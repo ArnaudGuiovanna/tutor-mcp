@@ -19,7 +19,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"tutor-mcp/db"
+	"tutor-mcp/models"
 )
 
 func futureTime() time.Time { return time.Now().Add(time.Hour) }
@@ -772,15 +772,15 @@ func TestVerifyClientAuth(t *testing.T) {
 	}
 	cases := []struct {
 		name    string
-		client  *db.OAuthClient
+		client  *models.OAuthClient
 		secret  string
 		wantErr bool
 	}{
-		{"public client passes", &db.OAuthClient{ClientSecretHash: ""}, "", false},
-		{"public client passes even with secret", &db.OAuthClient{ClientSecretHash: ""}, "anything", false},
-		{"confidential missing secret", &db.OAuthClient{ClientSecretHash: string(hash)}, "", true},
-		{"confidential wrong secret", &db.OAuthClient{ClientSecretHash: string(hash)}, "wrong", true},
-		{"confidential right secret", &db.OAuthClient{ClientSecretHash: string(hash)}, "s3cret", false},
+		{"public client passes", &models.OAuthClient{ClientSecretHash: ""}, "", false},
+		{"public client passes even with secret", &models.OAuthClient{ClientSecretHash: ""}, "anything", false},
+		{"confidential missing secret", &models.OAuthClient{ClientSecretHash: string(hash)}, "", true},
+		{"confidential wrong secret", &models.OAuthClient{ClientSecretHash: string(hash)}, "wrong", true},
+		{"confidential right secret", &models.OAuthClient{ClientSecretHash: string(hash)}, "s3cret", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

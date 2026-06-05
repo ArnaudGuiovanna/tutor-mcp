@@ -1125,25 +1125,6 @@ func (s *Store) GetConceptsDueForReview(ctx context.Context, learnerID string) (
 
 // ─── OAuth Persistence ──────────────────────────────────────────────────────
 
-// AuthCode holds the authorization code state (persisted in DB).
-type AuthCode struct {
-	Code          string
-	LearnerID     string
-	CodeChallenge string
-	ClientID      string
-	ExpiresAt     time.Time
-}
-
-// OAuthClient is a dynamically-registered OAuth client.
-// RedirectURIs holds the JSON array as persisted.
-// ClientSecretHash is a bcrypt digest of the secret; empty for public (PKCE-only) clients.
-type OAuthClient struct {
-	ClientID         string
-	ClientName       string
-	RedirectURIs     string
-	ClientSecretHash string
-}
-
 func (s *Store) CreateAuthCode(ctx context.Context, code, learnerID, codeChallenge, clientID string, expiresAt time.Time) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO oauth_codes (code, learner_id, code_challenge, client_id, expires_at) VALUES (?, ?, ?, ?, ?)`,
@@ -1157,14 +1138,14 @@ func (s *Store) CreateAuthCode(ctx context.Context, code, learnerID, codeChallen
 
 // ConsumeAuthCode retrieves and deletes an auth code in one operation.
 // Binds the code to the requesting client_id: returns invalid_grant if mismatch.
-func (s *Store) ConsumeAuthCode(ctx context.Context, code, clientID string) (*AuthCode, error) {
+func (s *Store) ConsumeAuthCode(ctx context.Context, code, clientID string) (*models.AuthCode, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback()
 
-	ac := &AuthCode{}
+	ac := &models.AuthCode{}
 	err = tx.QueryRowContext(ctx,
 		`SELECT code, learner_id, code_challenge, client_id, expires_at FROM oauth_codes WHERE code = ? AND client_id = ?`,
 		code, clientID,
@@ -1236,8 +1217,8 @@ func (s *Store) CountOAuthClients(ctx context.Context) (int, error) {
 	return count, nil
 }
 
-func (s *Store) GetOAuthClient(ctx context.Context, clientID string) (*OAuthClient, error) {
-	c := &OAuthClient{}
+func (s *Store) GetOAuthClient(ctx context.Context, clientID string) (*models.OAuthClient, error) {
+	c := &models.OAuthClient{}
 	var secretHash sql.NullString
 	err := s.db.QueryRowContext(ctx,
 		`SELECT client_id, client_name, redirect_uris, client_secret_hash FROM oauth_clients WHERE client_id = ?`,

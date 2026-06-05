@@ -24,6 +24,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"tutor-mcp/db"
+	"tutor-mcp/models"
 )
 
 // NormalizeEmail folds an email address to a canonical form (lowercase +
@@ -424,7 +425,7 @@ func extractClientCredentials(r *http.Request) (string, string) {
 // verifyClientAuth enforces secret-based authentication for confidential clients.
 // Public clients (empty stored hash) pass through and rely on PKCE.
 // The stored hash is a bcrypt digest; CompareHashAndPassword is constant-time.
-func verifyClientAuth(client *db.OAuthClient, suppliedSecret string) error {
+func verifyClientAuth(client *models.OAuthClient, suppliedSecret string) error {
 	if client.ClientSecretHash == "" {
 		return nil
 	}
