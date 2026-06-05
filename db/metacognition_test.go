@@ -92,7 +92,7 @@ func TestGetRecentAffectStates_OrderingAndLimit(t *testing.T) {
 	now := time.Now().UTC()
 	rewrite := func(sid string, ts time.Time) {
 		t.Helper()
-		if _, err := store.db.Exec(
+		if _, err := store.root.Exec(
 			`UPDATE affect_states SET created_at = ? WHERE session_id = ?`, ts, sid,
 		); err != nil {
 			t.Fatalf("rewrite %s: %v", sid, err)
@@ -395,7 +395,7 @@ func TestGetHintStatsForMastered(t *testing.T) {
 	// Two concepts: C-mastered (p_mastery=0.9) and C-novice (p_mastery=0.2).
 	mustExec := func(q string, args ...any) {
 		t.Helper()
-		if _, err := store.db.Exec(q, args...); err != nil {
+		if _, err := store.root.Exec(q, args...); err != nil {
 			t.Fatalf("exec %q: %v", q, err)
 		}
 	}
@@ -451,7 +451,7 @@ func TestCountProactiveReviews(t *testing.T) {
 	now := time.Now().UTC()
 	mustExec := func(q string, args ...any) {
 		t.Helper()
-		if _, err := store.db.Exec(q, args...); err != nil {
+		if _, err := store.root.Exec(q, args...); err != nil {
 			t.Fatalf("exec %q: %v", q, err)
 		}
 	}

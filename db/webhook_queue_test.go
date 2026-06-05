@@ -51,7 +51,7 @@ func TestEnqueueWebhookMessage_PersistsRow(t *testing.T) {
 		kind, content, status string
 		priority              int
 	)
-	if err := store.db.QueryRow(
+	if err := store.root.QueryRow(
 		`SELECT kind, content, priority, status FROM webhook_message_queue WHERE id = ?`, id,
 	).Scan(&kind, &content, &priority, &status); err != nil {
 		t.Fatalf("scan row: %v", err)
@@ -67,7 +67,7 @@ func TestEnqueueWebhookMessage_PersistsRow(t *testing.T) {
 		t.Fatalf("enqueue no expiry: %v", err)
 	}
 	var expiresAtNullable any
-	if err := store.db.QueryRow(
+	if err := store.root.QueryRow(
 		`SELECT expires_at FROM webhook_message_queue WHERE id = ?`, id2,
 	).Scan(&expiresAtNullable); err != nil {
 		t.Fatalf("scan expires_at: %v", err)
@@ -141,7 +141,7 @@ func TestDequeueNextPending(t *testing.T) {
 	}
 	var status string
 	var sentAtScan time.Time
-	if err := store.db.QueryRow(
+	if err := store.root.QueryRow(
 		`SELECT status, sent_at FROM webhook_message_queue WHERE id = ?`, idHigh,
 	).Scan(&status, &sentAtScan); err != nil {
 		t.Fatalf("scan after send: %v", err)
@@ -179,7 +179,7 @@ func TestMarkWebhookFailed(t *testing.T) {
 		t.Fatalf("MarkWebhookFailed: %v", err)
 	}
 	var status string
-	if err := store.db.QueryRow(
+	if err := store.root.QueryRow(
 		`SELECT status FROM webhook_message_queue WHERE id = ?`, id,
 	).Scan(&status); err != nil {
 		t.Fatalf("scan: %v", err)
@@ -192,7 +192,7 @@ func TestMarkWebhookFailed(t *testing.T) {
 func TestMarkWebhookMutatorsRequireLearnerOwnership(t *testing.T) {
 	store := setupTestDB(t)
 	now := time.Now().UTC()
-	if _, err := store.db.Exec(
+	if _, err := store.root.Exec(
 		`INSERT INTO learners (id, email, password_hash, objective, created_at) VALUES (?, ?, ?, ?, ?)`,
 		"L2", "l2@test.com", "h", "obj", now,
 	); err != nil {
@@ -216,7 +216,7 @@ func TestMarkWebhookMutatorsRequireLearnerOwnership(t *testing.T) {
 	}
 
 	var sentGuardCount int
-	if err := store.db.QueryRow(
+	if err := store.root.QueryRow(
 		`SELECT COUNT(*) FROM webhook_message_queue WHERE id = ? AND status = 'pending' AND sent_at IS NULL`,
 		idSent,
 	).Scan(&sentGuardCount); err != nil {
@@ -227,7 +227,7 @@ func TestMarkWebhookMutatorsRequireLearnerOwnership(t *testing.T) {
 	}
 
 	var failedStatus string
-	if err := store.db.QueryRow(
+	if err := store.root.QueryRow(
 		`SELECT status FROM webhook_message_queue WHERE id = ?`, idFailed,
 	).Scan(&failedStatus); err != nil {
 		t.Fatalf("scan failed guard row: %v", err)
@@ -271,17 +271,17 @@ func TestExpirePastWebhookMessages(t *testing.T) {
 		t.Errorf("expected 1 row affected, got %d", n)
 	}
 	var statusStale, statusFresh, statusNoExp string
-	if err := store.db.QueryRow(
+	if err := store.root.QueryRow(
 		`SELECT status FROM webhook_message_queue WHERE id = ?`, idStale,
 	).Scan(&statusStale); err != nil {
 		t.Fatalf("scan stale: %v", err)
 	}
-	if err := store.db.QueryRow(
+	if err := store.root.QueryRow(
 		`SELECT status FROM webhook_message_queue WHERE id = ?`, idFresh,
 	).Scan(&statusFresh); err != nil {
 		t.Fatalf("scan fresh: %v", err)
 	}
-	if err := store.db.QueryRow(
+	if err := store.root.QueryRow(
 		`SELECT status FROM webhook_message_queue WHERE id = ?`, idNoExp,
 	).Scan(&statusNoExp); err != nil {
 		t.Fatalf("scan noexp: %v", err)

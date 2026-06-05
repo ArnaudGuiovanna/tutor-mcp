@@ -20,20 +20,20 @@ import (
 
 	"tutor-mcp/algorithms"
 	"tutor-mcp/models"
+	"tutor-mcp/store"
 )
 
-// querier abstracts over *sql.DB and *sql.Tx so that Store helpers can
-// run either against the package-level pool or inside an explicit
-// transaction. Both types satisfy this interface as of Go 1.x stdlib.
-//
-// Used by the *WithQ private helpers + public Tx variants that callers
-// like applyInteraction (issue R008 / security-todo F-5.1) use to group
-// a read-modify-write cycle across concept_states / interactions /
-// pedagogical_snapshots under a single BEGIN IMMEDIATE transaction.
-type querier interface {
-	Exec(query string, args ...any) (sql.Result, error)
-	Query(query string, args ...any) (*sql.Rows, error)
-	QueryRow(query string, args ...any) *sql.Row
+// Compile-time proof that *Store satisfies the persistence port. If a db method
+// signature drifts from store.Store (or the interface was mis-transcribed), this
+// line fails to build — caught here, never at runtime.
+var _ store.Store = (*Store)(nil)
+
+// sqlExecutor is implemented by both *sql.DB and *sql.Tx, so Store methods run
+// transparently on a connection or inside a WithTx transaction.
+type sqlExecutor interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
 // IsSafeWebhookURL validates that a webhook URL targets Discord over HTTPS.
@@ -62,7 +62,8 @@ func IsSafeWebhookURL(rawURL string) bool {
 }
 
 type Store struct {
-	db *sql.DB
+	db   sqlExecutor // *sql.DB normally; *sql.Tx inside WithTx — query methods use this unchanged
+	root *sql.DB     // the real pool. For WithTx/Ping/Close/Migrate + internal BeginTx. nil in a tx-scoped Store.
 }
 
 var ErrOAuthClientLimitReached = errors.New("oauth client limit reached")
@@ -71,19 +72,45 @@ var ErrOAuthClientLimitReached = errors.New("oauth client limit reached")
 // to insert with explicit timestamps (e.g. simulating older
 // interactions for diagnostic-window assertions). Not for use in
 // production code paths — use the typed Store methods instead.
-func (s *Store) RawDB() *sql.DB { return s.db }
+func (s *Store) RawDB() *sql.DB { return s.root }
 
-func NewStore(db *sql.DB) *Store {
-	return &Store{db: db}
+func NewStore(database *sql.DB) *Store {
+	return &Store{db: database, root: database}
 }
 
-// BeginTx starts a serializable transaction. On modernc.org/sqlite this
-// translates to BEGIN IMMEDIATE, which acquires the writer lock at tx
-// start instead of at first write. Required for read-modify-write
-// patterns where concurrent goroutines would otherwise both read a
-// stale snapshot and one overwrite the other on commit (R008).
-func (s *Store) BeginTx(ctx context.Context) (*sql.Tx, error) {
-	return s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+// Ping verifies a live connection to the database.
+func (s *Store) Ping(ctx context.Context) error { return s.root.PingContext(ctx) }
+
+// Close closes the underlying connection pool.
+func (s *Store) Close() error { return s.root.Close() }
+
+// Migrate runs the schema migrations. (Wraps the package-level Migrate.)
+func (s *Store) Migrate(ctx context.Context) error { return Migrate(s.root) }
+
+// WithTx runs fn inside a single serializable transaction (BEGIN IMMEDIATE on
+// SQLite). The Store passed to fn routes every query through the tx.
+//
+// Serializable isolation translates to BEGIN IMMEDIATE on modernc.org/sqlite,
+// which acquires the writer lock at tx start instead of at first write. Required
+// for read-modify-write patterns where concurrent goroutines would otherwise
+// both read a stale snapshot and one overwrite the other on commit (R008).
+func (s *Store) WithTx(ctx context.Context, fn func(s store.Store) error) error {
+	tx, err := s.root.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return err
+	}
+	if err := fn(&Store{db: tx, root: nil}); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+// GetConceptStateForUpdate is identical to GetConceptState under SQLite (the
+// serializable tx already holds the writer lock via BEGIN IMMEDIATE). A future
+// PostgresStore overrides this with SELECT ... FOR UPDATE.
+func (s *Store) GetConceptStateForUpdate(ctx context.Context, learnerID, concept string) (*models.ConceptState, error) {
+	return s.GetConceptState(ctx, learnerID, concept)
 }
 
 func generateID() string {
@@ -547,7 +574,7 @@ func (s *Store) ActiveDomainConceptSet(ctx context.Context, learnerID string) (m
 }
 
 func (s *Store) DeleteDomain(ctx context.Context, domainID, learnerID string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.root.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin delete domain tx: %w", err)
 	}
@@ -606,19 +633,13 @@ func (s *Store) InsertConceptStateIfNotExists(ctx context.Context, cs *models.Co
 // ─── Concept States ───────────────────────────────────────────────────────────
 
 func (s *Store) GetConceptState(ctx context.Context, learnerID, concept string) (*models.ConceptState, error) {
-	return getConceptStateWithQ(s.db, learnerID, concept)
+	return getConceptStateWithQ(ctx, s.db, learnerID, concept)
 }
 
-// GetConceptStateTx runs GetConceptState inside the supplied transaction.
-// Used by applyInteraction to keep the read-modify-write cycle atomic.
-func (s *Store) GetConceptStateTx(tx *sql.Tx, learnerID, concept string) (*models.ConceptState, error) {
-	return getConceptStateWithQ(tx, learnerID, concept)
-}
-
-func getConceptStateWithQ(q querier, learnerID, concept string) (*models.ConceptState, error) {
+func getConceptStateWithQ(ctx context.Context, q sqlExecutor, learnerID, concept string) (*models.ConceptState, error) {
 	cs := &models.ConceptState{}
 	var lastReview, nextReview sql.NullTime
-	err := q.QueryRow(
+	err := q.QueryRowContext(ctx,
 		`SELECT id, learner_id, concept, stability, difficulty, elapsed_days, scheduled_days,
 		        reps, lapses, card_state, last_review, next_review, p_mastery, p_learn, p_forget,
 		        p_slip, p_guess, theta, updated_at
@@ -644,17 +665,12 @@ func getConceptStateWithQ(q querier, learnerID, concept string) (*models.Concept
 }
 
 func (s *Store) UpsertConceptState(ctx context.Context, cs *models.ConceptState) error {
-	return upsertConceptStateWithQ(s.db, cs)
+	return upsertConceptStateWithQ(ctx, s.db, cs)
 }
 
-// UpsertConceptStateTx runs UpsertConceptState inside the supplied transaction.
-func (s *Store) UpsertConceptStateTx(tx *sql.Tx, cs *models.ConceptState) error {
-	return upsertConceptStateWithQ(tx, cs)
-}
-
-func upsertConceptStateWithQ(q querier, cs *models.ConceptState) error {
+func upsertConceptStateWithQ(ctx context.Context, q sqlExecutor, cs *models.ConceptState) error {
 	cs.UpdatedAt = time.Now().UTC()
-	_, err := q.Exec(
+	_, err := q.ExecContext(ctx,
 		`INSERT INTO concept_states
 		    (learner_id, concept, stability, difficulty, elapsed_days, scheduled_days,
 		     reps, lapses, card_state, last_review, next_review, p_mastery, p_learn, p_forget,
@@ -730,17 +746,12 @@ func (s *Store) GetConceptStatesByLearner(ctx context.Context, learnerID string)
 const interactionCols = `id, learner_id, concept, activity_type, success, response_time, confidence, error_type, notes, hints_requested, self_initiated, calibration_id, is_proactive_review, misconception_type, misconception_detail, domain_id, bkt_slip, bkt_guess, rubric_json, rubric_score_json, created_at`
 
 func (s *Store) CreateInteraction(ctx context.Context, i *models.Interaction) error {
-	return createInteractionWithQ(s.db, i)
+	return createInteractionWithQ(ctx, s.db, i)
 }
 
-// CreateInteractionTx runs CreateInteraction inside the supplied transaction.
-func (s *Store) CreateInteractionTx(tx *sql.Tx, i *models.Interaction) error {
-	return createInteractionWithQ(tx, i)
-}
-
-func createInteractionWithQ(q querier, i *models.Interaction) error {
+func createInteractionWithQ(ctx context.Context, q sqlExecutor, i *models.Interaction) error {
 	i.CreatedAt = time.Now().UTC()
-	result, err := q.Exec(
+	result, err := q.ExecContext(ctx,
 		`INSERT INTO interactions (learner_id, concept, activity_type, success, response_time, confidence, error_type, notes, hints_requested, self_initiated, calibration_id, is_proactive_review, misconception_type, misconception_detail, domain_id, bkt_slip, bkt_guess, rubric_json, rubric_score_json, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		i.LearnerID, i.Concept, i.ActivityType, boolToInt(i.Success),
@@ -764,16 +775,11 @@ func createInteractionWithQ(q querier, i *models.Interaction) error {
 }
 
 func (s *Store) GetRecentInteractions(ctx context.Context, learnerID, concept string, limit int) ([]*models.Interaction, error) {
-	return getRecentInteractionsWithQ(s.db, learnerID, concept, limit)
+	return getRecentInteractionsWithQ(ctx, s.db, learnerID, concept, limit)
 }
 
-// GetRecentInteractionsTx runs GetRecentInteractions inside the supplied transaction.
-func (s *Store) GetRecentInteractionsTx(tx *sql.Tx, learnerID, concept string, limit int) ([]*models.Interaction, error) {
-	return getRecentInteractionsWithQ(tx, learnerID, concept, limit)
-}
-
-func getRecentInteractionsWithQ(q querier, learnerID, concept string, limit int) ([]*models.Interaction, error) {
-	rows, err := q.Query(
+func getRecentInteractionsWithQ(ctx context.Context, q sqlExecutor, learnerID, concept string, limit int) ([]*models.Interaction, error) {
+	rows, err := q.QueryContext(ctx,
 		`SELECT `+interactionCols+` FROM interactions WHERE learner_id = ? AND concept = ?
 		 ORDER BY created_at DESC LIMIT ?`,
 		learnerID, concept, limit,
@@ -1139,7 +1145,7 @@ func (s *Store) CreateAuthCode(ctx context.Context, code, learnerID, codeChallen
 // ConsumeAuthCode retrieves and deletes an auth code in one operation.
 // Binds the code to the requesting client_id: returns invalid_grant if mismatch.
 func (s *Store) ConsumeAuthCode(ctx context.Context, code, clientID string) (*models.AuthCode, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.root.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}

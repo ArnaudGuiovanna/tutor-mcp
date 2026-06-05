@@ -12,6 +12,7 @@ import (
 
 	"tutor-mcp/algorithms"
 	"tutor-mcp/models"
+	"tutor-mcp/store"
 )
 
 // interactionInput carries the minimal fields needed to persist an
@@ -72,193 +73,188 @@ func applyInteraction(
 	// (concept_states + interaction + pedagogical_snapshot) under a
 	// serializable transaction. Without this, concurrent record_interaction
 	// calls on the same (learner, concept) both read a stale snapshot and
-	// one silently overwrites the other on commit. BeginTx maps to
+	// one silently overwrites the other on commit. WithTx maps to
 	// BEGIN IMMEDIATE on SQLite (modernc.org/sqlite) so writers block at
 	// tx start, not at first write.
-	tx, err := deps.Store.BeginTx(ctx)
-	if err != nil {
-		return nil, nil, fmt.Errorf("applyInteraction: begin tx: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
+	var resultCS *models.ConceptState
+	var resultMeta map[string]any
+	err := deps.Store.WithTx(ctx, func(s store.Store) error {
+		// Load or bootstrap concept state.
+		cs, err := s.GetConceptStateForUpdate(ctx, learnerID, input.Concept)
+		if err != nil {
+			cs = models.NewConceptState(learnerID, input.Concept)
 		}
-	}()
+		observation := structuredObservation(input)
 
-	// Load or bootstrap concept state.
-	cs, err := deps.Store.GetConceptStateTx(tx, learnerID, input.Concept)
-	if err != nil {
-		cs = models.NewConceptState(learnerID, input.Concept)
-	}
-	observation := structuredObservation(input)
+		// ── Snapshot read-only prior state ──────────────────────────────
+		// All downstream algorithm steps read from this snapshot, never
+		// from `cs` directly, to keep the BKT → FSRS → IRT chain
+		// commutative. See doc comment above and issue #53.
+		priorPMastery := cs.PMastery
+		priorPLearn := cs.PLearn
+		priorPForget := cs.PForget
+		priorPSlip := cs.PSlip
+		priorPGuess := cs.PGuess
+		priorStability := cs.Stability
+		priorDifficulty := cs.Difficulty
+		priorElapsedDays := cs.ElapsedDays
+		priorScheduledDays := cs.ScheduledDays
+		priorReps := cs.Reps
+		priorLapses := cs.Lapses
+		priorCardState := cs.CardState
+		priorTheta := cs.Theta
+		var priorLastReview time.Time
+		if cs.LastReview != nil {
+			priorLastReview = *cs.LastReview
+		}
+		priorNextReview := cs.NextReview
 
-	// ── Snapshot read-only prior state ──────────────────────────────
-	// All downstream algorithm steps read from this snapshot, never
-	// from `cs` directly, to keep the BKT → FSRS → IRT chain
-	// commutative. See doc comment above and issue #53.
-	priorPMastery := cs.PMastery
-	priorPLearn := cs.PLearn
-	priorPForget := cs.PForget
-	priorPSlip := cs.PSlip
-	priorPGuess := cs.PGuess
-	priorStability := cs.Stability
-	priorDifficulty := cs.Difficulty
-	priorElapsedDays := cs.ElapsedDays
-	priorScheduledDays := cs.ScheduledDays
-	priorReps := cs.Reps
-	priorLapses := cs.Lapses
-	priorCardState := cs.CardState
-	priorTheta := cs.Theta
-	var priorLastReview time.Time
-	if cs.LastReview != nil {
-		priorLastReview = *cs.LastReview
-	}
-	priorNextReview := cs.NextReview
+		// ── BKT update — individualized over recent learner/concept
+		// evidence, while preserving the existing error_type ramps for the
+		// empty-history path. Computed up front (it only reads from the
+		// prior snapshot + prior interactions) so the effective parameters
+		// can be persisted and replayed deterministically.
+		bktState := algorithms.BKTState{
+			PMastery: priorPMastery,
+			PLearn:   priorPLearn,
+			PForget:  priorPForget,
+			PSlip:    priorPSlip,
+			PGuess:   priorPGuess,
+		}
+		recentForBKT, err := s.GetRecentInteractions(ctx, learnerID, input.Concept, 20)
+		if err != nil {
+			deps.Logger.Warn("applyInteraction: individualized BKT profile unavailable", "err", err, "learner", learnerID, "concept", input.Concept)
+			recentForBKT = nil
+		}
+		recentForBKT = filterInteractionsByDomainID(recentForBKT, input.DomainID)
+		bktProfile := buildIndividualBKTProfile(recentForBKT, priorStability)
+		bktResult := algorithms.BKTUpdateIndividualized(bktState, bktProfile, input.Success, input.ErrorType)
+		bktState = bktResult.State
+		slipUsed := bktResult.Params.PSlip
+		guessUsed := bktResult.Params.PGuess
 
-	// ── BKT update — individualized over recent learner/concept
-	// evidence, while preserving the existing error_type ramps for the
-	// empty-history path. Computed up front (it only reads from the
-	// prior snapshot + prior interactions) so the effective parameters
-	// can be persisted and replayed deterministically.
-	bktState := algorithms.BKTState{
-		PMastery: priorPMastery,
-		PLearn:   priorPLearn,
-		PForget:  priorPForget,
-		PSlip:    priorPSlip,
-		PGuess:   priorPGuess,
-	}
-	recentForBKT, err := deps.Store.GetRecentInteractionsTx(tx, learnerID, input.Concept, 20)
-	if err != nil {
-		deps.Logger.Warn("applyInteraction: individualized BKT profile unavailable", "err", err, "learner", learnerID, "concept", input.Concept)
-		recentForBKT = nil
-	}
-	recentForBKT = filterInteractionsByDomainID(recentForBKT, input.DomainID)
-	bktProfile := buildIndividualBKTProfile(recentForBKT, priorStability)
-	bktResult := algorithms.BKTUpdateIndividualized(bktState, bktProfile, input.Success, input.ErrorType)
-	bktState = bktResult.State
-	slipUsed := bktResult.Params.PSlip
-	guessUsed := bktResult.Params.PGuess
+		// ── Rasch/Elo calibration — audit-grade estimate for the
+		// learner/exercise difficulty pair. The concept state's Theta still
+		// follows the existing IRT update below; this model exposes an
+		// independent calibration signal for exercise selection and replay.
+		raschBefore := algorithms.NewRaschEloState(priorTheta, algorithms.FSRSDifficultyToIRT(priorDifficulty))
+		raschAfter := algorithms.RaschEloUpdate(raschBefore, input.Success)
+		observation = mergeObservation(observation, map[string]any{
+			"bkt_individualized_profile": individualBKTProfileSnapshot(bktProfile),
+			"bkt_individualized_params":  individualBKTParamsSnapshot(bktResult.Params),
+			"rasch_elo":                  raschEloObservation(raschBefore, raschAfter),
+		})
 
-	// ── Rasch/Elo calibration — audit-grade estimate for the
-	// learner/exercise difficulty pair. The concept state's Theta still
-	// follows the existing IRT update below; this model exposes an
-	// independent calibration signal for exercise selection and replay.
-	raschBefore := algorithms.NewRaschEloState(priorTheta, algorithms.FSRSDifficultyToIRT(priorDifficulty))
-	raschAfter := algorithms.RaschEloUpdate(raschBefore, input.Success)
-	observation = mergeObservation(observation, map[string]any{
-		"bkt_individualized_profile": individualBKTProfileSnapshot(bktProfile),
-		"bkt_individualized_params":  individualBKTParamsSnapshot(bktResult.Params),
-		"rasch_elo":                  raschEloObservation(raschBefore, raschAfter),
+		// Build and persist the interaction row.
+		interaction := &models.Interaction{
+			LearnerID:       learnerID,
+			Concept:         input.Concept,
+			ActivityType:    input.ActivityType,
+			Success:         input.Success,
+			ResponseTime:    int(input.ResponseTimeSeconds),
+			Confidence:      input.Confidence,
+			ErrorType:       input.ErrorType,
+			Notes:           input.Notes,
+			HintsRequested:  input.HintsRequested,
+			SelfInitiated:   input.SelfInitiated,
+			CalibrationID:   input.CalibrationID,
+			DomainID:        input.DomainID,
+			BKTSlip:         &slipUsed,
+			BKTGuess:        &guessUsed,
+			RubricJSON:      input.RubricJSON,
+			RubricScoreJSON: input.RubricScoreJSON,
+			CreatedAt:       now,
+		}
+
+		// Misconception fields — only stored on failures.
+		if !input.Success && input.MisconceptionType != "" {
+			interaction.MisconceptionType = input.MisconceptionType
+			interaction.MisconceptionDetail = input.MisconceptionDetail
+		}
+
+		// Proactive review flag — derived from the prior schedule.
+		if priorNextReview != nil && priorNextReview.After(now) && priorCardState != "new" {
+			interaction.IsProactiveReview = true
+		}
+
+		if err := s.CreateInteraction(ctx, interaction); err != nil {
+			return fmt.Errorf("create interaction: %w", err)
+		}
+
+		// ── FSRS update — reads from prior snapshot. ───────────────────
+		rating := algorithms.Good
+		if !input.Success {
+			rating = algorithms.Again
+		} else if input.Confidence >= 0.9 {
+			rating = algorithms.Easy
+		} else if input.Confidence < 0.5 {
+			rating = algorithms.Hard
+		}
+
+		fsrsCard := algorithms.FSRSCard{
+			Stability:     priorStability,
+			Difficulty:    priorDifficulty,
+			ElapsedDays:   priorElapsedDays,
+			ScheduledDays: priorScheduledDays,
+			Reps:          priorReps,
+			Lapses:        priorLapses,
+			State:         algorithms.CardState(priorCardState),
+			LastReview:    priorLastReview,
+		}
+		fsrsCard = algorithms.ReviewCard(fsrsCard, rating, now)
+
+		// ── IRT update — reads PRIOR difficulty from the snapshot, not
+		// the FSRS-rewritten value. This is the issue #53 fix: previously
+		// IRT consumed `cs.Difficulty` after FSRS had overwritten it. ──
+		item := algorithms.IRTItem{
+			Difficulty:     algorithms.FSRSDifficultyToIRT(priorDifficulty),
+			Discrimination: 1.0,
+		}
+		newTheta := algorithms.IRTUpdateTheta(priorTheta, []algorithms.IRTItem{item}, []bool{input.Success})
+
+		// ── Single write-back of the merged result. ────────────────────
+		cs.PMastery = bktState.PMastery
+		cs.Stability = fsrsCard.Stability
+		cs.Difficulty = fsrsCard.Difficulty
+		cs.ElapsedDays = fsrsCard.ElapsedDays
+		cs.ScheduledDays = fsrsCard.ScheduledDays
+		cs.Reps = fsrsCard.Reps
+		cs.Lapses = fsrsCard.Lapses
+		cs.CardState = string(fsrsCard.State)
+		cs.LastReview = &now
+		nextReview := now.Add(time.Duration(fsrsCard.ScheduledDays) * 24 * time.Hour)
+		cs.NextReview = &nextReview
+		cs.Theta = newTheta
+
+		// Persist updated concept state.
+		if err := s.UpsertConceptState(ctx, cs); err != nil {
+			return fmt.Errorf("upsert concept state: %w", err)
+		}
+		if err := s.CreatePedagogicalSnapshot(ctx, &models.PedagogicalSnapshot{
+			InteractionID:       interaction.ID,
+			LearnerID:           learnerID,
+			DomainID:            input.DomainID,
+			Concept:             input.Concept,
+			ActivityType:        input.ActivityType,
+			BeforeJSON:          mustSnapshotJSON(conceptStateSnapshot(priorPMastery, priorPLearn, priorPForget, priorPSlip, priorPGuess, priorStability, priorDifficulty, priorElapsedDays, priorScheduledDays, priorReps, priorLapses, priorCardState, priorTheta, priorLastReview, priorNextReview)),
+			ObservationJSON:     mustSnapshotJSON(observationSnapshot(input, bktResult.Params.PLearn, slipUsed, guessUsed, observation)),
+			AfterJSON:           mustSnapshotJSON(conceptStateAfterSnapshot(cs)),
+			DecisionJSON:        mustSnapshotJSON(decisionSnapshot(input, interaction.IsProactiveReview)),
+			InterpretationBrief: input.InterpretationBrief,
+			CreatedAt:           now,
+		}); err != nil {
+			return fmt.Errorf("create pedagogical snapshot: %w", err)
+		}
+
+		resultCS = cs
+		resultMeta = observation
+		return nil
 	})
-
-	// Build and persist the interaction row.
-	interaction := &models.Interaction{
-		LearnerID:       learnerID,
-		Concept:         input.Concept,
-		ActivityType:    input.ActivityType,
-		Success:         input.Success,
-		ResponseTime:    int(input.ResponseTimeSeconds),
-		Confidence:      input.Confidence,
-		ErrorType:       input.ErrorType,
-		Notes:           input.Notes,
-		HintsRequested:  input.HintsRequested,
-		SelfInitiated:   input.SelfInitiated,
-		CalibrationID:   input.CalibrationID,
-		DomainID:        input.DomainID,
-		BKTSlip:         &slipUsed,
-		BKTGuess:        &guessUsed,
-		RubricJSON:      input.RubricJSON,
-		RubricScoreJSON: input.RubricScoreJSON,
-		CreatedAt:       now,
+	if err != nil {
+		return nil, nil, fmt.Errorf("applyInteraction: %w", err)
 	}
 
-	// Misconception fields — only stored on failures.
-	if !input.Success && input.MisconceptionType != "" {
-		interaction.MisconceptionType = input.MisconceptionType
-		interaction.MisconceptionDetail = input.MisconceptionDetail
-	}
-
-	// Proactive review flag — derived from the prior schedule.
-	if priorNextReview != nil && priorNextReview.After(now) && priorCardState != "new" {
-		interaction.IsProactiveReview = true
-	}
-
-	if err := deps.Store.CreateInteractionTx(tx, interaction); err != nil {
-		return nil, nil, fmt.Errorf("applyInteraction: create interaction: %w", err)
-	}
-
-	// ── FSRS update — reads from prior snapshot. ───────────────────
-	rating := algorithms.Good
-	if !input.Success {
-		rating = algorithms.Again
-	} else if input.Confidence >= 0.9 {
-		rating = algorithms.Easy
-	} else if input.Confidence < 0.5 {
-		rating = algorithms.Hard
-	}
-
-	fsrsCard := algorithms.FSRSCard{
-		Stability:     priorStability,
-		Difficulty:    priorDifficulty,
-		ElapsedDays:   priorElapsedDays,
-		ScheduledDays: priorScheduledDays,
-		Reps:          priorReps,
-		Lapses:        priorLapses,
-		State:         algorithms.CardState(priorCardState),
-		LastReview:    priorLastReview,
-	}
-	fsrsCard = algorithms.ReviewCard(fsrsCard, rating, now)
-
-	// ── IRT update — reads PRIOR difficulty from the snapshot, not
-	// the FSRS-rewritten value. This is the issue #53 fix: previously
-	// IRT consumed `cs.Difficulty` after FSRS had overwritten it. ──
-	item := algorithms.IRTItem{
-		Difficulty:     algorithms.FSRSDifficultyToIRT(priorDifficulty),
-		Discrimination: 1.0,
-	}
-	newTheta := algorithms.IRTUpdateTheta(priorTheta, []algorithms.IRTItem{item}, []bool{input.Success})
-
-	// ── Single write-back of the merged result. ────────────────────
-	cs.PMastery = bktState.PMastery
-	cs.Stability = fsrsCard.Stability
-	cs.Difficulty = fsrsCard.Difficulty
-	cs.ElapsedDays = fsrsCard.ElapsedDays
-	cs.ScheduledDays = fsrsCard.ScheduledDays
-	cs.Reps = fsrsCard.Reps
-	cs.Lapses = fsrsCard.Lapses
-	cs.CardState = string(fsrsCard.State)
-	cs.LastReview = &now
-	nextReview := now.Add(time.Duration(fsrsCard.ScheduledDays) * 24 * time.Hour)
-	cs.NextReview = &nextReview
-	cs.Theta = newTheta
-
-	// Persist updated concept state.
-	if err := deps.Store.UpsertConceptStateTx(tx, cs); err != nil {
-		return nil, nil, fmt.Errorf("applyInteraction: upsert concept state: %w", err)
-	}
-	if err := deps.Store.CreatePedagogicalSnapshotTx(tx, &models.PedagogicalSnapshot{
-		InteractionID:       interaction.ID,
-		LearnerID:           learnerID,
-		DomainID:            input.DomainID,
-		Concept:             input.Concept,
-		ActivityType:        input.ActivityType,
-		BeforeJSON:          mustSnapshotJSON(conceptStateSnapshot(priorPMastery, priorPLearn, priorPForget, priorPSlip, priorPGuess, priorStability, priorDifficulty, priorElapsedDays, priorScheduledDays, priorReps, priorLapses, priorCardState, priorTheta, priorLastReview, priorNextReview)),
-		ObservationJSON:     mustSnapshotJSON(observationSnapshot(input, bktResult.Params.PLearn, slipUsed, guessUsed, observation)),
-		AfterJSON:           mustSnapshotJSON(conceptStateAfterSnapshot(cs)),
-		DecisionJSON:        mustSnapshotJSON(decisionSnapshot(input, interaction.IsProactiveReview)),
-		InterpretationBrief: input.InterpretationBrief,
-		CreatedAt:           now,
-	}); err != nil {
-		return nil, nil, fmt.Errorf("applyInteraction: create pedagogical snapshot: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, nil, fmt.Errorf("applyInteraction: commit tx: %w", err)
-	}
-	committed = true
-
-	return cs, observation, nil
+	return resultCS, resultMeta, nil
 }
 
 func structuredObservation(input interactionInput) map[string]any {

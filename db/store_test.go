@@ -28,7 +28,7 @@ func TestConsumeAuthCode_WrongClientID(t *testing.T) {
 
 	// Code must still be present after failed consume attempt
 	var count int
-	if err := store.db.QueryRow(`SELECT COUNT(*) FROM oauth_codes WHERE code = ?`, "code-1").Scan(&count); err != nil {
+	if err := store.root.QueryRow(`SELECT COUNT(*) FROM oauth_codes WHERE code = ?`, "code-1").Scan(&count); err != nil {
 		t.Fatalf("count: %v", err)
 	}
 	if count != 1 {
@@ -43,7 +43,7 @@ func TestConsumeAuthCode_WrongClientID(t *testing.T) {
 		t.Fatalf("unexpected ac: %+v", ac)
 	}
 
-	if err := store.db.QueryRow(`SELECT COUNT(*) FROM oauth_codes WHERE code = ?`, "code-1").Scan(&count); err != nil {
+	if err := store.root.QueryRow(`SELECT COUNT(*) FROM oauth_codes WHERE code = ?`, "code-1").Scan(&count); err != nil {
 		t.Fatalf("count: %v", err)
 	}
 	if count != 0 {

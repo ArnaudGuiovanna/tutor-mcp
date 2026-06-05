@@ -417,7 +417,7 @@ func insertInteractionWithType(t *testing.T, store *Store, concept string, succe
 	if success {
 		successInt = 1
 	}
-	_, err := store.db.Exec(
+	_, err := store.root.Exec(
 		`INSERT INTO interactions (learner_id, concept, activity_type, success, response_time, confidence, notes, misconception_type, misconception_detail, created_at)
 		 VALUES ('L1', ?, ?, ?, 60, 0.5, '', ?, ?, ?)`,
 		concept, activityType, successInt, nullString(""), nullString(""), createdAt,

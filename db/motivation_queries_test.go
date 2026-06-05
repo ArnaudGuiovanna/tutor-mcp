@@ -9,7 +9,7 @@ import (
 // Seed a concept_state with a given PMastery.
 func seedConceptState(t *testing.T, store *Store, concept string, pMastery float64) {
 	t.Helper()
-	_, err := store.db.Exec(
+	_, err := store.root.Exec(
 		`INSERT INTO concept_states (learner_id, concept, p_mastery, card_state, updated_at)
 		 VALUES ('L1', ?, ?, 'learning', ?)`,
 		concept, pMastery, time.Now().UTC(),
@@ -25,7 +25,7 @@ func insertSimpleInteraction(t *testing.T, store *Store, concept string, success
 	if success {
 		succInt = 1
 	}
-	_, err := store.db.Exec(
+	_, err := store.root.Exec(
 		`INSERT INTO interactions (learner_id, concept, activity_type, success, response_time, confidence, notes, created_at)
 		 VALUES ('L1', ?, 'RECALL_EXERCISE', ?, 60, 0.5, '', ?)`,
 		concept, succInt, createdAt,

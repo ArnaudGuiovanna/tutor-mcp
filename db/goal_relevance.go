@@ -35,7 +35,7 @@ func (s *Store) MergeDomainGoalRelevance(ctx context.Context, domainID string, r
 		return nil, fmt.Errorf("relevance map is nil")
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.root.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}

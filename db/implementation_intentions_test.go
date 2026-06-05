@@ -29,7 +29,7 @@ func TestGetRecentImplementationIntentions_OrderingAndLimit(t *testing.T) {
 	// Force ordering: rewrite created_at so we control most-recent ordering.
 	rewrite := func(trigger string, createdAt time.Time) {
 		t.Helper()
-		if _, err := store.db.Exec(
+		if _, err := store.root.Exec(
 			`UPDATE implementation_intentions SET created_at = ? WHERE trigger_text = ?`,
 			createdAt, trigger,
 		); err != nil {
@@ -116,7 +116,7 @@ func TestMarkIntentionHonored(t *testing.T) {
 				t.Fatalf("MarkIntentionHonored: %v", err)
 			}
 			var v int
-			if err := store.db.QueryRow(
+			if err := store.root.QueryRow(
 				`SELECT honored FROM implementation_intentions WHERE id = ?`, tc.id,
 			).Scan(&v); err != nil {
 				t.Fatalf("scan honored: %v", err)

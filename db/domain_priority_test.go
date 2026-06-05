@@ -11,7 +11,7 @@ import (
 
 func TestMigrate_AddsNullableDomainPriorityRank(t *testing.T) {
 	store := setupTestDB(t)
-	rows, err := store.db.Query(`PRAGMA table_info(domains)`)
+	rows, err := store.root.Query(`PRAGMA table_info(domains)`)
 	if err != nil {
 		t.Fatalf("table_info domains: %v", err)
 	}
@@ -55,7 +55,7 @@ func createPriorityTestDomain(t *testing.T, store *Store, learnerID, name string
 	if err != nil {
 		t.Fatalf("create domain %q: %v", name, err)
 	}
-	if _, err := store.db.Exec(`UPDATE domains SET created_at = ? WHERE id = ?`, createdAt, d.ID); err != nil {
+	if _, err := store.root.Exec(`UPDATE domains SET created_at = ? WHERE id = ?`, createdAt, d.ID); err != nil {
 		t.Fatalf("set created_at for %q: %v", name, err)
 	}
 	return d

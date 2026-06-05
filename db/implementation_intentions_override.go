@@ -25,7 +25,7 @@ const (
 // override in the existing implementation_intentions table. A new override
 // supersedes any older pending override for the same learner/domain pair.
 func (s *Store) InsertLearningNegotiationOverridePayload(ctx context.Context, learnerID, domainID, payload string, expiresAt, now time.Time) (int64, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.root.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("begin learning negotiation override insert: %w", err)
 	}
@@ -62,7 +62,7 @@ func (s *Store) InsertLearningNegotiationOverridePayload(ctx context.Context, le
 // ConsumeLearningNegotiationOverridePayload atomically marks the latest pending
 // override consumed. Expired overrides are marked missed and returned as expired.
 func (s *Store) ConsumeLearningNegotiationOverridePayload(ctx context.Context, learnerID, domainID string, now time.Time) (*models.LearningNegotiationOverridePayloadResult, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.root.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin learning negotiation override consume: %w", err)
 	}
