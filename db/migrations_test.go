@@ -14,8 +14,8 @@ import (
 // duplicate-column errors propagated). Then we assert that all expected
 // tables and indexes exist by querying sqlite_master.
 func TestMigrate_Idempotent(t *testing.T) {
-	dsn := fmt.Sprintf("file:migrate_idempo_%d?mode=memory&cache=shared", testDBCounter+10000)
-	testDBCounter++
+	n := testDBCounter.Add(1)
+	dsn := fmt.Sprintf("file:migrate_idempo_%d?mode=memory&cache=shared", n+10000)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -208,8 +208,8 @@ func TestMigrate_DropsPFAColumns(t *testing.T) {
 
 	// Scenario 1: fresh DB.
 	t.Run("fresh", func(t *testing.T) {
-		dsn := fmt.Sprintf("file:migrate_pfa_fresh_%d?mode=memory&cache=shared", testDBCounter+10100)
-		testDBCounter++
+		n := testDBCounter.Add(1)
+		dsn := fmt.Sprintf("file:migrate_pfa_fresh_%d?mode=memory&cache=shared", n+10100)
 		db, err := sql.Open("sqlite", dsn)
 		if err != nil {
 			t.Fatalf("open: %v", err)
@@ -233,8 +233,8 @@ func TestMigrate_DropsPFAColumns(t *testing.T) {
 	// and seed the legacy columns BEFORE Migrate runs — that mirrors
 	// the upgrade path a deployed v0.2 DB would actually take.
 	t.Run("upgrade_from_pre_55", func(t *testing.T) {
-		dsn := fmt.Sprintf("file:migrate_pfa_upgrade_%d?mode=memory&cache=shared", testDBCounter+10200)
-		testDBCounter++
+		n := testDBCounter.Add(1)
+		dsn := fmt.Sprintf("file:migrate_pfa_upgrade_%d?mode=memory&cache=shared", n+10200)
 		db, err := sql.Open("sqlite", dsn)
 		if err != nil {
 			t.Fatalf("open: %v", err)
@@ -286,8 +286,8 @@ func TestMigrate_DropsPFAColumns(t *testing.T) {
 // run Migrate, then assert json_extract returns NULL for the dropped keys
 // and the unrelated key is intact.
 func TestMigrate_DropsLegacyLearnerProfileFields(t *testing.T) {
-	dsn := fmt.Sprintf("file:migrate_drop_legacy_%d?mode=memory&cache=shared", testDBCounter+20000)
-	testDBCounter++
+	n := testDBCounter.Add(1)
+	dsn := fmt.Sprintf("file:migrate_drop_legacy_%d?mode=memory&cache=shared", n+20000)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -425,8 +425,8 @@ func TestOpenDB_BadPath(t *testing.T) {
 // table directly, so they bypass the higher-level Store helper.
 func openMigrateTestDB(t *testing.T, suffix string) *sql.DB {
 	t.Helper()
-	testDBCounter++
-	dsn := fmt.Sprintf("file:memdb_%s_%s_%d?mode=memory&cache=shared", t.Name(), suffix, testDBCounter)
+	n := testDBCounter.Add(1)
+	dsn := fmt.Sprintf("file:memdb_%s_%s_%d?mode=memory&cache=shared", t.Name(), suffix, n)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		t.Fatalf("open: %v", err)

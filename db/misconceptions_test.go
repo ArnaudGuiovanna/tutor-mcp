@@ -4,16 +4,19 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-var testDBCounter int
+// testDBCounter makes in-memory DSNs unique. Atomic because parallel tests
+// (e.g. the store conformance subtests) call setupTestDB concurrently.
+var testDBCounter atomic.Int64
 
 func setupTestDB(t *testing.T) *Store {
 	t.Helper()
-	testDBCounter++
-	dsn := fmt.Sprintf("file:memdb_%s_%d?mode=memory&cache=shared", t.Name(), testDBCounter)
+	n := testDBCounter.Add(1)
+	dsn := fmt.Sprintf("file:memdb_%s_%d?mode=memory&cache=shared", t.Name(), n)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		t.Fatal(err)
