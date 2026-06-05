@@ -22,8 +22,8 @@ import (
 	"time"
 
 	"tutor-mcp/algorithms"
-	"tutor-mcp/db"
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 )
 
 // nodeFragileMasteryThreshold is the lower mastery boundary for the Fragile
@@ -122,7 +122,7 @@ type OLMSnapshot struct {
 // If domainID is empty, the most recently created non-archived domain is used.
 // Returns an error if no active domain exists or the requested domain is
 // archived.
-func BuildOLMSnapshot(ctx context.Context, store *db.Store, learnerID, domainID string) (*OLMSnapshot, error) {
+func BuildOLMSnapshot(ctx context.Context, store storeport.Store, learnerID, domainID string) (*OLMSnapshot, error) {
 	domain, err := resolveActiveDomain(ctx, store, learnerID, domainID)
 	if err != nil {
 		return nil, err
@@ -246,7 +246,7 @@ func trendDirection(diff, threshold float64) string {
 // resolveActiveDomain returns the domain to use for the OLM. If domainID is
 // empty, picks the most recently created non-archived domain. Returns an error
 // if the learner has no active domain, or the requested domain is archived.
-func resolveActiveDomain(ctx context.Context, store *db.Store, learnerID, domainID string) (*models.Domain, error) {
+func resolveActiveDomain(ctx context.Context, store storeport.Store, learnerID, domainID string) (*models.Domain, error) {
 	if domainID == "" {
 		domains, err := store.GetDomainsByLearner(ctx, learnerID, false /*includeArchived*/)
 		if err != nil {

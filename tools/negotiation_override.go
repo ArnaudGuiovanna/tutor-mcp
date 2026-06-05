@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"tutor-mcp/algorithms"
-	"tutor-mcp/db"
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 )
 
 const learningNegotiationOverrideTTL = 30 * time.Minute
@@ -267,7 +267,7 @@ func unmetHardPrerequisites(domain *models.Domain, mastery map[string]float64, c
 	return unmet
 }
 
-func PersistLearningNegotiationOverride(ctx context.Context, store *db.Store, learnerID string, override *LearningNegotiationOverride, now time.Time) (int64, error) {
+func PersistLearningNegotiationOverride(ctx context.Context, store storeport.Store, learnerID string, override *LearningNegotiationOverride, now time.Time) (int64, error) {
 	if store == nil {
 		return 0, fmt.Errorf("store is nil")
 	}
@@ -294,7 +294,7 @@ func PersistLearningNegotiationOverride(ctx context.Context, store *db.Store, le
 // tools/activity.go. Call it after the normal activity has been selected and
 // before tutor-mode/motivation enrichment. It consumes at most one persisted
 // override and only returns it when hard constraints still permit it.
-func ConsumeLearningNegotiationOverride(ctx context.Context, store *db.Store, learnerID string, domain *models.Domain, systemActivity models.Activity, alerts []models.Alert, now time.Time) (models.Activity, LearningNegotiationOverrideConsumeResult, error) {
+func ConsumeLearningNegotiationOverride(ctx context.Context, store storeport.Store, learnerID string, domain *models.Domain, systemActivity models.Activity, alerts []models.Alert, now time.Time) (models.Activity, LearningNegotiationOverrideConsumeResult, error) {
 	if store == nil {
 		return systemActivity, LearningNegotiationOverrideConsumeResult{Status: LearningNegotiationOverrideConsumeNone}, fmt.Errorf("store is nil")
 	}
@@ -343,7 +343,7 @@ func ConsumeLearningNegotiationOverride(ctx context.Context, store *db.Store, le
 	}, nil
 }
 
-func validateConsumedLearningNegotiationOverride(ctx context.Context, store *db.Store, learnerID string, domain *models.Domain, systemActivity models.Activity, alerts []models.Alert, override *LearningNegotiationOverride) string {
+func validateConsumedLearningNegotiationOverride(ctx context.Context, store storeport.Store, learnerID string, domain *models.Domain, systemActivity models.Activity, alerts []models.Alert, override *LearningNegotiationOverride) string {
 	if override.DomainID != domain.ID {
 		return "override domain does not match the active domain"
 	}

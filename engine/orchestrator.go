@@ -34,8 +34,8 @@ import (
 	"time"
 
 	"tutor-mcp/algorithms"
-	"tutor-mcp/db"
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 )
 
 // ErrUnknownDomain is returned when the orchestrator cannot find the
@@ -80,7 +80,7 @@ const orchestratorMaxRetries = 1
 //
 // Thin wrapper around OrchestrateWithPhase for callers that don't
 // need the post-orchestrate phase (e.g. learning_negotiation).
-func Orchestrate(ctx context.Context, store *db.Store, input OrchestratorInput) (models.Activity, error) {
+func Orchestrate(ctx context.Context, store storeport.Store, input OrchestratorInput) (models.Activity, error) {
 	activity, _, err := OrchestrateWithPhase(ctx, store, input)
 	return activity, err
 }
@@ -94,7 +94,7 @@ func Orchestrate(ctx context.Context, store *db.Store, input OrchestratorInput) 
 // store.UpdateDomainPhase during the call.
 //
 // On error, the returned phase is the empty string ("").
-func OrchestrateWithPhase(ctx context.Context, store *db.Store, input OrchestratorInput) (models.Activity, models.Phase, error) {
+func OrchestrateWithPhase(ctx context.Context, store storeport.Store, input OrchestratorInput) (models.Activity, models.Phase, error) {
 	logger := input.logger()
 	domain, err := store.GetDomainByID(ctx, input.DomainID)
 	if err != nil {
@@ -221,7 +221,7 @@ type pipelineFixtures struct {
 	DiagnosticItems    int // count since phase_changed_at
 }
 
-func fetchPipelineFixtures(ctx context.Context, store *db.Store, domain *models.Domain, input OrchestratorInput) (*pipelineFixtures, error) {
+func fetchPipelineFixtures(ctx context.Context, store storeport.Store, domain *models.Domain, input OrchestratorInput) (*pipelineFixtures, error) {
 	states, err := store.GetConceptStatesByLearner(ctx, input.LearnerID)
 	if err != nil {
 		return nil, fmt.Errorf("get states: %w", err)
@@ -380,7 +380,7 @@ func noFringeFallbackPhase(current models.Phase) models.Phase {
 // the one-shot phase retry).
 func runPipeline(
 	ctx context.Context,
-	store *db.Store,
+	store storeport.Store,
 	domain *models.Domain,
 	pf *pipelineFixtures,
 	phase models.Phase,
@@ -492,7 +492,7 @@ func criticalForgettingBypassSelection(alerts []models.Alert, phase models.Phase
 
 func selectActionForSelection(
 	ctx context.Context,
-	store *db.Store,
+	store storeport.Store,
 	pf *pipelineFixtures,
 	selection Selection,
 	input OrchestratorInput,

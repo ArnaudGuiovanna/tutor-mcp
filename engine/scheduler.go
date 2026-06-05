@@ -16,16 +16,16 @@ import (
 	"strings"
 	"time"
 
-	"tutor-mcp/db"
 	"tutor-mcp/memory"
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 	"tutor-mcp/webhookurl"
 
 	"github.com/robfig/cron/v3"
 )
 
 type Scheduler struct {
-	store  *db.Store
+	store  storeport.Store
 	cron   *cron.Cron
 	logger *slog.Logger
 	client *http.Client
@@ -49,7 +49,7 @@ type Scheduler struct {
 // 5s of margin to close the database and finish other shutdown work.
 const defaultStopTimeout = 25 * time.Second
 
-func NewScheduler(store *db.Store, logger *slog.Logger) *Scheduler {
+func NewScheduler(store storeport.Store, logger *slog.Logger) *Scheduler {
 	// cron.New() ships no recover middleware: an unrecovered panic in any
 	// scheduled job is a goroutine panic, which Go terminates the whole
 	// process for. The HTTP recoveryMiddleware does not cover scheduler

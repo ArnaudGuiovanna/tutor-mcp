@@ -23,9 +23,8 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"tutor-mcp/db"
 	"tutor-mcp/models"
-	"tutor-mcp/store"
+	storeport "tutor-mcp/store"
 )
 
 // NormalizeEmail folds an email address to a canonical form (lowercase +
@@ -64,9 +63,15 @@ const (
 	clientNameMaxLen = 120
 )
 
+// oauthStore is the persistence surface the OAuth server needs.
+type oauthStore interface {
+	storeport.LearnerStore
+	storeport.AuthStore
+}
+
 // OAuthServer implements the OAuth 2.1 authorization server.
 type OAuthServer struct {
-	store                *db.Store
+	store                oauthStore
 	baseURL              string
 	logger               *slog.Logger
 	loginFailures        *LoginFailureTracker
@@ -75,7 +80,7 @@ type OAuthServer struct {
 
 // NewOAuthServer creates a new OAuthServer. The login-failure tracker locks
 // out an email after 5 password mismatches in 10 minutes (issue #36).
-func NewOAuthServer(store *db.Store, baseURL string, logger *slog.Logger) *OAuthServer {
+func NewOAuthServer(store oauthStore, baseURL string, logger *slog.Logger) *OAuthServer {
 	return &OAuthServer{
 		store:                store,
 		baseURL:              baseURL,
@@ -791,7 +796,7 @@ func (s *OAuthServer) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.store.CreateOAuthClientWithSecretCapped(ctx, clientID, clientName, string(redirectURIsJSON), secretHash, s.maxRegisteredClients); err != nil {
-		if errors.Is(err, store.ErrOAuthClientLimitReached) {
+		if errors.Is(err, storeport.ErrOAuthClientLimitReached) {
 			writeRegistrationError(w, "registration_disabled", "client cap reached")
 			return
 		}

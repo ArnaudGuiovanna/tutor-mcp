@@ -11,15 +11,15 @@ import (
 	"log/slog"
 
 	"tutor-mcp/auth"
-	"tutor-mcp/db"
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // Deps holds shared dependencies for all MCP tool handlers.
 type Deps struct {
-	Store   *db.Store
+	Store   storeport.Store
 	Logger  *slog.Logger
 	BaseURL string
 }
@@ -91,7 +91,7 @@ func filterInteractionsByDomainID(interactions []*models.Interaction, domainID s
 // specific tools (archive_domain, unarchive_domain, delete_domain) do not go
 // through resolveDomain — they call store.GetDomainByID directly because they
 // legitimately need to operate on archived rows.
-func resolveDomain(ctx context.Context, store *db.Store, learnerID, domainID string) (*models.Domain, error) {
+func resolveDomain(ctx context.Context, store storeport.Store, learnerID, domainID string) (*models.Domain, error) {
 	if domainID != "" {
 		d, err := store.GetDomainByID(ctx, domainID)
 		if err != nil {

@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"tutor-mcp/algorithms"
-	"tutor-mcp/db"
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 )
 
 // BriefInput gathers the signals the motivation engine needs to decide which brief (if any) to fire.
@@ -274,10 +274,10 @@ func ComposeBrief(in BriefInput, kind, pickedAxis string) *models.MotivationBrie
 // MotivationEngine wires SelectBrief / ComposeBrief to the persistence layer and
 // handles side effects (e.g., rotating the domain's last_value_axis).
 type MotivationEngine struct {
-	store *db.Store
+	store storeport.Store
 }
 
-func NewMotivationEngine(store *db.Store) *MotivationEngine {
+func NewMotivationEngine(store storeport.Store) *MotivationEngine {
 	return &MotivationEngine{store: store}
 }
 

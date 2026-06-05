@@ -12,9 +12,9 @@ import (
 	"unicode"
 
 	"tutor-mcp/algorithms"
-	"tutor-mcp/db"
 	"tutor-mcp/engine"
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 )
 
 const (
@@ -37,7 +37,7 @@ func normalizeActivityIntent(raw string) (string, error) {
 	}
 }
 
-func resolveActivityDomain(ctx context.Context, store *db.Store, learnerID, domainID, domainName string) (*models.Domain, error) {
+func resolveActivityDomain(ctx context.Context, store storeport.Store, learnerID, domainID, domainName string) (*models.Domain, error) {
 	if domainID != "" || strings.TrimSpace(domainName) == "" {
 		if domainID == "" {
 			if d, err := resolveCriticalRetentionDomain(ctx, store, learnerID); err != nil {
@@ -82,7 +82,7 @@ func resolveActivityDomain(ctx context.Context, store *db.Store, learnerID, doma
 	}
 }
 
-func resolveCriticalRetentionDomain(ctx context.Context, store *db.Store, learnerID string) (*models.Domain, error) {
+func resolveCriticalRetentionDomain(ctx context.Context, store storeport.Store, learnerID string) (*models.Domain, error) {
 	domains, err := store.GetDomainsByLearner(ctx, learnerID, false)
 	if err != nil {
 		return nil, err
@@ -171,7 +171,7 @@ type reviewIntentConstraints struct {
 // activity families for concept-bearing activities. Gate escape actions still
 // win. The legacy selector is retained as a fallback for NoFringe/constraint-
 // miss cases until the engine grows first-class intent input.
-func resolveReviewIntentActivity(ctx context.Context, store *db.Store, learnerID string, domain *models.Domain, states []*models.ConceptState, interactions []*models.Interaction, sessionConcepts map[string]int, alerts []models.Alert, now time.Time) (models.Activity, models.Phase, string, error) {
+func resolveReviewIntentActivity(ctx context.Context, store storeport.Store, learnerID string, domain *models.Domain, states []*models.ConceptState, interactions []*models.Interaction, sessionConcepts map[string]int, alerts []models.Alert, now time.Time) (models.Activity, models.Phase, string, error) {
 	activity, status, err := selectReviewIntentPipelineActivity(ctx, store, learnerID, domain, states, interactions, sessionConcepts, alerts, now)
 	if err != nil {
 		return models.Activity{}, "", "", err
@@ -184,7 +184,7 @@ func resolveReviewIntentActivity(ctx context.Context, store *db.Store, learnerID
 	return activity, models.PhaseMaintenance, status, nil
 }
 
-func selectReviewIntentPipelineActivity(ctx context.Context, store *db.Store, learnerID string, domain *models.Domain, states []*models.ConceptState, interactions []*models.Interaction, sessionConcepts map[string]int, alerts []models.Alert, now time.Time) (models.Activity, string, error) {
+func selectReviewIntentPipelineActivity(ctx context.Context, store storeport.Store, learnerID string, domain *models.Domain, states []*models.ConceptState, interactions []*models.Interaction, sessionConcepts map[string]int, alerts []models.Alert, now time.Time) (models.Activity, string, error) {
 	constraints, err := buildReviewIntentConstraints(ctx, store, learnerID, domain, states, interactions, sessionConcepts)
 	if err != nil {
 		return models.Activity{}, "", err
@@ -268,7 +268,7 @@ func selectReviewIntentPipelineActivity(ctx context.Context, store *db.Store, le
 	return activity, reviewIntentStatusApplied, nil
 }
 
-func buildReviewIntentConstraints(ctx context.Context, store *db.Store, learnerID string, domain *models.Domain, states []*models.ConceptState, interactions []*models.Interaction, sessionConcepts map[string]int) (reviewIntentConstraints, error) {
+func buildReviewIntentConstraints(ctx context.Context, store storeport.Store, learnerID string, domain *models.Domain, states []*models.ConceptState, interactions []*models.Interaction, sessionConcepts map[string]int) (reviewIntentConstraints, error) {
 	stateByConcept := statesByConcept(states)
 	seenByInteraction := interactionConceptSet(interactions)
 	activeMisconceptions, err := store.GetActiveMisconceptionsBatch(ctx, learnerID, domain.Graph.Concepts)
@@ -450,7 +450,7 @@ func reviewIntentContainsActivityType(set []models.ActivityType, t models.Activi
 // fallback-only path for issue #146: normal integration should call
 // resolveReviewIntentActivity so Gate, ConceptSelector and ActionSelector stay
 // on the routing path before this selector is considered.
-func selectReviewIntentActivity(ctx context.Context, store *db.Store, learnerID string, domain *models.Domain, states []*models.ConceptState, interactions []*models.Interaction, sessionConcepts map[string]int, now time.Time) (models.Activity, string) {
+func selectReviewIntentActivity(ctx context.Context, store storeport.Store, learnerID string, domain *models.Domain, states []*models.ConceptState, interactions []*models.Interaction, sessionConcepts map[string]int, now time.Time) (models.Activity, string) {
 	candidates := reviewCandidatesForDomain(ctx, store, learnerID, domain, states, interactions, sessionConcepts, now, true)
 	if len(candidates) == 0 {
 		candidates = reviewCandidatesForDomain(ctx, store, learnerID, domain, states, interactions, sessionConcepts, now, false)
@@ -498,7 +498,7 @@ func reviewUnavailableActivity() models.Activity {
 	}
 }
 
-func reviewCandidatesForDomain(ctx context.Context, store *db.Store, learnerID string, domain *models.Domain, states []*models.ConceptState, interactions []*models.Interaction, sessionConcepts map[string]int, now time.Time, skipSessionConcepts bool) []reviewCandidate {
+func reviewCandidatesForDomain(ctx context.Context, store storeport.Store, learnerID string, domain *models.Domain, states []*models.ConceptState, interactions []*models.Interaction, sessionConcepts map[string]int, now time.Time, skipSessionConcepts bool) []reviewCandidate {
 	stateByConcept := map[string]*models.ConceptState{}
 	for _, cs := range states {
 		stateByConcept[cs.Concept] = cs

@@ -582,7 +582,7 @@ func TestGetNextActivity_FadeFlagOn_VerbosityDecreasesAsAutonomyRises(t *testing
 		// step — newest-first ordering of GetRecentAffectStates is
 		// driven by created_at, and re-using session IDs would upsert
 		// rather than insert.
-		raw := deps.Store.RawDB()
+		raw := store.RawDB()
 		if _, err := raw.Exec(`DELETE FROM affect_states WHERE learner_id = ?`, "L_owner"); err != nil {
 			t.Fatalf("step %s: wipe affects: %v", st.name, err)
 		}
