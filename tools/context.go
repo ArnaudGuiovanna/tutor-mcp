@@ -35,8 +35,7 @@ func registerGetLearnerContext(server *mcp.Server, deps *Deps) {
 
 		learner, err := deps.Store.GetLearnerByID(learnerID)
 		if err != nil {
-			deps.Logger.Error("get_learner_context: failed to get learner", "err", err, "learner", learnerID)
-			r, _ := errorResult(fmt.Sprintf("learner not found: %v", err))
+			r, _ := safeErrorResult(deps.Logger, "learner not found", err)
 			return r, nil, nil
 		}
 

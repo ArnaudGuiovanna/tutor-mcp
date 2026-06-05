@@ -257,7 +257,14 @@ func enforceContextBudget(ec *EpisodicContext, budget int) {
 		return
 	}
 	size := contextSize(ec)
-	for size > budget && len(ec.RecentSessions) > 0 {
+	// Drop the oldest whole sessions first, but keep a floor of one: the most
+	// recent session always survives so the learner never loses their latest
+	// context outright. Once that survivor is the only one left we stop dropping
+	// and fall through to the graduated stages below (archives, then trimming
+	// the survivor's frontmatter, then its body). Without this floor the loop
+	// would empty RecentSessions entirely and the frontmatter/body stages could
+	// never fire.
+	for size > budget && len(ec.RecentSessions) > 1 {
 		ec.RecentSessions = ec.RecentSessions[:len(ec.RecentSessions)-1]
 		size = contextSize(ec)
 	}

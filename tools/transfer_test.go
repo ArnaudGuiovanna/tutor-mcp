@@ -27,15 +27,37 @@ func TestTransferChallenge_MissingConcept(t *testing.T) {
 }
 
 func TestTransferChallenge_NotFound(t *testing.T) {
-	_, deps := setupToolsTest(t)
+	store, deps := setupToolsTest(t)
+	// The concept is part of the domain graph but has no concept_state row —
+	// the domain/membership guard passes and the GetConceptState lookup is
+	// what fails. (issue #8 guard mirrors record_transfer_result.)
+	seedDomain(t, store, "L_owner", "ghost")
 	res := callTool(t, deps, registerTransferChallenge, "L_owner", "transfer_challenge", map[string]any{"concept": "ghost"})
 	if !res.IsError {
 		t.Fatalf("expected error for missing concept state")
 	}
 }
 
+func TestTransferChallenge_RejectsConceptOutsideDomain(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	// A mastered concept_state that is not part of the resolved domain must
+	// be rejected (issue #8): without the guard the tool served a transfer
+	// challenge for a stale/hallucinated concept name.
+	cs := models.NewConceptState("L_owner", "orphan")
+	cs.PMastery = 0.95
+	_ = store.InsertConceptStateIfNotExists(cs)
+	_ = store.UpsertConceptState(cs)
+	seedDomain(t, store, "L_owner", "calc") // domain does NOT contain "orphan"
+
+	res := callTool(t, deps, registerTransferChallenge, "L_owner", "transfer_challenge", map[string]any{"concept": "orphan"})
+	if !res.IsError || !strings.Contains(resultText(res), "not part of domain") {
+		t.Fatalf("expected concept-not-in-domain error, got %q", resultText(res))
+	}
+}
+
 func TestTransferChallenge_NotMastered(t *testing.T) {
 	store, deps := setupToolsTest(t)
+	seedDomain(t, store, "L_owner", "calc")
 	cs := models.NewConceptState("L_owner", "calc")
 	cs.PMastery = 0.3
 	_ = store.InsertConceptStateIfNotExists(cs)
@@ -53,6 +75,7 @@ func TestTransferChallenge_NotMastered(t *testing.T) {
 
 func TestTransferChallenge_DefaultContextType(t *testing.T) {
 	store, deps := setupToolsTest(t)
+	seedDomain(t, store, "L_owner", "calc")
 	cs := models.NewConceptState("L_owner", "calc")
 	cs.PMastery = 0.95
 	_ = store.InsertConceptStateIfNotExists(cs)
@@ -82,6 +105,7 @@ func TestTransferChallenge_DefaultContextType(t *testing.T) {
 
 func TestTransferChallenge_CustomContextType(t *testing.T) {
 	store, deps := setupToolsTest(t)
+	seedDomain(t, store, "L_owner", "calc")
 	cs := models.NewConceptState("L_owner", "calc")
 	cs.PMastery = 0.95
 	_ = store.InsertConceptStateIfNotExists(cs)
@@ -102,6 +126,7 @@ func TestTransferChallenge_CustomContextType(t *testing.T) {
 
 func TestTransferChallenge_AcceptsLegacyConceptID(t *testing.T) {
 	store, deps := setupToolsTest(t)
+	seedDomain(t, store, "L_owner", "legacy_calc")
 	cs := models.NewConceptState("L_owner", "legacy_calc")
 	cs.PMastery = 0.95
 	_ = store.InsertConceptStateIfNotExists(cs)

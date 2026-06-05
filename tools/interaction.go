@@ -182,8 +182,7 @@ func registerRecordInteraction(server *mcp.Server, deps *Deps) {
 			InterpretationBrief: interpretationBrief,
 		}, time.Now().UTC())
 		if err != nil {
-			deps.Logger.Error("record_interaction: applyInteraction failed", "err", err, "learner", learnerID)
-			r, _ := errorResult(fmt.Sprintf("failed to record interaction: %v", err))
+			r, _ := safeErrorResult(deps.Logger, "failed to record interaction", err)
 			return r, nil, nil
 		}
 

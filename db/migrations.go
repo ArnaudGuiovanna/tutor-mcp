@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	_ "embed"
 	"fmt"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -29,6 +30,23 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
+
+	// SQLite is a single-writer store: even under WAL (which permits
+	// concurrent readers) only one writer can hold the lock at a time.
+	// database/sql's default pool is unbounded, so under load it opens
+	// many connections that then serialise at the SQLite layer, turning
+	// lock contention into SQLITE_BUSY errors. We pin the pool to a
+	// single connection so every BEGIN IMMEDIATE (see _txlock above)
+	// queues in Go rather than racing for the writer lock — busy_timeout
+	// then only has to absorb the rare cross-process contention. This is
+	// a single-node deployment, so serialising all access on one conn is
+	// the correct, simplest choice (#5).
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	// A single long-lived connection is fine for an embedded DB; recycle
+	// hourly only as a hygiene measure against any per-conn state drift.
+	db.SetConnMaxLifetime(time.Hour)
+
 	if err := db.Ping(); err != nil {
 		return nil, fmt.Errorf("ping db: %w", err)
 	}

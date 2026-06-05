@@ -408,3 +408,94 @@ func selectDiagnostic(states []*models.ConceptState, graph models.KnowledgeSpace
 			bestScore, len(candidates)),
 	}
 }
+
+// SelectReviewConcept is the second concept-selector: a review-intent variant
+// that ranks already-seen concepts by decayed retention (plus misconception and
+// sub-mastery boosts) to pick what to revisit. Distinct from SelectConcept,
+// which routes *new* learning by phase. Extracted from the orchestrator (#9).
+func SelectReviewConcept(
+	allowed []string,
+	states map[string]*models.ConceptState,
+	interactions []*models.Interaction,
+	activeMisc map[string]bool,
+) Selection {
+	interactionCounts := make(map[string]int)
+	for _, interaction := range interactions {
+		if interaction == nil {
+			continue
+		}
+		interactionCounts[interaction.Concept]++
+	}
+
+	best := Selection{NoFringe: true, Phase: models.PhaseMaintenance}
+	bestScore := -1.0
+	for _, concept := range allowed {
+		cs := states[concept]
+		if !reviewableConcept(cs, interactionCounts[concept]) {
+			continue
+		}
+		retention := reviewRetention(cs)
+		score := 1 - retention
+		if activeMisc[concept] {
+			score += 2
+		}
+		if cs != nil && cs.PMastery < algorithms.MasteryBKT() {
+			score += 0.15
+		}
+		if interactionCounts[concept] > 0 {
+			score += 0.05
+		}
+		if score > bestScore {
+			bestScore = score
+			best = Selection{
+				Concept:   concept,
+				Score:     score,
+				NoFringe:  false,
+				Phase:     models.PhaseMaintenance,
+				Rationale: fmt.Sprintf("[intent=review] selected prior concept %q with retention %.2f", concept, retention),
+			}
+		}
+	}
+	return best
+}
+
+func reviewableConcept(cs *models.ConceptState, interactionCount int) bool {
+	if interactionCount > 0 {
+		return true
+	}
+	if cs == nil {
+		return false
+	}
+	return cs.Reps > 0 || cs.CardState != "new"
+}
+
+func reviewRetention(cs *models.ConceptState) float64 {
+	if cs == nil || cs.CardState == "new" {
+		return 0.70
+	}
+	return algorithms.Retrievability(cs.ElapsedDays, cs.Stability)
+}
+
+func constrainReviewAction(action Action, cs *models.ConceptState) Action {
+	switch action.Type {
+	case models.ActivityRecall, models.ActivityPractice, models.ActivityDebugMisconception:
+		action.Rationale = "review intent constraint : " + action.Rationale
+		return action
+	}
+	if reviewRetention(cs) < algorithms.RetentionRecallRoutingThreshold {
+		return Action{
+			Type:             models.ActivityRecall,
+			DifficultyTarget: 0.60,
+			Format:           "review_retrieval",
+			EstimatedMinutes: 8,
+			Rationale:        "review intent constraint : retrieval before new or mastery activity",
+		}
+	}
+	return Action{
+		Type:             models.ActivityPractice,
+		DifficultyTarget: clampActionDifficulty(action.DifficultyTarget),
+		Format:           "review_practice",
+		EstimatedMinutes: 10,
+		Rationale:        "review intent constraint : practice on prior material",
+	}
+}

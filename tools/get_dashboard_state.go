@@ -66,8 +66,7 @@ func registerGetDashboardState(server *mcp.Server, deps *Deps) {
 		if params.DomainID != "" {
 			d, derr := deps.Store.GetDomainByID(params.DomainID)
 			if derr != nil {
-				deps.Logger.Error("get_dashboard_state: failed to get domain", "err", derr, "learner", learnerID)
-				r, _ := errorResult(fmt.Sprintf("domain not found: %v", derr))
+				r, _ := safeErrorResult(deps.Logger, "domain not found", derr)
 				return r, nil, nil
 			}
 			if d.LearnerID != learnerID {

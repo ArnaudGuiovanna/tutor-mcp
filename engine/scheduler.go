@@ -34,6 +34,12 @@ type Scheduler struct {
 	// Overridable via test-only constructors so timeout-path tests don't
 	// need to wait the full production budget.
 	stopTimeout time.Duration
+
+	// stopCh is closed by Stop() to signal in-flight work — notably the
+	// synchronous backoff sleeps in doWithRetry — that the scheduler is
+	// shutting down. A nil stopCh (e.g. in struct-literal test fixtures)
+	// is a never-fires channel, so the abort path is simply inert. See #2.
+	stopCh chan struct{}
 }
 
 // defaultStopTimeout is the production budget for Stop() to wait for
@@ -54,6 +60,7 @@ func NewScheduler(store *db.Store, logger *slog.Logger) *Scheduler {
 		logger:      logger,
 		client:      &http.Client{Timeout: 10 * time.Second},
 		stopTimeout: defaultStopTimeout,
+		stopCh:      make(chan struct{}),
 	}
 }
 
@@ -134,6 +141,19 @@ func (s *Scheduler) Start() error {
 // producing "sql: database is closed" mid-loop and silent data loss on
 // webhook_message_queue + scheduled_alerts. See issue #123.
 func (s *Scheduler) Stop() {
+	// Signal in-flight webhook backoff sleeps to abort before we start the
+	// drain timer, so a job parked in doWithRetry's exponential schedule
+	// doesn't burn the Stop() budget waiting out 0+1+5+25s. Guard against a
+	// double Stop() (and a nil stopCh from test fixtures).
+	if s.stopCh != nil {
+		select {
+		case <-s.stopCh:
+			// already closed
+		default:
+			close(s.stopCh)
+		}
+	}
+
 	ctx := s.cron.Stop()
 	timeout := s.stopTimeout
 	if timeout <= 0 {
@@ -503,6 +523,12 @@ func (s *Scheduler) sendWebhook(url, message string) error {
 // changing behavior in production.
 var retryDelays = []time.Duration{0, 1 * time.Second, 5 * time.Second, 25 * time.Second}
 
+// maxRetryAfter caps how long a single 429 Retry-After header is honored. A
+// hostile or misconfigured endpoint can return Retry-After up to 60s; sleeping
+// that long synchronously in the cron goroutine would stall the tick and eat
+// the Stop() drain budget. We honor the header only up to this small bound. (#2)
+const maxRetryAfter = 5 * time.Second
+
 // safeWebhookURL is the SSRF guard used by doWithRetry. It defaults to the
 // production Discord-only allowlist and is overridden in tests so that
 // httptest.NewServer URLs (http://127.0.0.1:...) can be exercised end-to-end.
@@ -520,7 +546,10 @@ func (s *Scheduler) doWithRetry(url string, body []byte) error {
 	var lastErr error
 	for attempt, delay := range delays {
 		if delay > 0 {
-			time.Sleep(delay)
+			if !s.sleepOrStop(delay) {
+				// Scheduler is shutting down — abandon remaining attempts.
+				return lastErr
+			}
 		}
 		resp, err := s.client.Post(url, "application/json", bytes.NewReader(body))
 		if err != nil {
@@ -537,8 +566,14 @@ func (s *Scheduler) doWithRetry(url string, body []byte) error {
 		if resp.StatusCode == 429 {
 			if ra := resp.Header.Get("Retry-After"); ra != "" {
 				if secs, err := strconv.Atoi(ra); err == nil && secs > 0 && secs <= 60 {
-					s.logger.Warn("webhook rate limited, waiting", "retry_after", secs)
-					time.Sleep(time.Duration(secs) * time.Second)
+					wait := time.Duration(secs) * time.Second
+					if wait > maxRetryAfter {
+						wait = maxRetryAfter
+					}
+					s.logger.Warn("webhook rate limited, waiting", "retry_after", secs, "honored", wait.String())
+					if !s.sleepOrStop(wait) {
+						return lastErr
+					}
 				}
 			}
 			continue
@@ -550,6 +585,21 @@ func (s *Scheduler) doWithRetry(url string, body []byte) error {
 		s.logger.Warn("webhook retry", "attempt", attempt+1, "status", resp.StatusCode)
 	}
 	return lastErr
+}
+
+// sleepOrStop blocks for d, but returns false early (without finishing the
+// sleep) if the scheduler's stopCh is closed first. This keeps doWithRetry's
+// synchronous backoff interruptible so Stop() isn't held hostage by an
+// in-flight webhook retry. A nil stopCh never fires, so the sleep runs in full.
+func (s *Scheduler) sleepOrStop(d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-s.stopCh:
+		return false
+	}
 }
 
 // ─── OLM (Open Learner Model) Daily Dispatch ────────────────────────────────

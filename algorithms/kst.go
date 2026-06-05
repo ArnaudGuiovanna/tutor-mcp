@@ -17,23 +17,34 @@ func ComputeFrontier(graph KSTGraph, mastery map[string]float64) []string {
 	threshold := MasteryKST()
 	var frontier []string
 	for _, concept := range graph.Concepts {
-		if mastery[concept] >= threshold { continue }
+		if mastery[concept] >= threshold {
+			continue
+		}
 		prereqs := graph.Prerequisites[concept]
 		allMet := true
 		for _, prereq := range prereqs {
-			if mastery[prereq] < threshold { allMet = false; break }
+			if mastery[prereq] < threshold {
+				allMet = false
+				break
+			}
 		}
-		if allMet { frontier = append(frontier, concept) }
+		if allMet {
+			frontier = append(frontier, concept)
+		}
 	}
 	return frontier
 }
 
 func ConceptStatus(graph KSTGraph, mastery map[string]float64, concept string) string {
 	threshold := MasteryKST()
-	if mastery[concept] >= threshold { return "done" }
+	if mastery[concept] >= threshold {
+		return "done"
+	}
 	prereqs := graph.Prerequisites[concept]
 	for _, prereq := range prereqs {
-		if mastery[prereq] < threshold { return "locked" }
+		if mastery[prereq] < threshold {
+			return "locked"
+		}
 	}
 	return "current"
 }

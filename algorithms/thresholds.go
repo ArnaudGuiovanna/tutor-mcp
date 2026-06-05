@@ -46,9 +46,9 @@ const (
 // transfer_challenge gating and the mastered-concept count in
 // ComputeMetacognitiveAlerts.
 func MasteryBKT() float64 {
-	if isUnifiedThreshold() {
-		return 0.85
-	}
+	// Both profiles set BKT mastery to 0.85: the unified profile makes
+	// BKT/KST/Mid share 0.85, and the legacy profile already pinned BKT at
+	// 0.85, so the isUnifiedThreshold() branch was vestigial.
 	return 0.85
 }
 

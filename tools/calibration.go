@@ -72,8 +72,7 @@ func registerCalibrationCheck(server *mcp.Server, deps *Deps) {
 		}
 
 		if err := deps.Store.CreateCalibrationPrediction(record); err != nil {
-			deps.Logger.Error("calibration_check: failed to create calibration prediction", "err", err, "learner", learnerID)
-			r, _ := errorResult(fmt.Sprintf("failed to create calibration: %v", err))
+			r, _ := safeErrorResult(deps.Logger, "failed to create calibration", err)
 			return r, nil, nil
 		}
 
@@ -126,16 +125,14 @@ func registerRecordCalibrationResult(server *mcp.Server, deps *Deps) {
 		// "not found" if the prediction belongs to another learner (issue #87).
 		record, err := deps.Store.GetCalibrationRecord(params.PredictionID, learnerID)
 		if err != nil {
-			deps.Logger.Error("record_calibration_result: calibration record not found", "err", err, "learner", learnerID)
-			r, _ := errorResult(fmt.Sprintf("prediction not found: %v", err))
+			r, _ := safeErrorResult(deps.Logger, "prediction not found", err)
 			return r, nil, nil
 		}
 
 		delta := record.Predicted - params.ActualScore
 
 		if err := deps.Store.CompleteCalibrationRecord(params.PredictionID, learnerID, params.ActualScore, delta); err != nil {
-			deps.Logger.Error("record_calibration_result: failed to complete calibration record", "err", err, "learner", learnerID)
-			r, _ := errorResult(fmt.Sprintf("failed to record result: %v", err))
+			r, _ := safeErrorResult(deps.Logger, "failed to record result", err)
 			return r, nil, nil
 		}
 

@@ -7,7 +7,6 @@ package tools
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 
 	"tutor-mcp/models"
 
@@ -30,8 +29,7 @@ func registerGetAvailabilityModel(server *mcp.Server, deps *Deps) {
 
 		avail, err := deps.Store.GetAvailability(learnerID)
 		if err != nil {
-			deps.Logger.Error("get_availability_model: failed to get availability", "err", err, "learner", learnerID)
-			r, _ := errorResult(fmt.Sprintf("failed to get availability: %v", err))
+			r, _ := safeErrorResult(deps.Logger, "failed to get availability", err)
 			return r, nil, nil
 		}
 

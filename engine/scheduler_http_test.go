@@ -193,6 +193,81 @@ func TestDoWithRetry_RetriesOn429WithRetryAfter(t *testing.T) {
 	}
 }
 
+// TestDoWithRetry_CapsRetryAfter asserts an in-range Retry-After larger than
+// maxRetryAfter is honored only up to the cap, not for the full header value —
+// so a hostile endpoint can't park the cron goroutine for tens of seconds.
+func TestDoWithRetry_CapsRetryAfter(t *testing.T) {
+	allowAnyURL(t)
+	withoutBackoff(t)
+
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&hits, 1)
+		if n == 1 {
+			// In-range (<=60) so it IS honored, but well above maxRetryAfter (5s).
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	s := newTestScheduler()
+	start := time.Now()
+	if err := s.doWithRetry(srv.URL, []byte(`{}`)); err != nil {
+		t.Fatalf("expected success after 429, got %v", err)
+	}
+	elapsed := time.Since(start)
+	if elapsed >= 30*time.Second {
+		t.Fatalf("doWithRetry honored the full 60s Retry-After (%v) — cap not applied", elapsed)
+	}
+	// Should be ~maxRetryAfter (5s), allow generous slack for CI scheduling.
+	if elapsed > maxRetryAfter+3*time.Second {
+		t.Errorf("Retry-After wait = %v, want it bounded near maxRetryAfter (%v)", elapsed, maxRetryAfter)
+	}
+}
+
+// TestDoWithRetry_AbortsOnStop verifies a closed stopCh interrupts the
+// synchronous backoff sleep so a webhook retry can't hold the Stop() drain
+// budget hostage. The server always 500s, so without an abort the call would
+// pay the full retryDelays schedule.
+func TestDoWithRetry_AbortsOnStop(t *testing.T) {
+	allowAnyURL(t)
+
+	// Use real (non-zero) delays so there is a sleep to interrupt.
+	orig := retryDelays
+	retryDelays = []time.Duration{0, 10 * time.Second, 10 * time.Second, 10 * time.Second}
+	t.Cleanup(func() { retryDelays = orig })
+
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	s := newTestScheduler()
+	s.stopCh = make(chan struct{})
+	// Signal shutdown shortly after the first attempt enters its backoff sleep.
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		close(s.stopCh)
+	}()
+
+	start := time.Now()
+	_ = s.doWithRetry(srv.URL, []byte(`{}`))
+	elapsed := time.Since(start)
+
+	if elapsed >= 5*time.Second {
+		t.Fatalf("doWithRetry did not abort on stop: took %v (expected sub-second)", elapsed)
+	}
+	// Only the first attempt should have fired before the stop interrupted backoff.
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Errorf("hit count = %d, want 1 (stop must abort before the second attempt)", got)
+	}
+}
+
 func TestDoWithRetry_RetriesOn429WithoutRetryAfter(t *testing.T) {
 	allowAnyURL(t)
 	withoutBackoff(t)

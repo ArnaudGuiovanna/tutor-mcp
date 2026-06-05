@@ -171,6 +171,62 @@ func TestComputeAlertsForgettingCriticalSuppressesPlateau(t *testing.T) {
 	}
 }
 
+// TestComputeAlertsAt_DeterministicForgetting freezes now so the FORGETTING
+// retention decay is computed from a known elapsed interval (now - LastReview)
+// rather than the wall clock. With stability 0.1 and ~30 days elapsed,
+// retrievability falls below the critical threshold and fires UrgencyCritical.
+func TestComputeAlertsAt_DeterministicForgetting(t *testing.T) {
+	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
+	lastReview := now.AddDate(0, 0, -30)
+	states := []*models.ConceptState{
+		{Concept: "X", Stability: 0.1, ElapsedDays: 0, PMastery: 0.3, CardState: "review",
+			LastReview: &lastReview},
+	}
+
+	alerts := ComputeAlertsAt(states, nil, time.Time{}, now)
+
+	a, found := findAlert(alerts, models.AlertForgetting, "X")
+	if !found {
+		t.Fatal("expected FORGETTING alert at 30 days elapsed")
+	}
+	if a.Urgency != models.UrgencyCritical {
+		t.Errorf("expected UrgencyCritical at 30 days elapsed, got %v (retention=%.4f)", a.Urgency, a.Retention)
+	}
+
+	// A near-zero elapsed interval keeps retention high → no FORGETTING.
+	recent := now.Add(-1 * time.Hour)
+	statesRecent := []*models.ConceptState{
+		{Concept: "X", Stability: 0.1, ElapsedDays: 0, PMastery: 0.3, CardState: "review",
+			LastReview: &recent},
+	}
+	if _, found := findAlert(ComputeAlertsAt(statesRecent, nil, time.Time{}, now), models.AlertForgetting, "X"); found {
+		t.Error("did not expect FORGETTING alert for a 1-hour-old review")
+	}
+}
+
+// TestComputeAlertsAt_DeterministicOverload pins now so OVERLOAD depends only on
+// now - sessionStart, with no wall-clock dependency.
+func TestComputeAlertsAt_DeterministicOverload(t *testing.T) {
+	now := time.Date(2026, 6, 5, 12, 0, 0, 0, time.UTC)
+
+	// 46 minutes elapsed → just past the 45-minute threshold → OVERLOAD.
+	start := now.Add(-46 * time.Minute)
+	if _, found := findAlert(ComputeAlertsAt(nil, nil, start, now), models.AlertOverload, ""); !found {
+		t.Error("expected OVERLOAD at 46 minutes elapsed")
+	}
+
+	// 44 minutes elapsed → below threshold → no OVERLOAD.
+	startShort := now.Add(-44 * time.Minute)
+	if _, found := findAlert(ComputeAlertsAt(nil, nil, startShort, now), models.AlertOverload, ""); found {
+		t.Error("did not expect OVERLOAD at 44 minutes elapsed")
+	}
+
+	// Zero sessionStart → never OVERLOAD.
+	if _, found := findAlert(ComputeAlertsAt(nil, nil, time.Time{}, now), models.AlertOverload, ""); found {
+		t.Error("did not expect OVERLOAD with a zero sessionStart")
+	}
+}
+
 // TestComputeMetacognitiveAlerts_DifficultyBranch covers the second
 // AFFECT_NEGATIVE branch (perceived_difficulty == 1 on two consecutives).
 func TestComputeMetacognitiveAlerts_DifficultyBranch(t *testing.T) {

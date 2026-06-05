@@ -25,6 +25,23 @@ func makeOwnerDomain(t *testing.T, store interface {
 	return d
 }
 
+// seedDomain creates an active domain for the learner whose graph contains the
+// given concepts. Tools that resolve + validate the concept against the active
+// domain (feynman_challenge, transfer_challenge — issue #8) need a real domain
+// in place before they will touch concept_state.
+func seedDomain(t *testing.T, store interface {
+	CreateDomainWithValueFramings(string, string, string, models.KnowledgeSpace, string) (*models.Domain, error)
+}, ownerID string, concepts ...string) *models.Domain {
+	t.Helper()
+	d, err := store.CreateDomainWithValueFramings(ownerID, "seeded", "", models.KnowledgeSpace{
+		Concepts: concepts,
+	}, "")
+	if err != nil {
+		t.Fatalf("create domain: %v", err)
+	}
+	return d
+}
+
 func TestArchiveDomain_NoAuth(t *testing.T) {
 	_, deps := setupToolsTest(t)
 	res := callTool(t, deps, registerArchiveDomain, "", "archive_domain", map[string]any{"domain_id": "d_x"})

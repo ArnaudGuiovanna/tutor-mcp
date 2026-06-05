@@ -58,8 +58,7 @@ func registerGetMisconceptions(server *mcp.Server, deps *Deps) {
 		// Get misconception groups
 		groups, err := deps.Store.GetMisconceptionGroups(learnerID, conceptFilter)
 		if err != nil {
-			deps.Logger.Error("get_misconceptions: failed to fetch groups", "err", err, "learner", learnerID)
-			r, _ := errorResult(fmt.Sprintf("failed to fetch misconceptions: %v", err))
+			r, _ := safeErrorResult(deps.Logger, "failed to fetch misconceptions", err)
 			return r, nil, nil
 		}
 

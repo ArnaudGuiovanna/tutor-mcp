@@ -7,6 +7,7 @@ package db
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"tutor-mcp/algorithms"
@@ -35,29 +36,65 @@ func (s *Store) ConceptMasteryDelta(learnerID string, domainConcepts []string, s
 		stateByConcept[cs.Concept] = cs
 	}
 
-	var deltas []models.ConceptDelta
+	// Only concepts we actually have a current state for can yield a
+	// delta — restrict the (formerly per-concept) history aggregation to
+	// those, in one GROUP BY query keyed by concept.
+	relevant := make([]string, 0, len(domainConcepts))
 	for _, concept := range domainConcepts {
-		cs := stateByConcept[concept]
-		if cs == nil {
-			continue
+		if stateByConcept[concept] != nil {
+			relevant = append(relevant, concept)
 		}
+	}
 
-		// Count successes/failures before `since` — approximates past mastery.
-		var totalBefore, successBefore int
-		err := s.db.QueryRow(
-			`SELECT COUNT(*), COALESCE(SUM(success), 0)
-			 FROM interactions WHERE learner_id = ? AND concept = ? AND created_at < ?`,
-			learnerID, concept, since.UTC(),
-		).Scan(&totalBefore, &successBefore)
-		if err != nil {
-			continue
+	// Counts of total/successful interactions before `since` per concept
+	// — approximates past mastery. Concepts with no prior interactions are
+	// simply absent from the map (handled as the totalBefore == 0 case).
+	type beforeCounts struct{ total, success int }
+	before := make(map[string]beforeCounts, len(relevant))
+	if len(relevant) > 0 {
+		placeholders := make([]string, 0, len(relevant))
+		args := make([]any, 0, len(relevant)+2)
+		args = append(args, learnerID)
+		for _, c := range relevant {
+			placeholders = append(placeholders, "?")
+			args = append(args, c)
 		}
+		args = append(args, since.UTC())
+		rows, err := s.db.Query(
+			`SELECT concept, COUNT(*), COALESCE(SUM(success), 0)
+			 FROM interactions
+			 WHERE learner_id = ? AND concept IN (`+strings.Join(placeholders, ",")+`)
+			   AND created_at < ?
+			 GROUP BY concept`,
+			args...,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("mastery delta: history counts: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var concept string
+			var bc beforeCounts
+			if err := rows.Scan(&concept, &bc.total, &bc.success); err != nil {
+				return nil, fmt.Errorf("mastery delta: scan history: %w", err)
+			}
+			before[concept] = bc
+		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("mastery delta: history rows: %w", err)
+		}
+	}
+
+	var deltas []models.ConceptDelta
+	for _, concept := range relevant {
+		cs := stateByConcept[concept]
+		bc := before[concept]
 
 		var masteryWas float64
-		if totalBefore == 0 {
+		if bc.total == 0 {
 			masteryWas = 0.1 // initial BKT prior
 		} else {
-			masteryWas = float64(successBefore) / float64(totalBefore)
+			masteryWas = float64(bc.success) / float64(bc.total)
 		}
 
 		delta := cs.PMastery - masteryWas
@@ -93,7 +130,11 @@ func (s *Store) MilestonesInWindow(learnerID string, domainConcepts []string, si
 		domainSet[c] = true
 	}
 
-	var milestones []string
+	// Candidate concepts: in-domain AND currently above the mastery
+	// threshold. The "recently active" check below is then resolved for
+	// all candidates in a single set-based query instead of one COUNT(*)
+	// per concept.
+	var candidates []string
 	for _, cs := range states {
 		if !domainSet[cs.Concept] {
 			continue
@@ -101,19 +142,42 @@ func (s *Store) MilestonesInWindow(learnerID string, domainConcepts []string, si
 		if cs.PMastery < algorithms.MasteryBKT() {
 			continue
 		}
-		// Check there's at least one interaction since `since`.
-		var count int
-		err := s.db.QueryRow(
-			`SELECT COUNT(*) FROM interactions
-			 WHERE learner_id = ? AND concept = ? AND success = 1 AND created_at >= ?`,
-			learnerID, cs.Concept, since.UTC(),
-		).Scan(&count)
-		if err != nil {
-			continue
+		candidates = append(candidates, cs.Concept)
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+
+	// Concepts with at least one successful interaction since `since`.
+	placeholders := make([]string, 0, len(candidates))
+	args := make([]any, 0, len(candidates)+2)
+	args = append(args, learnerID)
+	for _, c := range candidates {
+		placeholders = append(placeholders, "?")
+		args = append(args, c)
+	}
+	args = append(args, since.UTC())
+	rows, err := s.db.Query(
+		`SELECT DISTINCT concept FROM interactions
+		 WHERE learner_id = ? AND concept IN (`+strings.Join(placeholders, ",")+`)
+		   AND success = 1 AND created_at >= ?`,
+		args...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("milestones: active concepts: %w", err)
+	}
+	defer rows.Close()
+
+	var milestones []string
+	for rows.Next() {
+		var concept string
+		if err := rows.Scan(&concept); err != nil {
+			return nil, fmt.Errorf("milestones: scan concept: %w", err)
 		}
-		if count > 0 {
-			milestones = append(milestones, cs.Concept)
-		}
+		milestones = append(milestones, concept)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("milestones: rows: %w", err)
 	}
 	sort.Strings(milestones)
 	return milestones, nil

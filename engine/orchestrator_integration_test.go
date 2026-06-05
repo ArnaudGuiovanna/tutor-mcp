@@ -22,35 +22,35 @@ import (
 // observer needs to reconstruct the run after the fact (cf. user
 // requirement: artefact lisible pour debug et calibration).
 type e2eSession struct {
-	SessionNum         int     `json:"session_num"`
-	PhaseBefore        string  `json:"phase_before"`
-	PhaseAfter         string  `json:"phase_after"`
-	Transitioned       bool    `json:"transitioned"`
-	MeanEntropy        float64 `json:"mean_entropy"`
-	PhaseEntryEntropy  float64 `json:"phase_entry_entropy"`
-	MasteredCount      int     `json:"mastered_count"`
-	MasteredGoalCount  int     `json:"mastered_goal_count"`
-	TotalGoalRelevant  int     `json:"total_goal_relevant"`
-	ActivityType       string  `json:"activity_emitted"`
-	Concept            string  `json:"concept"`
-	LearnerCorrect     bool    `json:"learner_response_correct"`
-	Rationale          string  `json:"rationale"`
+	SessionNum        int     `json:"session_num"`
+	PhaseBefore       string  `json:"phase_before"`
+	PhaseAfter        string  `json:"phase_after"`
+	Transitioned      bool    `json:"transitioned"`
+	MeanEntropy       float64 `json:"mean_entropy"`
+	PhaseEntryEntropy float64 `json:"phase_entry_entropy"`
+	MasteredCount     int     `json:"mastered_count"`
+	MasteredGoalCount int     `json:"mastered_goal_count"`
+	TotalGoalRelevant int     `json:"total_goal_relevant"`
+	ActivityType      string  `json:"activity_emitted"`
+	Concept           string  `json:"concept"`
+	LearnerCorrect    bool    `json:"learner_response_correct"`
+	Rationale         string  `json:"rationale"`
 }
 
 type e2eArtifact struct {
-	Scenario  string        `json:"scenario"`
-	StartedAt time.Time     `json:"started_at"`
-	Sessions  []e2eSession  `json:"sessions"`
-	Summary   e2eSummary    `json:"summary"`
+	Scenario  string       `json:"scenario"`
+	StartedAt time.Time    `json:"started_at"`
+	Sessions  []e2eSession `json:"sessions"`
+	Summary   e2eSummary   `json:"summary"`
 }
 
 type e2eSummary struct {
-	TotalSessions       int            `json:"total_sessions"`
-	TransitionsCount    int            `json:"transitions_count"`
-	PhaseDistribution   map[string]int `json:"phase_distribution"`
-	FirstInstructionAt  int            `json:"first_instruction_at,omitempty"`
-	FirstMaintenanceAt  int            `json:"first_maintenance_at,omitempty"`
-	FinalPhase          string         `json:"final_phase"`
+	TotalSessions      int            `json:"total_sessions"`
+	TransitionsCount   int            `json:"transitions_count"`
+	PhaseDistribution  map[string]int `json:"phase_distribution"`
+	FirstInstructionAt int            `json:"first_instruction_at,omitempty"`
+	FirstMaintenanceAt int            `json:"first_maintenance_at,omitempty"`
+	FinalPhase         string         `json:"final_phase"`
 }
 
 // simulatedAnswer returns whether the synthetic learner answers

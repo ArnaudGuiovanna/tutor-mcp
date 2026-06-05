@@ -222,11 +222,11 @@ func ComposeBrief(in BriefInput, kind, pickedAxis string) *models.MotivationBrie
 	case models.MotivationKindGrowthMindset:
 		if in.LastFailure != nil {
 			fm := &models.FailureMeta{
-				Concept:             in.LastFailure.Concept,
-				HintsRequested:      in.LastFailure.HintsRequested,
-				ErrorType:           in.LastFailure.ErrorType,
-				MisconceptionType:   in.LastFailure.MisconceptionType,
-				HoursAgo:            int(in.Now.Sub(in.LastFailure.CreatedAt).Hours()),
+				Concept:           in.LastFailure.Concept,
+				HintsRequested:    in.LastFailure.HintsRequested,
+				ErrorType:         in.LastFailure.ErrorType,
+				MisconceptionType: in.LastFailure.MisconceptionType,
+				HoursAgo:          int(in.Now.Sub(in.LastFailure.CreatedAt).Hours()),
 			}
 			if in.Now.IsZero() {
 				fm.HoursAgo = int(time.Since(in.LastFailure.CreatedAt).Hours())

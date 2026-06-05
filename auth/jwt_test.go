@@ -92,6 +92,35 @@ func TestLoadJWTSecret_PlainStringErrorMentionsOpenssl(t *testing.T) {
 	}
 }
 
+func TestLoadJWTSecret_RejectsShortDecodedSecret(t *testing.T) {
+	// A 16-byte decoded secret is too weak for HS256 and must be rejected,
+	// even though it is valid base64 — see finding #6.
+	saved := jwtSecret
+	defer func() { jwtSecret = saved }()
+
+	raw := make([]byte, 16)
+	t.Setenv("JWT_SECRET", base64.StdEncoding.EncodeToString(raw))
+	err := LoadJWTSecret()
+	if err == nil {
+		t.Fatal("expected error for 16-byte decoded JWT_SECRET")
+	}
+	if !strings.Contains(err.Error(), "at least 32 bytes") {
+		t.Fatalf("error message %q must mention the 32-byte minimum", err.Error())
+	}
+}
+
+func TestLoadJWTSecret_AcceptsStrongDecodedSecret(t *testing.T) {
+	// A 32-byte decoded secret meets the HS256 strength floor and must load.
+	saved := jwtSecret
+	defer func() { jwtSecret = saved }()
+
+	raw := make([]byte, 32)
+	t.Setenv("JWT_SECRET", base64.StdEncoding.EncodeToString(raw))
+	if err := LoadJWTSecret(); err != nil {
+		t.Fatalf("expected 32-byte secret to be accepted, got: %v", err)
+	}
+}
+
 func TestMain(m *testing.M) {
 	// Ensure tests don't accidentally inherit a JWT_SECRET from the host env.
 	os.Unsetenv("JWT_SECRET")

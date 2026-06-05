@@ -103,10 +103,10 @@ type FailureMeta struct {
 // AffectMeta surfaces the dominant negative signal from the most recent record_affect
 // call (for affect_reframe).
 type AffectMeta struct {
-	SessionID           string `json:"session_id"`
-	Dimension           string `json:"dimension"` // satisfaction | difficulty | energy
-	Value               int    `json:"value"`
-	HoursAgo            int    `json:"hours_ago"`
+	SessionID string `json:"session_id"`
+	Dimension string `json:"dimension"` // satisfaction | difficulty | energy
+	Value     int    `json:"value"`
+	HoursAgo  int    `json:"hours_ago"`
 }
 
 // ProgressNarrative is attached to get_learner_context responses. Claude uses it

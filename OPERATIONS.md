@@ -182,6 +182,21 @@ journalctl --user -u tutor-mcp --since "1 hour ago" \
 - **No `interaction recorded` logs while exercises are happening** — the LLM is generating activities but not closing the loop with `record_interaction`. Cohérence-of-rule-3 problem in the system prompt.
 - **Repeated `phase fallback (NoFringe)` for the same domain** — the candidate pool is empty. Likely cause: missing `goal_relevance` on a domain where the strict contract is enforced (partial vector). Run `set_goal_relevance` to repair.
 
+## Operational constraints (single-node / in-memory state)
+
+This server is designed to run as a **single process on a single host**. Several pieces of state live only in process memory, with no shared store behind them:
+
+- **Rate limiter** (`auth/ratelimit.go`) — per-client token buckets are held in memory.
+- **Login-failure tracker** (`auth/login_failures.go`) — the brute-force lockout counters are held in memory.
+- **Scheduler** (background jobs in `engine/`) — runs in-process, single-node.
+
+Two consequences follow, and both are deliberate trade-offs for this deployment shape:
+
+- **A restart clears throttle and lockout state.** Every process restart or crash-loop resets the rate-limiter buckets and the login-failure counters to zero. An account locked out by repeated bad passwords becomes reachable again the moment the server is restarted (e.g. after a binary deploy, see *Pre-migration safety* above). Avoid restart-storming the service if a lockout is actively protecting you.
+- **State is not shared across instances.** Each process keeps its own buckets and counters. **Do not run multiple instances behind a load balancer expecting shared throttle or lockout state** — doing so multiplies the effective rate limit by the instance count and lets brute-force attempts spread across instances, weakening both protections. The in-process scheduler has the same constraint: running two instances would double-fire scheduled jobs.
+
+If you ever need to scale beyond one node, the throttle/lockout state must move to a shared store (e.g. Redis) and the scheduler must gain leader election first. Until then, treat single-node as a hard requirement.
+
 ## Service control quick reference
 
 ```bash

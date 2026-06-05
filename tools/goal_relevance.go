@@ -120,8 +120,7 @@ func registerSetGoalRelevance(server *mcp.Server, deps *Deps) {
 
 		merged, err := deps.Store.MergeDomainGoalRelevance(domain.ID, params.Relevance)
 		if err != nil {
-			deps.Logger.Error("set_goal_relevance: merge failed", "err", err, "domain", domain.ID)
-			r, _ := errorResult(fmt.Sprintf("persist failed: %v", err))
+			r, _ := safeErrorResult(deps.Logger, "persist failed", err)
 			return r, nil, nil
 		}
 

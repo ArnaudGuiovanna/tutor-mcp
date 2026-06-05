@@ -56,7 +56,7 @@ func registerQueueWebhookMessage(server *mcp.Server, deps *Deps) {
 			}
 			encoded, err := models.EncodeWebhookBrief(brief)
 			if err != nil {
-				r, _ := errorResult(fmt.Sprintf("invalid brief: %v", err))
+				r, _ := safeErrorResult(deps.Logger, "invalid brief", err)
 				return r, nil, nil
 			}
 			content = encoded
@@ -88,8 +88,7 @@ func registerQueueWebhookMessage(server *mcp.Server, deps *Deps) {
 
 		id, err := deps.Store.EnqueueWebhookMessage(learnerID, params.Kind, content, scheduledFor, expiresAt, params.Priority)
 		if err != nil {
-			deps.Logger.Error("queue_webhook_message: enqueue failed", "err", err, "learner", learnerID)
-			r, _ := errorResult(fmt.Sprintf("failed to enqueue: %v", err))
+			r, _ := safeErrorResult(deps.Logger, "failed to enqueue", err)
 			return r, nil, nil
 		}
 

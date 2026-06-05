@@ -10,12 +10,12 @@ type AffectState struct {
 	ID                  int64
 	LearnerID           string
 	SessionID           string
-	Energy              int       // 1-4: fatigued → on fire
-	SubjectConfidence   int       // 1-4: anxious → confident
-	Satisfaction        int       // 1-4: frustrating → flow
-	PerceivedDifficulty int       // 1-4: too hard → too easy
-	NextSessionIntent   int       // 1-4: now → don't know
-	AutonomyScore       float64   // snapshot computed at end-of-session
+	Energy              int     // 1-4: fatigued → on fire
+	SubjectConfidence   int     // 1-4: anxious → confident
+	Satisfaction        int     // 1-4: frustrating → flow
+	PerceivedDifficulty int     // 1-4: too hard → too easy
+	NextSessionIntent   int     // 1-4: now → don't know
+	AutonomyScore       float64 // snapshot computed at end-of-session
 	CreatedAt           time.Time
 }
 
@@ -23,9 +23,9 @@ type CalibrationRecord struct {
 	PredictionID string
 	LearnerID    string
 	ConceptID    string
-	Predicted    float64   // 0-1 normalized from 1-5 scale
-	Actual       *float64  // nil until exercise completed
-	Delta        *float64  // predicted - actual, nil until completed
+	Predicted    float64  // 0-1 normalized from 1-5 scale
+	Actual       *float64 // nil until exercise completed
+	Delta        *float64 // predicted - actual, nil until completed
 	CreatedAt    time.Time
 }
 

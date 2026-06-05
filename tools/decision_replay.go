@@ -5,7 +5,6 @@ package tools
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"tutor-mcp/engine"
@@ -60,8 +59,7 @@ func registerGetDecisionReplaySummary(server *mcp.Server, deps *Deps) {
 		limit := boundedDecisionReplaySnapshotsLimit(params.Limit)
 		snapshots, err := deps.Store.GetPedagogicalSnapshots(learnerID, domainID, params.Concept, limit)
 		if err != nil {
-			deps.Logger.Error("get_decision_replay_summary: snapshot fetch failed", "err", err, "learner", learnerID, "domain_id", domainID, "concept", params.Concept)
-			r, _ := errorResult(fmt.Sprintf("failed to fetch pedagogical snapshots: %v", err))
+			r, _ := safeErrorResult(deps.Logger, "failed to fetch pedagogical snapshots", err)
 			return r, nil, nil
 		}
 
@@ -73,8 +71,7 @@ func registerGetDecisionReplaySummary(server *mcp.Server, deps *Deps) {
 		}
 		interactions, err := deps.Store.GetInteractionsSince(learnerID, since)
 		if err != nil {
-			deps.Logger.Error("get_decision_replay_summary: interaction fetch failed", "err", err, "learner", learnerID)
-			r, _ := errorResult(fmt.Sprintf("failed to fetch replay interactions: %v", err))
+			r, _ := safeErrorResult(deps.Logger, "failed to fetch replay interactions", err)
 			return r, nil, nil
 		}
 

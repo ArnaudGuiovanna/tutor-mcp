@@ -24,15 +24,25 @@ func TestIRTProbability(t *testing.T) {
 func TestIRTUpdateTheta(t *testing.T) {
 	items := []IRTItem{{Difficulty: 0, Discrimination: 1}, {Difficulty: 0.5, Discrimination: 1}}
 	newTheta := IRTUpdateTheta(0, items, []bool{true, true})
-	if newTheta <= 0 { t.Errorf("theta should increase after all correct, got %f", newTheta) }
+	if newTheta <= 0 {
+		t.Errorf("theta should increase after all correct, got %f", newTheta)
+	}
 	newTheta = IRTUpdateTheta(0, items, []bool{false, false})
-	if newTheta >= 0 { t.Errorf("theta should decrease after all incorrect, got %f", newTheta) }
+	if newTheta >= 0 {
+		t.Errorf("theta should decrease after all incorrect, got %f", newTheta)
+	}
 }
 
 func TestIRTIsInZPD(t *testing.T) {
-	if !IRTIsInZPD(0.65) { t.Error("0.65 should be in ZPD") }
-	if IRTIsInZPD(0.90) { t.Error("0.90 should NOT be in ZPD") }
-	if IRTIsInZPD(0.40) { t.Error("0.40 should NOT be in ZPD") }
+	if !IRTIsInZPD(0.65) {
+		t.Error("0.65 should be in ZPD")
+	}
+	if IRTIsInZPD(0.90) {
+		t.Error("0.90 should NOT be in ZPD")
+	}
+	if IRTIsInZPD(0.40) {
+		t.Error("0.40 should NOT be in ZPD")
+	}
 }
 
 func TestFSRSDifficultyToIRT(t *testing.T) {
@@ -40,9 +50,9 @@ func TestFSRSDifficultyToIRT(t *testing.T) {
 		fsrs float64
 		want float64
 	}{
-		{1.0, -3.0},   // easiest FSRS → lowest IRT
-		{10.0, 3.0},   // hardest FSRS → highest IRT
-		{5.5, 0.0},    // midpoint → zero
+		{1.0, -3.0}, // easiest FSRS → lowest IRT
+		{10.0, 3.0}, // hardest FSRS → highest IRT
+		{5.5, 0.0},  // midpoint → zero
 	}
 	for _, tt := range tests {
 		got := FSRSDifficultyToIRT(tt.fsrs)

@@ -64,8 +64,7 @@ func registerCheckMastery(server *mcp.Server, deps *Deps) {
 
 		cs, err := deps.Store.GetConceptState(learnerID, concept)
 		if err != nil {
-			deps.Logger.Error("check_mastery: failed to get concept state", "err", err, "learner", learnerID)
-			r, _ := errorResult(fmt.Sprintf("concept state not found: %v", err))
+			r, _ := safeErrorResult(deps.Logger, "concept state not found", err)
 			return r, nil, nil
 		}
 
@@ -73,8 +72,7 @@ func registerCheckMastery(server *mcp.Server, deps *Deps) {
 		bktMastered := algorithms.BKTIsMastered(bktState)
 		recent, err := deps.Store.GetRecentInteractions(learnerID, concept, 50)
 		if err != nil {
-			deps.Logger.Error("check_mastery: failed to get recent interactions", "err", err, "learner", learnerID, "concept", concept)
-			r, _ := errorResult(fmt.Sprintf("failed to compute mastery evidence: %v", err))
+			r, _ := safeErrorResult(deps.Logger, "failed to compute mastery evidence", err)
 			return r, nil, nil
 		}
 		recent = filterInteractionsByDomainID(recent, domainID)

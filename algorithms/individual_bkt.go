@@ -11,6 +11,60 @@ const (
 	individualBKTMaxGuess = 0.5
 )
 
+// Delta coefficients for the individualized BKT adjustment. Each per-signal
+// weight is the contribution (per unit of evidence weight) that a fully
+// saturated signal makes to a probability before it is clamped. The values
+// were hand-tuned so a maxed-out single signal nudges a parameter by a few
+// hundredths — deliberately gentle so individualization refines rather than
+// overrides the base BKT update. See docs/regulation-design for provenance.
+const (
+	// individualBKTLearnStableCoeff rewards P(L) when the learner shows strong,
+	// confident success (strongStable).
+	individualBKTLearnStableCoeff = 0.06
+	// individualBKTLearnStabilityCoeff rewards P(L) for response stability.
+	individualBKTLearnStabilityCoeff = 0.04
+	// individualBKTLearnErrorCoeff penalizes P(L) for the error signal.
+	individualBKTLearnErrorCoeff = 0.07
+	// individualBKTLearnHintsCoeff penalizes P(L) for hint reliance.
+	individualBKTLearnHintsCoeff = 0.05
+	// individualBKTLearnOverconfCoeff penalizes P(L) for overconfidence.
+	individualBKTLearnOverconfCoeff = 0.06
+
+	// individualBKTSlipStableCoeff lowers P(slip) when success is strong/stable.
+	individualBKTSlipStableCoeff = 0.06
+	// individualBKTSlipStabilityCoeff lowers P(slip) for response stability.
+	individualBKTSlipStabilityCoeff = 0.05
+	// individualBKTSlipErrorCoeff raises P(slip) for the error signal.
+	individualBKTSlipErrorCoeff = 0.06
+	// individualBKTSlipHintsCoeff raises P(slip) for hint reliance.
+	individualBKTSlipHintsCoeff = 0.04
+	// individualBKTSlipOverconfCoeff raises P(slip) for overconfidence.
+	individualBKTSlipOverconfCoeff = 0.05
+
+	// individualBKTGuessStableCoeff lowers P(guess) when success is strong.
+	individualBKTGuessStableCoeff = 0.04
+	// individualBKTGuessStabilityCoeff lowers P(guess) for response stability.
+	individualBKTGuessStabilityCoeff = 0.02
+	// individualBKTGuessErrorCoeff raises P(guess) for the error signal.
+	individualBKTGuessErrorCoeff = 0.04
+	// individualBKTGuessHintsCoeff raises P(guess) for hint reliance.
+	individualBKTGuessHintsCoeff = 0.06
+	// individualBKTGuessOverconfCoeff raises P(guess) for overconfidence.
+	individualBKTGuessOverconfCoeff = 0.05
+
+	// individualBKTOverconfidenceScale converts the margin of avg confidence
+	// above 0.75 into an overconfidence proxy: a learner 0.25 above the
+	// threshold (i.e. fully confident) saturates the [0,1] proxy.
+	individualBKTOverconfidenceScale = 4
+	// individualBKTConfidenceThreshold is the avg-confidence level above which
+	// confidence starts counting as overconfidence.
+	individualBKTConfidenceThreshold = 0.75
+
+	// individualBKTEvidenceRamp is the observation count at which evidence
+	// weight saturates to 1; below it, weight ramps linearly as obs/ramp.
+	individualBKTEvidenceRamp = 20
+)
+
 // IndividualBKTProfile summarizes learner/concept observations used to tune a
 // single BKT update. All rates are expected in [0, 1]; invalid values are
 // treated defensively so this layer remains pure and deterministic.
@@ -49,11 +103,11 @@ func BKTUpdateIndividualized(state BKTState, profile IndividualBKTProfile, corre
 	if weight > 0 {
 		signals := sanitizeIndividualBKTSignals(profile)
 		strongStable := signals.success * (0.75 + 0.25*signals.confidence)
-		overconfidence := math.Max(signals.overconfidence, clamp((signals.confidence-0.75)*4, 0, 1)*signals.error)
+		overconfidence := math.Max(signals.overconfidence, clamp((signals.confidence-individualBKTConfidenceThreshold)*individualBKTOverconfidenceScale, 0, 1)*signals.error)
 
-		learnDelta := weight * (0.06*strongStable + 0.04*signals.stability - 0.07*signals.error - 0.05*signals.hints - 0.06*overconfidence)
-		slipDelta := weight * (-0.06*strongStable - 0.05*signals.stability + 0.06*signals.error + 0.04*signals.hints + 0.05*overconfidence)
-		guessDelta := weight * (-0.04*strongStable - 0.02*signals.stability + 0.04*signals.error + 0.06*signals.hints + 0.05*overconfidence)
+		learnDelta := weight * (individualBKTLearnStableCoeff*strongStable + individualBKTLearnStabilityCoeff*signals.stability - individualBKTLearnErrorCoeff*signals.error - individualBKTLearnHintsCoeff*signals.hints - individualBKTLearnOverconfCoeff*overconfidence)
+		slipDelta := weight * (-individualBKTSlipStableCoeff*strongStable - individualBKTSlipStabilityCoeff*signals.stability + individualBKTSlipErrorCoeff*signals.error + individualBKTSlipHintsCoeff*signals.hints + individualBKTSlipOverconfCoeff*overconfidence)
+		guessDelta := weight * (-individualBKTGuessStableCoeff*strongStable - individualBKTGuessStabilityCoeff*signals.stability + individualBKTGuessErrorCoeff*signals.error + individualBKTGuessHintsCoeff*signals.hints + individualBKTGuessOverconfCoeff*overconfidence)
 
 		adjusted.PLearn = finiteClamp(adjusted.PLearn+learnDelta, 0, 1)
 		adjusted.PSlip = finiteClamp(adjusted.PSlip+slipDelta, 0, individualBKTMaxSlip)
@@ -118,7 +172,7 @@ func sanitizeIndividualBKTSignals(profile IndividualBKTProfile) individualBKTSig
 
 func individualBKTEvidenceWeight(profile IndividualBKTProfile) float64 {
 	if profile.Observations > 0 {
-		return finiteClamp(float64(profile.Observations)/20, 0, 1)
+		return finiteClamp(float64(profile.Observations)/individualBKTEvidenceRamp, 0, 1)
 	}
 	if profile.SuccessRate != 0 ||
 		profile.ErrorRate != 0 ||

@@ -43,8 +43,7 @@ func registerArchiveDomain(server *mcp.Server, deps *Deps) {
 		}
 
 		if err := deps.Store.ArchiveDomain(params.DomainID, learnerID); err != nil {
-			deps.Logger.Error("archive_domain: failed", "err", err, "domain", params.DomainID)
-			r, _ := errorResult(fmt.Sprintf("failed to archive domain: %v", err))
+			r, _ := safeErrorResult(deps.Logger, "failed to archive domain", err)
 			return r, nil, nil
 		}
 
@@ -90,8 +89,7 @@ func registerUnarchiveDomain(server *mcp.Server, deps *Deps) {
 		}
 
 		if err := deps.Store.UnarchiveDomain(params.DomainID, learnerID); err != nil {
-			deps.Logger.Error("unarchive_domain: failed", "err", err, "domain", params.DomainID)
-			r, _ := errorResult(fmt.Sprintf("failed to unarchive domain: %v", err))
+			r, _ := safeErrorResult(deps.Logger, "failed to unarchive domain", err)
 			return r, nil, nil
 		}
 
@@ -142,8 +140,7 @@ func registerDeleteDomain(server *mcp.Server, deps *Deps) {
 		}
 
 		if err := deps.Store.DeleteDomain(params.DomainID, learnerID); err != nil {
-			deps.Logger.Error("delete_domain: failed", "err", err, "domain", params.DomainID)
-			r, _ := errorResult(fmt.Sprintf("failed to delete domain: %v", err))
+			r, _ := safeErrorResult(deps.Logger, "failed to delete domain", err)
 			return r, nil, nil
 		}
 

@@ -35,9 +35,9 @@ func TestBuildGlobalOLMSnapshot_AggregatesAcrossDomains(t *testing.T) {
 	store, raw := newOLMTestStore(t)
 	seedLearner(t, raw, "L1")
 
-	seedDomain(t, raw, "L1", "math",    []string{"a", "b"}, map[string][]string{"b": {"a"}}, false)
-	seedDomain(t, raw, "L1", "anglais", []string{"x"},      nil,                              false)
-	seedDomain(t, raw, "L1", "piano",   []string{"p"},      nil,                              false)
+	seedDomain(t, raw, "L1", "math", []string{"a", "b"}, map[string][]string{"b": {"a"}}, false)
+	seedDomain(t, raw, "L1", "anglais", []string{"x"}, nil, false)
+	seedDomain(t, raw, "L1", "piano", []string{"p"}, nil, false)
 	seedConceptState(t, store, "L1", "a", 0.90, "review")
 	seedConceptState(t, store, "L1", "x", 0.90, "review")
 

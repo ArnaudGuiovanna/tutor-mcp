@@ -11,10 +11,10 @@ import (
 
 func TestValidateConcepts(t *testing.T) {
 	cases := []struct {
-		name      string
-		concepts  []string
-		prereqs   map[string][]string
-		wantErr   string
+		name     string
+		concepts []string
+		prereqs  map[string][]string
+		wantErr  string
 	}{
 		{
 			name:     "ok small graph",
@@ -123,8 +123,8 @@ func TestValidateConcepts_CycleDetection(t *testing.T) {
 			name:     "disconnected graph with one cycle",
 			concepts: []string{"x", "y", "a", "b", "c"},
 			prereqs: map[string][]string{
-				"y": {"x"},        // clean DAG component
-				"b": {"a"},        // cycle component
+				"y": {"x"}, // clean DAG component
+				"b": {"a"}, // cycle component
 				"c": {"b"},
 				"a": {"c"},
 			},

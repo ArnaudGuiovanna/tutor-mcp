@@ -7,7 +7,6 @@ package tools
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -49,8 +48,7 @@ func registerUpdateLearnerProfile(server *mcp.Server, deps *Deps) {
 
 		learner, err := deps.Store.GetLearnerByID(learnerID)
 		if err != nil {
-			deps.Logger.Error("update_learner_profile: failed to get learner", "err", err, "learner", learnerID)
-			r, _ := errorResult(fmt.Sprintf("learner not found: %v", err))
+			r, _ := safeErrorResult(deps.Logger, "learner not found", err)
 			return r, nil, nil
 		}
 
@@ -135,8 +133,7 @@ func registerUpdateLearnerProfile(server *mcp.Server, deps *Deps) {
 
 		profileJSON, _ := json.Marshal(profile)
 		if err := deps.Store.UpdateLearnerProfile(learnerID, string(profileJSON)); err != nil {
-			deps.Logger.Error("update_learner_profile: failed to update profile", "err", err, "learner", learnerID)
-			r, _ := errorResult(fmt.Sprintf("failed to update profile: %v", err))
+			r, _ := safeErrorResult(deps.Logger, "failed to update profile", err)
 			return r, nil, nil
 		}
 

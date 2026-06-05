@@ -80,11 +80,28 @@ func Retrievability(elapsedDays int, stability float64) float64 {
 	return math.Pow(1+fsrsFactor*float64(elapsedDays)/stability, fsrsDecay)
 }
 
+// clampRating bounds a Rating to the valid [Again..Easy] range. Callers index
+// defaultWeights with int(rating)-1, so rating==0 (or any value below Again)
+// would read index -1 and panic, and a value above Easy would silently read a
+// wrong weight. Clamping keeps both functions total over arbitrary inputs
+// while preserving behaviour for the four canonical ratings.
+func clampRating(rating Rating) Rating {
+	if rating < Again {
+		return Again
+	}
+	if rating > Easy {
+		return Easy
+	}
+	return rating
+}
+
 func InitialStability(rating Rating) float64 {
+	rating = clampRating(rating)
 	return defaultWeights[int(rating)-1]
 }
 
 func InitialDifficulty(rating Rating) float64 {
+	rating = clampRating(rating)
 	d := defaultWeights[4] - math.Exp(defaultWeights[5]*float64(rating-1)) + 1
 	return clamp(d, 1, 10)
 }

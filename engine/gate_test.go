@@ -152,18 +152,18 @@ func TestApplyGate_AllOutputsPassValidate(t *testing.T) {
 			Graph:    graph([]string{"A", "B"}, nil),
 		},
 		{
-			Phase:    models.PhaseInstruction,
-			Concepts: []string{"A"},
-			States:   statesMap(gateCS("A", 0.5)),
-			Graph:    graph([]string{"A"}, nil),
+			Phase:                models.PhaseInstruction,
+			Concepts:             []string{"A"},
+			States:               statesMap(gateCS("A", 0.5)),
+			Graph:                graph([]string{"A"}, nil),
 			ActiveMisconceptions: map[string]bool{"A": true},
 		},
 		{
-			Phase:          models.PhaseInstruction,
-			Concepts:       []string{"A"},
-			States:         statesMap(gateCS("A", 0.5)),
-			Graph:          graph([]string{"A"}, nil),
-			RecentConcepts: []string{"A"},
+			Phase:            models.PhaseInstruction,
+			Concepts:         []string{"A"},
+			States:           statesMap(gateCS("A", 0.5)),
+			Graph:            graph([]string{"A"}, nil),
+			RecentConcepts:   []string{"A"},
 			AntiRepeatWindow: 1,
 		},
 	}
@@ -426,7 +426,7 @@ func TestApplyGate_Misconception_DoesNotBypassPrereq(t *testing.T) {
 		Phase:    models.PhaseInstruction,
 		Concepts: g.Concepts,
 		States: statesMap(
-			gateCS("Basics", 0.30),    // prereq fails
+			gateCS("Basics", 0.30), // prereq fails
 			gateCS("Advanced", 0.50),
 		),
 		Graph:                g,
@@ -512,9 +512,9 @@ func TestApplyGate_AllRulesCombined(t *testing.T) {
 		Phase:    models.PhaseInstruction,
 		Concepts: g.Concepts,
 		States: statesMap(
-			gateCS("Pre", 0.95),  // mastered
-			gateCS("Mid", 0.50),  // prereq OK, eligible
-			gateCS("Adv", 0.10),  // prereq fails
+			gateCS("Pre", 0.95), // mastered
+			gateCS("Mid", 0.50), // prereq OK, eligible
+			gateCS("Adv", 0.10), // prereq fails
 		),
 		Graph:                g,
 		ActiveMisconceptions: map[string]bool{"Mid": true},

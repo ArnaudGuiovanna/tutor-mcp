@@ -46,6 +46,32 @@ func TestInitialDifficulty(t *testing.T) {
 	}
 }
 
+// TestInitialStabilityDifficultyOutOfRange guards against the index-out-of-range
+// panic that would occur when a Rating outside [Again..Easy] reaches
+// defaultWeights[int(rating)-1]: Rating(0) indexed -1, and a too-large value
+// silently read the wrong weight. Both functions must now clamp and return a
+// sane bounded result without panicking.
+func TestInitialStabilityDifficultyOutOfRange(t *testing.T) {
+	for _, r := range []Rating{Rating(0), Rating(-5), Rating(7), Rating(1000)} {
+		s := InitialStability(r) // must not panic
+		// Result is clamped to one of the canonical weight entries, all > 0.
+		if s <= 0 || math.IsNaN(s) || math.IsInf(s, 0) {
+			t.Errorf("InitialStability(%d) = %f, want positive finite", r, s)
+		}
+		d := InitialDifficulty(r) // must not panic
+		if d < 1 || d > 10 {
+			t.Errorf("InitialDifficulty(%d) = %f, want in [1, 10]", r, d)
+		}
+	}
+	// Clamping low maps to Again, clamping high maps to Easy.
+	if s := InitialStability(Rating(0)); !approxEqual(s, InitialStability(Again), 1e-9) {
+		t.Errorf("InitialStability(0) = %f, want InitialStability(Again) = %f", s, InitialStability(Again))
+	}
+	if s := InitialStability(Rating(99)); !approxEqual(s, InitialStability(Easy), 1e-9) {
+		t.Errorf("InitialStability(99) = %f, want InitialStability(Easy) = %f", s, InitialStability(Easy))
+	}
+}
+
 func TestReviewCard(t *testing.T) {
 	now := time.Date(2026, 3, 27, 10, 0, 0, 0, time.UTC)
 	card := NewFSRSCard()
@@ -316,7 +342,7 @@ func TestNextForgetStabilityNoNaNOrInfOnDegenerateInputs(t *testing.T) {
 // multiplied by the surrounding s=0 factor.
 func TestNextRecallStabilityNoNaNOrInfOnDegenerateInputs(t *testing.T) {
 	tests := []struct {
-		name string
+		name    string
 		d, s, r float64
 		rating  Rating
 	}{

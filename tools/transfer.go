@@ -65,10 +65,31 @@ func registerTransferChallenge(server *mcp.Server, deps *Deps) {
 			}
 		}
 
+		// Resolve the active domain (honoring the optional domain_id) and
+		// validate the concept against its concept list before touching
+		// concept_state. Without this guard the tool silently serves a
+		// transfer challenge for a hallucinated or stale concept name that
+		// isn't part of the resolved domain — see issue #8 (mirrors the guard
+		// in record_transfer_result).
+		domain, err := resolveDomain(deps.Store, learnerID, params.DomainID)
+		if err != nil || domain == nil {
+			if params.DomainID != "" {
+				deps.Logger.Error("transfer_challenge: domain not found by id", "err", err, "learner", learnerID, "domain_id", params.DomainID)
+				r, _ := errorResult("domain not found")
+				return r, nil, nil
+			}
+			deps.Logger.Info("transfer_challenge: no active domain - needs setup", "learner", learnerID)
+			r, _ := noActiveDomainResult()
+			return r, nil, nil
+		}
+		if err := validateConceptInDomain(domain, concept); err != nil {
+			r, _ := errorResult(err.Error())
+			return r, nil, nil
+		}
+
 		cs, err := deps.Store.GetConceptState(learnerID, concept)
 		if err != nil {
-			deps.Logger.Error("transfer_challenge: failed to get concept state", "err", err, "learner", learnerID)
-			r, _ := errorResult(fmt.Sprintf("concept not found: %v", err))
+			r, _ := safeErrorResult(deps.Logger, "concept not found", err)
 			return r, nil, nil
 		}
 
@@ -236,8 +257,7 @@ func registerRecordTransferResult(server *mcp.Server, deps *Deps) {
 		}
 
 		if err := deps.Store.CreateTransferRecord(record); err != nil {
-			deps.Logger.Error("record_transfer_result: failed to create transfer record", "err", err, "learner", learnerID)
-			r, _ := errorResult(fmt.Sprintf("failed to record transfer: %v", err))
+			r, _ := safeErrorResult(deps.Logger, "failed to record transfer", err)
 			return r, nil, nil
 		}
 

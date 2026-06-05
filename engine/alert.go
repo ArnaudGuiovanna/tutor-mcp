@@ -14,6 +14,14 @@ import (
 )
 
 func ComputeAlerts(states []*models.ConceptState, recentInteractions []*models.Interaction, sessionStart time.Time) []models.Alert {
+	return ComputeAlertsAt(states, recentInteractions, sessionStart, time.Now())
+}
+
+// ComputeAlertsAt is the clock-injected variant of ComputeAlerts: it derives all
+// elapsed-time computations (FORGETTING retention decay, OVERLOAD session length)
+// from the supplied now rather than the wall clock, making the logic deterministic
+// and testable. ComputeAlerts is a thin wrapper that passes time.Now().
+func ComputeAlertsAt(states []*models.ConceptState, recentInteractions []*models.Interaction, sessionStart time.Time, now time.Time) []models.Alert {
 	var alerts []models.Alert
 
 	// criticalForgetting tracks concepts where FORGETTING fired at UrgencyCritical.
@@ -31,7 +39,7 @@ func ComputeAlerts(states []*models.ConceptState, recentInteractions []*models.I
 		// FORGETTING: FSRS retention below the named alert warning threshold.
 		elapsed := cs.ElapsedDays
 		if cs.LastReview != nil {
-			elapsed = int(time.Since(*cs.LastReview).Hours() / 24)
+			elapsed = int(now.Sub(*cs.LastReview).Hours() / 24)
 		}
 		retention := algorithms.Retrievability(elapsed, cs.Stability)
 		if retention < algorithms.RetentionAlertWarningThreshold {
@@ -168,7 +176,7 @@ func ComputeAlerts(states []*models.ConceptState, recentInteractions []*models.I
 	}
 
 	// OVERLOAD: session > 45 min
-	if !sessionStart.IsZero() && time.Since(sessionStart) > 45*time.Minute {
+	if !sessionStart.IsZero() && now.Sub(sessionStart) > 45*time.Minute {
 		alerts = append(alerts, models.Alert{
 			Type:              models.AlertOverload,
 			Urgency:           models.UrgencyInfo,

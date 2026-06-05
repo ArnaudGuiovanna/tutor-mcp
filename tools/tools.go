@@ -123,6 +123,18 @@ func errorResult(msg string) (*mcp.CallToolResult, error) {
 	}, nil
 }
 
+// safeErrorResult logs the full underlying error server-side and returns an
+// errorResult carrying only the public, LLM-facing message. Issue #3: raw
+// SQLite/internal error strings must never be interpolated into model context;
+// they leak schema and storage internals. Handlers pass a clean public message
+// and the real err — the err is recorded in the server log, not the response.
+func safeErrorResult(logger *slog.Logger, publicMsg string, err error) (*mcp.CallToolResult, error) {
+	if logger != nil {
+		logger.Error(publicMsg, "err", err)
+	}
+	return errorResult(publicMsg)
+}
+
 // noActiveDomainResult returns the canonical "no active domain" payload that
 // every chat-side tool emits when called without an explicit DomainID and the
 // learner has no domain yet. Issue #33: a uniform shape lets the LLM branch

@@ -89,7 +89,16 @@ func TestContextBudgetKeepsStableMemoryAndDropsSessionsFirst(t *testing.T) {
 	if ec.LearnerMemory == "" || ec.ConceptNotes == "" || len(ec.OLMInconsistencies) == 0 {
 		t.Fatalf("stable context was truncated: %#v", ec)
 	}
-	if len(ec.RecentSessions) != 0 {
-		t.Fatalf("sessions should be dropped first: %d", len(ec.RecentSessions))
+	// Session content is shed before any stable memory: the older session is
+	// dropped whole and the surviving one-session floor has its body cleared,
+	// leaving no session payload but preserving the most-recent slot.
+	if len(ec.RecentSessions) != 1 {
+		t.Fatalf("one-session floor should be preserved: %d", len(ec.RecentSessions))
+	}
+	if ec.RecentSessions[0].Body != "" {
+		t.Fatalf("surviving session body should be cleared, got %q", ec.RecentSessions[0].Body)
+	}
+	if contextSize(ec) > 80 {
+		t.Fatalf("size %d exceeds budget 80", contextSize(ec))
 	}
 }

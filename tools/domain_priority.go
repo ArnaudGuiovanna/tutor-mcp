@@ -57,8 +57,7 @@ func registerSetDomainPriority(server *mcp.Server, deps *Deps) {
 		}
 
 		if err := deps.Store.SetDomainPriority(domain.ID, learnerID, *params.Rank); err != nil {
-			deps.Logger.Error("set_domain_priority: failed", "err", err, "domain", domain.ID)
-			r, _ := errorResult(fmt.Sprintf("failed to set domain priority: %v", err))
+			r, _ := safeErrorResult(deps.Logger, "failed to set domain priority", err)
 			return r, nil, nil
 		}
 

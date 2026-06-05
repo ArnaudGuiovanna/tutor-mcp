@@ -98,65 +98,135 @@ func (s *Store) GetMisconceptionGroups(learnerID string, conceptFilter map[strin
 			continue
 		}
 
-		// Enrich: last_error_detail
-		detail, err := s.getLastMisconceptionDetail(learnerID, g.Concept, g.MisconceptionType)
-		if err != nil {
-			return nil, fmt.Errorf("get last misconception detail: %w", err)
-		}
-		g.LastErrorDetail = detail
-
-		// Enrich: status
-		g.Status = s.computeMisconceptionStatus(learnerID, g.Concept, g.MisconceptionType)
-
 		groups = append(groups, g)
 	}
-	return groups, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Enrich the groups in two set-based passes instead of firing a
+	// per-group follow-up query (the former N+1). Both helpers take the
+	// concept set scanned above and return a map keyed by (concept,
+	// misconception_type), so the loop below is pure in-memory lookup.
+	concepts := make([]string, 0, len(groups))
+	for _, g := range groups {
+		concepts = append(concepts, g.Concept)
+	}
+	details, err := s.lastMisconceptionDetails(learnerID, concepts)
+	if err != nil {
+		return nil, fmt.Errorf("get last misconception details: %w", err)
+	}
+	statuses, err := s.misconceptionStatuses(learnerID, concepts)
+	if err != nil {
+		return nil, fmt.Errorf("get misconception statuses: %w", err)
+	}
+	for i := range groups {
+		key := miscKey(groups[i].Concept, groups[i].MisconceptionType)
+		groups[i].LastErrorDetail = details[key]
+		if statuses[key] {
+			groups[i].Status = "active"
+		} else {
+			groups[i].Status = "resolved"
+		}
+	}
+	return groups, nil
 }
 
-// getLastMisconceptionDetail returns the most recent misconception_detail
-// for a given (learner, concept, misconception_type) tuple.
-func (s *Store) getLastMisconceptionDetail(learnerID, concept, misconceptionType string) (string, error) {
-	var detail sql.NullString
-	err := s.db.QueryRow(
-		`SELECT misconception_detail FROM interactions
-		 WHERE learner_id = ? AND concept = ? AND misconception_type = ?
-		 ORDER BY created_at DESC LIMIT 1`,
-		learnerID, concept, misconceptionType,
-	).Scan(&detail)
-	if err != nil && err != sql.ErrNoRows {
-		return "", fmt.Errorf("query last misconception detail: %w", err)
-	}
-	if detail.Valid {
-		return detail.String, nil
-	}
-	return "", nil
+// miscKey joins a (concept, misconception_type) pair into a single map
+// key. The NUL separator can't appear in either component, so distinct
+// pairs never collide.
+func miscKey(concept, misconceptionType string) string {
+	return concept + "\x00" + misconceptionType
 }
 
-// computeMisconceptionStatus inspects the MisconceptionResolutionWindow
-// most recent interactions on a concept and returns "active" if any of
-// them carry the given misconception_type, or "resolved" otherwise.
-func (s *Store) computeMisconceptionStatus(learnerID, concept, misconceptionType string) string {
+// lastMisconceptionDetails returns, for the given concepts, the most
+// recent non-empty misconception_detail per (concept, misconception_type)
+// in a single query (set-based replacement for the per-group
+// getLastMisconceptionDetail). The window function picks the latest row
+// per partition; empty/NULL details map to "".
+func (s *Store) lastMisconceptionDetails(learnerID string, concepts []string) (map[string]string, error) {
+	out := make(map[string]string)
+	if len(concepts) == 0 {
+		return out, nil
+	}
+	placeholders := make([]string, 0, len(concepts))
+	args := make([]any, 0, len(concepts)+1)
+	args = append(args, learnerID)
+	for _, c := range concepts {
+		placeholders = append(placeholders, "?")
+		args = append(args, c)
+	}
 	rows, err := s.db.Query(
-		`SELECT misconception_type FROM interactions
-		 WHERE learner_id = ? AND concept = ?
-		 ORDER BY created_at DESC LIMIT ?`,
-		learnerID, concept, MisconceptionResolutionWindow,
+		`SELECT concept, misconception_type, misconception_detail
+		 FROM (
+		    SELECT concept, misconception_type, misconception_detail,
+		           ROW_NUMBER() OVER (PARTITION BY concept, misconception_type
+		                              ORDER BY created_at DESC, id DESC) AS rn
+		    FROM interactions
+		    WHERE learner_id = ? AND misconception_type IS NOT NULL
+		      AND concept IN (`+strings.Join(placeholders, ",")+`)
+		 )
+		 WHERE rn = 1`,
+		args...,
 	)
 	if err != nil {
-		return "active" // err on the side of caution
+		return nil, fmt.Errorf("query last misconception details: %w", err)
 	}
 	defer rows.Close()
-
 	for rows.Next() {
-		var mt sql.NullString
-		if err := rows.Scan(&mt); err != nil {
-			return "active"
+		var concept, misconceptionType string
+		var detail sql.NullString
+		if err := rows.Scan(&concept, &misconceptionType, &detail); err != nil {
+			return nil, fmt.Errorf("scan last misconception detail: %w", err)
 		}
-		if mt.Valid && mt.String == misconceptionType {
-			return "active"
-		}
+		out[miscKey(concept, misconceptionType)] = detail.String
 	}
-	return "resolved"
+	return out, rows.Err()
+}
+
+// misconceptionStatuses returns a set of (concept, misconception_type)
+// keys that are "active" — i.e. the misconception_type appears among the
+// MisconceptionResolutionWindow most recent interactions on that concept.
+// Single-query replacement for the per-group computeMisconceptionStatus;
+// the window function ranks interactions per concept and we keep the
+// top-N, then flag every misconception_type still present in that window.
+func (s *Store) misconceptionStatuses(learnerID string, concepts []string) (map[string]bool, error) {
+	out := make(map[string]bool)
+	if len(concepts) == 0 {
+		return out, nil
+	}
+	placeholders := make([]string, 0, len(concepts))
+	args := make([]any, 0, len(concepts)+2)
+	args = append(args, learnerID)
+	for _, c := range concepts {
+		placeholders = append(placeholders, "?")
+		args = append(args, c)
+	}
+	args = append(args, MisconceptionResolutionWindow)
+	rows, err := s.db.Query(
+		`SELECT concept, misconception_type
+		 FROM (
+		    SELECT concept, misconception_type,
+		           ROW_NUMBER() OVER (PARTITION BY concept
+		                              ORDER BY created_at DESC, id DESC) AS rn
+		    FROM interactions
+		    WHERE learner_id = ? AND concept IN (`+strings.Join(placeholders, ",")+`)
+		 )
+		 WHERE rn <= ? AND misconception_type IS NOT NULL`,
+		args...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query misconception statuses: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var concept, misconceptionType string
+		if err := rows.Scan(&concept, &misconceptionType); err != nil {
+			return nil, fmt.Errorf("scan misconception status: %w", err)
+		}
+		out[miscKey(concept, misconceptionType)] = true
+	}
+	return out, rows.Err()
 }
 
 // GetDistinctMisconceptionTypes returns all distinct misconception types

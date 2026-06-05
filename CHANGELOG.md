@@ -28,9 +28,58 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   upstream stdlib advisories, including four `html/template` XSS variants that
   touched `auth/pages.go`, the TLS 1.3 KeyUpdate DoS, and the `net/url` IPv6
   host misparse that backstopped `validateRegistrationRedirectURIs` (R035).
+- **(security)** Reject `JWT_SECRET` values that decode to fewer than 32 bytes
+  (256 bits) in `auth.LoadJWTSecret`, so a short/low-entropy secret can no
+  longer silently weaken HS256 token signing.
+- **(security)** Stop leaking raw internal/SQLite error strings into LLM-facing
+  tool responses. New `tools.safeErrorResult` logs the underlying error
+  server-side and returns a clean public message; all 31 `errorResult(fmt.
+  Sprintf("…: %v", err))` sites were converted.
+- **(security)** Validate the target concept against the resolved domain in
+  `feynman_challenge` and `transfer_challenge` (`resolveDomain` +
+  `validateConceptInDomain`), matching `record_interaction` and preventing
+  operations on concepts from archived/other domains of the same learner.
+- Bound webhook retry time in the in-process scheduler: cap an honored 429
+  `Retry-After` at 5s (was up to 60s) and interrupt in-flight backoff sleeps on
+  shutdown via a `stopCh`, so a few dead webhook URLs can no longer stall a cron
+  tick for minutes or exhaust the `Stop()` drain budget.
+- Guard `algorithms.InitialStability` / `InitialDifficulty` against an
+  out-of-range FSRS `Rating` (clamp to `[Again..Easy]`), removing an
+  `index -1` panic risk on `Rating(0)`.
+- Cap the SQLite connection pool (`SetMaxOpenConns(1)` + idle/lifetime tuning in
+  `db.OpenDB`) so concurrent writers queue on the single writer rather than
+  surfacing `SQLITE_BUSY` past the busy-timeout.
+- Make `engine.ComputeAlerts` testable/deterministic via a new
+  `ComputeAlertsAt(…, now)` seam; `ComputeAlerts` is now a thin `time.Now()`
+  wrapper, leaving all existing call sites untouched.
+- Give the learner-memory context-budget eviction a one-session floor so the
+  graduated frontmatter/body trimming stages actually fire instead of the loop
+  dropping every session whole (previously the later stages were dead code).
+- Remove N+1 query patterns in `db.GetMisconceptionGroups` (set-based
+  window-function fetch) and `db.ConceptMasteryDelta` / `MilestonesInWindow`
+  (single grouped/`IN` queries).
+
+### Changed
+
+- Extract the review-mode concept selector (`SelectReviewConcept` and helpers)
+  out of `engine/orchestrator.go` into `engine/concept_selector.go`; pure code
+  move, behavior unchanged.
+- Replace the undocumented BKT tuning magic numbers in
+  `algorithms/individual_bkt.go` with named, commented constants; collapse the
+  vestigial `MasteryBKT()` branch.
+
+### Tests
+
+- Add direct coverage for previously thin/zero-covered paths: `applyInteraction`
+  (BKT→FSRS→IRT read-modify-write), OAuth client-consent persistence and the
+  learning-negotiation override pair, `engine/nudge_planner`, the memory
+  markdown section replacer, and context-budget eviction.
 
 ### Documentation
 
+- Document the single-node / in-memory state operational constraints (rate
+  limiter, login-failure tracker, in-process scheduler reset on restart and do
+  not scale horizontally with shared throttle expectations) in `OPERATIONS.md`.
 - Condense `README.md` from 603 lines / 45 KB to 259 lines / 17 KB. Collapse
   the three overlapping narrative pillars into one, replace per-tool walls of
   text with grouped compact tables, and align with the live code: add

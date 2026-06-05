@@ -6,7 +6,6 @@ package tools
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"tutor-mcp/engine"
@@ -78,8 +77,7 @@ func registerRecordAffect(server *mcp.Server, deps *Deps) {
 		}
 
 		if err := deps.Store.UpsertAffectState(affect); err != nil {
-			deps.Logger.Error("record_affect: failed to upsert affect state", "err", err, "learner", learnerID)
-			r, _ := errorResult(fmt.Sprintf("failed to record affect: %v", err))
+			r, _ := safeErrorResult(deps.Logger, "failed to record affect", err)
 			return r, nil, nil
 		}
 

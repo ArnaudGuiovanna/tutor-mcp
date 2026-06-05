@@ -49,10 +49,31 @@ func registerFeynmanChallenge(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
+		// Resolve the active domain (honoring the optional domain_id) and
+		// validate the concept against its concept list before touching
+		// concept_state. Without this guard the tool silently serves a
+		// Feynman challenge for a hallucinated or stale concept name that
+		// isn't part of the resolved domain — see issue #8 (mirrors the guard
+		// in record_transfer_result).
+		domain, err := resolveDomain(deps.Store, learnerID, params.DomainID)
+		if err != nil || domain == nil {
+			if params.DomainID != "" {
+				deps.Logger.Error("feynman_challenge: domain not found by id", "err", err, "learner", learnerID, "domain_id", params.DomainID)
+				r, _ := errorResult("domain not found")
+				return r, nil, nil
+			}
+			deps.Logger.Info("feynman_challenge: no active domain - needs setup", "learner", learnerID)
+			r, _ := noActiveDomainResult()
+			return r, nil, nil
+		}
+		if err := validateConceptInDomain(domain, concept); err != nil {
+			r, _ := errorResult(err.Error())
+			return r, nil, nil
+		}
+
 		cs, err := deps.Store.GetConceptState(learnerID, concept)
 		if err != nil {
-			deps.Logger.Error("feynman_challenge: failed to get concept state", "err", err, "learner", learnerID)
-			r, _ := errorResult(fmt.Sprintf("concept not found: %v", err))
+			r, _ := safeErrorResult(deps.Logger, "concept not found", err)
 			return r, nil, nil
 		}
 

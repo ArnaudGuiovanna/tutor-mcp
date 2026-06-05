@@ -6,7 +6,6 @@ package tools
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 
 	"tutor-mcp/models"
 
@@ -59,8 +58,7 @@ func registerGetPedagogicalSnapshots(server *mcp.Server, deps *Deps) {
 		limit := boundedPedagogicalSnapshotsLimit(params.Limit)
 		snapshots, err := deps.Store.GetPedagogicalSnapshots(learnerID, domainID, params.Concept, limit)
 		if err != nil {
-			deps.Logger.Error("get_pedagogical_snapshots: fetch failed", "err", err, "learner", learnerID, "domain_id", domainID, "concept", params.Concept)
-			r, _ := errorResult(fmt.Sprintf("failed to fetch pedagogical snapshots: %v", err))
+			r, _ := safeErrorResult(deps.Logger, "failed to fetch pedagogical snapshots", err)
 			return r, nil, nil
 		}
 
