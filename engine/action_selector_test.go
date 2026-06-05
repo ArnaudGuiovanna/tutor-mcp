@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"tutor-mcp/algorithms"
-	"tutor-mcp/db"
 	"tutor-mcp/models"
 )
 
@@ -32,7 +31,7 @@ func reviewedConceptState(concept string, mastery float64) *models.ConceptState 
 func TestSelectAction_Misconception_OverridesAll(t *testing.T) {
 	cs := reviewedConceptState("Goroutines", 0.95)
 	cs.Theta = 1.0
-	mc := &db.MisconceptionGroup{
+	mc := &models.MisconceptionGroup{
 		Concept:           "Goroutines",
 		MisconceptionType: "channel_blocking_assumption",
 		Status:            "active",
@@ -53,7 +52,7 @@ func TestSelectAction_MisconceptionBeatsLowRetention(t *testing.T) {
 	cs := reviewedConceptState("Channels", 0.5)
 	cs.Stability = 1.0
 	cs.ElapsedDays = 30 // pushes retention well below the recall-routing threshold
-	mc := &db.MisconceptionGroup{
+	mc := &models.MisconceptionGroup{
 		Concept:           "Channels",
 		MisconceptionType: "deadlock_unaware",
 		Status:            "active",

@@ -14,50 +14,6 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Auxiliary types that are part of the persistence-port boundary.
-// These were previously declared in the db package; they live here so that
-// callers (engine, tools) can reference them without depending on db.
-// ---------------------------------------------------------------------------
-
-// ActionHistoryCounts encapsulates per-concept activity-type counts used by
-// the phase-transition logic and action-selector heuristics.
-type ActionHistoryCounts struct {
-	MasteryChallengeCount int
-	FeynmanCount          int
-	TransferCount         int
-	InteractionsAboveBKT  int
-}
-
-// MisconceptionGroup is the DB-layer shape of a grouped misconception row.
-type MisconceptionGroup struct {
-	Concept           string    `json:"concept"`
-	MisconceptionType string    `json:"misconception_type"`
-	Count             int       `json:"count"`
-	FirstSeen         time.Time `json:"first_seen"`
-	LastSeen          time.Time `json:"last_seen"`
-	LastErrorDetail   string    `json:"last_error_detail"`
-	Status            string    `json:"status"`
-}
-
-// RawLearnerEvent is the DB-layer shape of a timeline event. Engine layer
-// translates this into its own domain type.
-type RawLearnerEvent struct {
-	At      time.Time
-	Kind    string
-	Message string
-	Concept string
-}
-
-// LearningNegotiationOverridePayloadResult is the result type returned by
-// ConsumeLearningNegotiationOverridePayload.
-type LearningNegotiationOverridePayloadResult struct {
-	ID        int64
-	Payload   string
-	Status    string
-	ExpiresAt *time.Time
-}
-
-// ---------------------------------------------------------------------------
 // Sub-interfaces — segregated by domain concern
 // ---------------------------------------------------------------------------
 
@@ -129,7 +85,7 @@ type InteractionStore interface {
 	GetSessionInteractions(ctx context.Context, learnerID string) ([]*models.Interaction, error)
 	GetInteractionsSince(ctx context.Context, learnerID string, since time.Time) ([]*models.Interaction, error)
 	GetSessionStart(ctx context.Context, learnerID string) (time.Time, error)
-	GetActionHistoryForConcept(ctx context.Context, learnerID, concept string, recentLimit int) (ActionHistoryCounts, error)
+	GetActionHistoryForConcept(ctx context.Context, learnerID, concept string, recentLimit int) (models.ActionHistoryCounts, error)
 	CountInteractionsSince(ctx context.Context, learnerID string, since time.Time, domainConcepts []string) (int, error)
 	GetRecentConceptsByDomain(ctx context.Context, learnerID string, domainConcepts []string, limit int) ([]string, error)
 }
@@ -140,7 +96,7 @@ type ActivityStatsStore interface {
 	GetTodayInteractionCount(ctx context.Context, learnerID string) (int, error)
 	GetTodaySuccessRate(ctx context.Context, learnerID string) (float64, int, error)
 	GetActivityStreak(ctx context.Context, learnerID string) (int, error)
-	GetRecentLearnerEvents(ctx context.Context, learnerID string, since time.Time) ([]RawLearnerEvent, error)
+	GetRecentLearnerEvents(ctx context.Context, learnerID string, since time.Time) ([]models.RawLearnerEvent, error)
 	ConceptMasteryDelta(ctx context.Context, learnerID string, domainConcepts []string, since time.Time, limit int) ([]models.ConceptDelta, error)
 	MilestonesInWindow(ctx context.Context, learnerID string, domainConcepts []string, since time.Time) ([]string, error)
 	CountInteractionsByConcept(ctx context.Context, learnerID, concept string) (int, error)
@@ -170,11 +126,11 @@ type MetacognitionStore interface {
 
 // MisconceptionStore queries and aggregates learner misconception data.
 type MisconceptionStore interface {
-	GetMisconceptionGroups(ctx context.Context, learnerID string, conceptFilter map[string]bool) ([]MisconceptionGroup, error)
+	GetMisconceptionGroups(ctx context.Context, learnerID string, conceptFilter map[string]bool) ([]models.MisconceptionGroup, error)
 	GetDistinctMisconceptionTypes(ctx context.Context, learnerID, concept string) ([]string, error)
-	GetActiveMisconceptions(ctx context.Context, learnerID, concept string) ([]MisconceptionGroup, error)
+	GetActiveMisconceptions(ctx context.Context, learnerID, concept string) ([]models.MisconceptionGroup, error)
 	GetActiveMisconceptionsBatch(ctx context.Context, learnerID string, concepts []string) (map[string]bool, error)
-	GetFirstActiveMisconception(ctx context.Context, learnerID, concept string) (*MisconceptionGroup, error)
+	GetFirstActiveMisconception(ctx context.Context, learnerID, concept string) (*models.MisconceptionGroup, error)
 }
 
 // IntentionStore manages implementation intentions and learning-negotiation overrides.
@@ -184,7 +140,7 @@ type IntentionStore interface {
 	GetRecentImplementationIntentions(ctx context.Context, learnerID string, since time.Time, limit int) ([]*models.ImplementationIntention, error)
 	MarkIntentionHonored(ctx context.Context, id int64, honored bool) error
 	InsertLearningNegotiationOverridePayload(ctx context.Context, learnerID, domainID, payload string, expiresAt, now time.Time) (int64, error)
-	ConsumeLearningNegotiationOverridePayload(ctx context.Context, learnerID, domainID string, now time.Time) (*LearningNegotiationOverridePayloadResult, error)
+	ConsumeLearningNegotiationOverridePayload(ctx context.Context, learnerID, domainID string, now time.Time) (*models.LearningNegotiationOverridePayloadResult, error)
 }
 
 // AlertStore manages scheduled learner alerts.

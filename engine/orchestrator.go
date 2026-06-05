@@ -503,7 +503,7 @@ func selectActionForSelection(
 		// SelectAction (mastery=0, theta=0) to avoid the panic.
 		cs = models.NewConceptState(input.LearnerID, selection.Concept)
 	}
-	var mc *db.MisconceptionGroup
+	var mc *models.MisconceptionGroup
 	if pf.ActiveMisc[selection.Concept] {
 		var err error
 		mc, err = store.GetFirstActiveMisconception(ctx, input.LearnerID, selection.Concept)

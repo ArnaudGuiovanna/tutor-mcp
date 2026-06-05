@@ -8,7 +8,7 @@ import (
 	"context"
 	"fmt"
 
-	"tutor-mcp/db"
+	"tutor-mcp/models"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -49,7 +49,7 @@ func registerGetMisconceptions(server *mcp.Server, deps *Deps) {
 		if params.Concept != "" {
 			if conceptFilter != nil && !conceptFilter[params.Concept] {
 				// Concept not in domain, return empty
-				r, _ := jsonResult(map[string]any{"misconceptions": []db.MisconceptionGroup{}})
+				r, _ := jsonResult(map[string]any{"misconceptions": []models.MisconceptionGroup{}})
 				return r, nil, nil
 			}
 			conceptFilter = map[string]bool{params.Concept: true}
@@ -64,7 +64,7 @@ func registerGetMisconceptions(server *mcp.Server, deps *Deps) {
 
 		// Replace nil with empty slice for JSON serialization
 		if groups == nil {
-			groups = []db.MisconceptionGroup{}
+			groups = []models.MisconceptionGroup{}
 		}
 
 		r, _ := jsonResult(map[string]any{"misconceptions": groups})

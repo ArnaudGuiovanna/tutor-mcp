@@ -98,7 +98,7 @@ func (s *Store) GetActiveMisconceptionsBatch(ctx context.Context, learnerID stri
 // misconception group on a (learner, concept) pair, or nil if none.
 // Used by [2] orchestrator to pass a *MisconceptionGroup to
 // SelectAction (which expects a single misconception, not a list).
-func (s *Store) GetFirstActiveMisconception(ctx context.Context, learnerID, concept string) (*MisconceptionGroup, error) {
+func (s *Store) GetFirstActiveMisconception(ctx context.Context, learnerID, concept string) (*models.MisconceptionGroup, error) {
 	groups, err := s.GetActiveMisconceptions(ctx, learnerID, concept)
 	if err != nil {
 		return nil, err
@@ -206,27 +206,13 @@ func (s *Store) CountInteractionsSince(ctx context.Context, learnerID string, si
 	return n, rows.Err()
 }
 
-// ActionHistoryCounts encapsulates per-concept counts used by
-// engine.SelectAction's high-mastery rotation. Values are strict
-// counts of completed activities of each type on the concept,
-// regardless of success/failure outcome. InteractionsAboveBKT is the
-// streak of consecutive successful interactions since the most recent
-// drop below MasteryBKT() (caller responsibility — exposed here as a
-// raw counter since the Store doesn't track historical mastery).
-type ActionHistoryCounts struct {
-	MasteryChallengeCount int
-	FeynmanCount          int
-	TransferCount         int
-	InteractionsAboveBKT  int
-}
-
 // GetActionHistoryForConcept returns the rotation/streak counts for a
 // concept. The InteractionsAboveBKT field counts consecutive
 // successful interactions on the concept (strict success streak from
 // the most recent backwards) — a simple proxy for "stable above
 // mastery" since we don't snapshot historical PMastery values. The
 // proxy is sound when used after a successful BKT update push.
-func (s *Store) GetActionHistoryForConcept(ctx context.Context, learnerID, concept string, recentLimit int) (ActionHistoryCounts, error) {
+func (s *Store) GetActionHistoryForConcept(ctx context.Context, learnerID, concept string, recentLimit int) (models.ActionHistoryCounts, error) {
 	if recentLimit <= 0 {
 		recentLimit = 50
 	}
@@ -238,17 +224,17 @@ func (s *Store) GetActionHistoryForConcept(ctx context.Context, learnerID, conce
 		learnerID, concept, recentLimit,
 	)
 	if err != nil {
-		return ActionHistoryCounts{}, fmt.Errorf("action history: %w", err)
+		return models.ActionHistoryCounts{}, fmt.Errorf("action history: %w", err)
 	}
 	defer rows.Close()
 
-	var h ActionHistoryCounts
+	var h models.ActionHistoryCounts
 	streakLive := true
 	for rows.Next() {
 		var actType string
 		var success int
 		if err := rows.Scan(&actType, &success); err != nil {
-			return ActionHistoryCounts{}, fmt.Errorf("scan history: %w", err)
+			return models.ActionHistoryCounts{}, fmt.Errorf("scan history: %w", err)
 		}
 		switch actType {
 		case string(models.ActivityMasteryChallenge):

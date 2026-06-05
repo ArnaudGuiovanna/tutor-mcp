@@ -27,7 +27,6 @@ import (
 	"sync/atomic"
 
 	"tutor-mcp/algorithms"
-	"tutor-mcp/db"
 	"tutor-mcp/models"
 )
 
@@ -126,7 +125,7 @@ func NaNFallbackCount() int64 {
 // The threshold is read through algorithms.MasteryBKT() so the legacy
 // vs unified profile (REGULATION_THRESHOLD) is honoured — no literal
 // 0.85 in this file (drift test of [7] guards that).
-func SelectAction(concept string, cs *models.ConceptState, mc *db.MisconceptionGroup, history ActionHistory) Action {
+func SelectAction(concept string, cs *models.ConceptState, mc *models.MisconceptionGroup, history ActionHistory) Action {
 	// (1) NaN / nil guard — OQ-5.6 = B. Logged at ERROR (not WARN) to
 	// surface corruption explicitly; counter incremented for sampling.
 	if cs == nil {

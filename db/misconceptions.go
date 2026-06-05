@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"tutor-mcp/models"
 )
 
 // parseTimeFlex attempts several common SQLite/Go time formats.
@@ -51,19 +53,9 @@ func parseTimeFlex(s string) (time.Time, error) {
 // Documented in docs/regulation-design/03-gate-controller.md OQ-3.3.
 const MisconceptionResolutionWindow = 3
 
-type MisconceptionGroup struct {
-	Concept           string    `json:"concept"`
-	MisconceptionType string    `json:"misconception_type"`
-	Count             int       `json:"count"`
-	FirstSeen         time.Time `json:"first_seen"`
-	LastSeen          time.Time `json:"last_seen"`
-	LastErrorDetail   string    `json:"last_error_detail"`
-	Status            string    `json:"status"`
-}
-
 // GetMisconceptionGroups returns all misconception groups for a learner,
 // optionally filtered by concept. Groups are ordered by count descending.
-func (s *Store) GetMisconceptionGroups(ctx context.Context, learnerID string, conceptFilter map[string]bool) ([]MisconceptionGroup, error) {
+func (s *Store) GetMisconceptionGroups(ctx context.Context, learnerID string, conceptFilter map[string]bool) ([]models.MisconceptionGroup, error) {
 	query := `SELECT concept, misconception_type, COUNT(*) AS cnt, MIN(created_at), MAX(created_at)
 		 FROM interactions
 		 WHERE learner_id = ? AND misconception_type IS NOT NULL`
@@ -84,9 +76,9 @@ func (s *Store) GetMisconceptionGroups(ctx context.Context, learnerID string, co
 	}
 	defer rows.Close()
 
-	var groups []MisconceptionGroup
+	var groups []models.MisconceptionGroup
 	for rows.Next() {
-		var g MisconceptionGroup
+		var g models.MisconceptionGroup
 		var firstSeen, lastSeen string
 		if err := rows.Scan(&g.Concept, &g.MisconceptionType, &g.Count, &firstSeen, &lastSeen); err != nil {
 			return nil, fmt.Errorf("scan misconception group: %w", err)
@@ -257,14 +249,14 @@ func (s *Store) GetDistinctMisconceptionTypes(ctx context.Context, learnerID, co
 
 // GetActiveMisconceptions returns only the "active" misconception groups
 // for a learner on a specific concept.
-func (s *Store) GetActiveMisconceptions(ctx context.Context, learnerID, concept string) ([]MisconceptionGroup, error) {
+func (s *Store) GetActiveMisconceptions(ctx context.Context, learnerID, concept string) ([]models.MisconceptionGroup, error) {
 	filter := map[string]bool{concept: true}
 	groups, err := s.GetMisconceptionGroups(ctx, learnerID, filter)
 	if err != nil {
 		return nil, fmt.Errorf("get active misconceptions: %w", err)
 	}
 
-	var active []MisconceptionGroup
+	var active []models.MisconceptionGroup
 	for _, g := range groups {
 		if g.Status == "active" {
 			active = append(active, g)

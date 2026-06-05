@@ -233,7 +233,7 @@ func selectReviewIntentPipelineActivity(ctx context.Context, store *db.Store, le
 	}
 
 	cs := constraints.stateByConcept[selection.Concept]
-	var mc *db.MisconceptionGroup
+	var mc *models.MisconceptionGroup
 	if constraints.activeMisconceptions[selection.Concept] {
 		mc, err = store.GetFirstActiveMisconception(ctx, learnerID, selection.Concept)
 		if err != nil {

@@ -1340,15 +1340,6 @@ func (s *Store) GetActivityStreak(ctx context.Context, learnerID string) (int, e
 	return streak, nil
 }
 
-// RawLearnerEvent is the DB-layer shape of a timeline event. Engine layer
-// converts to engine.LearnerEvent (same fields, different package).
-type RawLearnerEvent struct {
-	At      time.Time
-	Kind    string
-	Message string
-	Concept string
-}
-
 // fragileThreshold mirrors the engine.NodeClassify fragile boundary. The
 // mastered-cutoff was previously a duplicate const here (mirrored from
 // algorithms.KSTMasteryThreshold = 0.70), but it now reads through
@@ -1368,8 +1359,8 @@ const fragileThreshold = 0.30
 //
 // (calibration_threshold derivable from calibration_history but skipped in v1
 // to keep the query simple — covered by the calibration sparkline.)
-func (s *Store) GetRecentLearnerEvents(ctx context.Context, learnerID string, since time.Time) ([]RawLearnerEvent, error) {
-	var events []RawLearnerEvent
+func (s *Store) GetRecentLearnerEvents(ctx context.Context, learnerID string, since time.Time) ([]models.RawLearnerEvent, error) {
+	var events []models.RawLearnerEvent
 
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT concept, p_mastery, updated_at
@@ -1391,12 +1382,12 @@ func (s *Store) GetRecentLearnerEvents(ctx context.Context, learnerID string, si
 			return nil, fmt.Errorf("scan event row: %w", err)
 		}
 		if mastery >= masteryKST {
-			events = append(events, RawLearnerEvent{
+			events = append(events, models.RawLearnerEvent{
 				At: at, Kind: "mastery_threshold", Concept: concept,
 				Message: fmt.Sprintf("%s reached the mastery threshold", concept),
 			})
 		} else if mastery < fragileThreshold {
-			events = append(events, RawLearnerEvent{
+			events = append(events, models.RawLearnerEvent{
 				At: at, Kind: "retention_drop", Concept: concept,
 				Message: fmt.Sprintf("%s passe en fragile", concept),
 			})
@@ -1409,7 +1400,7 @@ func (s *Store) GetRecentLearnerEvents(ctx context.Context, learnerID string, si
 	if streak, _ := s.GetActivityStreak(ctx, learnerID); streak > 0 {
 		startedAt := time.Now().UTC().AddDate(0, 0, -streak+1).Truncate(24 * time.Hour)
 		if !startedAt.Before(since) {
-			events = append(events, RawLearnerEvent{
+			events = append(events, models.RawLearnerEvent{
 				At: startedAt, Kind: "streak_start",
 				Message: fmt.Sprintf("%d-day streak started", streak),
 			})

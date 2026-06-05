@@ -9,6 +9,8 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"tutor-mcp/models"
 )
 
 const learningNegotiationOverrideTrigger = "__learning_negotiation_activity_override__"
@@ -18,13 +20,6 @@ const (
 	LearningNegotiationOverrideStatusConsumed = "consumed"
 	LearningNegotiationOverrideStatusExpired  = "expired"
 )
-
-type LearningNegotiationOverridePayloadResult struct {
-	ID        int64
-	Payload   string
-	Status    string
-	ExpiresAt *time.Time
-}
 
 // InsertLearningNegotiationOverridePayload stores a pending one-shot activity
 // override in the existing implementation_intentions table. A new override
@@ -66,7 +61,7 @@ func (s *Store) InsertLearningNegotiationOverridePayload(ctx context.Context, le
 
 // ConsumeLearningNegotiationOverridePayload atomically marks the latest pending
 // override consumed. Expired overrides are marked missed and returned as expired.
-func (s *Store) ConsumeLearningNegotiationOverridePayload(ctx context.Context, learnerID, domainID string, now time.Time) (*LearningNegotiationOverridePayloadResult, error) {
+func (s *Store) ConsumeLearningNegotiationOverridePayload(ctx context.Context, learnerID, domainID string, now time.Time) (*models.LearningNegotiationOverridePayloadResult, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin learning negotiation override consume: %w", err)
@@ -88,7 +83,7 @@ func (s *Store) ConsumeLearningNegotiationOverridePayload(ctx context.Context, l
 		if commitErr := tx.Commit(); commitErr != nil {
 			return nil, fmt.Errorf("commit empty learning negotiation override consume: %w", commitErr)
 		}
-		return &LearningNegotiationOverridePayloadResult{Status: LearningNegotiationOverrideStatusNone}, nil
+		return &models.LearningNegotiationOverridePayloadResult{Status: LearningNegotiationOverrideStatusNone}, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("select learning negotiation override: %w", err)
@@ -108,7 +103,7 @@ func (s *Store) ConsumeLearningNegotiationOverridePayload(ctx context.Context, l
 			if err := tx.Commit(); err != nil {
 				return nil, fmt.Errorf("commit learning negotiation override expiration: %w", err)
 			}
-			return &LearningNegotiationOverridePayloadResult{
+			return &models.LearningNegotiationOverridePayloadResult{
 				ID:        id,
 				Status:    LearningNegotiationOverrideStatusExpired,
 				ExpiresAt: expires,
@@ -131,12 +126,12 @@ func (s *Store) ConsumeLearningNegotiationOverridePayload(ctx context.Context, l
 		if err := tx.Commit(); err != nil {
 			return nil, fmt.Errorf("commit raced learning negotiation override consume: %w", err)
 		}
-		return &LearningNegotiationOverridePayloadResult{Status: LearningNegotiationOverrideStatusNone}, nil
+		return &models.LearningNegotiationOverridePayloadResult{Status: LearningNegotiationOverrideStatusNone}, nil
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit learning negotiation override consume: %w", err)
 	}
-	return &LearningNegotiationOverridePayloadResult{
+	return &models.LearningNegotiationOverridePayloadResult{
 		ID:        id,
 		Payload:   payload,
 		Status:    LearningNegotiationOverrideStatusConsumed,
