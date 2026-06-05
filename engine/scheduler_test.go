@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"tutor-mcp/db"
 	"tutor-mcp/memory"
 	"tutor-mcp/models"
+	"tutor-mcp/webhookurl"
 )
 
 func TestIsSafeWebhookURL(t *testing.T) {
@@ -32,7 +32,7 @@ func TestIsSafeWebhookURL(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := db.IsSafeWebhookURL(tc.url); got != tc.want {
+			if got := webhookurl.IsSafeWebhookURL(tc.url); got != tc.want {
 				t.Errorf("IsSafeWebhookURL(%q) = %v, want %v", tc.url, got, tc.want)
 			}
 		})

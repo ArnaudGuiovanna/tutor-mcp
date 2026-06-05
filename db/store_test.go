@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	storeport "tutor-mcp/store"
 )
 
 func TestConsumeAuthCode_WrongClientID(t *testing.T) {
@@ -93,7 +95,7 @@ func TestCreateOAuthClientWithSecretCappedRejectsAtLimit(t *testing.T) {
 	}
 
 	err := store.CreateOAuthClientWithSecretCapped(context.Background(), "c2", "n2", `["https://y.example/cb"]`, "", 1)
-	if !errors.Is(err, ErrOAuthClientLimitReached) {
+	if !errors.Is(err, storeport.ErrOAuthClientLimitReached) {
 		t.Fatalf("err = %v, want ErrOAuthClientLimitReached", err)
 	}
 	got, err := store.CountOAuthClients(context.Background())

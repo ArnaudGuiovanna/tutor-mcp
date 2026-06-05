@@ -25,6 +25,7 @@ import (
 
 	"tutor-mcp/db"
 	"tutor-mcp/models"
+	"tutor-mcp/store"
 )
 
 // NormalizeEmail folds an email address to a canonical form (lowercase +
@@ -790,7 +791,7 @@ func (s *OAuthServer) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.store.CreateOAuthClientWithSecretCapped(ctx, clientID, clientName, string(redirectURIsJSON), secretHash, s.maxRegisteredClients); err != nil {
-		if errors.Is(err, db.ErrOAuthClientLimitReached) {
+		if errors.Is(err, store.ErrOAuthClientLimitReached) {
 			writeRegistrationError(w, "registration_disabled", "client cap reached")
 			return
 		}

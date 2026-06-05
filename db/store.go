@@ -10,17 +10,14 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"net"
-	"net/url"
 	"sort"
-	"strings"
 	"time"
 
 	"tutor-mcp/algorithms"
 	"tutor-mcp/models"
 	"tutor-mcp/store"
+	"tutor-mcp/webhookurl"
 )
 
 // Compile-time proof that *Store satisfies the persistence port. If a db method
@@ -36,37 +33,10 @@ type sqlExecutor interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
-// IsSafeWebhookURL validates that a webhook URL targets Discord over HTTPS.
-// SSRF guard: only Discord webhook hosts allowed (blocks IMDS, internal ranges, etc.).
-func IsSafeWebhookURL(rawURL string) bool {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return false
-	}
-	if u.Scheme != "https" {
-		return false
-	}
-	host := u.Hostname()
-	if host == "" || strings.Contains(host, "..") {
-		return false
-	}
-	if net.ParseIP(host) != nil {
-		return false
-	}
-	host = strings.ToLower(host)
-	switch host {
-	case "discord.com", "discordapp.com":
-		return true
-	}
-	return strings.HasSuffix(host, ".discord.com") || strings.HasSuffix(host, ".discordapp.com")
-}
-
 type Store struct {
 	db   sqlExecutor // *sql.DB normally; *sql.Tx inside WithTx — query methods use this unchanged
 	root *sql.DB     // the real pool. For WithTx/Ping/Close/Migrate + internal BeginTx. nil in a tx-scoped Store.
 }
-
-var ErrOAuthClientLimitReached = errors.New("oauth client limit reached")
 
 // RawDB returns the underlying *sql.DB. Intended for tests that need
 // to insert with explicit timestamps (e.g. simulating older
@@ -147,7 +117,7 @@ func boolToInt(b bool) int {
 // ─── Learners ────────────────────────────────────────────────────────────────
 
 func (s *Store) CreateLearner(ctx context.Context, email, passwordHash, objective, webhookURL string) (*models.Learner, error) {
-	if webhookURL != "" && !IsSafeWebhookURL(webhookURL) {
+	if webhookURL != "" && !webhookurl.IsSafeWebhookURL(webhookURL) {
 		return nil, fmt.Errorf("invalid webhook_url: must be https://discord.com/...")
 	}
 	id := generateID()
@@ -1210,7 +1180,7 @@ func (s *Store) CreateOAuthClientWithSecretCapped(ctx context.Context, clientID,
 		return fmt.Errorf("create oauth client rows affected: %w", err)
 	}
 	if rows == 0 {
-		return ErrOAuthClientLimitReached
+		return store.ErrOAuthClientLimitReached
 	}
 	return nil
 }

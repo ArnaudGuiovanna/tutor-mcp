@@ -7,6 +7,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"tutor-mcp/models"
 )
 
 // TestApproveClientPersistsAndScopes covers the consent persistence path:
@@ -107,7 +109,7 @@ func TestLearningNegotiationOverrideInsertConsume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("consume: %v", err)
 	}
-	if res.Status != LearningNegotiationOverrideStatusConsumed {
+	if res.Status != models.LearningNegotiationOverrideStatusConsumed {
 		t.Fatalf("status = %q, want consumed", res.Status)
 	}
 	if res.Payload != "payload-1" {
@@ -122,7 +124,7 @@ func TestLearningNegotiationOverrideInsertConsume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("consume #2: %v", err)
 	}
-	if res2.Status != LearningNegotiationOverrideStatusNone {
+	if res2.Status != models.LearningNegotiationOverrideStatusNone {
 		t.Errorf("status #2 = %q, want none", res2.Status)
 	}
 }
@@ -146,7 +148,7 @@ func TestLearningNegotiationOverrideSupersede(t *testing.T) {
 	if err != nil {
 		t.Fatalf("consume: %v", err)
 	}
-	if res.Status != LearningNegotiationOverrideStatusConsumed {
+	if res.Status != models.LearningNegotiationOverrideStatusConsumed {
 		t.Fatalf("status = %q, want consumed", res.Status)
 	}
 	if res.Payload != "new" {
@@ -158,7 +160,7 @@ func TestLearningNegotiationOverrideSupersede(t *testing.T) {
 	if err != nil {
 		t.Fatalf("consume #2: %v", err)
 	}
-	if res2.Status != LearningNegotiationOverrideStatusNone {
+	if res2.Status != models.LearningNegotiationOverrideStatusNone {
 		t.Errorf("status #2 = %q, want none", res2.Status)
 	}
 }
@@ -180,7 +182,7 @@ func TestLearningNegotiationOverrideExpired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("consume: %v", err)
 	}
-	if res.Status != LearningNegotiationOverrideStatusExpired {
+	if res.Status != models.LearningNegotiationOverrideStatusExpired {
 		t.Fatalf("status = %q, want expired", res.Status)
 	}
 	if res.ID != id {
@@ -195,7 +197,7 @@ func TestLearningNegotiationOverrideExpired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("consume #2: %v", err)
 	}
-	if res2.Status != LearningNegotiationOverrideStatusNone {
+	if res2.Status != models.LearningNegotiationOverrideStatusNone {
 		t.Errorf("status #2 = %q, want none", res2.Status)
 	}
 }

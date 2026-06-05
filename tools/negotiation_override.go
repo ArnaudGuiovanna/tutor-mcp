@@ -307,9 +307,9 @@ func ConsumeLearningNegotiationOverride(ctx context.Context, store *db.Store, le
 		return systemActivity, LearningNegotiationOverrideConsumeResult{Status: LearningNegotiationOverrideConsumeNone}, err
 	}
 	switch record.Status {
-	case db.LearningNegotiationOverrideStatusNone:
+	case models.LearningNegotiationOverrideStatusNone:
 		return systemActivity, LearningNegotiationOverrideConsumeResult{Status: LearningNegotiationOverrideConsumeNone}, nil
-	case db.LearningNegotiationOverrideStatusExpired:
+	case models.LearningNegotiationOverrideStatusExpired:
 		return systemActivity, LearningNegotiationOverrideConsumeResult{
 			Status: LearningNegotiationOverrideConsumeExpired,
 			ID:     record.ID,

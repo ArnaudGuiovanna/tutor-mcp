@@ -19,6 +19,7 @@ import (
 	"tutor-mcp/db"
 	"tutor-mcp/memory"
 	"tutor-mcp/models"
+	"tutor-mcp/webhookurl"
 
 	"github.com/robfig/cron/v3"
 )
@@ -535,7 +536,7 @@ const maxRetryAfter = 5 * time.Second
 // safeWebhookURL is the SSRF guard used by doWithRetry. It defaults to the
 // production Discord-only allowlist and is overridden in tests so that
 // httptest.NewServer URLs (http://127.0.0.1:...) can be exercised end-to-end.
-var safeWebhookURL = db.IsSafeWebhookURL
+var safeWebhookURL = webhookurl.IsSafeWebhookURL
 
 // doWithRetry posts body to url with exponential backoff.
 // 4 attempts: immediate, +1s, +5s, +25s.

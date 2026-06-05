@@ -8,10 +8,15 @@ package store
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"tutor-mcp/models"
 )
+
+// ErrOAuthClientLimitReached is returned by CreateOAuthClientWithSecretCapped
+// when the per-deployment client cap is hit.
+var ErrOAuthClientLimitReached = errors.New("oauth client limit reached")
 
 // ---------------------------------------------------------------------------
 // Sub-interfaces — segregated by domain concern

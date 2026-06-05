@@ -15,12 +15,6 @@ import (
 
 const learningNegotiationOverrideTrigger = "__learning_negotiation_activity_override__"
 
-const (
-	LearningNegotiationOverrideStatusNone     = "none"
-	LearningNegotiationOverrideStatusConsumed = "consumed"
-	LearningNegotiationOverrideStatusExpired  = "expired"
-)
-
 // InsertLearningNegotiationOverridePayload stores a pending one-shot activity
 // override in the existing implementation_intentions table. A new override
 // supersedes any older pending override for the same learner/domain pair.
@@ -83,7 +77,7 @@ func (s *Store) ConsumeLearningNegotiationOverridePayload(ctx context.Context, l
 		if commitErr := tx.Commit(); commitErr != nil {
 			return nil, fmt.Errorf("commit empty learning negotiation override consume: %w", commitErr)
 		}
-		return &models.LearningNegotiationOverridePayloadResult{Status: LearningNegotiationOverrideStatusNone}, nil
+		return &models.LearningNegotiationOverridePayloadResult{Status: models.LearningNegotiationOverrideStatusNone}, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("select learning negotiation override: %w", err)
@@ -105,7 +99,7 @@ func (s *Store) ConsumeLearningNegotiationOverridePayload(ctx context.Context, l
 			}
 			return &models.LearningNegotiationOverridePayloadResult{
 				ID:        id,
-				Status:    LearningNegotiationOverrideStatusExpired,
+				Status:    models.LearningNegotiationOverrideStatusExpired,
 				ExpiresAt: expires,
 			}, nil
 		}
@@ -126,7 +120,7 @@ func (s *Store) ConsumeLearningNegotiationOverridePayload(ctx context.Context, l
 		if err := tx.Commit(); err != nil {
 			return nil, fmt.Errorf("commit raced learning negotiation override consume: %w", err)
 		}
-		return &models.LearningNegotiationOverridePayloadResult{Status: LearningNegotiationOverrideStatusNone}, nil
+		return &models.LearningNegotiationOverridePayloadResult{Status: models.LearningNegotiationOverrideStatusNone}, nil
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit learning negotiation override consume: %w", err)
@@ -134,7 +128,7 @@ func (s *Store) ConsumeLearningNegotiationOverridePayload(ctx context.Context, l
 	return &models.LearningNegotiationOverridePayloadResult{
 		ID:        id,
 		Payload:   payload,
-		Status:    LearningNegotiationOverrideStatusConsumed,
+		Status:    models.LearningNegotiationOverrideStatusConsumed,
 		ExpiresAt: expires,
 	}, nil
 }

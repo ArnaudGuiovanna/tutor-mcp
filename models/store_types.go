@@ -46,3 +46,9 @@ type LearningNegotiationOverridePayloadResult struct {
 	Status    string
 	ExpiresAt *time.Time
 }
+
+const (
+	LearningNegotiationOverrideStatusNone     = "none"
+	LearningNegotiationOverrideStatusConsumed = "consumed"
+	LearningNegotiationOverrideStatusExpired  = "expired"
+)
