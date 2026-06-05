@@ -32,7 +32,7 @@ func registerArchiveDomain(server *mcp.Server, deps *Deps) {
 		}
 
 		// Verify domain exists and belongs to learner
-		domain, err := deps.Store.GetDomainByID(params.DomainID)
+		domain, err := deps.Store.GetDomainByID(ctx, params.DomainID)
 		if err != nil {
 			r, _ := errorResult(fmt.Sprintf("domain not found: %s", params.DomainID))
 			return r, nil, nil
@@ -42,7 +42,7 @@ func registerArchiveDomain(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		if err := deps.Store.ArchiveDomain(params.DomainID, learnerID); err != nil {
+		if err := deps.Store.ArchiveDomain(ctx, params.DomainID, learnerID); err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to archive domain", err)
 			return r, nil, nil
 		}
@@ -78,7 +78,7 @@ func registerUnarchiveDomain(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		domain, err := deps.Store.GetDomainByID(params.DomainID)
+		domain, err := deps.Store.GetDomainByID(ctx, params.DomainID)
 		if err != nil {
 			r, _ := errorResult(fmt.Sprintf("domain not found: %s", params.DomainID))
 			return r, nil, nil
@@ -88,7 +88,7 @@ func registerUnarchiveDomain(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		if err := deps.Store.UnarchiveDomain(params.DomainID, learnerID); err != nil {
+		if err := deps.Store.UnarchiveDomain(ctx, params.DomainID, learnerID); err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to unarchive domain", err)
 			return r, nil, nil
 		}
@@ -129,7 +129,7 @@ func registerDeleteDomain(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		domain, err := deps.Store.GetDomainByID(params.DomainID)
+		domain, err := deps.Store.GetDomainByID(ctx, params.DomainID)
 		if err != nil {
 			r, _ := errorResult(fmt.Sprintf("domain not found: %s", params.DomainID))
 			return r, nil, nil
@@ -139,7 +139,7 @@ func registerDeleteDomain(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		if err := deps.Store.DeleteDomain(params.DomainID, learnerID); err != nil {
+		if err := deps.Store.DeleteDomain(ctx, params.DomainID, learnerID); err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to delete domain", err)
 			return r, nil, nil
 		}

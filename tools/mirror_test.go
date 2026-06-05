@@ -4,6 +4,7 @@
 package tools
 
 import (
+	"context"
 	"testing"
 
 	"tutor-mcp/models"
@@ -48,12 +49,12 @@ func TestGetMetacognitiveMirror_DomainIDFiltersForeignSignal(t *testing.T) {
 	// because the signal is filtered out. Issue #95.
 	store, deps := setupToolsTest(t)
 
-	d1, err := store.CreateDomain("L_owner", "active", "",
+	d1, err := store.CreateDomain(context.Background(), "L_owner", "active", "",
 		models.KnowledgeSpace{Concepts: []string{"a"}, Prerequisites: map[string][]string{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	d2, err := store.CreateDomain("L_owner", "foreign", "",
+	d2, err := store.CreateDomain(context.Background(), "L_owner", "foreign", "",
 		models.KnowledgeSpace{Concepts: []string{"x"}, Prerequisites: map[string][]string{}})
 	if err != nil {
 		t.Fatal(err)
@@ -69,7 +70,7 @@ func TestGetMetacognitiveMirror_DomainIDFiltersForeignSignal(t *testing.T) {
 			SelfInitiated: false,
 			ResponseTime:  4.0,
 		}
-		if err := store.CreateInteraction(interaction); err != nil {
+		if err := store.CreateInteraction(context.Background(), interaction); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -38,7 +38,7 @@ func registerRecordSessionClose(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		domain, err := resolveDomain(deps.Store, learnerID, params.DomainID)
+		domain, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
 		if err != nil || domain == nil {
 			if params.DomainID != "" {
 				deps.Logger.Error("record_session_close: domain not found by id", "err", err, "learner", learnerID, "domain_id", params.DomainID)
@@ -80,7 +80,7 @@ func registerRecordSessionClose(server *mcp.Server, deps *Deps) {
 					scheduled = parsed
 				}
 			}
-			if _, err := deps.Store.InsertImplementationIntention(
+			if _, err := deps.Store.InsertImplementationIntention(ctx,
 				learnerID, domain.ID,
 				params.ImplementationIntention.Trigger,
 				params.ImplementationIntention.Action,
@@ -90,7 +90,7 @@ func registerRecordSessionClose(server *mcp.Server, deps *Deps) {
 			}
 		}
 
-		recap := buildRecapBrief(deps, learnerID, domain)
+		recap := buildRecapBrief(ctx, deps, learnerID, domain)
 		payload := map[string]any{"recap_brief": recap}
 		if memory.Enabled() {
 			payload["summary_request"] = map[string]any{
@@ -108,13 +108,13 @@ func registerRecordSessionClose(server *mcp.Server, deps *Deps) {
 }
 
 // buildRecapBrief produces session-close signals for Claude.
-func buildRecapBrief(deps *Deps, learnerID string, domain *models.Domain) *models.RecapBrief {
+func buildRecapBrief(ctx context.Context, deps *Deps, learnerID string, domain *models.Domain) *models.RecapBrief {
 	domainSet := make(map[string]bool, len(domain.Graph.Concepts))
 	for _, c := range domain.Graph.Concepts {
 		domainSet[c] = true
 	}
 
-	sessionInteractions, _ := deps.Store.GetSessionInteractions(learnerID)
+	sessionInteractions, _ := deps.Store.GetSessionInteractions(ctx, learnerID)
 
 	practicedSet := map[string]bool{}
 	winsSet := map[string]bool{}
@@ -143,7 +143,7 @@ func buildRecapBrief(deps *Deps, learnerID string, domain *models.Domain) *model
 	}
 
 	// Next scheduled review — earliest next_review across domain states.
-	states, _ := deps.Store.GetConceptStatesByLearner(learnerID)
+	states, _ := deps.Store.GetConceptStatesByLearner(ctx, learnerID)
 	var next string
 	var earliest time.Time
 	for _, cs := range states {
@@ -157,7 +157,7 @@ func buildRecapBrief(deps *Deps, learnerID string, domain *models.Domain) *model
 	}
 
 	// Prompt for implementation intention if none recorded in last 7 days for any domain.
-	has, _ := deps.Store.HasRecentImplementationIntention(learnerID, "", time.Now().UTC().Add(-7*24*time.Hour))
+	has, _ := deps.Store.HasRecentImplementationIntention(ctx, learnerID, "", time.Now().UTC().Add(-7*24*time.Hour))
 	promptIntent := !has
 
 	instruction := "Close the session in 2-3 sentences. Mention a tangible win or a good attempt. " +

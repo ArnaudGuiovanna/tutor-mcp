@@ -142,7 +142,7 @@ func registerRecordInteraction(server *mcp.Server, deps *Deps) {
 		// validate the concept against its concept list. Without this guard
 		// the BKT/FSRS chain silently inserts orphan concept_states for
 		// hallucinated or stale concept names — see issue #23.
-		domain, err := resolveDomain(deps.Store, learnerID, params.DomainID)
+		domain, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
 		if err != nil || domain == nil {
 			if params.DomainID != "" {
 				deps.Logger.Error("record_interaction: domain not found by id", "err", err, "learner", learnerID, "domain_id", params.DomainID)
@@ -158,7 +158,7 @@ func registerRecordInteraction(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		cs, observation, err := applyInteraction(deps, learnerID, interactionInput{
+		cs, observation, err := applyInteraction(ctx, deps, learnerID, interactionInput{
 			Concept:             params.Concept,
 			ActivityType:        params.ActivityType,
 			Success:             params.Success,
@@ -187,9 +187,9 @@ func registerRecordInteraction(server *mcp.Server, deps *Deps) {
 		}
 
 		// Update last active
-		_ = deps.Store.UpdateLastActive(learnerID)
+		_ = deps.Store.UpdateLastActive(ctx, learnerID)
 		pushNow := time.Now().UTC()
-		_ = deps.Store.MarkWebhookPushConceptAddressed(learnerID, domain.ID, params.Concept, pushNow, pushNow.Add(-7*24*time.Hour))
+		_ = deps.Store.MarkWebhookPushConceptAddressed(ctx, learnerID, domain.ID, params.Concept, pushNow, pushNow.Add(-7*24*time.Hour))
 
 		deps.Logger.Info("interaction recorded",
 			"learner", learnerID,
@@ -212,7 +212,7 @@ func registerRecordInteraction(server *mcp.Server, deps *Deps) {
 		}
 
 		// Compute cognitive signals from session patterns
-		sessionInteractions, _ := deps.Store.GetSessionInteractions(learnerID)
+		sessionInteractions, _ := deps.Store.GetSessionInteractions(ctx, learnerID)
 		fatigueSignal, frustrationSignal := computeCognitiveSignals(sessionInteractions)
 
 		nextReviewHours := float64(cs.ScheduledDays) * 24.0

@@ -5,6 +5,7 @@
 package db
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -29,12 +30,12 @@ import (
 //
 // Returns the merged vector after persistence (so the caller can compose
 // the response payload — uncovered list, covered count, etc.).
-func (s *Store) MergeDomainGoalRelevance(domainID string, relevance map[string]float64) (*models.GoalRelevance, error) {
+func (s *Store) MergeDomainGoalRelevance(ctx context.Context, domainID string, relevance map[string]float64) (*models.GoalRelevance, error) {
 	if relevance == nil {
 		return nil, fmt.Errorf("relevance map is nil")
 	}
 
-	tx, err := s.db.Begin()
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
@@ -42,7 +43,7 @@ func (s *Store) MergeDomainGoalRelevance(domainID string, relevance map[string]f
 
 	var existingJSON string
 	var graphVersion int
-	err = tx.QueryRow(
+	err = tx.QueryRowContext(ctx,
 		`SELECT goal_relevance_json, graph_version FROM domains WHERE id = ?`,
 		domainID,
 	).Scan(&existingJSON, &graphVersion)
@@ -79,7 +80,7 @@ func (s *Store) MergeDomainGoalRelevance(domainID string, relevance map[string]f
 		return nil, fmt.Errorf("marshal goal_relevance: %w", err)
 	}
 
-	_, err = tx.Exec(
+	_, err = tx.ExecContext(ctx,
 		`UPDATE domains
 		 SET goal_relevance_json = ?, goal_relevance_version = goal_relevance_version + 1
 		 WHERE id = ?`,
@@ -98,9 +99,9 @@ func (s *Store) MergeDomainGoalRelevance(domainID string, relevance map[string]f
 // GetDomainGoalRelevance returns the parsed goal-relevance payload for a
 // domain. Returns (nil, nil) if no vector has been set yet — callers MUST
 // treat this as "uniform fallback (1.0 everywhere)" rather than an error.
-func (s *Store) GetDomainGoalRelevance(domainID string) (*models.GoalRelevance, error) {
+func (s *Store) GetDomainGoalRelevance(ctx context.Context, domainID string) (*models.GoalRelevance, error) {
 	var raw string
-	err := s.db.QueryRow(
+	err := s.db.QueryRowContext(ctx,
 		`SELECT goal_relevance_json FROM domains WHERE id = ?`,
 		domainID,
 	).Scan(&raw)

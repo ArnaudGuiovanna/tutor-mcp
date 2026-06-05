@@ -5,6 +5,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -68,7 +69,7 @@ func simulatedAnswer(pMastery float64) bool {
 // runtime, minus FSRS scheduling (we keep cards in 'review' state).
 func learnerInteract(t *testing.T, store *db.Store, concept string, success bool, when time.Time) {
 	t.Helper()
-	cs, err := store.GetConceptState("L1", concept)
+	cs, err := store.GetConceptState(context.Background(), "L1", concept)
 	if err != nil {
 		t.Fatalf("get state %q: %v", concept, err)
 	}
@@ -85,7 +86,7 @@ func learnerInteract(t *testing.T, store *db.Store, concept string, success bool
 		cs.Stability = 30
 		cs.ElapsedDays = 1
 	}
-	if err := store.UpsertConceptState(cs); err != nil {
+	if err := store.UpsertConceptState(context.Background(), cs); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
 	successInt := 0
@@ -140,7 +141,7 @@ func runE2ESimulation(
 		now := artifact.StartedAt.Add(time.Duration(i) * time.Hour)
 
 		// Snapshot pre-call.
-		domainBefore, err := store.GetDomainByID(domainID)
+		domainBefore, err := store.GetDomainByID(context.Background(), domainID)
 		if err != nil {
 			t.Fatalf("session %d: get domain: %v", i, err)
 		}
@@ -153,7 +154,7 @@ func runE2ESimulation(
 		input := defaultInput(domainID)
 		input.Now = now
 		input.Config = cfg
-		activity, err := Orchestrate(store, input)
+		activity, err := Orchestrate(context.Background(), store, input)
 		if err != nil {
 			// Phase-corrupted or pipeline-error : surface in artifact
 			// but don't fail the test (this is a tracing harness).
@@ -167,14 +168,14 @@ func runE2ESimulation(
 		}
 
 		// Snapshot post-call.
-		domainAfter, _ := store.GetDomainByID(domainID)
+		domainAfter, _ := store.GetDomainByID(context.Background(), domainID)
 		phaseAfter := string(domainAfter.Phase)
 		if phaseAfter == "" {
 			phaseAfter = string(models.PhaseInstruction)
 		}
 
 		// Compute observables for the artifact.
-		states, _ := store.GetConceptStatesByLearner("L1")
+		states, _ := store.GetConceptStatesByLearner(context.Background(), "L1")
 		sm := map[string]*models.ConceptState{}
 		mastered := 0
 		for _, s := range states {

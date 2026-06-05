@@ -30,9 +30,9 @@ func registerGetAutonomyMetrics(server *mcp.Server, deps *Deps) {
 		}
 
 		since := time.Now().UTC().Add(-30 * 24 * time.Hour)
-		interactions, _ := deps.Store.GetInteractionsSince(learnerID, since)
-		states, _ := deps.Store.GetConceptStatesByLearner(learnerID)
-		calibBias, _ := deps.Store.GetCalibrationBias(learnerID, 20)
+		interactions, _ := deps.Store.GetInteractionsSince(ctx, learnerID, since)
+		states, _ := deps.Store.GetConceptStatesByLearner(ctx, learnerID)
+		calibBias, _ := deps.Store.GetCalibrationBias(ctx, learnerID, 20)
 
 		// Domain filter (#95): if domain_id is supplied, restrict the
 		// concept-keyed inputs (interactions, states) to that domain's
@@ -41,7 +41,7 @@ func registerGetAutonomyMetrics(server *mcp.Server, deps *Deps) {
 		// because it's computed from affect rows (session-keyed, not
 		// concept-keyed) and represents a cross-session learner signal.
 		if params.DomainID != "" {
-			domain, err := resolveDomain(deps.Store, learnerID, params.DomainID)
+			domain, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
 			if err != nil {
 				r, _ := errorResult(err.Error())
 				return r, nil, nil
@@ -61,7 +61,7 @@ func registerGetAutonomyMetrics(server *mcp.Server, deps *Deps) {
 			SessionGap:      2 * time.Hour,
 		})
 
-		affects, _ := deps.Store.GetRecentAffectStates(learnerID, 10)
+		affects, _ := deps.Store.GetRecentAffectStates(ctx, learnerID, 10)
 		var scores []float64
 		for _, a := range affects {
 			scores = append(scores, a.AutonomyScore)

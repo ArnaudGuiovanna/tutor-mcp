@@ -63,7 +63,7 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 
 		// Check if domain exists
 		domainStart := time.Now()
-		domain, err := resolveActivityDomain(deps.Store, learnerID, params.DomainID, params.DomainName)
+		domain, err := resolveActivityDomain(ctx, deps.Store, learnerID, params.DomainID, params.DomainName)
 		domainMs := time.Since(domainStart).Milliseconds()
 		if err != nil || domain == nil {
 			if params.DomainName != "" {
@@ -86,12 +86,12 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 		}
 
 		prefetchStart := time.Now()
-		states, _ := deps.Store.GetConceptStatesByLearner(learnerID)
-		interactions, _ := deps.Store.GetRecentInteractionsByLearner(learnerID, engine.DefaultRecentInteractionsWindow)
-		sessionStart, _ := deps.Store.GetSessionStart(learnerID)
+		states, _ := deps.Store.GetConceptStatesByLearner(ctx, learnerID)
+		interactions, _ := deps.Store.GetRecentInteractionsByLearner(ctx, learnerID, engine.DefaultRecentInteractionsWindow)
+		sessionStart, _ := deps.Store.GetSessionStart(ctx, learnerID)
 
 		// Get session interactions to track what was already practiced
-		sessionInteractions, _ := deps.Store.GetSessionInteractions(learnerID)
+		sessionInteractions, _ := deps.Store.GetSessionInteractions(ctx, learnerID)
 
 		// Filter states to only those in the current domain
 		domainConcepts := make(map[string]bool)
@@ -150,7 +150,7 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 		}
 		// OrchestrateWithPhase returns the post-orchestrate phase so we
 		// can audit-log it without re-reading the domain row (perf #91).
-		activity, orchPhase, orchErr = engine.OrchestrateWithPhase(deps.Store, input)
+		activity, orchPhase, orchErr = engine.OrchestrateWithPhase(ctx, deps.Store, input)
 		if input.ReviewOnly && strings.Contains(activity.Rationale, "no_reviewable_concept") {
 			intentStatus = "no_reviewable_concept"
 		}
@@ -161,8 +161,8 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 		pushSince := now.Add(-7 * 24 * time.Hour)
-		activeWebhookNudge, _ := deps.Store.GetLatestOpenWebhookPush(learnerID, domain.ID, pushSince)
-		_ = deps.Store.MarkWebhookPushSessionOpened(learnerID, now, pushSince)
+		activeWebhookNudge, _ := deps.Store.GetLatestOpenWebhookPush(ctx, learnerID, domain.ID, pushSince)
+		_ = deps.Store.MarkWebhookPushSessionOpened(ctx, learnerID, now, pushSince)
 		if activeWebhookNudge != nil {
 			extra["active_webhook_nudge"] = activeWebhookNudge
 			if activeWebhookNudge.OpenLoop != "" || activeWebhookNudge.NextAction != "" {
@@ -174,7 +174,7 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 			}
 		}
 		overrideResult := LearningNegotiationOverrideConsumeResult{Status: LearningNegotiationOverrideConsumeNone}
-		if overrideActivity, consumed, err := ConsumeLearningNegotiationOverride(deps.Store, learnerID, domain, activity, alerts, now); err != nil {
+		if overrideActivity, consumed, err := ConsumeLearningNegotiationOverride(ctx, deps.Store, learnerID, domain, activity, alerts, now); err != nil {
 			deps.Logger.Warn("get_next_activity: learning negotiation override consume failed", "err", err, "learner", learnerID, "domain", domain.ID)
 		} else {
 			overrideResult = consumed
@@ -221,9 +221,9 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 		// Metacognitive mirror
 		mirrorStart := time.Now()
 		since := time.Now().UTC().Add(-7 * 24 * time.Hour)
-		allInteractions, _ := deps.Store.GetInteractionsSince(learnerID, since)
-		calibBias, _ := deps.Store.GetCalibrationBias(learnerID, 20)
-		affects, _ := deps.Store.GetRecentAffectStates(learnerID, 10)
+		allInteractions, _ := deps.Store.GetInteractionsSince(ctx, learnerID, since)
+		calibBias, _ := deps.Store.GetCalibrationBias(ctx, learnerID, 20)
+		affects, _ := deps.Store.GetRecentAffectStates(ctx, learnerID, 10)
 
 		var autonomyScores []float64
 		for _, a := range affects {
@@ -244,7 +244,7 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 		// so a learner who hits get_next_activity multiple times in a day
 		// only sees one queued nudge.
 		if mirror != nil {
-			if _, _, err := engine.EnqueueMirrorWebhook(deps.Store, learnerID, mirror, time.Now().UTC()); err != nil {
+			if _, _, err := engine.EnqueueMirrorWebhook(ctx, deps.Store, learnerID, mirror, time.Now().UTC()); err != nil {
 				deps.Logger.Warn("get_next_activity: mirror enqueue failed", "err", err, "learner", learnerID)
 			}
 		}
@@ -289,7 +289,7 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 		activeMisconceptionCount := 0
 
 		if activity.Concept != "" {
-			if active, err := deps.Store.GetActiveMisconceptions(learnerID, activity.Concept); err == nil && len(active) > 0 {
+			if active, err := deps.Store.GetActiveMisconceptions(ctx, learnerID, activity.Concept); err == nil && len(active) > 0 {
 				activeMisconceptions = active
 				activeMisconceptionCount = len(active)
 
@@ -308,7 +308,7 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 				activity.PromptForLLM += misconceptionPrompt
 			}
 
-			if types, err := deps.Store.GetDistinctMisconceptionTypes(learnerID, activity.Concept); err == nil && len(types) > 0 {
+			if types, err := deps.Store.GetDistinctMisconceptionTypes(ctx, learnerID, activity.Concept); err == nil && len(types) > 0 {
 				knownMisconceptionTypes = types
 			}
 		}
@@ -326,7 +326,7 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 		}
 		motivationEngine := engine.NewMotivationEngine(deps.Store)
 		motivationBrief, _ := motivationEngine.Build(
-			learnerID, domain, activity.Concept, activity.Type,
+			ctx, learnerID, domain, activity.Concept, activity.Type,
 			plateauActive, len(sessionConcepts),
 		)
 		motivationMs := time.Since(motivationStart).Milliseconds()
@@ -370,7 +370,7 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 					break
 				}
 			}
-			conceptInteractions, err := deps.Store.GetRecentInteractions(learnerID, activity.Concept, 50)
+			conceptInteractions, err := deps.Store.GetRecentInteractions(ctx, learnerID, activity.Concept, 50)
 			if err != nil {
 				deps.Logger.Warn("get_next_activity: mastery diagnostics fetch failed", "err", err, "learner", learnerID, "concept", activity.Concept)
 			} else {
@@ -389,7 +389,7 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 				raschState := algorithms.NewRaschEloState(selectedState.Theta, algorithms.FSRSDifficultyToIRT(selectedState.Difficulty))
 				raschEloCalibration = raschEloStateSnapshot(raschState)
 			}
-			if transferRecords, err := deps.Store.GetTransferScores(learnerID, activity.Concept); err != nil {
+			if transferRecords, err := deps.Store.GetTransferScores(ctx, learnerID, activity.Concept); err != nil {
 				deps.Logger.Warn("get_next_activity: transfer diagnostics fetch failed", "err", err, "learner", learnerID, "concept", activity.Concept)
 			} else {
 				typedTransferProfile = engine.BuildTransferProfile(activity.Concept, transferRecords)
@@ -405,7 +405,7 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 		}); decision.Adjusted {
 			activity = decision.Activity
 			extra["evidence_adjustment"] = decision.Rationale
-			if active, err := deps.Store.GetActiveMisconceptions(learnerID, activity.Concept); err == nil && len(active) > 0 {
+			if active, err := deps.Store.GetActiveMisconceptions(ctx, learnerID, activity.Concept); err == nil && len(active) > 0 {
 				activeMisconceptions = active
 				activeMisconceptionCount = len(active)
 				misconceptionPrompt := fmt.Sprintf("\nWARNING: the learner has %d active misconception(s): ", len(active))
@@ -424,7 +424,7 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 		}
 		diagnosticsMs := time.Since(diagnosticsStart).Milliseconds()
 		goalRelevanceStatus := buildGoalRelevanceStatus(domain)
-		episodicContext, olmSnapshot := loadEpisodicContextForActivity(deps, learnerID, domain, domainStates, activity.Concept, alerts)
+		episodicContext, olmSnapshot := loadEpisodicContextForActivity(ctx, deps, learnerID, domain, domainStates, activity.Concept, alerts)
 		contract := buildPedagogicalContract(activity, intent, evidenceQuality, uncertainty, typedTransferProfile, goalRelevanceStatus, extra["fade_params"], episodicContext, activeMisconceptionCount, olmSnapshot)
 
 		out := map[string]any{
@@ -453,7 +453,7 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 		if episodicContextVisible(episodicContext) {
 			out["episodic_context"] = episodicContext
 		}
-		if consolidationRequest := maybeBuildConsolidationRequest(deps, learnerID, now); consolidationRequest != nil {
+		if consolidationRequest := maybeBuildConsolidationRequest(ctx, deps, learnerID, now); consolidationRequest != nil {
 			out["consolidation_request"] = consolidationRequest
 		}
 		if overrideResult.Status != LearningNegotiationOverrideConsumeNone {
@@ -522,6 +522,7 @@ func applyFadeToMotivation(brief *models.MotivationBrief, level engine.HintLevel
 }
 
 func loadEpisodicContextForActivity(
+	ctx context.Context,
 	deps *Deps,
 	learnerID string,
 	domain *models.Domain,
@@ -533,7 +534,7 @@ func loadEpisodicContextForActivity(
 		return nil, nil
 	}
 	var olmSnapshot *engine.OLMSnapshot
-	if snap, err := engine.BuildOLMSnapshot(deps.Store, learnerID, domain.ID); err == nil {
+	if snap, err := engine.BuildOLMSnapshot(ctx, deps.Store, learnerID, domain.ID); err == nil {
 		olmSnapshot = snap
 	} else if deps.Logger != nil {
 		deps.Logger.Warn("get_next_activity: OLM snapshot for memory context failed", "err", err, "learner", learnerID, "domain", domain.ID)

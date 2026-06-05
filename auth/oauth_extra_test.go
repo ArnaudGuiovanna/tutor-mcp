@@ -5,6 +5,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -169,7 +170,7 @@ func TestHandleToken_AuthorizationCode_Success(t *testing.T) {
 	h := sha256.Sum256([]byte(verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(h[:])
 
-	if err := store.CreateAuthCode("the-code", learnerID, challenge, "cid", futureTime()); err != nil {
+	if err := store.CreateAuthCode(context.Background(), "the-code", learnerID, challenge, "cid", futureTime()); err != nil {
 		t.Fatalf("seed code: %v", err)
 	}
 
@@ -261,7 +262,7 @@ func TestHandleToken_AuthorizationCode_ConfidentialClient_BadSecret(t *testing.T
 	setTestSecret(t)
 	s, store := newTestServer(t)
 	hash, _ := bcrypt.GenerateFromPassword([]byte("real-secret"), bcrypt.MinCost)
-	if err := store.CreateOAuthClientWithSecret("cid-conf", "Confidential", `["https://c.example/cb"]`, string(hash)); err != nil {
+	if err := store.CreateOAuthClientWithSecret(context.Background(), "cid-conf", "Confidential", `["https://c.example/cb"]`, string(hash)); err != nil {
 		t.Fatalf("create confidential client: %v", err)
 	}
 
@@ -288,7 +289,7 @@ func TestHandleToken_AuthorizationCode_ConfidentialClient_BasicAuthOK(t *testing
 	setTestSecret(t)
 	s, store := newTestServer(t)
 	hash, _ := bcrypt.GenerateFromPassword([]byte("real-secret"), bcrypt.MinCost)
-	if err := store.CreateOAuthClientWithSecret("cid-conf", "Confidential", `["https://c.example/cb"]`, string(hash)); err != nil {
+	if err := store.CreateOAuthClientWithSecret(context.Background(), "cid-conf", "Confidential", `["https://c.example/cb"]`, string(hash)); err != nil {
 		t.Fatalf("create confidential client: %v", err)
 	}
 	learner := seedLearner(t, store, "u-conf@e.com", "pw")
@@ -296,7 +297,7 @@ func TestHandleToken_AuthorizationCode_ConfidentialClient_BasicAuthOK(t *testing
 	verifier := "verifier-string"
 	h := sha256.Sum256([]byte(verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(h[:])
-	if err := store.CreateAuthCode("conf-code", learner, challenge, "cid-conf", futureTime()); err != nil {
+	if err := store.CreateAuthCode(context.Background(), "conf-code", learner, challenge, "cid-conf", futureTime()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -347,7 +348,7 @@ func TestHandleToken_AuthorizationCode_ExpiredCode(t *testing.T) {
 	verifier := "v"
 	h := sha256.Sum256([]byte(verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(h[:])
-	if err := store.CreateAuthCode("exp-code", learner, challenge, "cid", pastTime()); err != nil {
+	if err := store.CreateAuthCode(context.Background(), "exp-code", learner, challenge, "cid", pastTime()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -375,7 +376,7 @@ func TestHandleToken_AuthorizationCode_PKCEMismatch(t *testing.T) {
 	seedClient(t, store, "cid", "https://good.example/cb")
 	learner := seedLearner(t, store, "u-pkce@e.com", "pw")
 
-	if err := store.CreateAuthCode("pkce-code", learner, "wrong-challenge", "cid", futureTime()); err != nil {
+	if err := store.CreateAuthCode(context.Background(), "pkce-code", learner, "wrong-challenge", "cid", futureTime()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -449,7 +450,7 @@ func TestHandleToken_RefreshToken_Success(t *testing.T) {
 	// always authenticates the client (issue #30).
 	seedClient(t, store, "cid-pub", "https://app.example/cb")
 	learner := seedLearner(t, store, "u-rt@e.com", "pw")
-	rt, err := store.CreateRefreshToken(learner, "")
+	rt, err := store.CreateRefreshToken(context.Background(), learner, "")
 	if err != nil {
 		t.Fatalf("seed rt: %v", err)
 	}
@@ -474,7 +475,7 @@ func TestHandleToken_RefreshToken_Success(t *testing.T) {
 	if newRT == "" || newRT == rt.Token {
 		t.Fatalf("refresh token must rotate; old=%q new=%q", rt.Token, newRT)
 	}
-	if _, err := store.GetRefreshToken(rt.Token); err == nil {
+	if _, err := store.GetRefreshToken(context.Background(), rt.Token); err == nil {
 		t.Fatal("old refresh token must be deleted after rotation")
 	}
 }
@@ -483,7 +484,7 @@ func TestHandleToken_RefreshToken_ConfidentialClientUnknown(t *testing.T) {
 	setTestSecret(t)
 	s, store := newTestServer(t)
 	learner := seedLearner(t, store, "u-rt2@e.com", "pw")
-	rt, err := store.CreateRefreshToken(learner, "")
+	rt, err := store.CreateRefreshToken(context.Background(), learner, "")
 	if err != nil {
 		t.Fatalf("seed rt: %v", err)
 	}
@@ -510,11 +511,11 @@ func TestHandleToken_RefreshToken_ConfidentialClientBadSecret(t *testing.T) {
 	setTestSecret(t)
 	s, store := newTestServer(t)
 	hash, _ := bcrypt.GenerateFromPassword([]byte("real-secret"), bcrypt.MinCost)
-	if err := store.CreateOAuthClientWithSecret("cid-c2", "Confidential2", `["https://c.example/cb"]`, string(hash)); err != nil {
+	if err := store.CreateOAuthClientWithSecret(context.Background(), "cid-c2", "Confidential2", `["https://c.example/cb"]`, string(hash)); err != nil {
 		t.Fatalf("create confidential client: %v", err)
 	}
 	learner := seedLearner(t, store, "u-rt3@e.com", "pw")
-	rt, err := store.CreateRefreshToken(learner, "")
+	rt, err := store.CreateRefreshToken(context.Background(), learner, "")
 	if err != nil {
 		t.Fatalf("seed rt: %v", err)
 	}
@@ -651,7 +652,7 @@ func TestHandleRegister_RejectsOversizedBody(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "request body too large") {
 		t.Fatalf("body missing size error: %q", rec.Body.String())
 	}
-	count, err := store.CountOAuthClients()
+	count, err := store.CountOAuthClients(context.Background())
 	if err != nil {
 		t.Fatalf("count clients: %v", err)
 	}
@@ -663,7 +664,7 @@ func TestHandleRegister_RejectsOversizedBody(t *testing.T) {
 func TestHandleRegister_ClientCapReached(t *testing.T) {
 	s, store := newTestServer(t)
 	s.maxRegisteredClients = 1
-	if err := store.CreateOAuthClient("existing", "Existing", `["https://app.example/cb"]`); err != nil {
+	if err := store.CreateOAuthClient(context.Background(), "existing", "Existing", `["https://app.example/cb"]`); err != nil {
 		t.Fatalf("seed client: %v", err)
 	}
 
@@ -679,7 +680,7 @@ func TestHandleRegister_ClientCapReached(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "registration_disabled") {
 		t.Fatalf("body missing registration_disabled: %q", rec.Body.String())
 	}
-	count, err := store.CountOAuthClients()
+	count, err := store.CountOAuthClients(context.Background())
 	if err != nil {
 		t.Fatalf("count clients: %v", err)
 	}
@@ -1047,7 +1048,7 @@ func TestAuthorizePost_RegisterSuccess_CreatesAndRedirects(t *testing.T) {
 	if rec.Code != http.StatusFound {
 		t.Fatalf("status = %d, want 302; body=%q", rec.Code, rec.Body.String())
 	}
-	if learner, err := store.GetLearnerByEmail("newuser@e.com"); err != nil || learner == nil {
+	if learner, err := store.GetLearnerByEmail(context.Background(), "newuser@e.com"); err != nil || learner == nil {
 		t.Fatalf("learner not created: err=%v learner=%v", err, learner)
 	}
 }
@@ -1212,7 +1213,7 @@ func TestValidateRedirectURI_Branches(t *testing.T) {
 	s, store := newTestServer(t)
 	seedClient(t, store, "cid", "https://good.example/cb")
 	// Seed a client with malformed registered URIs (should hit unmarshal error).
-	if err := store.CreateOAuthClient("cid-bad", "Bad", "not-json-at-all"); err != nil {
+	if err := store.CreateOAuthClient(context.Background(), "cid-bad", "Bad", "not-json-at-all"); err != nil {
 		t.Fatalf("seed bad client: %v", err)
 	}
 
@@ -1231,7 +1232,7 @@ func TestValidateRedirectURI_Branches(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := s.validateRedirectURI(tc.clientID, tc.redirectURI)
+			err := s.validateRedirectURI(context.Background(), tc.clientID, tc.redirectURI)
 			if tc.wantErr && err == nil {
 				t.Fatalf("expected error")
 			}
@@ -1298,7 +1299,7 @@ func TestRequirePKCEForPublicClient_Branches(t *testing.T) {
 	s, store := newTestServer(t)
 	seedClient(t, store, "pub", "https://good.example/cb")
 	hash, _ := bcrypt.GenerateFromPassword([]byte("s"), bcrypt.MinCost)
-	if err := store.CreateOAuthClientWithSecret("conf", "Conf", `["https://c.example/cb"]`, string(hash)); err != nil {
+	if err := store.CreateOAuthClientWithSecret(context.Background(), "conf", "Conf", `["https://c.example/cb"]`, string(hash)); err != nil {
 		t.Fatalf("seed conf: %v", err)
 	}
 
@@ -1318,7 +1319,7 @@ func TestRequirePKCEForPublicClient_Branches(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := s.requirePKCEForPublicClient(tc.clientID, tc.challenge, tc.method)
+			err := s.requirePKCEForPublicClient(context.Background(), tc.clientID, tc.challenge, tc.method)
 			if tc.wantErr && err == nil {
 				t.Fatalf("expected error")
 			}
@@ -1364,7 +1365,7 @@ func TestAuthorizePost_LoginSkipsApprovalAfterFirstConsent(t *testing.T) {
 	s, store := newTestServer(t)
 	// Client registered with two redirect_uris so we can verify that the
 	// approval row keys on redirect_uri and not on client_id alone.
-	if err := store.CreateOAuthClient(
+	if err := store.CreateOAuthClient(context.Background(),
 		"cid",
 		"Test Client",
 		`["https://good.example/cb","https://good.example/cb2"]`,

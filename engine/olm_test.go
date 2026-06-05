@@ -4,6 +4,7 @@
 package engine
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -40,7 +41,7 @@ func newOLMTestStore(t *testing.T) (*db.Store, *sql.DB) {
 func TestBuildOLMSnapshot_NoDomain_ReturnsError(t *testing.T) {
 	store, _ := newOLMTestStore(t)
 
-	snap, err := BuildOLMSnapshot(store, "nonexistent_learner", "")
+	snap, err := BuildOLMSnapshot(context.Background(), store, "nonexistent_learner", "")
 	if err == nil {
 		t.Fatalf("expected error for learner with no active domain, got snap=%+v", snap)
 	}
@@ -85,7 +86,7 @@ func seedConceptState(t *testing.T, store *db.Store, learnerID, concept string, 
 		cs.LastReview = &now
 		cs.ScheduledDays = 7
 	}
-	if err := store.UpsertConceptState(cs); err != nil {
+	if err := store.UpsertConceptState(context.Background(), cs); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -115,7 +116,7 @@ func TestBuildOLMSnapshot_MasteryBuckets(t *testing.T) {
 	seedConceptState(t, store, "L1", "d", 0.0, "new")     // NotStarted
 	// "e" has NO concept_state row → also NotStarted
 
-	snap, err := BuildOLMSnapshot(store, "L1", "")
+	snap, err := BuildOLMSnapshot(context.Background(), store, "L1", "")
 	if err != nil {
 		t.Fatalf("BuildOLMSnapshot: %v", err)
 	}
@@ -150,11 +151,11 @@ func TestBuildOLMSnapshot_FocusForgettingCritical(t *testing.T) {
 	cs.CardState = "review"
 	now := time.Now().UTC().Add(-30 * 24 * time.Hour)
 	cs.LastReview = &now
-	if err := store.UpsertConceptState(cs); err != nil {
+	if err := store.UpsertConceptState(context.Background(), cs); err != nil {
 		t.Fatal(err)
 	}
 
-	snap, err := BuildOLMSnapshot(store, "L1", "")
+	snap, err := BuildOLMSnapshot(context.Background(), store, "L1", "")
 	if err != nil {
 		t.Fatalf("BuildOLMSnapshot: %v", err)
 	}
@@ -180,7 +181,7 @@ func TestBuildOLMSnapshot_FocusFallsBackToFrontier(t *testing.T) {
 	// 'a' mastered → 'b' is on the frontier. 'b' has no state yet.
 	seedConceptState(t, store, "L1", "a", 0.90, "review")
 
-	snap, err := BuildOLMSnapshot(store, "L1", "")
+	snap, err := BuildOLMSnapshot(context.Background(), store, "L1", "")
 	if err != nil {
 		t.Fatalf("BuildOLMSnapshot: %v", err)
 	}
@@ -212,13 +213,13 @@ func TestBuildOLMSnapshot_MetacognitiveSignals(t *testing.T) {
 			Satisfaction:  2,
 			AutonomyScore: score,
 		}
-		if err := store.UpsertAffectState(af); err != nil {
+		if err := store.UpsertAffectState(context.Background(), af); err != nil {
 			t.Fatal(err)
 		}
 		time.Sleep(10 * time.Millisecond) // ensure distinct created_at
 	}
 
-	snap, err := BuildOLMSnapshot(store, "L1", "")
+	snap, err := BuildOLMSnapshot(context.Background(), store, "L1", "")
 	if err != nil {
 		t.Fatalf("BuildOLMSnapshot: %v", err)
 	}
@@ -245,7 +246,7 @@ func TestBuildOLMSnapshot_KSTProgressAndActionable(t *testing.T) {
 	seedConceptState(t, store, "L1", "a", 0.90, "review")
 	seedConceptState(t, store, "L1", "b", 0.85, "review")
 
-	snap, err := BuildOLMSnapshot(store, "L1", "")
+	snap, err := BuildOLMSnapshot(context.Background(), store, "L1", "")
 	if err != nil {
 		t.Fatalf("BuildOLMSnapshot: %v", err)
 	}
@@ -268,7 +269,7 @@ func TestBuildOLMSnapshot_NotActionable_AllSolid(t *testing.T) {
 	seedConceptState(t, store, "L1", "a", 0.90, "review")
 	seedConceptState(t, store, "L1", "b", 0.90, "review")
 
-	snap, err := BuildOLMSnapshot(store, "L1", "")
+	snap, err := BuildOLMSnapshot(context.Background(), store, "L1", "")
 	if err != nil {
 		t.Fatalf("BuildOLMSnapshot: %v", err)
 	}

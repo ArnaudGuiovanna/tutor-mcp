@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -15,13 +16,13 @@ func TestGetRecentImplementationIntentions_OrderingAndLimit(t *testing.T) {
 
 	// Insert three intentions; we'll back-date by hand because the helper
 	// records created_at = NOW().
-	if _, err := store.InsertImplementationIntention("L1", "D1", "t1", "a1", time.Time{}); err != nil {
+	if _, err := store.InsertImplementationIntention(context.Background(), "L1", "D1", "t1", "a1", time.Time{}); err != nil {
 		t.Fatalf("insert i1: %v", err)
 	}
-	if _, err := store.InsertImplementationIntention("L1", "D1", "t2", "a2", now.Add(2*time.Hour)); err != nil {
+	if _, err := store.InsertImplementationIntention(context.Background(), "L1", "D1", "t2", "a2", now.Add(2*time.Hour)); err != nil {
 		t.Fatalf("insert i2: %v", err)
 	}
-	if _, err := store.InsertImplementationIntention("L1", "D1", "t3", "a3", time.Time{}); err != nil {
+	if _, err := store.InsertImplementationIntention(context.Background(), "L1", "D1", "t3", "a3", time.Time{}); err != nil {
 		t.Fatalf("insert i3: %v", err)
 	}
 
@@ -40,7 +41,7 @@ func TestGetRecentImplementationIntentions_OrderingAndLimit(t *testing.T) {
 	rewrite("t3", now.Add(-1*time.Hour))
 
 	// since=last-90min picks up only t3
-	got, err := store.GetRecentImplementationIntentions("L1", now.Add(-90*time.Minute), 10)
+	got, err := store.GetRecentImplementationIntentions(context.Background(), "L1", now.Add(-90*time.Minute), 10)
 	if err != nil {
 		t.Fatalf("get recent: %v", err)
 	}
@@ -56,7 +57,7 @@ func TestGetRecentImplementationIntentions_OrderingAndLimit(t *testing.T) {
 	}
 
 	// since=4h picks up all 3, ordered DESC
-	got, err = store.GetRecentImplementationIntentions("L1", now.Add(-4*time.Hour), 10)
+	got, err = store.GetRecentImplementationIntentions(context.Background(), "L1", now.Add(-4*time.Hour), 10)
 	if err != nil {
 		t.Fatalf("get recent all: %v", err)
 	}
@@ -73,13 +74,13 @@ func TestGetRecentImplementationIntentions_OrderingAndLimit(t *testing.T) {
 	}
 
 	// limit=2 caps results
-	got, _ = store.GetRecentImplementationIntentions("L1", now.Add(-4*time.Hour), 2)
+	got, _ = store.GetRecentImplementationIntentions(context.Background(), "L1", now.Add(-4*time.Hour), 2)
 	if len(got) != 2 {
 		t.Errorf("expected 2 rows with limit=2, got %d", len(got))
 	}
 
 	// limit<=0 defaults to 20 (i.e. returns all 3)
-	got, _ = store.GetRecentImplementationIntentions("L1", now.Add(-4*time.Hour), 0)
+	got, _ = store.GetRecentImplementationIntentions(context.Background(), "L1", now.Add(-4*time.Hour), 0)
 	if len(got) != 3 {
 		t.Errorf("expected 3 rows with default limit, got %d", len(got))
 	}
@@ -90,11 +91,11 @@ func TestGetRecentImplementationIntentions_OrderingAndLimit(t *testing.T) {
 func TestMarkIntentionHonored(t *testing.T) {
 	store := setupTestDB(t)
 
-	id1, err := store.InsertImplementationIntention("L1", "D1", "t1", "a1", time.Time{})
+	id1, err := store.InsertImplementationIntention(context.Background(), "L1", "D1", "t1", "a1", time.Time{})
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	id2, err := store.InsertImplementationIntention("L1", "D1", "t2", "a2", time.Time{})
+	id2, err := store.InsertImplementationIntention(context.Background(), "L1", "D1", "t2", "a2", time.Time{})
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -111,7 +112,7 @@ func TestMarkIntentionHonored(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			if err := store.MarkIntentionHonored(tc.id, tc.honored); err != nil {
+			if err := store.MarkIntentionHonored(context.Background(), tc.id, tc.honored); err != nil {
 				t.Fatalf("MarkIntentionHonored: %v", err)
 			}
 			var v int
@@ -127,7 +128,7 @@ func TestMarkIntentionHonored(t *testing.T) {
 	}
 
 	// And verify it surfaces in GetRecentImplementationIntentions.
-	got, err := store.GetRecentImplementationIntentions("L1", time.Now().UTC().Add(-1*time.Hour), 10)
+	got, err := store.GetRecentImplementationIntentions(context.Background(), "L1", time.Now().UTC().Add(-1*time.Hour), 10)
 	if err != nil {
 		t.Fatalf("get recent: %v", err)
 	}
@@ -147,7 +148,7 @@ func TestInsertImplementationIntention_ScheduledFor(t *testing.T) {
 	store := setupTestDB(t)
 	when := time.Now().UTC().Add(48 * time.Hour).Truncate(time.Second)
 
-	id, err := store.InsertImplementationIntention("L1", "D1", "trig", "act", when)
+	id, err := store.InsertImplementationIntention(context.Background(), "L1", "D1", "trig", "act", when)
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -155,7 +156,7 @@ func TestInsertImplementationIntention_ScheduledFor(t *testing.T) {
 		t.Fatal("expected non-zero id")
 	}
 
-	got, err := store.GetRecentImplementationIntentions("L1", time.Now().UTC().Add(-1*time.Hour), 10)
+	got, err := store.GetRecentImplementationIntentions(context.Background(), "L1", time.Now().UTC().Add(-1*time.Hour), 10)
 	if err != nil {
 		t.Fatalf("get recent: %v", err)
 	}

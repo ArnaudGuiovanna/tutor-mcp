@@ -4,6 +4,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -57,11 +58,11 @@ If you detect that a consolidation is impossible (corrupted sessions, ambiguous 
 
 Section headers in all written markdown MUST remain in English. Content under headers should be in the learner's primary language.`
 
-func maybeBuildConsolidationRequest(deps *Deps, learnerID string, now time.Time) *ConsolidationRequest {
+func maybeBuildConsolidationRequest(ctx context.Context, deps *Deps, learnerID string, now time.Time) *ConsolidationRequest {
 	if !memory.Enabled() {
 		return nil
 	}
-	pending, err := deps.Store.GetPendingConsolidations(learnerID)
+	pending, err := deps.Store.GetPendingConsolidations(ctx, learnerID)
 	if err != nil {
 		deps.Logger.Warn("get_next_activity: pending consolidations lookup failed", "err", err, "learner", learnerID)
 		return nil
@@ -77,7 +78,7 @@ func maybeBuildConsolidationRequest(deps *Deps, learnerID string, now time.Time)
 	if len(req.PendingJobs) == 0 {
 		return nil
 	}
-	if err := deps.Store.MarkConsolidationsDelivered(learnerID, ids, now); err != nil {
+	if err := deps.Store.MarkConsolidationsDelivered(ctx, learnerID, ids, now); err != nil {
 		deps.Logger.Warn("get_next_activity: mark consolidations delivered failed", "err", err, "learner", learnerID)
 	}
 	return req

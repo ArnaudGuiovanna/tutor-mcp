@@ -77,7 +77,7 @@ func registerSetGoalRelevance(server *mcp.Server, deps *Deps) {
 			}
 		}
 
-		domain, err := resolveDomain(deps.Store, learnerID, params.DomainID)
+		domain, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
 		if err != nil || domain == nil {
 			if params.DomainID != "" {
 				deps.Logger.Error("set_goal_relevance: domain not found by id", "err", err, "learner", learnerID, "domain_id", params.DomainID)
@@ -118,7 +118,7 @@ func registerSetGoalRelevance(server *mcp.Server, deps *Deps) {
 			}
 		}
 
-		merged, err := deps.Store.MergeDomainGoalRelevance(domain.ID, params.Relevance)
+		merged, err := deps.Store.MergeDomainGoalRelevance(ctx, domain.ID, params.Relevance)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "persist failed", err)
 			return r, nil, nil
@@ -128,7 +128,7 @@ func registerSetGoalRelevance(server *mcp.Server, deps *Deps) {
 		// add_concepts ran between read and write, uncovered may include
 		// the freshly added concepts — that is the correct stale-after-set
 		// signal.
-		fresh, _ := deps.Store.GetDomainByID(domain.ID)
+		fresh, _ := deps.Store.GetDomainByID(ctx, domain.ID)
 		var uncovered []string
 		var staleAfterSet bool
 		if fresh != nil {
@@ -182,7 +182,7 @@ func registerGetGoalRelevance(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		domain, err := resolveDomain(deps.Store, learnerID, params.DomainID)
+		domain, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
 		if err != nil || domain == nil {
 			if params.DomainID != "" {
 				deps.Logger.Error("get_goal_relevance: domain not found by id", "err", err, "learner", learnerID, "domain_id", params.DomainID)

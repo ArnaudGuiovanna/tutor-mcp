@@ -5,6 +5,7 @@
 package engine
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -26,14 +27,14 @@ func TestMigration_PreExistingDomain_StaysInInstruction(t *testing.T) {
 	// read NULL → PhaseInstruction fallback and operate accordingly.
 	in := defaultInput(domainID)
 	in.Now = time.Now().UTC()
-	if _, err := Orchestrate(store, in); err != nil {
+	if _, err := Orchestrate(context.Background(), store, in); err != nil {
 		t.Fatalf("orchestrate failed on pre-existing domain: %v", err)
 	}
 
 	// Phase column should remain NULL — we don't write back when no
 	// transition occurred. Pre-existing domains must NOT be silently
 	// upgraded to DIAGNOSTIC.
-	d, err := store.GetDomainByID(domainID)
+	d, err := store.GetDomainByID(context.Background(), domainID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,32 +60,32 @@ func TestEntryPoint_OffOnOff_ApprenantObservable(t *testing.T) {
 	// Phase 1 — flag off (legacy). We don't actually call the legacy
 	// router here — but we DO assert that not calling Orchestrate
 	// leaves the DB intact.
-	dBefore, _ := store.GetDomainByID(domainID)
+	dBefore, _ := store.GetDomainByID(context.Background(), domainID)
 	phaseBefore := dBefore.Phase
 
 	// Phase 2 — flag on : Orchestrate runs.
-	if _, err := Orchestrate(store, defaultInput(domainID)); err != nil {
+	if _, err := Orchestrate(context.Background(), store, defaultInput(domainID)); err != nil {
 		t.Fatalf("orchestrate flag-on call failed: %v", err)
 	}
-	dAfterOn, _ := store.GetDomainByID(domainID)
+	dAfterOn, _ := store.GetDomainByID(context.Background(), domainID)
 
 	// Phase 3 — flag off again : DB state must be readable, no
 	// corruption. We don't call Orchestrate ; we just inspect.
-	dCheck, _ := store.GetDomainByID(domainID)
+	dCheck, _ := store.GetDomainByID(context.Background(), domainID)
 	if dCheck.Phase != dAfterOn.Phase {
 		t.Errorf("flag toggle off corrupted phase: was %q now %q", dAfterOn.Phase, dCheck.Phase)
 	}
 
 	// Phase 4 — flag on again : Orchestrate idempotent.
-	if _, err := Orchestrate(store, defaultInput(domainID)); err != nil {
+	if _, err := Orchestrate(context.Background(), store, defaultInput(domainID)); err != nil {
 		t.Fatalf("orchestrate flag-on (re-entry) failed: %v", err)
 	}
-	dFinal, _ := store.GetDomainByID(domainID)
+	dFinal, _ := store.GetDomainByID(context.Background(), domainID)
 
 	// Observable side: the learner's progress (concept_states)
 	// must be unchanged across toggles (Orchestrate is read-only on
 	// concept_states ; only domain.phase moves).
-	statesBefore, _ := store.GetConceptStatesByLearner("L1")
+	statesBefore, _ := store.GetConceptStatesByLearner(context.Background(), "L1")
 	for _, cs := range statesBefore {
 		if cs.PMastery != 0.1 {
 			t.Errorf("concept %q PMastery moved unexpectedly: %f", cs.Concept, cs.PMastery)
@@ -122,7 +123,7 @@ func TestMigration_AddPhaseColumns_Idempotent(t *testing.T) {
 	_ = row.Scan(&phase, &ts, &ent) // err on no rows is ok
 	// Insert a domain to ensure the columns are write-able.
 	domainID := seedOrchDomain(t, store, []string{"A"}, nil, models.PhaseDiagnostic)
-	d, err := store.GetDomainByID(domainID)
+	d, err := store.GetDomainByID(context.Background(), domainID)
 	if err != nil {
 		t.Fatalf("post-migration read failed: %v", err)
 	}

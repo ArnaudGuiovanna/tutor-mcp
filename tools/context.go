@@ -33,19 +33,19 @@ func registerGetLearnerContext(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		learner, err := deps.Store.GetLearnerByID(learnerID)
+		learner, err := deps.Store.GetLearnerByID(ctx, learnerID)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "learner not found", err)
 			return r, nil, nil
 		}
 
 		// Check domain
-		domain, domainErr := resolveDomain(deps.Store, learnerID, params.DomainID)
+		domain, domainErr := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
 		needsDomainSetup := domainErr != nil || domain == nil
 
-		states, _ := deps.Store.GetConceptStatesByLearner(learnerID)
-		interactions, _ := deps.Store.GetRecentInteractionsByLearner(learnerID, 10)
-		allDomains, _ := deps.Store.GetDomainsByLearner(learnerID, false)
+		states, _ := deps.Store.GetConceptStatesByLearner(ctx, learnerID)
+		interactions, _ := deps.Store.GetRecentInteractionsByLearner(ctx, learnerID, 10)
+		allDomains, _ := deps.Store.GetDomainsByLearner(ctx, learnerID, false)
 
 		// Filter out orphan states/interactions left over from deleted or
 		// archived domains — only surface concepts that still belong to an
@@ -127,7 +127,7 @@ func registerGetLearnerContext(server *mcp.Server, deps *Deps) {
 		}
 
 		// List archived domains so Claude knows they exist
-		archivedDomains, _ := deps.Store.GetDomainsByLearner(learnerID, true)
+		archivedDomains, _ := deps.Store.GetDomainsByLearner(ctx, learnerID, true)
 		var archivedList []map[string]interface{}
 		for _, d := range archivedDomains {
 			if d.Archived {
@@ -144,7 +144,7 @@ func registerGetLearnerContext(server *mcp.Server, deps *Deps) {
 		// Progress narrative — open learner model surfaced at session start.
 		var narrative *models.ProgressNarrative
 		if !needsDomainSetup && domain != nil {
-			narrative = buildProgressNarrative(deps, learnerID, learner, domain)
+			narrative = buildProgressNarrative(ctx, deps, learnerID, learner, domain)
 		}
 
 		payload := map[string]interface{}{
@@ -173,16 +173,16 @@ func registerGetLearnerContext(server *mcp.Server, deps *Deps) {
 
 // buildProgressNarrative composes the session-opening OLM narrative signals. Returns
 // nil if there's nothing meaningful to narrate (e.g., zero interactions so far).
-func buildProgressNarrative(deps *Deps, learnerID string, learner *models.Learner, domain *models.Domain) *models.ProgressNarrative {
+func buildProgressNarrative(ctx context.Context, deps *Deps, learnerID string, learner *models.Learner, domain *models.Domain) *models.ProgressNarrative {
 	window := 30 * 24 * time.Hour
 	since := time.Now().UTC().Add(-window)
 
-	deltas, _ := deps.Store.ConceptMasteryDelta(learnerID, domain.Graph.Concepts, since, 3)
-	streak, _ := deps.Store.CountLearnerSessionStreak(learnerID)
-	milestones, _ := deps.Store.MilestonesInWindow(learnerID, domain.Graph.Concepts, time.Now().UTC().Add(-7*24*time.Hour))
+	deltas, _ := deps.Store.ConceptMasteryDelta(ctx, learnerID, domain.Graph.Concepts, since, 3)
+	streak, _ := deps.Store.CountLearnerSessionStreak(ctx, learnerID)
+	milestones, _ := deps.Store.MilestonesInWindow(ctx, learnerID, domain.Graph.Concepts, time.Now().UTC().Add(-7*24*time.Hour))
 
 	trend := "stable"
-	affects, _ := deps.Store.GetRecentAffectStates(learnerID, 5)
+	affects, _ := deps.Store.GetRecentAffectStates(ctx, learnerID, 5)
 	if len(affects) >= 3 {
 		var scores []float64
 		for _, a := range affects {

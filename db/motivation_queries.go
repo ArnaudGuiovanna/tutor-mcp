@@ -5,6 +5,7 @@
 package db
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -21,13 +22,13 @@ import (
 // Note: past mastery is approximated from success ratio on interactions before `since`.
 // Exact historical BKT snapshots are not persisted — this is good enough for a
 // learner-facing trajectory narrative.
-func (s *Store) ConceptMasteryDelta(learnerID string, domainConcepts []string, since time.Time, limit int) ([]models.ConceptDelta, error) {
+func (s *Store) ConceptMasteryDelta(ctx context.Context, learnerID string, domainConcepts []string, since time.Time, limit int) ([]models.ConceptDelta, error) {
 	if limit <= 0 {
 		limit = 3
 	}
 
 	// Current mastery per concept (BKT p_mastery).
-	states, err := s.GetConceptStatesByLearner(learnerID)
+	states, err := s.GetConceptStatesByLearner(ctx, learnerID)
 	if err != nil {
 		return nil, fmt.Errorf("mastery delta: get states: %w", err)
 	}
@@ -60,7 +61,7 @@ func (s *Store) ConceptMasteryDelta(learnerID string, domainConcepts []string, s
 			args = append(args, c)
 		}
 		args = append(args, since.UTC())
-		rows, err := s.db.Query(
+		rows, err := s.db.QueryContext(ctx,
 			`SELECT concept, COUNT(*), COALESCE(SUM(success), 0)
 			 FROM interactions
 			 WHERE learner_id = ? AND concept IN (`+strings.Join(placeholders, ",")+`)
@@ -120,8 +121,8 @@ func (s *Store) ConceptMasteryDelta(learnerID string, domainConcepts []string, s
 // MilestonesInWindow returns concepts newly mastered in the window [since, now].
 // "Newly mastered" = current PMastery >= MasteryBKT() AND the most recent
 // interaction on that concept is after `since` (approximation).
-func (s *Store) MilestonesInWindow(learnerID string, domainConcepts []string, since time.Time) ([]string, error) {
-	states, err := s.GetConceptStatesByLearner(learnerID)
+func (s *Store) MilestonesInWindow(ctx context.Context, learnerID string, domainConcepts []string, since time.Time) ([]string, error) {
+	states, err := s.GetConceptStatesByLearner(ctx, learnerID)
 	if err != nil {
 		return nil, fmt.Errorf("milestones: get states: %w", err)
 	}
@@ -157,7 +158,7 @@ func (s *Store) MilestonesInWindow(learnerID string, domainConcepts []string, si
 		args = append(args, c)
 	}
 	args = append(args, since.UTC())
-	rows, err := s.db.Query(
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT DISTINCT concept FROM interactions
 		 WHERE learner_id = ? AND concept IN (`+strings.Join(placeholders, ",")+`)
 		   AND success = 1 AND created_at >= ?`,
@@ -184,9 +185,9 @@ func (s *Store) MilestonesInWindow(learnerID string, domainConcepts []string, si
 }
 
 // CountInteractionsByConcept returns the total number of interactions on a given concept.
-func (s *Store) CountInteractionsByConcept(learnerID, concept string) (int, error) {
+func (s *Store) CountInteractionsByConcept(ctx context.Context, learnerID, concept string) (int, error) {
 	var count int
-	err := s.db.QueryRow(
+	err := s.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM interactions WHERE learner_id = ? AND concept = ?`,
 		learnerID, concept,
 	).Scan(&count)
@@ -201,9 +202,9 @@ func (s *Store) CountInteractionsByConcept(learnerID, concept string) (int, erro
 // interaction on that concept (rough proxy — good enough for Hidi-Renninger phase
 // inference). The substr(created_at, 1, 10) works around modernc-sqlite's ISO 8601
 // serialization (the built-in DATE() doesn't parse the 'T' separator).
-func (s *Store) CountSessionsOnConcept(learnerID, concept string) (int, error) {
+func (s *Store) CountSessionsOnConcept(ctx context.Context, learnerID, concept string) (int, error) {
 	var count int
-	err := s.db.QueryRow(
+	err := s.db.QueryRowContext(ctx,
 		`SELECT COUNT(DISTINCT substr(created_at, 1, 10)) FROM interactions
 		 WHERE learner_id = ? AND concept = ?`,
 		learnerID, concept,
@@ -216,8 +217,8 @@ func (s *Store) CountSessionsOnConcept(learnerID, concept string) (int, error) {
 
 // CountLearnerSessionStreak returns the consecutive-day streak for a learner,
 // computed via substr-based date extraction (works with modernc's ISO serialization).
-func (s *Store) CountLearnerSessionStreak(learnerID string) (int, error) {
-	rows, err := s.db.Query(
+func (s *Store) CountLearnerSessionStreak(ctx context.Context, learnerID string) (int, error) {
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT DISTINCT substr(created_at, 1, 10) AS d FROM interactions
 		 WHERE learner_id = ? ORDER BY d DESC`,
 		learnerID,
@@ -259,9 +260,9 @@ func (s *Store) CountLearnerSessionStreak(learnerID string) (int, error) {
 
 // SelfInitiatedRatio returns the ratio of self_initiated interactions on a concept
 // (0 if no interactions).
-func (s *Store) SelfInitiatedRatio(learnerID, concept string) (float64, error) {
+func (s *Store) SelfInitiatedRatio(ctx context.Context, learnerID, concept string) (float64, error) {
 	var total, selfInit int
-	err := s.db.QueryRow(
+	err := s.db.QueryRowContext(ctx,
 		`SELECT COUNT(*), COALESCE(SUM(self_initiated), 0)
 		 FROM interactions WHERE learner_id = ? AND concept = ?`,
 		learnerID, concept,
@@ -277,9 +278,9 @@ func (s *Store) SelfInitiatedRatio(learnerID, concept string) (float64, error) {
 
 // LastFailureOnConcept returns the most recent failed interaction on a concept,
 // or nil if none exists within `window`.
-func (s *Store) LastFailureOnConcept(learnerID, concept string, window time.Duration) (*models.Interaction, error) {
+func (s *Store) LastFailureOnConcept(ctx context.Context, learnerID, concept string, window time.Duration) (*models.Interaction, error) {
 	cutoff := time.Now().UTC().Add(-window)
-	rows, err := s.db.Query(
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+interactionCols+` FROM interactions
 		 WHERE learner_id = ? AND concept = ? AND success = 0 AND created_at >= ?
 		 ORDER BY created_at DESC LIMIT 1`,

@@ -5,6 +5,7 @@
 package tools
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -25,7 +26,7 @@ func TestApplyInteraction_CorrectAnswer_MasteryUp(t *testing.T) {
 	makeOwnerDomain(t, store, "L_owner", "math") // concepts: ["a","b"]
 
 	now := time.Now().UTC()
-	cs, _, err := applyInteraction(deps, "L_owner", interactionInput{
+	cs, _, err := applyInteraction(context.Background(), deps, "L_owner", interactionInput{
 		Concept:             "a",
 		ActivityType:        "RECALL_EXERCISE",
 		Success:             true,
@@ -54,7 +55,7 @@ func TestApplyInteraction_CorrectAnswer_MasteryUp(t *testing.T) {
 	}
 
 	// The write-back must have been persisted, not just returned.
-	stored, err := store.GetConceptState("L_owner", "a")
+	stored, err := store.GetConceptState(context.Background(), "L_owner", "a")
 	if err != nil {
 		t.Fatalf("GetConceptState: %v", err)
 	}
@@ -64,7 +65,7 @@ func TestApplyInteraction_CorrectAnswer_MasteryUp(t *testing.T) {
 	}
 
 	// The interaction row must have been created.
-	recents, err := store.GetRecentInteractionsByLearner("L_owner", 5)
+	recents, err := store.GetRecentInteractionsByLearner(context.Background(), "L_owner", 5)
 	if err != nil {
 		t.Fatalf("GetRecentInteractionsByLearner: %v", err)
 	}
@@ -100,11 +101,11 @@ func TestApplyInteraction_IncorrectAnswer_MasteryDown(t *testing.T) {
 		PSlip:         0.1,
 		PGuess:        0.2,
 	}
-	if err := store.UpsertConceptState(seed); err != nil {
+	if err := store.UpsertConceptState(context.Background(), seed); err != nil {
 		t.Fatalf("seed concept state: %v", err)
 	}
 
-	cs, _, err := applyInteraction(deps, "L_owner", interactionInput{
+	cs, _, err := applyInteraction(context.Background(), deps, "L_owner", interactionInput{
 		Concept:             "a",
 		ActivityType:        "RECALL_EXERCISE",
 		Success:             false, // → FSRS rating Again
@@ -130,7 +131,7 @@ func TestApplyInteraction_IncorrectAnswer_MasteryDown(t *testing.T) {
 	}
 
 	// The drop must be persisted.
-	stored, err := store.GetConceptState("L_owner", "a")
+	stored, err := store.GetConceptState(context.Background(), "L_owner", "a")
 	if err != nil {
 		t.Fatalf("GetConceptState: %v", err)
 	}
@@ -139,7 +140,7 @@ func TestApplyInteraction_IncorrectAnswer_MasteryDown(t *testing.T) {
 	}
 
 	// The failed interaction row must have been recorded.
-	recents, err := store.GetRecentInteractionsByLearner("L_owner", 5)
+	recents, err := store.GetRecentInteractionsByLearner(context.Background(), "L_owner", 5)
 	if err != nil {
 		t.Fatalf("GetRecentInteractionsByLearner: %v", err)
 	}

@@ -42,7 +42,7 @@ func registerSetDomainPriority(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		domain, err := deps.Store.GetDomainByID(params.DomainID)
+		domain, err := deps.Store.GetDomainByID(ctx, params.DomainID)
 		if err != nil {
 			r, _ := errorResult(fmt.Sprintf("domain not found: %s", params.DomainID))
 			return r, nil, nil
@@ -56,7 +56,7 @@ func registerSetDomainPriority(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		if err := deps.Store.SetDomainPriority(domain.ID, learnerID, *params.Rank); err != nil {
+		if err := deps.Store.SetDomainPriority(ctx, domain.ID, learnerID, *params.Rank); err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to set domain priority", err)
 			return r, nil, nil
 		}

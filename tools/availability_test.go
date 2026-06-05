@@ -4,6 +4,7 @@
 package tools
 
 import (
+	"context"
 	"testing"
 
 	"tutor-mcp/models"
@@ -48,7 +49,7 @@ func TestGetAvailabilityModel_PersistedRow(t *testing.T) {
 		SessionsWeek: 5,
 		DoNotDisturb: true,
 	}
-	if err := store.UpsertAvailability(a); err != nil {
+	if err := store.UpsertAvailability(context.Background(), a); err != nil {
 		t.Fatal(err)
 	}
 

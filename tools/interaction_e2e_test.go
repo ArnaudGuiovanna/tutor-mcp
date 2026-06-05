@@ -4,7 +4,10 @@
 
 package tools
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 // Issue #38: end-to-end regression guard for the BKT/FSRS/IRT update chain.
 // The unit tests on each algorithm cover the math; this test exercises the
@@ -57,7 +60,7 @@ func TestEndToEnd_TenSuccessesMoveMastery(t *testing.T) {
 	movedConcepts := 0
 	totalReps := 0
 	for _, c := range []string{"a", "b", "c", "d", "e"} {
-		cs, err := store.GetConceptState("L", c)
+		cs, err := store.GetConceptState(context.Background(), "L", c)
 		if err != nil || cs == nil {
 			continue
 		}

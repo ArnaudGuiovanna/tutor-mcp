@@ -5,6 +5,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -22,7 +23,7 @@ import (
 //
 // Used by [2] PhaseController. Idempotent at the row level: writing
 // the same phase twice is a no-op semantically (timestamp updates).
-func (s *Store) UpdateDomainPhase(domainID string, phase models.Phase, phaseEntryEntropy float64, now time.Time) error {
+func (s *Store) UpdateDomainPhase(ctx context.Context, domainID string, phase models.Phase, phaseEntryEntropy float64, now time.Time) error {
 	var entropyArg any
 	if phase == models.PhaseDiagnostic {
 		entropyArg = phaseEntryEntropy
@@ -31,7 +32,7 @@ func (s *Store) UpdateDomainPhase(domainID string, phase models.Phase, phaseEntr
 		// be stale otherwise.
 		entropyArg = nil
 	}
-	_, err := s.db.Exec(
+	_, err := s.db.ExecContext(ctx,
 		`UPDATE domains
 		 SET phase = ?, phase_changed_at = ?, phase_entry_entropy = ?
 		 WHERE id = ?`,
@@ -51,7 +52,7 @@ func (s *Store) UpdateDomainPhase(domainID string, phase models.Phase, phaseEntr
 // "Active" semantics follow MisconceptionResolutionWindow (3 most
 // recent interactions, see misconceptions.go). Returns empty map on
 // no matches; never nil.
-func (s *Store) GetActiveMisconceptionsBatch(learnerID string, concepts []string) (map[string]bool, error) {
+func (s *Store) GetActiveMisconceptionsBatch(ctx context.Context, learnerID string, concepts []string) (map[string]bool, error) {
 	out := make(map[string]bool, len(concepts))
 	if len(concepts) == 0 {
 		return out, nil
@@ -66,7 +67,7 @@ func (s *Store) GetActiveMisconceptionsBatch(learnerID string, concepts []string
 	}
 	args = append(args, MisconceptionResolutionWindow)
 
-	rows, err := s.db.Query(
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT concept, misconception_type
 		 FROM (
 		    SELECT concept, misconception_type,
@@ -97,8 +98,8 @@ func (s *Store) GetActiveMisconceptionsBatch(learnerID string, concepts []string
 // misconception group on a (learner, concept) pair, or nil if none.
 // Used by [2] orchestrator to pass a *MisconceptionGroup to
 // SelectAction (which expects a single misconception, not a list).
-func (s *Store) GetFirstActiveMisconception(learnerID, concept string) (*MisconceptionGroup, error) {
-	groups, err := s.GetActiveMisconceptions(learnerID, concept)
+func (s *Store) GetFirstActiveMisconception(ctx context.Context, learnerID, concept string) (*MisconceptionGroup, error) {
+	groups, err := s.GetActiveMisconceptions(ctx, learnerID, concept)
 	if err != nil {
 		return nil, err
 	}
@@ -123,7 +124,7 @@ func (s *Store) GetFirstActiveMisconception(learnerID, concept string) (*Misconc
 // (we don't store domain_id on interactions; the relationship is
 // derived from the concept membership). Caller passes the concept
 // set; we keep it Go-side for clarity.
-func (s *Store) GetRecentConceptsByDomain(learnerID string, domainConcepts []string, limit int) ([]string, error) {
+func (s *Store) GetRecentConceptsByDomain(ctx context.Context, learnerID string, domainConcepts []string, limit int) ([]string, error) {
 	if len(domainConcepts) == 0 || limit <= 0 {
 		return nil, nil
 	}
@@ -131,7 +132,7 @@ func (s *Store) GetRecentConceptsByDomain(learnerID string, domainConcepts []str
 	for _, c := range domainConcepts {
 		conceptSet[c] = true
 	}
-	rows, err := s.db.Query(
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT concept FROM interactions
 		 WHERE learner_id = ?
 		 ORDER BY created_at DESC
@@ -166,10 +167,10 @@ func (s *Store) GetRecentConceptsByDomain(learnerID string, domainConcepts []str
 // `domainConcepts` filters Go-side (interactions don't carry domain_id;
 // we filter by membership). Pass nil/empty to count across all
 // concepts (useful for tests).
-func (s *Store) CountInteractionsSince(learnerID string, since time.Time, domainConcepts []string) (int, error) {
+func (s *Store) CountInteractionsSince(ctx context.Context, learnerID string, since time.Time, domainConcepts []string) (int, error) {
 	if len(domainConcepts) == 0 {
 		var n int
-		err := s.db.QueryRow(
+		err := s.db.QueryRowContext(ctx,
 			`SELECT COUNT(*) FROM interactions
 			 WHERE learner_id = ? AND created_at >= ?`,
 			learnerID, since,
@@ -183,7 +184,7 @@ func (s *Store) CountInteractionsSince(learnerID string, since time.Time, domain
 	for _, c := range domainConcepts {
 		conceptSet[c] = true
 	}
-	rows, err := s.db.Query(
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT concept FROM interactions
 		 WHERE learner_id = ? AND created_at >= ?`,
 		learnerID, since,
@@ -225,11 +226,11 @@ type ActionHistoryCounts struct {
 // the most recent backwards) — a simple proxy for "stable above
 // mastery" since we don't snapshot historical PMastery values. The
 // proxy is sound when used after a successful BKT update push.
-func (s *Store) GetActionHistoryForConcept(learnerID, concept string, recentLimit int) (ActionHistoryCounts, error) {
+func (s *Store) GetActionHistoryForConcept(ctx context.Context, learnerID, concept string, recentLimit int) (ActionHistoryCounts, error) {
 	if recentLimit <= 0 {
 		recentLimit = 50
 	}
-	rows, err := s.db.Query(
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT activity_type, success FROM interactions
 		 WHERE learner_id = ? AND concept = ?
 		 ORDER BY created_at DESC

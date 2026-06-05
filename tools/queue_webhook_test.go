@@ -4,6 +4,7 @@
 package tools
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -115,7 +116,7 @@ func TestQueueWebhookMessage_HappyPath(t *testing.T) {
 	}
 
 	// DB state — message persisted as pending.
-	pending, err := store.GetPendingWebhookMessages("L_owner")
+	pending, err := store.GetPendingWebhookMessages(context.Background(), "L_owner")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +151,7 @@ func TestQueueWebhookMessage_StructuredBrief(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("got %q", resultText(res))
 	}
-	pending, err := store.GetPendingWebhookMessages("L_owner")
+	pending, err := store.GetPendingWebhookMessages(context.Background(), "L_owner")
 	if err != nil {
 		t.Fatal(err)
 	}

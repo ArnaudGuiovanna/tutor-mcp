@@ -55,7 +55,7 @@ func registerFeynmanChallenge(server *mcp.Server, deps *Deps) {
 		// Feynman challenge for a hallucinated or stale concept name that
 		// isn't part of the resolved domain — see issue #8 (mirrors the guard
 		// in record_transfer_result).
-		domain, err := resolveDomain(deps.Store, learnerID, params.DomainID)
+		domain, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
 		if err != nil || domain == nil {
 			if params.DomainID != "" {
 				deps.Logger.Error("feynman_challenge: domain not found by id", "err", err, "learner", learnerID, "domain_id", params.DomainID)
@@ -71,7 +71,7 @@ func registerFeynmanChallenge(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		cs, err := deps.Store.GetConceptState(learnerID, concept)
+		cs, err := deps.Store.GetConceptState(ctx, learnerID, concept)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "concept not found", err)
 			return r, nil, nil

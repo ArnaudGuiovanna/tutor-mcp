@@ -5,6 +5,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"time"
@@ -14,9 +15,9 @@ import (
 
 // ─── Affect States ──────────────────────────────────────────────────────────
 
-func (s *Store) UpsertAffectState(a *models.AffectState) error {
+func (s *Store) UpsertAffectState(ctx context.Context, a *models.AffectState) error {
 	a.CreatedAt = time.Now().UTC()
-	_, err := s.db.Exec(
+	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO affect_states (learner_id, session_id, energy, subject_confidence, satisfaction, perceived_difficulty, next_session_intent, autonomy_score, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(learner_id, session_id) DO UPDATE SET
@@ -35,8 +36,8 @@ func (s *Store) UpsertAffectState(a *models.AffectState) error {
 	return nil
 }
 
-func (s *Store) GetRecentAffectStates(learnerID string, limit int) ([]*models.AffectState, error) {
-	rows, err := s.db.Query(
+func (s *Store) GetRecentAffectStates(ctx context.Context, learnerID string, limit int) ([]*models.AffectState, error) {
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, learner_id, session_id, energy, subject_confidence, satisfaction, perceived_difficulty, next_session_intent, autonomy_score, created_at
 		 FROM affect_states WHERE learner_id = ? ORDER BY created_at DESC LIMIT ?`,
 		learnerID, limit,
@@ -63,9 +64,9 @@ func scanAffectStates(rows *sql.Rows) ([]*models.AffectState, error) {
 	return states, rows.Err()
 }
 
-func (s *Store) GetAffectBySession(learnerID, sessionID string) (*models.AffectState, error) {
+func (s *Store) GetAffectBySession(ctx context.Context, learnerID, sessionID string) (*models.AffectState, error) {
 	a := &models.AffectState{}
-	err := s.db.QueryRow(
+	err := s.db.QueryRowContext(ctx,
 		`SELECT id, learner_id, session_id, energy, subject_confidence, satisfaction, perceived_difficulty, next_session_intent, autonomy_score, created_at
 		 FROM affect_states WHERE learner_id = ? AND session_id = ?`,
 		learnerID, sessionID,
@@ -81,9 +82,9 @@ func (s *Store) GetAffectBySession(learnerID, sessionID string) (*models.AffectS
 
 // ─── Calibration Records ────────────────────────────────────────────────────
 
-func (s *Store) CreateCalibrationPrediction(r *models.CalibrationRecord) error {
+func (s *Store) CreateCalibrationPrediction(ctx context.Context, r *models.CalibrationRecord) error {
 	r.CreatedAt = time.Now().UTC()
-	_, err := s.db.Exec(
+	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO calibration_records (prediction_id, learner_id, concept_id, predicted, created_at)
 		 VALUES (?, ?, ?, ?, ?)`,
 		r.PredictionID, r.LearnerID, r.ConceptID, r.Predicted, r.CreatedAt,
@@ -98,8 +99,8 @@ func (s *Store) CreateCalibrationPrediction(r *models.CalibrationRecord) error {
 // supplied learner. The learner_id filter is enforced at the DB layer so that
 // any future caller cannot accidentally reintroduce the IDOR closed by issues
 // #34/#87 — defence-in-depth, mirrors Store.ArchiveDomain.
-func (s *Store) CompleteCalibrationRecord(predictionID, learnerID string, actual, delta float64) error {
-	result, err := s.db.Exec(
+func (s *Store) CompleteCalibrationRecord(ctx context.Context, predictionID, learnerID string, actual, delta float64) error {
+	result, err := s.db.ExecContext(ctx,
 		`UPDATE calibration_records SET actual = ?, delta = ?
 		 WHERE prediction_id = ? AND learner_id = ?`,
 		actual, delta, predictionID, learnerID,
@@ -118,10 +119,10 @@ func (s *Store) CompleteCalibrationRecord(predictionID, learnerID string, actual
 // learner. The learner_id filter is enforced at the DB layer so callers cannot
 // accidentally surface another learner's row — defence-in-depth, mirrors
 // Store.ArchiveDomain.
-func (s *Store) GetCalibrationRecord(predictionID, learnerID string) (*models.CalibrationRecord, error) {
+func (s *Store) GetCalibrationRecord(ctx context.Context, predictionID, learnerID string) (*models.CalibrationRecord, error) {
 	r := &models.CalibrationRecord{}
 	var actual, delta sql.NullFloat64
-	err := s.db.QueryRow(
+	err := s.db.QueryRowContext(ctx,
 		`SELECT prediction_id, learner_id, concept_id, predicted, actual, delta, created_at
 		 FROM calibration_records WHERE prediction_id = ? AND learner_id = ?`,
 		predictionID, learnerID,
@@ -141,9 +142,9 @@ func (s *Store) GetCalibrationRecord(predictionID, learnerID string) (*models.Ca
 	return r, nil
 }
 
-func (s *Store) GetCalibrationBias(learnerID string, limit int) (float64, error) {
+func (s *Store) GetCalibrationBias(ctx context.Context, learnerID string, limit int) (float64, error) {
 	var bias sql.NullFloat64
-	err := s.db.QueryRow(
+	err := s.db.QueryRowContext(ctx,
 		`SELECT AVG(delta) FROM (
 		    SELECT delta FROM calibration_records
 		    WHERE learner_id = ? AND delta IS NOT NULL
@@ -156,8 +157,8 @@ func (s *Store) GetCalibrationBias(learnerID string, limit int) (float64, error)
 	return bias.Float64, nil
 }
 
-func (s *Store) GetCalibrationBiasHistory(learnerID string, limit int) ([]float64, error) {
-	rows, err := s.db.Query(
+func (s *Store) GetCalibrationBiasHistory(ctx context.Context, learnerID string, limit int) ([]float64, error) {
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT delta FROM calibration_records
 		 WHERE learner_id = ? AND delta IS NOT NULL
 		 ORDER BY created_at DESC LIMIT ?`,
@@ -180,9 +181,9 @@ func (s *Store) GetCalibrationBiasHistory(learnerID string, limit int) ([]float6
 
 // ─── Transfer Records ───────────────────────────────────────────────────────
 
-func (s *Store) CreateTransferRecord(r *models.TransferRecord) error {
+func (s *Store) CreateTransferRecord(ctx context.Context, r *models.TransferRecord) error {
 	r.CreatedAt = time.Now().UTC()
-	_, err := s.db.Exec(
+	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO transfer_records (learner_id, concept_id, context_type, score, session_id, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		r.LearnerID, r.ConceptID, r.ContextType, r.Score, r.SessionID, r.CreatedAt,
@@ -193,8 +194,8 @@ func (s *Store) CreateTransferRecord(r *models.TransferRecord) error {
 	return nil
 }
 
-func (s *Store) GetTransferScores(learnerID, conceptID string) ([]*models.TransferRecord, error) {
-	rows, err := s.db.Query(
+func (s *Store) GetTransferScores(ctx context.Context, learnerID, conceptID string) ([]*models.TransferRecord, error) {
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, learner_id, concept_id, context_type, score, session_id, created_at
 		 FROM transfer_records WHERE learner_id = ? AND concept_id = ?
 		 ORDER BY created_at DESC`,
@@ -219,8 +220,8 @@ func (s *Store) GetTransferScores(learnerID, conceptID string) ([]*models.Transf
 // learner across all concepts. Used by the metacognitive alert pipeline to
 // detect TRANSFER_BLOCKED (mastered concepts whose context-transfer scores
 // remain below 0.50 on 2+ contexts). Newest-first.
-func (s *Store) GetTransferRecordsByLearner(learnerID string) ([]*models.TransferRecord, error) {
-	rows, err := s.db.Query(
+func (s *Store) GetTransferRecordsByLearner(ctx context.Context, learnerID string) ([]*models.TransferRecord, error) {
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, learner_id, concept_id, context_type, score, session_id, created_at
 		 FROM transfer_records WHERE learner_id = ?
 		 ORDER BY created_at DESC`,
@@ -243,8 +244,8 @@ func (s *Store) GetTransferRecordsByLearner(learnerID string) ([]*models.Transfe
 
 // ─── Autonomy Queries ───────────────────────────────────────────────────────
 
-func (s *Store) GetHintStatsForMastered(learnerID string, threshold float64) (hints int, total int, err error) {
-	err = s.db.QueryRow(
+func (s *Store) GetHintStatsForMastered(ctx context.Context, learnerID string, threshold float64) (hints int, total int, err error) {
+	err = s.db.QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(i.hints_requested), 0), COUNT(*)
 		 FROM interactions i
 		 JOIN concept_states cs ON i.learner_id = cs.learner_id AND i.concept = cs.concept
@@ -257,8 +258,8 @@ func (s *Store) GetHintStatsForMastered(learnerID string, threshold float64) (hi
 	return hints, total, nil
 }
 
-func (s *Store) UpdateAffectAutonomyScore(learnerID, sessionID string, score float64) error {
-	_, err := s.db.Exec(
+func (s *Store) UpdateAffectAutonomyScore(ctx context.Context, learnerID, sessionID string, score float64) error {
+	_, err := s.db.ExecContext(ctx,
 		`UPDATE affect_states SET autonomy_score = ? WHERE learner_id = ? AND session_id = ?`,
 		score, learnerID, sessionID,
 	)
@@ -268,8 +269,8 @@ func (s *Store) UpdateAffectAutonomyScore(learnerID, sessionID string, score flo
 	return nil
 }
 
-func (s *Store) CountProactiveReviews(learnerID string, since time.Time) (proactive int, total int, err error) {
-	err = s.db.QueryRow(
+func (s *Store) CountProactiveReviews(ctx context.Context, learnerID string, since time.Time) (proactive int, total int, err error) {
+	err = s.db.QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(is_proactive_review), 0), COUNT(*)
 		 FROM interactions
 		 WHERE learner_id = ? AND created_at >= ? AND activity_type != 'NEW_CONCEPT' AND activity_type != 'REST' AND activity_type != 'SETUP_DOMAIN'`,

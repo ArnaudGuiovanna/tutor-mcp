@@ -4,6 +4,7 @@
 package tools
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -87,8 +88,8 @@ func TestLearningNegotiation_LearnerProposalAccepted(t *testing.T) {
 	cs := models.NewConceptState("L_owner", "a")
 	cs.PMastery = 0.5
 	cs.Difficulty = 5.0
-	_ = store.InsertConceptStateIfNotExists(cs)
-	_ = store.UpsertConceptState(cs)
+	_ = store.InsertConceptStateIfNotExists(context.Background(), cs)
+	_ = store.UpsertConceptState(context.Background(), cs)
 
 	res := callTool(t, deps, registerLearningNegotiation, "L_owner", "learning_negotiation", map[string]any{
 		"session_id":        "s1",
@@ -123,7 +124,7 @@ func TestLearningNegotiation_StructuredOverrideAcceptedAndConsumedOnce(t *testin
 	cs := models.NewConceptState("L_owner", "a")
 	cs.PMastery = 0.5
 	cs.Difficulty = 5.0
-	if err := store.UpsertConceptState(cs); err != nil {
+	if err := store.UpsertConceptState(context.Background(), cs); err != nil {
 		t.Fatal(err)
 	}
 
@@ -155,7 +156,7 @@ func TestLearningNegotiation_StructuredOverrideAcceptedAndConsumedOnce(t *testin
 		Format:           "mixed",
 		EstimatedMinutes: 10,
 	}
-	gotActivity, consume, err := ConsumeLearningNegotiationOverride(
+	gotActivity, consume, err := ConsumeLearningNegotiationOverride(context.Background(),
 		store, "L_owner", d, systemActivity, nil, time.Now().UTC(),
 	)
 	if err != nil {
@@ -174,7 +175,7 @@ func TestLearningNegotiation_StructuredOverrideAcceptedAndConsumedOnce(t *testin
 		t.Fatalf("expected micro diagnostic to cap duration at 5 minutes, got %d", gotActivity.EstimatedMinutes)
 	}
 
-	secondActivity, second, err := ConsumeLearningNegotiationOverride(
+	secondActivity, second, err := ConsumeLearningNegotiationOverride(context.Background(),
 		store, "L_owner", d, systemActivity, nil, time.Now().UTC(),
 	)
 	if err != nil {
@@ -232,7 +233,7 @@ func TestLearningNegotiation_RejectedProposalDoesNotPersistOverride(t *testing.T
 	}
 
 	systemActivity := models.Activity{Type: models.ActivityRecall, Concept: "a", Format: "mixed", EstimatedMinutes: 10}
-	_, consume, err := ConsumeLearningNegotiationOverride(store, "L_owner", d, systemActivity, nil, time.Now().UTC())
+	_, consume, err := ConsumeLearningNegotiationOverride(context.Background(), store, "L_owner", d, systemActivity, nil, time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,12 +258,12 @@ func TestConsumeLearningNegotiationOverride_ExpiredOverride(t *testing.T) {
 			EstimatedMinutes: 10,
 		},
 	}
-	if _, err := PersistLearningNegotiationOverride(store, "L_owner", override, now.Add(-2*time.Minute)); err != nil {
+	if _, err := PersistLearningNegotiationOverride(context.Background(), store, "L_owner", override, now.Add(-2*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 
 	systemActivity := models.Activity{Type: models.ActivityRecall, Concept: "a", Format: "mixed", EstimatedMinutes: 10}
-	gotActivity, consume, err := ConsumeLearningNegotiationOverride(store, "L_owner", d, systemActivity, nil, now)
+	gotActivity, consume, err := ConsumeLearningNegotiationOverride(context.Background(), store, "L_owner", d, systemActivity, nil, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,12 +291,12 @@ func TestConsumeLearningNegotiationOverride_RejectsHardPrerequisiteBypass(t *tes
 			EstimatedMinutes: 10,
 		},
 	}
-	if _, err := PersistLearningNegotiationOverride(store, "L_owner", override, now); err != nil {
+	if _, err := PersistLearningNegotiationOverride(context.Background(), store, "L_owner", override, now); err != nil {
 		t.Fatal(err)
 	}
 
 	systemActivity := models.Activity{Type: models.ActivityRecall, Concept: "a", Format: "mixed", EstimatedMinutes: 10}
-	gotActivity, consume, err := ConsumeLearningNegotiationOverride(store, "L_owner", d, systemActivity, nil, now)
+	gotActivity, consume, err := ConsumeLearningNegotiationOverride(context.Background(), store, "L_owner", d, systemActivity, nil, now)
 	if err != nil {
 		t.Fatal(err)
 	}

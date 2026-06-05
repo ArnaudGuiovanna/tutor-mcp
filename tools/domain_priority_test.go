@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -70,7 +71,7 @@ func TestSetDomainPriority_HappyPath(t *testing.T) {
 		t.Fatalf("priority_rank mismatch: %+v", out)
 	}
 
-	got, err := store.GetDomainByID(d.ID)
+	got, err := store.GetDomainByID(context.Background(), d.ID)
 	if err != nil {
 		t.Fatalf("GetDomainByID: %v", err)
 	}
@@ -94,7 +95,7 @@ func TestSetDomainPriority_ForeignDomainRejected(t *testing.T) {
 		t.Fatalf("expected not found, got %q", resultText(res))
 	}
 
-	got, err := store.GetDomainByID(d.ID)
+	got, err := store.GetDomainByID(context.Background(), d.ID)
 	if err != nil {
 		t.Fatalf("GetDomainByID: %v", err)
 	}
@@ -106,7 +107,7 @@ func TestSetDomainPriority_ForeignDomainRejected(t *testing.T) {
 func TestSetDomainPriority_ArchivedDomainRejected(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	d := makeOwnerDomain(t, store, "L_owner", "math")
-	if err := store.ArchiveDomain(d.ID, "L_owner"); err != nil {
+	if err := store.ArchiveDomain(context.Background(), d.ID, "L_owner"); err != nil {
 		t.Fatalf("archive domain: %v", err)
 	}
 
@@ -121,7 +122,7 @@ func TestSetDomainPriority_ArchivedDomainRejected(t *testing.T) {
 		t.Fatalf("expected archived-domain error, got %q", resultText(res))
 	}
 
-	got, err := store.GetDomainByID(d.ID)
+	got, err := store.GetDomainByID(context.Background(), d.ID)
 	if err != nil {
 		t.Fatalf("GetDomainByID: %v", err)
 	}

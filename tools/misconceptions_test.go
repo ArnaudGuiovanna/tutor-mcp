@@ -4,6 +4,7 @@
 package tools
 
 import (
+	"context"
 	"testing"
 
 	"tutor-mcp/models"
@@ -47,7 +48,7 @@ func TestGetMisconceptions_FilterByConcept(t *testing.T) {
 	store, deps := setupToolsTest(t)
 
 	// Seed an interaction with a misconception.
-	if err := store.CreateInteraction(&models.Interaction{
+	if err := store.CreateInteraction(context.Background(), &models.Interaction{
 		LearnerID:           "L_owner",
 		Concept:             "loops",
 		ActivityType:        "RECALL_EXERCISE",

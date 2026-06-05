@@ -89,7 +89,7 @@ func registerLearningNegotiation(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		domain, err := resolveDomain(deps.Store, learnerID, params.DomainID)
+		domain, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
 		if err != nil || domain == nil {
 			if params.DomainID != "" {
 				deps.Logger.Error("learning_negotiation: domain not found by id", "err", err, "learner", learnerID, "domain_id", params.DomainID)
@@ -115,7 +115,7 @@ func registerLearningNegotiation(server *mcp.Server, deps *Deps) {
 			}
 		}
 
-		states, _ := deps.Store.GetConceptStatesByLearner(learnerID)
+		states, _ := deps.Store.GetConceptStatesByLearner(ctx, learnerID)
 
 		domainConcepts := make(map[string]bool)
 		for _, c := range domain.Graph.Concepts {
@@ -134,7 +134,7 @@ func registerLearningNegotiation(server *mcp.Server, deps *Deps) {
 		// shown to the learner during negotiation matches what would be
 		// served on the next activity request.
 		now := time.Now().UTC()
-		systemActivity, orchErr := engine.Orchestrate(deps.Store, engine.OrchestratorInput{
+		systemActivity, orchErr := engine.Orchestrate(ctx, deps.Store, engine.OrchestratorInput{
 			LearnerID: learnerID,
 			DomainID:  domain.ID,
 			Now:       now,
@@ -169,7 +169,7 @@ func registerLearningNegotiation(server *mcp.Server, deps *Deps) {
 
 			systemConcept := systemActivity.Concept
 			if concept != "" && systemConcept != "" && systemConcept != concept {
-				systemCS, _ := deps.Store.GetConceptState(learnerID, systemConcept)
+				systemCS, _ := deps.Store.GetConceptState(ctx, learnerID, systemConcept)
 				if systemCS != nil && systemCS.LastReview != nil {
 					elapsed := int(now.Sub(*systemCS.LastReview).Hours() / 24)
 					currentRet := algorithms.Retrievability(elapsed, systemCS.Stability)
@@ -233,7 +233,7 @@ func registerLearningNegotiation(server *mcp.Server, deps *Deps) {
 				})
 			}
 			if concept != "" {
-				learnerCS, _ := deps.Store.GetConceptState(learnerID, concept)
+				learnerCS, _ := deps.Store.GetConceptState(ctx, learnerID, concept)
 				if proposal.ActivityType == models.ActivityMasteryChallenge ||
 					proposal.ActivityType == models.ActivityFeynmanPrompt ||
 					proposal.ActivityType == models.ActivityTransferProbe {
@@ -260,7 +260,7 @@ func registerLearningNegotiation(server *mcp.Server, deps *Deps) {
 			var override *LearningNegotiationOverride
 			if accepted {
 				ov := buildLearningNegotiationOverride(params, domain.ID, systemActivity, domainStates, concept, now)
-				id, err := PersistLearningNegotiationOverride(deps.Store, learnerID, &ov, now)
+				id, err := PersistLearningNegotiationOverride(ctx, deps.Store, learnerID, &ov, now)
 				if err != nil {
 					deps.Logger.Error("learning_negotiation: failed to persist override", "err", err, "learner", learnerID, "domain", domain.ID)
 					r, _ := errorResult("could not persist negotiated override")

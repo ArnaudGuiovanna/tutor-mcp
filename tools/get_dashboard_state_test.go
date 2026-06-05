@@ -4,6 +4,7 @@
 package tools
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -58,7 +59,7 @@ func TestGetDashboardState_ColorEnumIsEnglish(t *testing.T) {
 		LastReview: &last,
 		PMastery:   0.4,
 	}
-	if err := store.UpsertConceptState(seed); err != nil {
+	if err := store.UpsertConceptState(context.Background(), seed); err != nil {
 		t.Fatalf("seed concept state: %v", err)
 	}
 

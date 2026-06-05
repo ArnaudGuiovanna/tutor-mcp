@@ -5,6 +5,7 @@
 package engine
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -36,7 +37,7 @@ func TestOrchestrate_EscapePath_NoFringeAfterRetry(t *testing.T) {
 	// Master "A" so external fringe is empty in INSTRUCTION.
 	setMastery(t, store, "A", 0.95)
 
-	activity, err := Orchestrate(store, defaultInput(domainID))
+	activity, err := Orchestrate(context.Background(), store, defaultInput(domainID))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -67,7 +68,7 @@ func TestOrchestrate_EscapePath_MaintenanceFallbackToInstruction_BothNoFringe(t 
 	// Easier: drop A out of goal_relevance entirely so both phases return NoFringe.
 	setGoalRelevance(t, store, domainID, map[string]float64{"DUMMY": 1.0})
 
-	activity, err := Orchestrate(store, defaultInput(domainID))
+	activity, err := Orchestrate(context.Background(), store, defaultInput(domainID))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -96,7 +97,7 @@ func TestOrchestrate_GateEscape_OVERLOAD_ComposesCloseSession(t *testing.T) {
 	// OVERLOAD threshold is 45 min ; pass an "older than 45 min" timestamp.
 	input.SessionStart = time.Now().UTC().Add(-1 * time.Hour)
 
-	activity, err := Orchestrate(store, input)
+	activity, err := Orchestrate(context.Background(), store, input)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -122,7 +123,7 @@ func TestOrchestrate_GateEscape_FreshSessionDoesNotCloseSession(t *testing.T) {
 	input := defaultInput(domainID)
 	input.SessionStart = time.Now().UTC()
 
-	activity, err := Orchestrate(store, input)
+	activity, err := Orchestrate(context.Background(), store, input)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

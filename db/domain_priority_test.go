@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"testing"
 	"time"
@@ -47,7 +48,7 @@ func TestMigrate_AddsNullableDomainPriorityRank(t *testing.T) {
 
 func createPriorityTestDomain(t *testing.T, store *Store, learnerID, name string, createdAt time.Time) *models.Domain {
 	t.Helper()
-	d, err := store.CreateDomain(learnerID, name, "", models.KnowledgeSpace{
+	d, err := store.CreateDomain(context.Background(), learnerID, name, "", models.KnowledgeSpace{
 		Concepts:      []string{name + "_concept"},
 		Prerequisites: map[string][]string{},
 	})
@@ -66,7 +67,7 @@ func TestGetDomainByLearner_PreservesCreatedAtFallbackWhenPriorityNull(t *testin
 	old := createPriorityTestDomain(t, store, "L1", "old", base)
 	newer := createPriorityTestDomain(t, store, "L1", "newer", base.Add(time.Hour))
 
-	got, err := store.GetDomainByLearner("L1")
+	got, err := store.GetDomainByLearner(context.Background(), "L1")
 	if err != nil {
 		t.Fatalf("GetDomainByLearner: %v", err)
 	}
@@ -84,11 +85,11 @@ func TestGetDomainByLearner_ExplicitPriorityBeatsNewerUnrankedDomain(t *testing.
 	preferred := createPriorityTestDomain(t, store, "L1", "preferred", base)
 	newer := createPriorityTestDomain(t, store, "L1", "newer", base.Add(time.Hour))
 
-	if err := store.SetDomainPriority(preferred.ID, "L1", 1); err != nil {
+	if err := store.SetDomainPriority(context.Background(), preferred.ID, "L1", 1); err != nil {
 		t.Fatalf("SetDomainPriority: %v", err)
 	}
 
-	got, err := store.GetDomainByLearner("L1")
+	got, err := store.GetDomainByLearner(context.Background(), "L1")
 	if err != nil {
 		t.Fatalf("GetDomainByLearner: %v", err)
 	}
@@ -107,14 +108,14 @@ func TestGetDomainByLearner_LowerRankWinsThenCreatedAtTieBreak(t *testing.T) {
 	highPriority := createPriorityTestDomain(t, store, "L1", "high", base.Add(time.Hour))
 	unrankedNewest := createPriorityTestDomain(t, store, "L1", "unranked", base.Add(2*time.Hour))
 
-	if err := store.SetDomainPriority(lowPriority.ID, "L1", 5); err != nil {
+	if err := store.SetDomainPriority(context.Background(), lowPriority.ID, "L1", 5); err != nil {
 		t.Fatalf("set low priority: %v", err)
 	}
-	if err := store.SetDomainPriority(highPriority.ID, "L1", 2); err != nil {
+	if err := store.SetDomainPriority(context.Background(), highPriority.ID, "L1", 2); err != nil {
 		t.Fatalf("set high priority: %v", err)
 	}
 
-	got, err := store.GetDomainByLearner("L1")
+	got, err := store.GetDomainByLearner(context.Background(), "L1")
 	if err != nil {
 		t.Fatalf("GetDomainByLearner: %v", err)
 	}
@@ -122,10 +123,10 @@ func TestGetDomainByLearner_LowerRankWinsThenCreatedAtTieBreak(t *testing.T) {
 		t.Fatalf("lower explicit rank should win over higher rank and unranked newest: got %s, want %s", got.ID, highPriority.ID)
 	}
 
-	if err := store.SetDomainPriority(unrankedNewest.ID, "L1", 2); err != nil {
+	if err := store.SetDomainPriority(context.Background(), unrankedNewest.ID, "L1", 2); err != nil {
 		t.Fatalf("set tied priority: %v", err)
 	}
-	got, err = store.GetDomainByLearner("L1")
+	got, err = store.GetDomainByLearner(context.Background(), "L1")
 	if err != nil {
 		t.Fatalf("GetDomainByLearner after tie: %v", err)
 	}
@@ -137,14 +138,14 @@ func TestGetDomainByLearner_LowerRankWinsThenCreatedAtTieBreak(t *testing.T) {
 func TestSetDomainPriority_RejectsArchivedDomain(t *testing.T) {
 	store := setupTestDB(t)
 	d := createPriorityTestDomain(t, store, "L1", "archived", time.Now().UTC())
-	if err := store.ArchiveDomain(d.ID, "L1"); err != nil {
+	if err := store.ArchiveDomain(context.Background(), d.ID, "L1"); err != nil {
 		t.Fatalf("archive domain: %v", err)
 	}
-	if err := store.SetDomainPriority(d.ID, "L1", 1); err == nil {
+	if err := store.SetDomainPriority(context.Background(), d.ID, "L1", 1); err == nil {
 		t.Fatalf("expected archived domain priority update to fail")
 	}
 
-	got, err := store.GetDomainByID(d.ID)
+	got, err := store.GetDomainByID(context.Background(), d.ID)
 	if err != nil {
 		t.Fatalf("GetDomainByID: %v", err)
 	}

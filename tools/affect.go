@@ -76,12 +76,12 @@ func registerRecordAffect(server *mcp.Server, deps *Deps) {
 			NextSessionIntent:   params.NextSessionIntent,
 		}
 
-		if err := deps.Store.UpsertAffectState(affect); err != nil {
+		if err := deps.Store.UpsertAffectState(ctx, affect); err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to record affect", err)
 			return r, nil, nil
 		}
 
-		saved, err := deps.Store.GetAffectBySession(learnerID, params.SessionID)
+		saved, err := deps.Store.GetAffectBySession(ctx, learnerID, params.SessionID)
 		if err != nil {
 			saved = affect
 		}
@@ -100,7 +100,7 @@ func registerRecordAffect(server *mcp.Server, deps *Deps) {
 		// End-of-session: compute calibration_bias_delta
 		if params.Satisfaction > 0 && params.PerceivedDifficulty > 0 {
 			perceivedAbility := float64(params.PerceivedDifficulty) / 4.0
-			sessionInteractions, _ := deps.Store.GetSessionInteractions(learnerID)
+			sessionInteractions, _ := deps.Store.GetSessionInteractions(ctx, learnerID)
 			if len(sessionInteractions) > 0 {
 				successes := 0
 				for _, i := range sessionInteractions {
@@ -115,9 +115,9 @@ func registerRecordAffect(server *mcp.Server, deps *Deps) {
 
 			// Compute and persist autonomy score
 			since := time.Now().UTC().Add(-30 * 24 * time.Hour)
-			allInteractions, _ := deps.Store.GetInteractionsSince(learnerID, since)
-			allStates, _ := deps.Store.GetConceptStatesByLearner(learnerID)
-			calibBias, _ := deps.Store.GetCalibrationBias(learnerID, 20)
+			allInteractions, _ := deps.Store.GetInteractionsSince(ctx, learnerID, since)
+			allStates, _ := deps.Store.GetConceptStatesByLearner(ctx, learnerID)
+			calibBias, _ := deps.Store.GetCalibrationBias(ctx, learnerID, 20)
 
 			autonomy := engine.ComputeAutonomyMetrics(engine.AutonomyInput{
 				Interactions:    allInteractions,
@@ -126,7 +126,7 @@ func registerRecordAffect(server *mcp.Server, deps *Deps) {
 				SessionGap:      2 * time.Hour,
 			})
 
-			_ = deps.Store.UpdateAffectAutonomyScore(learnerID, params.SessionID, autonomy.Score)
+			_ = deps.Store.UpdateAffectAutonomyScore(ctx, learnerID, params.SessionID, autonomy.Score)
 			result["autonomy_score"] = autonomy.Score
 		}
 

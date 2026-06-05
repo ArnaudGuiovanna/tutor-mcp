@@ -4,6 +4,7 @@
 package tools
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -45,8 +46,8 @@ func TestTransferChallenge_RejectsConceptOutsideDomain(t *testing.T) {
 	// challenge for a stale/hallucinated concept name.
 	cs := models.NewConceptState("L_owner", "orphan")
 	cs.PMastery = 0.95
-	_ = store.InsertConceptStateIfNotExists(cs)
-	_ = store.UpsertConceptState(cs)
+	_ = store.InsertConceptStateIfNotExists(context.Background(), cs)
+	_ = store.UpsertConceptState(context.Background(), cs)
 	seedDomain(t, store, "L_owner", "calc") // domain does NOT contain "orphan"
 
 	res := callTool(t, deps, registerTransferChallenge, "L_owner", "transfer_challenge", map[string]any{"concept": "orphan"})
@@ -60,8 +61,8 @@ func TestTransferChallenge_NotMastered(t *testing.T) {
 	seedDomain(t, store, "L_owner", "calc")
 	cs := models.NewConceptState("L_owner", "calc")
 	cs.PMastery = 0.3
-	_ = store.InsertConceptStateIfNotExists(cs)
-	_ = store.UpsertConceptState(cs)
+	_ = store.InsertConceptStateIfNotExists(context.Background(), cs)
+	_ = store.UpsertConceptState(context.Background(), cs)
 
 	res := callTool(t, deps, registerTransferChallenge, "L_owner", "transfer_challenge", map[string]any{"concept": "calc"})
 	if res.IsError {
@@ -78,8 +79,8 @@ func TestTransferChallenge_DefaultContextType(t *testing.T) {
 	seedDomain(t, store, "L_owner", "calc")
 	cs := models.NewConceptState("L_owner", "calc")
 	cs.PMastery = 0.95
-	_ = store.InsertConceptStateIfNotExists(cs)
-	_ = store.UpsertConceptState(cs)
+	_ = store.InsertConceptStateIfNotExists(context.Background(), cs)
+	_ = store.UpsertConceptState(context.Background(), cs)
 
 	res := callTool(t, deps, registerTransferChallenge, "L_owner", "transfer_challenge", map[string]any{"concept": "calc"})
 	if res.IsError {
@@ -108,8 +109,8 @@ func TestTransferChallenge_CustomContextType(t *testing.T) {
 	seedDomain(t, store, "L_owner", "calc")
 	cs := models.NewConceptState("L_owner", "calc")
 	cs.PMastery = 0.95
-	_ = store.InsertConceptStateIfNotExists(cs)
-	_ = store.UpsertConceptState(cs)
+	_ = store.InsertConceptStateIfNotExists(context.Background(), cs)
+	_ = store.UpsertConceptState(context.Background(), cs)
 
 	res := callTool(t, deps, registerTransferChallenge, "L_owner", "transfer_challenge", map[string]any{
 		"concept":      "calc",
@@ -129,8 +130,8 @@ func TestTransferChallenge_AcceptsLegacyConceptID(t *testing.T) {
 	seedDomain(t, store, "L_owner", "legacy_calc")
 	cs := models.NewConceptState("L_owner", "legacy_calc")
 	cs.PMastery = 0.95
-	_ = store.InsertConceptStateIfNotExists(cs)
-	_ = store.UpsertConceptState(cs)
+	_ = store.InsertConceptStateIfNotExists(context.Background(), cs)
+	_ = store.UpsertConceptState(context.Background(), cs)
 
 	res := callTool(t, deps, registerTransferChallenge, "L_owner", "transfer_challenge", map[string]any{"concept_id": "legacy_calc"})
 	if res.IsError {
@@ -193,7 +194,7 @@ func TestRecordTransferResult_HappyPath(t *testing.T) {
 	}
 
 	// DB state — record persisted.
-	scores, err := store.GetTransferScores("L_owner", "a")
+	scores, err := store.GetTransferScores(context.Background(), "L_owner", "a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +229,7 @@ func TestRecordTransferResult_RejectsScoreOutsideUnitInterval(t *testing.T) {
 	}
 
 	// Nothing persisted on rejection.
-	scores, _ := store.GetTransferScores("L_owner", "a")
+	scores, _ := store.GetTransferScores(context.Background(), "L_owner", "a")
 	if len(scores) != 0 {
 		t.Fatalf("expected no transfer rows, got %d", len(scores))
 	}
@@ -272,7 +273,7 @@ func TestRecordTransferResult_RejectsUnknownConcept(t *testing.T) {
 	}
 
 	// No orphan row should have been persisted.
-	scores, _ := store.GetTransferScores("L_owner", "ghost")
+	scores, _ := store.GetTransferScores(context.Background(), "L_owner", "ghost")
 	if len(scores) != 0 {
 		t.Fatalf("orphan transfer row persisted for unknown concept: %+v", scores)
 	}
@@ -322,7 +323,7 @@ func TestRecordTransferResult_AllowsKnownContextTypes(t *testing.T) {
 			if out["recorded"] != true {
 				t.Fatalf("context_type=%q: expected recorded=true, got %v", ct, out)
 			}
-			scores, _ := store.GetTransferScores("L_owner", "a")
+			scores, _ := store.GetTransferScores(context.Background(), "L_owner", "a")
 			if len(scores) != 1 {
 				t.Fatalf("context_type=%q: expected 1 transfer row, got %d", ct, len(scores))
 			}
@@ -336,7 +337,7 @@ func TestRecordTransferResult_AllowsKnownContextTypes(t *testing.T) {
 func TestRecordTransferResult_DomainIDRejectsForeignDomain(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	makeOwnerDomain(t, store, "L_owner", "math")
-	foreign, err := store.CreateDomain("L_other", "shared", "", models.KnowledgeSpace{
+	foreign, err := store.CreateDomain(context.Background(), "L_other", "shared", "", models.KnowledgeSpace{
 		Concepts: []string{"a"},
 	})
 	if err != nil {

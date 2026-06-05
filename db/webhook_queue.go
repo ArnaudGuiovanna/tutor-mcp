@@ -5,6 +5,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"time"
@@ -14,7 +15,7 @@ import (
 
 // EnqueueWebhookMessage persists a scheduled, LLM-authored webhook nudge.
 // Returns the inserted row ID.
-func (s *Store) EnqueueWebhookMessage(learnerID, kind, content string, scheduledFor, expiresAt time.Time, priority int) (int64, error) {
+func (s *Store) EnqueueWebhookMessage(ctx context.Context, learnerID, kind, content string, scheduledFor, expiresAt time.Time, priority int) (int64, error) {
 	if kind == "" {
 		return 0, fmt.Errorf("kind is required")
 	}
@@ -28,7 +29,7 @@ func (s *Store) EnqueueWebhookMessage(learnerID, kind, content string, scheduled
 	if !expiresAt.IsZero() {
 		expires = expiresAt.UTC()
 	}
-	result, err := s.db.Exec(
+	result, err := s.db.ExecContext(ctx,
 		`INSERT INTO webhook_message_queue (learner_id, kind, scheduled_for, expires_at, content, priority, status, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
 		learnerID, kind, scheduledFor.UTC(), expires, content, priority, time.Now().UTC(),
@@ -46,7 +47,7 @@ func (s *Store) EnqueueWebhookMessage(learnerID, kind, content string, scheduled
 // CreateWebhookPushLog records a learner-facing push after the webhook send
 // succeeds. queueID can be zero for Go fallback messages that did not originate
 // from webhook_message_queue.
-func (s *Store) CreateWebhookPushLog(learnerID string, queueID int64, brief *models.WebhookBrief, pushedAt time.Time) (int64, error) {
+func (s *Store) CreateWebhookPushLog(ctx context.Context, learnerID string, queueID int64, brief *models.WebhookBrief, pushedAt time.Time) (int64, error) {
 	if learnerID == "" {
 		return 0, fmt.Errorf("learner_id is required")
 	}
@@ -60,7 +61,7 @@ func (s *Store) CreateWebhookPushLog(learnerID string, queueID int64, brief *mod
 	if pushedAt.IsZero() {
 		pushedAt = time.Now().UTC()
 	}
-	result, err := s.db.Exec(
+	result, err := s.db.ExecContext(ctx,
 		`INSERT INTO webhook_push_log
 		 (learner_id, queue_id, kind, domain_id, domain_name, concept, trigger_text,
 		  pedagogical_intent, learning_gain, open_loop, next_action, pushed_at, created_at)
@@ -82,7 +83,7 @@ func (s *Store) CreateWebhookPushLog(learnerID string, queueID int64, brief *mod
 // GetLatestOpenWebhookPush returns the newest unresolved pedagogical push for
 // a learner. If domainID is provided, global pushes with an empty domain_id
 // and matching domain pushes are both eligible.
-func (s *Store) GetLatestOpenWebhookPush(learnerID, domainID string, since time.Time) (*models.WebhookPushLog, error) {
+func (s *Store) GetLatestOpenWebhookPush(ctx context.Context, learnerID, domainID string, since time.Time) (*models.WebhookPushLog, error) {
 	query := `SELECT id, learner_id, queue_id, kind, domain_id, domain_name, concept,
 		         trigger_text, pedagogical_intent, learning_gain, open_loop, next_action,
 		         pushed_at, opened_session_at, concept_addressed, created_at
@@ -96,7 +97,7 @@ func (s *Store) GetLatestOpenWebhookPush(learnerID, domainID string, since time.
 		args = append(args, domainID)
 	}
 	query += ` ORDER BY pushed_at DESC LIMIT 1`
-	row := s.db.QueryRow(query, args...)
+	row := s.db.QueryRowContext(ctx, query, args...)
 	push, err := scanWebhookPushLog(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -110,11 +111,11 @@ func (s *Store) GetLatestOpenWebhookPush(learnerID, domainID string, since time.
 // MarkWebhookPushSessionOpened notes that a learner returned after a push.
 // It intentionally does not mark concept_addressed; that happens only when an
 // interaction touches the pushed concept.
-func (s *Store) MarkWebhookPushSessionOpened(learnerID string, openedAt, since time.Time) error {
+func (s *Store) MarkWebhookPushSessionOpened(ctx context.Context, learnerID string, openedAt, since time.Time) error {
 	if openedAt.IsZero() {
 		openedAt = time.Now().UTC()
 	}
-	_, err := s.db.Exec(
+	_, err := s.db.ExecContext(ctx,
 		`UPDATE webhook_push_log
 		    SET opened_session_at = COALESCE(opened_session_at, ?),
 		        concept_addressed = CASE WHEN concept = '' THEN 1 ELSE concept_addressed END
@@ -131,7 +132,7 @@ func (s *Store) MarkWebhookPushSessionOpened(learnerID string, openedAt, since t
 
 // MarkWebhookPushConceptAddressed closes open-loop pushes whose concept was
 // actually worked on in a later session.
-func (s *Store) MarkWebhookPushConceptAddressed(learnerID, domainID, concept string, addressedAt, since time.Time) error {
+func (s *Store) MarkWebhookPushConceptAddressed(ctx context.Context, learnerID, domainID, concept string, addressedAt, since time.Time) error {
 	if concept == "" {
 		return nil
 	}
@@ -150,7 +151,7 @@ func (s *Store) MarkWebhookPushConceptAddressed(learnerID, domainID, concept str
 		query += ` AND (domain_id = '' OR domain_id = ?)`
 		args = append(args, domainID)
 	}
-	if _, err := s.db.Exec(query, args...); err != nil {
+	if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
 		return fmt.Errorf("mark webhook push concept addressed: %w", err)
 	}
 	return nil
@@ -159,10 +160,10 @@ func (s *Store) MarkWebhookPushConceptAddressed(learnerID, domainID, concept str
 // DequeueNextPending returns the highest-priority pending message for a learner/kind
 // whose scheduled_for is within [now-window, now+window] and not expired.
 // Returns (nil, nil) if nothing is pending.
-func (s *Store) DequeueNextPending(learnerID, kind string, now time.Time, window time.Duration) (*models.WebhookQueueItem, error) {
+func (s *Store) DequeueNextPending(ctx context.Context, learnerID, kind string, now time.Time, window time.Duration) (*models.WebhookQueueItem, error) {
 	lower := now.Add(-window).UTC()
 	upper := now.Add(window).UTC()
-	row := s.db.QueryRow(
+	row := s.db.QueryRowContext(ctx,
 		`SELECT id, learner_id, kind, scheduled_for, expires_at, content, priority, status, created_at, sent_at
 		 FROM webhook_message_queue
 		 WHERE learner_id = ? AND kind = ? AND status = 'pending'
@@ -183,8 +184,8 @@ func (s *Store) DequeueNextPending(learnerID, kind string, now time.Time, window
 }
 
 // MarkWebhookSent marks the learner-owned queue item as sent at `now`.
-func (s *Store) MarkWebhookSent(id int64, learnerID string, now time.Time) error {
-	_, err := s.db.Exec(
+func (s *Store) MarkWebhookSent(ctx context.Context, id int64, learnerID string, now time.Time) error {
+	_, err := s.db.ExecContext(ctx,
 		`UPDATE webhook_message_queue SET status = 'sent', sent_at = ? WHERE id = ? AND learner_id = ?`,
 		now.UTC(), id, learnerID,
 	)
@@ -195,8 +196,8 @@ func (s *Store) MarkWebhookSent(id int64, learnerID string, now time.Time) error
 }
 
 // MarkWebhookFailed marks the learner-owned queue item as failed (will not be retried).
-func (s *Store) MarkWebhookFailed(id int64, learnerID string) error {
-	_, err := s.db.Exec(
+func (s *Store) MarkWebhookFailed(ctx context.Context, id int64, learnerID string) error {
+	_, err := s.db.ExecContext(ctx,
 		`UPDATE webhook_message_queue SET status = 'failed' WHERE id = ? AND learner_id = ?`,
 		id, learnerID,
 	)
@@ -209,8 +210,8 @@ func (s *Store) MarkWebhookFailed(id int64, learnerID string) error {
 // ExpirePastWebhookMessages marks any pending message whose expires_at is in the past as 'expired'.
 // This is intentionally global: it is a scheduler cleanup pass, not a learner-scoped mutator.
 // Returns the number of rows updated.
-func (s *Store) ExpirePastWebhookMessages(now time.Time) (int64, error) {
-	result, err := s.db.Exec(
+func (s *Store) ExpirePastWebhookMessages(ctx context.Context, now time.Time) (int64, error) {
+	result, err := s.db.ExecContext(ctx,
 		`UPDATE webhook_message_queue SET status = 'expired'
 		 WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < ?`,
 		now.UTC(),
@@ -222,8 +223,8 @@ func (s *Store) ExpirePastWebhookMessages(now time.Time) (int64, error) {
 }
 
 // GetPendingWebhookMessages returns all pending messages (for monitoring / debugging).
-func (s *Store) GetPendingWebhookMessages(learnerID string) ([]*models.WebhookQueueItem, error) {
-	rows, err := s.db.Query(
+func (s *Store) GetPendingWebhookMessages(ctx context.Context, learnerID string) ([]*models.WebhookQueueItem, error) {
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, learner_id, kind, scheduled_for, expires_at, content, priority, status, created_at, sent_at
 		 FROM webhook_message_queue
 		 WHERE learner_id = ? AND status = 'pending'

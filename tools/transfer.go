@@ -71,7 +71,7 @@ func registerTransferChallenge(server *mcp.Server, deps *Deps) {
 		// transfer challenge for a hallucinated or stale concept name that
 		// isn't part of the resolved domain — see issue #8 (mirrors the guard
 		// in record_transfer_result).
-		domain, err := resolveDomain(deps.Store, learnerID, params.DomainID)
+		domain, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
 		if err != nil || domain == nil {
 			if params.DomainID != "" {
 				deps.Logger.Error("transfer_challenge: domain not found by id", "err", err, "learner", learnerID, "domain_id", params.DomainID)
@@ -87,7 +87,7 @@ func registerTransferChallenge(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		cs, err := deps.Store.GetConceptState(learnerID, concept)
+		cs, err := deps.Store.GetConceptState(ctx, learnerID, concept)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "concept not found", err)
 			return r, nil, nil
@@ -103,7 +103,7 @@ func registerTransferChallenge(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		existingTransfers, _ := deps.Store.GetTransferScores(learnerID, concept)
+		existingTransfers, _ := deps.Store.GetTransferScores(ctx, learnerID, concept)
 		transferProfile := engine.BuildTransferProfile(concept, existingTransfers)
 
 		contextType := params.ContextType
@@ -232,7 +232,7 @@ func registerRecordTransferResult(server *mcp.Server, deps *Deps) {
 		// validate the concept against its concept list. Without this guard
 		// the tool silently inserts orphan transfer rows for hallucinated
 		// or stale concept names — see issue #96.
-		domain, err := resolveDomain(deps.Store, learnerID, params.DomainID)
+		domain, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
 		if err != nil || domain == nil {
 			if params.DomainID != "" {
 				deps.Logger.Error("record_transfer_result: domain not found by id", "err", err, "learner", learnerID, "domain_id", params.DomainID)
@@ -256,12 +256,12 @@ func registerRecordTransferResult(server *mcp.Server, deps *Deps) {
 			SessionID:   params.SessionID,
 		}
 
-		if err := deps.Store.CreateTransferRecord(record); err != nil {
+		if err := deps.Store.CreateTransferRecord(ctx, record); err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to record transfer", err)
 			return r, nil, nil
 		}
 
-		updatedTransfers, _ := deps.Store.GetTransferScores(learnerID, concept)
+		updatedTransfers, _ := deps.Store.GetTransferScores(ctx, learnerID, concept)
 		transferProfile := engine.BuildTransferProfile(concept, updatedTransfers)
 
 		r, _ := jsonResult(map[string]interface{}{

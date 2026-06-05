@@ -46,7 +46,7 @@ func TestUpdateLearnerProfile_HappyPath(t *testing.T) {
 	}
 
 	// DB state: profile is persisted.
-	learner, err := store.GetLearnerByID("L_owner")
+	learner, err := store.GetLearnerByID(context.Background(), "L_owner")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestUpdateLearnerProfile_PartialUpdatePreservesExisting(t *testing.T) {
 		t.Fatalf("second call: %q", resultText(res2))
 	}
 
-	learner, err := store.GetLearnerByID("L_owner")
+	learner, err := store.GetLearnerByID(context.Background(), "L_owner")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,7 @@ func TestUpdateLearnerProfile_AllowsZeroCalibrationBias(t *testing.T) {
 		t.Fatalf("expected fields_changed >= 1, got %v", out["fields_changed"])
 	}
 
-	learner, err := store.GetLearnerByID("L_owner")
+	learner, err := store.GetLearnerByID(context.Background(), "L_owner")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestUpdateLearnerProfile_AllowsZeroAutonomyScore(t *testing.T) {
 		t.Fatalf("expected fields_changed >= 1, got %v", out["fields_changed"])
 	}
 
-	learner, err := store.GetLearnerByID("L_owner")
+	learner, err := store.GetLearnerByID(context.Background(), "L_owner")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +233,7 @@ func TestUpdateLearnerProfile_OmitsLeavesUnchanged(t *testing.T) {
 		t.Fatalf("unrelated update: %q", resultText(res2))
 	}
 
-	learner, err := store.GetLearnerByID("L_owner")
+	learner, err := store.GetLearnerByID(context.Background(), "L_owner")
 	if err != nil {
 		t.Fatal(err)
 	}

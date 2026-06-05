@@ -4,6 +4,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -12,14 +13,14 @@ import (
 	"tutor-mcp/models"
 )
 
-func (s *Store) UpsertPendingConsolidation(learnerID, periodType, periodKey string, now time.Time) error {
+func (s *Store) UpsertPendingConsolidation(ctx context.Context, learnerID, periodType, periodKey string, now time.Time) error {
 	if learnerID == "" || periodType == "" || periodKey == "" {
 		return fmt.Errorf("learner_id, period_type and period_key are required")
 	}
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	_, err := s.db.Exec(
+	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO pending_consolidations (learner_id, period_type, period_key, status, detected_at)
 		 VALUES (?, ?, ?, 'pending', ?)
 		 ON CONFLICT(learner_id, period_type, period_key) DO NOTHING`,
@@ -31,8 +32,8 @@ func (s *Store) UpsertPendingConsolidation(learnerID, periodType, periodKey stri
 	return nil
 }
 
-func (s *Store) GetPendingConsolidations(learnerID string) ([]*models.PendingConsolidation, error) {
-	rows, err := s.db.Query(
+func (s *Store) GetPendingConsolidations(ctx context.Context, learnerID string) ([]*models.PendingConsolidation, error) {
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, learner_id, period_type, period_key, status, detected_at, delivered_at, completed_at
 		 FROM pending_consolidations
 		 WHERE learner_id = ? AND status = 'pending'
@@ -46,8 +47,8 @@ func (s *Store) GetPendingConsolidations(learnerID string) ([]*models.PendingCon
 	return scanConsolidationRows(rows)
 }
 
-func (s *Store) GetConsolidation(learnerID, periodType, periodKey string) (*models.PendingConsolidation, error) {
-	row := s.db.QueryRow(
+func (s *Store) GetConsolidation(ctx context.Context, learnerID, periodType, periodKey string) (*models.PendingConsolidation, error) {
+	row := s.db.QueryRowContext(ctx,
 		`SELECT id, learner_id, period_type, period_key, status, detected_at, delivered_at, completed_at
 		 FROM pending_consolidations
 		 WHERE learner_id = ? AND period_type = ? AND period_key = ?`,
@@ -60,7 +61,7 @@ func (s *Store) GetConsolidation(learnerID, periodType, periodKey string) (*mode
 	return item, nil
 }
 
-func (s *Store) MarkConsolidationsDelivered(learnerID string, ids []int64, now time.Time) error {
+func (s *Store) MarkConsolidationsDelivered(ctx context.Context, learnerID string, ids []int64, now time.Time) error {
 	if learnerID == "" || len(ids) == 0 {
 		return nil
 	}
@@ -74,7 +75,7 @@ func (s *Store) MarkConsolidationsDelivered(learnerID string, ids []int64, now t
 		placeholders = append(placeholders, "?")
 		args = append(args, id)
 	}
-	_, err := s.db.Exec(
+	_, err := s.db.ExecContext(ctx,
 		`UPDATE pending_consolidations
 		 SET status = 'delivered', delivered_at = ?
 		 WHERE learner_id = ? AND status = 'pending' AND id IN (`+strings.Join(placeholders, ",")+`)`,
@@ -86,14 +87,14 @@ func (s *Store) MarkConsolidationsDelivered(learnerID string, ids []int64, now t
 	return nil
 }
 
-func (s *Store) MarkConsolidationCompleted(learnerID, periodType, periodKey string, now time.Time) error {
+func (s *Store) MarkConsolidationCompleted(ctx context.Context, learnerID, periodType, periodKey string, now time.Time) error {
 	if learnerID == "" || periodType == "" || periodKey == "" {
 		return nil
 	}
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	_, err := s.db.Exec(
+	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO pending_consolidations (learner_id, period_type, period_key, status, detected_at, completed_at)
 		 VALUES (?, ?, ?, 'completed', ?, ?)
 		 ON CONFLICT(learner_id, period_type, period_key) DO UPDATE SET
@@ -107,8 +108,8 @@ func (s *Store) MarkConsolidationCompleted(learnerID, periodType, periodKey stri
 	return nil
 }
 
-func (s *Store) RequeueStaleDeliveredConsolidations(cutoff time.Time) (int64, error) {
-	res, err := s.db.Exec(
+func (s *Store) RequeueStaleDeliveredConsolidations(ctx context.Context, cutoff time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
 		`UPDATE pending_consolidations
 		 SET status = 'pending', delivered_at = NULL
 		 WHERE status = 'delivered' AND delivered_at IS NOT NULL AND delivered_at < ?`,

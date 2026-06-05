@@ -4,6 +4,7 @@
 package engine
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -32,14 +33,14 @@ func TestDispatchMetacognitiveAlerts_EnqueuesAndPostsAffect(t *testing.T) {
 	rawDB, store, learnerID := rawTestSetup(t, srv.URL)
 
 	// Two consecutive low-satisfaction affect rows trip AFFECT_NEGATIVE.
-	if err := store.UpsertAffectState(&models.AffectState{
+	if err := store.UpsertAffectState(context.Background(), &models.AffectState{
 		LearnerID:    learnerID,
 		SessionID:    "s1",
 		Satisfaction: 2,
 	}); err != nil {
 		t.Fatalf("upsert affect s1: %v", err)
 	}
-	if err := store.UpsertAffectState(&models.AffectState{
+	if err := store.UpsertAffectState(context.Background(), &models.AffectState{
 		LearnerID:    learnerID,
 		SessionID:    "s2",
 		Satisfaction: 1,
@@ -131,14 +132,14 @@ func TestDispatchMetacognitiveAlerts_SelectsHighestValueKind(t *testing.T) {
 	rawDB, store, learnerID := rawTestSetup(t, srv.URL)
 
 	// Trip AFFECT_NEGATIVE.
-	if err := store.UpsertAffectState(&models.AffectState{
+	if err := store.UpsertAffectState(context.Background(), &models.AffectState{
 		LearnerID:    learnerID,
 		SessionID:    "s1",
 		Satisfaction: 2,
 	}); err != nil {
 		t.Fatalf("upsert affect s1: %v", err)
 	}
-	if err := store.UpsertAffectState(&models.AffectState{
+	if err := store.UpsertAffectState(context.Background(), &models.AffectState{
 		LearnerID:    learnerID,
 		SessionID:    "s2",
 		Satisfaction: 1,

@@ -46,7 +46,7 @@ func registerUpdateLearnerProfile(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		learner, err := deps.Store.GetLearnerByID(learnerID)
+		learner, err := deps.Store.GetLearnerByID(ctx, learnerID)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "learner not found", err)
 			return r, nil, nil
@@ -132,7 +132,7 @@ func registerUpdateLearnerProfile(server *mcp.Server, deps *Deps) {
 		}
 
 		profileJSON, _ := json.Marshal(profile)
-		if err := deps.Store.UpdateLearnerProfile(learnerID, string(profileJSON)); err != nil {
+		if err := deps.Store.UpdateLearnerProfile(ctx, learnerID, string(profileJSON)); err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to update profile", err)
 			return r, nil, nil
 		}

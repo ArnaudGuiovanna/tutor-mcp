@@ -4,6 +4,7 @@
 package tools
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -19,7 +20,7 @@ func TestResolveReviewIntentActivity_PipelineRetentionFirstNoNewConcept(t *testi
 	low := seedReviewIntentState(t, store, "low", 0.99, 1, 40, "review")
 	high := seedReviewIntentState(t, store, "high", 0.99, 20, 1, "review")
 
-	activity, phase, status, err := resolveReviewIntentActivity(store, "L_owner", d, []*models.ConceptState{low, high}, nil, nil, nil, now)
+	activity, phase, status, err := resolveReviewIntentActivity(context.Background(), store, "L_owner", d, []*models.ConceptState{low, high}, nil, nil, nil, now)
 	if err != nil {
 		t.Fatalf("resolve review intent: %v", err)
 	}
@@ -48,7 +49,7 @@ func TestResolveReviewIntentActivity_MisconceptionBeatsRetention(t *testing.T) {
 	misconception := seedReviewIntentState(t, store, "misconception", 0.99, 20, 1, "review")
 	seedReviewIntentInteraction(t, store, d.ID, "misconception", string(models.ActivityPractice), false, "wrong_sign")
 
-	activity, _, status, err := resolveReviewIntentActivity(store, "L_owner", d, []*models.ConceptState{retention, misconception}, nil, nil, nil, now)
+	activity, _, status, err := resolveReviewIntentActivity(context.Background(), store, "L_owner", d, []*models.ConceptState{retention, misconception}, nil, nil, nil, now)
 	if err != nil {
 		t.Fatalf("resolve review intent: %v", err)
 	}
@@ -70,7 +71,7 @@ func TestResolveReviewIntentActivity_NoReviewedConceptDoesNotIntroduce(t *testin
 	store, _ := setupToolsTest(t)
 	d := makeReviewIntentDomain(t, store, []string{"fresh"})
 
-	activity, _, status, err := resolveReviewIntentActivity(store, "L_owner", d, nil, nil, nil, nil, time.Now().UTC())
+	activity, _, status, err := resolveReviewIntentActivity(context.Background(), store, "L_owner", d, nil, nil, nil, nil, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("resolve review intent: %v", err)
 	}
@@ -87,30 +88,30 @@ func TestResolveReviewIntentActivity_NoReviewedConceptDoesNotIntroduce(t *testin
 
 func TestResolveActivityDomain_DefaultCriticalRetentionOverridesPriorityRank(t *testing.T) {
 	store, _ := setupToolsTest(t)
-	math, err := store.CreateDomainWithValueFramings("L_owner", "math", "", models.KnowledgeSpace{
+	math, err := store.CreateDomainWithValueFramings(context.Background(), "L_owner", "math", "", models.KnowledgeSpace{
 		Concepts:      []string{"math_new"},
 		Prerequisites: map[string][]string{},
 	}, "")
 	if err != nil {
 		t.Fatalf("create math domain: %v", err)
 	}
-	critical, err := store.CreateDomainWithValueFramings("L_owner", "adaptive", "", models.KnowledgeSpace{
+	critical, err := store.CreateDomainWithValueFramings(context.Background(), "L_owner", "adaptive", "", models.KnowledgeSpace{
 		Concepts:      []string{"forgotten"},
 		Prerequisites: map[string][]string{},
 	}, "")
 	if err != nil {
 		t.Fatalf("create critical domain: %v", err)
 	}
-	if err := store.SetDomainPriority(math.ID, "L_owner", 1); err != nil {
+	if err := store.SetDomainPriority(context.Background(), math.ID, "L_owner", 1); err != nil {
 		t.Fatalf("set math priority: %v", err)
 	}
-	if err := store.SetDomainPriority(critical.ID, "L_owner", 2); err != nil {
+	if err := store.SetDomainPriority(context.Background(), critical.ID, "L_owner", 2); err != nil {
 		t.Fatalf("set critical priority: %v", err)
 	}
 	seedReviewIntentState(t, store, "math_new", 0.10, 30, 1, "review")
 	seedReviewIntentState(t, store, "forgotten", 0.95, 1, 80, "review")
 
-	got, err := resolveActivityDomain(store, "L_owner", "", "")
+	got, err := resolveActivityDomain(context.Background(), store, "L_owner", "", "")
 	if err != nil {
 		t.Fatalf("resolve default domain: %v", err)
 	}
@@ -118,7 +119,7 @@ func TestResolveActivityDomain_DefaultCriticalRetentionOverridesPriorityRank(t *
 		t.Fatalf("default domain = %q, want critical retention domain %q", got.ID, critical.ID)
 	}
 
-	explicit, err := resolveActivityDomain(store, "L_owner", math.ID, "")
+	explicit, err := resolveActivityDomain(context.Background(), store, "L_owner", math.ID, "")
 	if err != nil {
 		t.Fatalf("resolve explicit domain: %v", err)
 	}
@@ -126,7 +127,7 @@ func TestResolveActivityDomain_DefaultCriticalRetentionOverridesPriorityRank(t *
 		t.Fatalf("explicit domain = %q, want math domain %q", explicit.ID, math.ID)
 	}
 
-	byName, err := resolveActivityDomain(store, "L_owner", "", "math")
+	byName, err := resolveActivityDomain(context.Background(), store, "L_owner", "", "math")
 	if err != nil {
 		t.Fatalf("resolve domain by name: %v", err)
 	}
@@ -144,7 +145,7 @@ func TestResolveReviewIntentActivity_ConstrainsHighMasteryRotation(t *testing.T)
 		seedReviewIntentInteraction(t, store, d.ID, "stable", string(models.ActivityPractice), true, "")
 	}
 
-	activity, _, status, err := resolveReviewIntentActivity(store, "L_owner", d, []*models.ConceptState{stable}, nil, nil, nil, now)
+	activity, _, status, err := resolveReviewIntentActivity(context.Background(), store, "L_owner", d, []*models.ConceptState{stable}, nil, nil, nil, now)
 	if err != nil {
 		t.Fatalf("resolve review intent: %v", err)
 	}
@@ -164,7 +165,7 @@ func TestResolveReviewIntentActivity_ConstrainsHighMasteryRotation(t *testing.T)
 
 func makeReviewIntentDomain(t *testing.T, store *db.Store, concepts []string) *models.Domain {
 	t.Helper()
-	d, err := store.CreateDomainWithValueFramings("L_owner", "review-intent", "", models.KnowledgeSpace{
+	d, err := store.CreateDomainWithValueFramings(context.Background(), "L_owner", "review-intent", "", models.KnowledgeSpace{
 		Concepts:      concepts,
 		Prerequisites: map[string][]string{},
 	}, "")
@@ -184,7 +185,7 @@ func seedReviewIntentState(t *testing.T, store *db.Store, concept string, master
 	cs.Reps = 2
 	cs.CardState = cardState
 	cs.LastReview = &lastReview
-	if err := store.UpsertConceptState(cs); err != nil {
+	if err := store.UpsertConceptState(context.Background(), cs); err != nil {
 		t.Fatalf("upsert concept state %q: %v", concept, err)
 	}
 	return cs
@@ -203,7 +204,7 @@ func seedReviewIntentInteraction(t *testing.T, store *db.Store, domainID, concep
 		MisconceptionType:   misconception,
 		MisconceptionDetail: "seeded from review intent test",
 	}
-	if err := store.CreateInteraction(i); err != nil {
+	if err := store.CreateInteraction(context.Background(), i); err != nil {
 		t.Fatalf("create interaction %q: %v", concept, err)
 	}
 }

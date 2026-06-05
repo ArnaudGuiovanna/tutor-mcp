@@ -4,6 +4,7 @@
 package db
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -14,12 +15,12 @@ import (
 // redirect_uri (a different URI on the same client re-prompts).
 func TestApproveClientPersistsAndScopes(t *testing.T) {
 	store := setupTestDB(t)
-	if err := store.CreateOAuthClient("c1", "Client 1", `["https://a.example/cb"]`); err != nil {
+	if err := store.CreateOAuthClient(context.Background(), "c1", "Client 1", `["https://a.example/cb"]`); err != nil {
 		t.Fatalf("create client: %v", err)
 	}
 
 	// Not approved before any consent is recorded.
-	ok, err := store.IsClientApproved("L1", "c1", "https://a.example/cb")
+	ok, err := store.IsClientApproved(context.Background(), "L1", "c1", "https://a.example/cb")
 	if err != nil {
 		t.Fatalf("is approved (pre): %v", err)
 	}
@@ -27,11 +28,11 @@ func TestApproveClientPersistsAndScopes(t *testing.T) {
 		t.Fatal("expected not approved before ApproveClient")
 	}
 
-	if err := store.ApproveClient("L1", "c1", "https://a.example/cb"); err != nil {
+	if err := store.ApproveClient(context.Background(), "L1", "c1", "https://a.example/cb"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 
-	ok, err = store.IsClientApproved("L1", "c1", "https://a.example/cb")
+	ok, err = store.IsClientApproved(context.Background(), "L1", "c1", "https://a.example/cb")
 	if err != nil {
 		t.Fatalf("is approved (post): %v", err)
 	}
@@ -41,7 +42,7 @@ func TestApproveClientPersistsAndScopes(t *testing.T) {
 
 	// Approval is scoped to redirect_uri: a different URI on the same
 	// client is still unapproved.
-	ok, err = store.IsClientApproved("L1", "c1", "https://a.example/other")
+	ok, err = store.IsClientApproved(context.Background(), "L1", "c1", "https://a.example/other")
 	if err != nil {
 		t.Fatalf("is approved (other uri): %v", err)
 	}
@@ -55,12 +56,12 @@ func TestApproveClientPersistsAndScopes(t *testing.T) {
 // single row on file.
 func TestApproveClientIdempotent(t *testing.T) {
 	store := setupTestDB(t)
-	if err := store.CreateOAuthClient("c1", "Client 1", `["https://a.example/cb"]`); err != nil {
+	if err := store.CreateOAuthClient(context.Background(), "c1", "Client 1", `["https://a.example/cb"]`); err != nil {
 		t.Fatalf("create client: %v", err)
 	}
 
 	for i := 0; i < 3; i++ {
-		if err := store.ApproveClient("L1", "c1", "https://a.example/cb"); err != nil {
+		if err := store.ApproveClient(context.Background(), "L1", "c1", "https://a.example/cb"); err != nil {
 			t.Fatalf("approve #%d: %v", i, err)
 		}
 	}
@@ -77,7 +78,7 @@ func TestApproveClientIdempotent(t *testing.T) {
 		t.Fatalf("expected exactly 1 approval row, got %d", count)
 	}
 
-	ok, err := store.IsClientApproved("L1", "c1", "https://a.example/cb")
+	ok, err := store.IsClientApproved(context.Background(), "L1", "c1", "https://a.example/cb")
 	if err != nil {
 		t.Fatalf("is approved: %v", err)
 	}
@@ -94,7 +95,7 @@ func TestLearningNegotiationOverrideInsertConsume(t *testing.T) {
 	now := time.Now().UTC()
 	expires := now.Add(1 * time.Hour)
 
-	id, err := store.InsertLearningNegotiationOverridePayload("L1", "D1", "payload-1", expires, now)
+	id, err := store.InsertLearningNegotiationOverridePayload(context.Background(), "L1", "D1", "payload-1", expires, now)
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -102,7 +103,7 @@ func TestLearningNegotiationOverrideInsertConsume(t *testing.T) {
 		t.Fatal("expected non-zero override id")
 	}
 
-	res, err := store.ConsumeLearningNegotiationOverridePayload("L1", "D1", now)
+	res, err := store.ConsumeLearningNegotiationOverridePayload(context.Background(), "L1", "D1", now)
 	if err != nil {
 		t.Fatalf("consume: %v", err)
 	}
@@ -117,7 +118,7 @@ func TestLearningNegotiationOverrideInsertConsume(t *testing.T) {
 	}
 
 	// Second consume: nothing pending.
-	res2, err := store.ConsumeLearningNegotiationOverridePayload("L1", "D1", now)
+	res2, err := store.ConsumeLearningNegotiationOverridePayload(context.Background(), "L1", "D1", now)
 	if err != nil {
 		t.Fatalf("consume #2: %v", err)
 	}
@@ -134,14 +135,14 @@ func TestLearningNegotiationOverrideSupersede(t *testing.T) {
 	now := time.Now().UTC()
 	expires := now.Add(1 * time.Hour)
 
-	if _, err := store.InsertLearningNegotiationOverridePayload("L1", "D1", "old", expires, now); err != nil {
+	if _, err := store.InsertLearningNegotiationOverridePayload(context.Background(), "L1", "D1", "old", expires, now); err != nil {
 		t.Fatalf("insert old: %v", err)
 	}
-	if _, err := store.InsertLearningNegotiationOverridePayload("L1", "D1", "new", expires, now.Add(time.Second)); err != nil {
+	if _, err := store.InsertLearningNegotiationOverridePayload(context.Background(), "L1", "D1", "new", expires, now.Add(time.Second)); err != nil {
 		t.Fatalf("insert new: %v", err)
 	}
 
-	res, err := store.ConsumeLearningNegotiationOverridePayload("L1", "D1", now.Add(2*time.Second))
+	res, err := store.ConsumeLearningNegotiationOverridePayload(context.Background(), "L1", "D1", now.Add(2*time.Second))
 	if err != nil {
 		t.Fatalf("consume: %v", err)
 	}
@@ -153,7 +154,7 @@ func TestLearningNegotiationOverrideSupersede(t *testing.T) {
 	}
 
 	// Nothing pending remains after consuming the superseding override.
-	res2, err := store.ConsumeLearningNegotiationOverridePayload("L1", "D1", now.Add(2*time.Second))
+	res2, err := store.ConsumeLearningNegotiationOverridePayload(context.Background(), "L1", "D1", now.Add(2*time.Second))
 	if err != nil {
 		t.Fatalf("consume #2: %v", err)
 	}
@@ -170,12 +171,12 @@ func TestLearningNegotiationOverrideExpired(t *testing.T) {
 	now := time.Now().UTC()
 	expires := now.Add(-1 * time.Minute) // already expired
 
-	id, err := store.InsertLearningNegotiationOverridePayload("L1", "D1", "stale", expires, now.Add(-2*time.Minute))
+	id, err := store.InsertLearningNegotiationOverridePayload(context.Background(), "L1", "D1", "stale", expires, now.Add(-2*time.Minute))
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
-	res, err := store.ConsumeLearningNegotiationOverridePayload("L1", "D1", now)
+	res, err := store.ConsumeLearningNegotiationOverridePayload(context.Background(), "L1", "D1", now)
 	if err != nil {
 		t.Fatalf("consume: %v", err)
 	}
@@ -190,7 +191,7 @@ func TestLearningNegotiationOverrideExpired(t *testing.T) {
 	}
 
 	// No longer pending afterwards.
-	res2, err := store.ConsumeLearningNegotiationOverridePayload("L1", "D1", now)
+	res2, err := store.ConsumeLearningNegotiationOverridePayload(context.Background(), "L1", "D1", now)
 	if err != nil {
 		t.Fatalf("consume #2: %v", err)
 	}

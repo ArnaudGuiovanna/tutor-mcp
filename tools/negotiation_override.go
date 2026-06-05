@@ -5,6 +5,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -266,7 +267,7 @@ func unmetHardPrerequisites(domain *models.Domain, mastery map[string]float64, c
 	return unmet
 }
 
-func PersistLearningNegotiationOverride(store *db.Store, learnerID string, override *LearningNegotiationOverride, now time.Time) (int64, error) {
+func PersistLearningNegotiationOverride(ctx context.Context, store *db.Store, learnerID string, override *LearningNegotiationOverride, now time.Time) (int64, error) {
 	if store == nil {
 		return 0, fmt.Errorf("store is nil")
 	}
@@ -286,14 +287,14 @@ func PersistLearningNegotiationOverride(store *db.Store, learnerID string, overr
 	if err != nil {
 		return 0, fmt.Errorf("marshal learning negotiation override: %w", err)
 	}
-	return store.InsertLearningNegotiationOverridePayload(learnerID, override.DomainID, string(payload), override.ExpiresAt, now)
+	return store.InsertLearningNegotiationOverridePayload(ctx, learnerID, override.DomainID, string(payload), override.ExpiresAt, now)
 }
 
 // ConsumeLearningNegotiationOverride is the integration point for
 // tools/activity.go. Call it after the normal activity has been selected and
 // before tutor-mode/motivation enrichment. It consumes at most one persisted
 // override and only returns it when hard constraints still permit it.
-func ConsumeLearningNegotiationOverride(store *db.Store, learnerID string, domain *models.Domain, systemActivity models.Activity, alerts []models.Alert, now time.Time) (models.Activity, LearningNegotiationOverrideConsumeResult, error) {
+func ConsumeLearningNegotiationOverride(ctx context.Context, store *db.Store, learnerID string, domain *models.Domain, systemActivity models.Activity, alerts []models.Alert, now time.Time) (models.Activity, LearningNegotiationOverrideConsumeResult, error) {
 	if store == nil {
 		return systemActivity, LearningNegotiationOverrideConsumeResult{Status: LearningNegotiationOverrideConsumeNone}, fmt.Errorf("store is nil")
 	}
@@ -301,7 +302,7 @@ func ConsumeLearningNegotiationOverride(store *db.Store, learnerID string, domai
 		return systemActivity, LearningNegotiationOverrideConsumeResult{Status: LearningNegotiationOverrideConsumeNone}, fmt.Errorf("domain is nil")
 	}
 
-	record, err := store.ConsumeLearningNegotiationOverridePayload(learnerID, domain.ID, now)
+	record, err := store.ConsumeLearningNegotiationOverridePayload(ctx, learnerID, domain.ID, now)
 	if err != nil {
 		return systemActivity, LearningNegotiationOverrideConsumeResult{Status: LearningNegotiationOverrideConsumeNone}, err
 	}
@@ -326,7 +327,7 @@ func ConsumeLearningNegotiationOverride(store *db.Store, learnerID string, domai
 	}
 	override.ID = record.ID
 
-	if reason := validateConsumedLearningNegotiationOverride(store, learnerID, domain, systemActivity, alerts, &override); reason != "" {
+	if reason := validateConsumedLearningNegotiationOverride(ctx, store, learnerID, domain, systemActivity, alerts, &override); reason != "" {
 		return systemActivity, LearningNegotiationOverrideConsumeResult{
 			Status:   LearningNegotiationOverrideConsumeRejectedHardConstraint,
 			ID:       record.ID,
@@ -342,7 +343,7 @@ func ConsumeLearningNegotiationOverride(store *db.Store, learnerID string, domai
 	}, nil
 }
 
-func validateConsumedLearningNegotiationOverride(store *db.Store, learnerID string, domain *models.Domain, systemActivity models.Activity, alerts []models.Alert, override *LearningNegotiationOverride) string {
+func validateConsumedLearningNegotiationOverride(ctx context.Context, store *db.Store, learnerID string, domain *models.Domain, systemActivity models.Activity, alerts []models.Alert, override *LearningNegotiationOverride) string {
 	if override.DomainID != domain.ID {
 		return "override domain does not match the active domain"
 	}
@@ -383,7 +384,7 @@ func validateConsumedLearningNegotiationOverride(store *db.Store, learnerID stri
 		return ""
 	}
 
-	states, err := store.GetConceptStatesByLearner(learnerID)
+	states, err := store.GetConceptStatesByLearner(ctx, learnerID)
 	if err != nil {
 		return "could not validate concept prerequisites"
 	}

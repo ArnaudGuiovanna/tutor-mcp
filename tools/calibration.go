@@ -71,7 +71,7 @@ func registerCalibrationCheck(server *mcp.Server, deps *Deps) {
 			Predicted:    predicted,
 		}
 
-		if err := deps.Store.CreateCalibrationPrediction(record); err != nil {
+		if err := deps.Store.CreateCalibrationPrediction(ctx, record); err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to create calibration", err)
 			return r, nil, nil
 		}
@@ -123,7 +123,7 @@ func registerRecordCalibrationResult(server *mcp.Server, deps *Deps) {
 
 		// Ownership is enforced at the DB layer: GetCalibrationRecord returns
 		// "not found" if the prediction belongs to another learner (issue #87).
-		record, err := deps.Store.GetCalibrationRecord(params.PredictionID, learnerID)
+		record, err := deps.Store.GetCalibrationRecord(ctx, params.PredictionID, learnerID)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "prediction not found", err)
 			return r, nil, nil
@@ -131,12 +131,12 @@ func registerRecordCalibrationResult(server *mcp.Server, deps *Deps) {
 
 		delta := record.Predicted - params.ActualScore
 
-		if err := deps.Store.CompleteCalibrationRecord(params.PredictionID, learnerID, params.ActualScore, delta); err != nil {
+		if err := deps.Store.CompleteCalibrationRecord(ctx, params.PredictionID, learnerID, params.ActualScore, delta); err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to record result", err)
 			return r, nil, nil
 		}
 
-		bias, _ := deps.Store.GetCalibrationBias(learnerID, 20)
+		bias, _ := deps.Store.GetCalibrationBias(ctx, learnerID, 20)
 
 		r, _ := jsonResult(map[string]interface{}{
 			"delta":                    delta,

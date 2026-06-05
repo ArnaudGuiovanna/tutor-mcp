@@ -15,6 +15,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"strings"
@@ -121,8 +122,8 @@ type OLMSnapshot struct {
 // If domainID is empty, the most recently created non-archived domain is used.
 // Returns an error if no active domain exists or the requested domain is
 // archived.
-func BuildOLMSnapshot(store *db.Store, learnerID, domainID string) (*OLMSnapshot, error) {
-	domain, err := resolveActiveDomain(store, learnerID, domainID)
+func BuildOLMSnapshot(ctx context.Context, store *db.Store, learnerID, domainID string) (*OLMSnapshot, error) {
+	domain, err := resolveActiveDomain(ctx, store, learnerID, domainID)
 	if err != nil {
 		return nil, err
 	}
@@ -133,7 +134,7 @@ func BuildOLMSnapshot(store *db.Store, learnerID, domainID string) (*OLMSnapshot
 		PersonalGoal: domain.PersonalGoal,
 	}
 
-	allStates, err := store.GetConceptStatesByLearner(learnerID)
+	allStates, err := store.GetConceptStatesByLearner(ctx, learnerID)
 	if err != nil {
 		return nil, fmt.Errorf("olm: get states: %w", err)
 	}
@@ -169,7 +170,7 @@ func BuildOLMSnapshot(store *db.Store, learnerID, domainID string) (*OLMSnapshot
 			domainStates = append(domainStates, cs)
 		}
 	}
-	recent, _ := store.GetRecentInteractionsByLearner(learnerID, DefaultRecentInteractionsWindow)
+	recent, _ := store.GetRecentInteractionsByLearner(ctx, learnerID, DefaultRecentInteractionsWindow)
 	var domainInteractions []*models.Interaction
 	for _, in := range recent {
 		if domainConceptSet[in.Concept] {
@@ -202,13 +203,13 @@ func BuildOLMSnapshot(store *db.Store, learnerID, domainID string) (*OLMSnapshot
 
 	// Metacognitive signals — only set if a clear trend exists across the
 	// last 3 affects (or if calibration bias exceeds the actionable threshold).
-	affects, _ := store.GetRecentAffectStates(learnerID, 3)
+	affects, _ := store.GetRecentAffectStates(ctx, learnerID, 3)
 	if len(affects) >= 3 {
 		snap.AutonomyTrend = trendDirection(affects[0].AutonomyScore-affects[2].AutonomyScore, 0.10)
 		// Satisfaction is a 1..4 Likert; require a ≥2-step move before calling it a trend.
 		snap.AffectTrend = trendDirection(float64(affects[0].Satisfaction-affects[2].Satisfaction), 1.5)
 	}
-	bias, _ := store.GetCalibrationBias(learnerID, 20)
+	bias, _ := store.GetCalibrationBias(ctx, learnerID, 20)
 	snap.CalibrationBias = bias
 
 	// KST progress: fraction of active concepts that are Solid.
@@ -245,9 +246,9 @@ func trendDirection(diff, threshold float64) string {
 // resolveActiveDomain returns the domain to use for the OLM. If domainID is
 // empty, picks the most recently created non-archived domain. Returns an error
 // if the learner has no active domain, or the requested domain is archived.
-func resolveActiveDomain(store *db.Store, learnerID, domainID string) (*models.Domain, error) {
+func resolveActiveDomain(ctx context.Context, store *db.Store, learnerID, domainID string) (*models.Domain, error) {
 	if domainID == "" {
-		domains, err := store.GetDomainsByLearner(learnerID, false /*includeArchived*/)
+		domains, err := store.GetDomainsByLearner(ctx, learnerID, false /*includeArchived*/)
 		if err != nil {
 			return nil, fmt.Errorf("olm: list domains: %w", err)
 		}
@@ -256,7 +257,7 @@ func resolveActiveDomain(store *db.Store, learnerID, domainID string) (*models.D
 		}
 		return domains[0], nil
 	}
-	d, err := store.GetDomainByID(domainID)
+	d, err := store.GetDomainByID(ctx, domainID)
 	if err != nil {
 		return nil, fmt.Errorf("olm: get domain %s: %w", domainID, err)
 	}

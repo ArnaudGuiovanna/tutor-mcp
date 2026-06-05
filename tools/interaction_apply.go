@@ -62,6 +62,7 @@ type interactionInput struct {
 // recent-interactions list on each call, so storing rolling counts
 // per-concept added schema weight without any reader (issue #55).
 func applyInteraction(
+	ctx context.Context,
 	deps *Deps,
 	learnerID string,
 	input interactionInput,
@@ -74,7 +75,7 @@ func applyInteraction(
 	// one silently overwrites the other on commit. BeginTx maps to
 	// BEGIN IMMEDIATE on SQLite (modernc.org/sqlite) so writers block at
 	// tx start, not at first write.
-	tx, err := deps.Store.BeginTx(context.Background())
+	tx, err := deps.Store.BeginTx(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("applyInteraction: begin tx: %w", err)
 	}

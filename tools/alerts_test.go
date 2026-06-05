@@ -4,6 +4,7 @@
 package tools
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -73,7 +74,7 @@ func TestGetPendingAlerts_NoActiveDomain_ReturnsCleanEmpty(t *testing.T) {
 	// Insert a concept_state that *would* trigger MASTERY_READY for a
 	// concept that is not in any domain. No init_domain call — learner
 	// has zero active domains.
-	if err := store.InsertConceptStateIfNotExists(orphanMasteryState("L_owner", "ghost")); err != nil {
+	if err := store.InsertConceptStateIfNotExists(context.Background(), orphanMasteryState("L_owner", "ghost")); err != nil {
 		t.Fatalf("seed orphan state: %v", err)
 	}
 
@@ -103,7 +104,7 @@ func TestGetPendingAlerts_WiresMetacognitiveAlerts(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	// At least one active domain so the no-domain_id branch doesn't
 	// short-circuit on needs_domain_setup.
-	if _, err := store.CreateDomain("L_owner", "math", "", models.KnowledgeSpace{
+	if _, err := store.CreateDomain(context.Background(), "L_owner", "math", "", models.KnowledgeSpace{
 		Concepts: []string{"a"},
 	}); err != nil {
 		t.Fatalf("create domain: %v", err)
@@ -111,7 +112,7 @@ func TestGetPendingAlerts_WiresMetacognitiveAlerts(t *testing.T) {
 
 	// Two consecutive low-satisfaction affect rows trigger AFFECT_NEGATIVE.
 	now := time.Now().UTC()
-	if err := store.UpsertAffectState(&models.AffectState{
+	if err := store.UpsertAffectState(context.Background(), &models.AffectState{
 		LearnerID:    "L_owner",
 		SessionID:    "s1",
 		Satisfaction: 2,
@@ -120,7 +121,7 @@ func TestGetPendingAlerts_WiresMetacognitiveAlerts(t *testing.T) {
 	}
 	// Force a small ordering gap so newest-first ordering is deterministic.
 	_ = now
-	if err := store.UpsertAffectState(&models.AffectState{
+	if err := store.UpsertAffectState(context.Background(), &models.AffectState{
 		LearnerID:    "L_owner",
 		SessionID:    "s2",
 		Satisfaction: 1,
@@ -190,13 +191,13 @@ func TestGetPendingAlerts_MultipleActiveDomains_FiltersOutOrphan(t *testing.T) {
 	// Two active domains with disjoint concept sets. D2 is created last,
 	// so a single-domain fallback in resolveDomain would only see {x,y}
 	// and silently drop a legitimate alert on "a".
-	if _, err := store.CreateDomain("L_owner", "d1", "", models.KnowledgeSpace{
+	if _, err := store.CreateDomain(context.Background(), "L_owner", "d1", "", models.KnowledgeSpace{
 		Concepts:      []string{"a", "b"},
 		Prerequisites: map[string][]string{"b": {"a"}},
 	}); err != nil {
 		t.Fatalf("create d1: %v", err)
 	}
-	if _, err := store.CreateDomain("L_owner", "d2", "", models.KnowledgeSpace{
+	if _, err := store.CreateDomain(context.Background(), "L_owner", "d2", "", models.KnowledgeSpace{
 		Concepts:      []string{"x", "y"},
 		Prerequisites: map[string][]string{"y": {"x"}},
 	}); err != nil {
@@ -205,10 +206,10 @@ func TestGetPendingAlerts_MultipleActiveDomains_FiltersOutOrphan(t *testing.T) {
 
 	// Seed a MASTERY_READY-trigger state on "a" (D1) and on "ghost"
 	// (no domain). Only "a" should surface.
-	if err := store.InsertConceptStateIfNotExists(orphanMasteryState("L_owner", "a")); err != nil {
+	if err := store.InsertConceptStateIfNotExists(context.Background(), orphanMasteryState("L_owner", "a")); err != nil {
 		t.Fatalf("seed a: %v", err)
 	}
-	if err := store.InsertConceptStateIfNotExists(orphanMasteryState("L_owner", "ghost")); err != nil {
+	if err := store.InsertConceptStateIfNotExists(context.Background(), orphanMasteryState("L_owner", "ghost")); err != nil {
 		t.Fatalf("seed ghost: %v", err)
 	}
 

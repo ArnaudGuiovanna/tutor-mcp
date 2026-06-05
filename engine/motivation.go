@@ -5,6 +5,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"time"
 
@@ -283,7 +284,7 @@ func NewMotivationEngine(store *db.Store) *MotivationEngine {
 // Build gathers signals from the store, selects a brief kind, composes the brief,
 // and persists side effects (rotates Domain.LastValueAxis when a competence_value
 // brief fires). Returns a brief with Kind == "" when no trigger matches.
-func (m *MotivationEngine) Build(learnerID string, domain *models.Domain, concept string, activityType models.ActivityType, plateauActive bool, sessionExerciseCount int) (*models.MotivationBrief, error) {
+func (m *MotivationEngine) Build(ctx context.Context, learnerID string, domain *models.Domain, concept string, activityType models.ActivityType, plateauActive bool, sessionExerciseCount int) (*models.MotivationBrief, error) {
 	now := time.Now().UTC()
 
 	in := BriefInput{
@@ -297,22 +298,22 @@ func (m *MotivationEngine) Build(learnerID string, domain *models.Domain, concep
 
 	// Concept-scoped signals (only if we have a concept target)
 	if concept != "" {
-		cs, _ := m.store.GetConceptState(learnerID, concept)
+		cs, _ := m.store.GetConceptState(ctx, learnerID, concept)
 		in.ConceptState = cs
 
-		if fail, _ := m.store.LastFailureOnConcept(learnerID, concept, 24*time.Hour); fail != nil {
+		if fail, _ := m.store.LastFailureOnConcept(ctx, learnerID, concept, 24*time.Hour); fail != nil {
 			in.LastFailure = fail
 		}
-		if sessions, err := m.store.CountSessionsOnConcept(learnerID, concept); err == nil {
+		if sessions, err := m.store.CountSessionsOnConcept(ctx, learnerID, concept); err == nil {
 			in.SessionsOnConcept = sessions
 		}
-		if ratio, err := m.store.SelfInitiatedRatio(learnerID, concept); err == nil {
+		if ratio, err := m.store.SelfInitiatedRatio(ctx, learnerID, concept); err == nil {
 			in.SelfInitiatedRatio = ratio
 		}
 	}
 
 	// Latest affect (global, not concept-scoped)
-	if affects, _ := m.store.GetRecentAffectStates(learnerID, 1); len(affects) > 0 {
+	if affects, _ := m.store.GetRecentAffectStates(ctx, learnerID, 1); len(affects) > 0 {
 		in.LatestAffect = affects[0]
 	}
 
@@ -329,7 +330,7 @@ func (m *MotivationEngine) Build(learnerID string, domain *models.Domain, concep
 			}
 		}
 		pickedAxis = nextValueAxis(domain.LastValueAxis, framings)
-		_ = m.store.UpdateDomainLastValueAxis(domain.ID, pickedAxis)
+		_ = m.store.UpdateDomainLastValueAxis(ctx, domain.ID, pickedAxis)
 	}
 
 	return ComposeBrief(in, kind, pickedAxis), nil

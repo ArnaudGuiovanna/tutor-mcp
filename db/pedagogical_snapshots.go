@@ -5,6 +5,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -15,7 +16,7 @@ import (
 
 const pedagogicalSnapshotCols = `id, interaction_id, learner_id, domain_id, concept, activity_type, before_json, observation_json, after_json, decision_json, interpretation_brief, created_at`
 
-func (s *Store) CreatePedagogicalSnapshot(snapshot *models.PedagogicalSnapshot) error {
+func (s *Store) CreatePedagogicalSnapshot(ctx context.Context, snapshot *models.PedagogicalSnapshot) error {
 	return createPedagogicalSnapshotWithQ(s.db, snapshot)
 }
 
@@ -51,7 +52,7 @@ func createPedagogicalSnapshotWithQ(q querier, snapshot *models.PedagogicalSnaps
 	return nil
 }
 
-func (s *Store) GetPedagogicalSnapshots(learnerID, domainID, concept string, limit int) ([]*models.PedagogicalSnapshot, error) {
+func (s *Store) GetPedagogicalSnapshots(ctx context.Context, learnerID, domainID, concept string, limit int) ([]*models.PedagogicalSnapshot, error) {
 	if learnerID == "" {
 		return nil, fmt.Errorf("learner_id is required")
 	}
@@ -74,7 +75,7 @@ func (s *Store) GetPedagogicalSnapshots(learnerID, domainID, concept string, lim
 	}
 	args = append(args, limit)
 
-	rows, err := s.db.Query(
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+pedagogicalSnapshotCols+`
 		 FROM pedagogical_snapshots
 		 WHERE `+strings.Join(where, " AND ")+`

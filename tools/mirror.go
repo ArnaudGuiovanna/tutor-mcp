@@ -34,10 +34,10 @@ func registerGetMetacognitiveMirror(server *mcp.Server, deps *Deps) {
 		}
 
 		since := time.Now().UTC().Add(-7 * 24 * time.Hour)
-		interactions, _ := deps.Store.GetInteractionsSince(learnerID, since)
-		states, _ := deps.Store.GetConceptStatesByLearner(learnerID)
-		calibBias, _ := deps.Store.GetCalibrationBias(learnerID, 20)
-		affects, _ := deps.Store.GetRecentAffectStates(learnerID, 10)
+		interactions, _ := deps.Store.GetInteractionsSince(ctx, learnerID, since)
+		states, _ := deps.Store.GetConceptStatesByLearner(ctx, learnerID)
+		calibBias, _ := deps.Store.GetCalibrationBias(ctx, learnerID, 20)
+		affects, _ := deps.Store.GetRecentAffectStates(ctx, learnerID, 10)
 
 		// Domain filter (#95): if domain_id is supplied, restrict the
 		// concept-keyed inputs (interactions, states) to that domain's
@@ -46,7 +46,7 @@ func registerGetMetacognitiveMirror(server *mcp.Server, deps *Deps) {
 		// because they are session-keyed (from affect rows, not concept-
 		// keyed) — autonomy is a learner trait, not a domain trait.
 		if params.DomainID != "" {
-			domain, err := resolveDomain(deps.Store, learnerID, params.DomainID)
+			domain, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
 			if err != nil {
 				r, _ := errorResult(err.Error())
 				return r, nil, nil
@@ -84,7 +84,7 @@ func registerGetMetacognitiveMirror(server *mcp.Server, deps *Deps) {
 		// Persist & enqueue for proactive push (#59). Best-effort: a queue
 		// failure must not block the in-session pull response — Claude can
 		// still surface the mirror text even if the webhook lane is offline.
-		if _, _, err := engine.EnqueueMirrorWebhook(deps.Store, learnerID, mirror, time.Now().UTC()); err != nil {
+		if _, _, err := engine.EnqueueMirrorWebhook(ctx, deps.Store, learnerID, mirror, time.Now().UTC()); err != nil {
 			deps.Logger.Warn("get_metacognitive_mirror: enqueue failed", "err", err, "learner", learnerID)
 		}
 

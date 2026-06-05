@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -73,11 +74,11 @@ func TestSendOLM_DispatchesFallbackWhenQueueEmpty(t *testing.T) {
 	sched := schedulerForTest(store)
 	sched.sendOLM()
 
-	sent, _ := store.WasAlertSentToday("L1", alertKindOLM)
+	sent, _ := store.WasAlertSentToday(context.Background(), "L1", alertKindOLM)
 	if !sent {
 		t.Errorf("OLM dispatch should mark sent today")
 	}
-	push, err := store.GetLatestOpenWebhookPush("L1", "", time.Now().UTC().Add(-time.Hour))
+	push, err := store.GetLatestOpenWebhookPush(context.Background(), "L1", "", time.Now().UTC().Add(-time.Hour))
 	if err != nil {
 		t.Fatalf("GetLatestOpenWebhookPush: %v", err)
 	}
@@ -128,7 +129,7 @@ func TestRunConsolidationCycleEnqueuesPendingOnly(t *testing.T) {
 
 	sched.runConsolidationCycleAt(time.Date(2026, time.May, 3, 13, 30, 0, 0, time.UTC))
 
-	item, err := store.GetConsolidation(learnerID, "monthly", "2026-04")
+	item, err := store.GetConsolidation(context.Background(), learnerID, "monthly", "2026-04")
 	if err != nil {
 		t.Fatalf("GetConsolidation: %v", err)
 	}
@@ -148,7 +149,7 @@ func TestRunConsolidationCycleSkipsWhenMemoryDisabled(t *testing.T) {
 
 	sched.runConsolidationCycleAt(time.Date(2026, time.May, 3, 13, 30, 0, 0, time.UTC))
 
-	pending, err := store.GetPendingConsolidations(learnerID)
+	pending, err := store.GetPendingConsolidations(context.Background(), learnerID)
 	if err != nil {
 		t.Fatalf("GetPendingConsolidations: %v", err)
 	}
@@ -181,7 +182,7 @@ func TestSendOLM_SkipsWhenNothingActionable(t *testing.T) {
 	sched := schedulerForTest(store)
 	sched.sendOLM()
 
-	sent, _ := store.WasAlertSentToday("L1", alertKindOLM)
+	sent, _ := store.WasAlertSentToday(context.Background(), "L1", alertKindOLM)
 	if sent {
 		t.Errorf("nothing actionable should NOT mark OLM as sent")
 	}

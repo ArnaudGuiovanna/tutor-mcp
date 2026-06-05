@@ -33,7 +33,7 @@ func registerGetMisconceptions(server *mcp.Server, deps *Deps) {
 		// Build concept filter from domain if provided
 		var conceptFilter map[string]bool
 		if params.DomainID != "" {
-			domain, err := resolveDomain(deps.Store, learnerID, params.DomainID)
+			domain, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
 			if err != nil {
 				deps.Logger.Error("get_misconceptions: domain resolution failed", "err", err, "domain", params.DomainID)
 				r, _ := errorResult(fmt.Sprintf("domain not found: %s", params.DomainID))
@@ -56,7 +56,7 @@ func registerGetMisconceptions(server *mcp.Server, deps *Deps) {
 		}
 
 		// Get misconception groups
-		groups, err := deps.Store.GetMisconceptionGroups(learnerID, conceptFilter)
+		groups, err := deps.Store.GetMisconceptionGroups(ctx, learnerID, conceptFilter)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to fetch misconceptions", err)
 			return r, nil, nil

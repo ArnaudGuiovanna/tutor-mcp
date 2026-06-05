@@ -4,6 +4,7 @@
 package db
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -26,7 +27,7 @@ func TestUpsertAffectState_InsertThenMergeNonZero(t *testing.T) {
 		NextSessionIntent:   2,
 		AutonomyScore:       0.5,
 	}
-	if err := store.UpsertAffectState(a1); err != nil {
+	if err := store.UpsertAffectState(context.Background(), a1); err != nil {
 		t.Fatalf("first upsert: %v", err)
 	}
 
@@ -42,11 +43,11 @@ func TestUpsertAffectState_InsertThenMergeNonZero(t *testing.T) {
 		NextSessionIntent:   0,    // should keep 2
 		AutonomyScore:       0.75, // should overwrite 0.5 -> 0.75
 	}
-	if err := store.UpsertAffectState(a2); err != nil {
+	if err := store.UpsertAffectState(context.Background(), a2); err != nil {
 		t.Fatalf("second upsert: %v", err)
 	}
 
-	got, err := store.GetAffectBySession("L1", "S1")
+	got, err := store.GetAffectBySession(context.Background(), "L1", "S1")
 	if err != nil {
 		t.Fatalf("GetAffectBySession: %v", err)
 	}
@@ -71,7 +72,7 @@ func TestUpsertAffectState_InsertThenMergeNonZero(t *testing.T) {
 
 func TestGetAffectBySession_NotFound(t *testing.T) {
 	store := setupTestDB(t)
-	if _, err := store.GetAffectBySession("L1", "missing"); err == nil {
+	if _, err := store.GetAffectBySession(context.Background(), "L1", "missing"); err == nil {
 		t.Fatal("expected error for missing affect state")
 	}
 }
@@ -84,7 +85,7 @@ func TestGetRecentAffectStates_OrderingAndLimit(t *testing.T) {
 	sessions := []string{"S1", "S2", "S3"}
 	for _, sid := range sessions {
 		a := &models.AffectState{LearnerID: "L1", SessionID: sid, Energy: 3}
-		if err := store.UpsertAffectState(a); err != nil {
+		if err := store.UpsertAffectState(context.Background(), a); err != nil {
 			t.Fatalf("insert %s: %v", sid, err)
 		}
 	}
@@ -101,7 +102,7 @@ func TestGetRecentAffectStates_OrderingAndLimit(t *testing.T) {
 	rewrite("S2", now.Add(-2*time.Hour))
 	rewrite("S3", now.Add(-1*time.Hour))
 
-	got, err := store.GetRecentAffectStates("L1", 10)
+	got, err := store.GetRecentAffectStates(context.Background(), "L1", 10)
 	if err != nil {
 		t.Fatalf("GetRecentAffectStates: %v", err)
 	}
@@ -114,7 +115,7 @@ func TestGetRecentAffectStates_OrderingAndLimit(t *testing.T) {
 	}
 
 	// limit caps result count.
-	got, err = store.GetRecentAffectStates("L1", 2)
+	got, err = store.GetRecentAffectStates(context.Background(), "L1", 2)
 	if err != nil {
 		t.Fatalf("limit query: %v", err)
 	}
@@ -123,7 +124,7 @@ func TestGetRecentAffectStates_OrderingAndLimit(t *testing.T) {
 	}
 
 	// Other learner gets nothing.
-	got, _ = store.GetRecentAffectStates("L2", 10)
+	got, _ = store.GetRecentAffectStates(context.Background(), "L2", 10)
 	if len(got) != 0 {
 		t.Errorf("expected 0 rows for L2, got %d", len(got))
 	}
@@ -132,14 +133,14 @@ func TestGetRecentAffectStates_OrderingAndLimit(t *testing.T) {
 func TestUpdateAffectAutonomyScore(t *testing.T) {
 	store := setupTestDB(t)
 	a := &models.AffectState{LearnerID: "L1", SessionID: "S1", Energy: 1, AutonomyScore: 0.1}
-	if err := store.UpsertAffectState(a); err != nil {
+	if err := store.UpsertAffectState(context.Background(), a); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
-	if err := store.UpdateAffectAutonomyScore("L1", "S1", 0.42); err != nil {
+	if err := store.UpdateAffectAutonomyScore(context.Background(), "L1", "S1", 0.42); err != nil {
 		t.Fatalf("UpdateAffectAutonomyScore: %v", err)
 	}
-	got, err := store.GetAffectBySession("L1", "S1")
+	got, err := store.GetAffectBySession(context.Background(), "L1", "S1")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -148,7 +149,7 @@ func TestUpdateAffectAutonomyScore(t *testing.T) {
 	}
 
 	// No-op against missing row should not error (UPDATE 0 rows is fine).
-	if err := store.UpdateAffectAutonomyScore("L1", "missing", 0.99); err != nil {
+	if err := store.UpdateAffectAutonomyScore(context.Background(), "L1", "missing", 0.99); err != nil {
 		t.Errorf("unexpected error for missing session: %v", err)
 	}
 }
@@ -163,11 +164,11 @@ func TestCalibrationLifecycle(t *testing.T) {
 		ConceptID:    "C1",
 		Predicted:    0.6,
 	}
-	if err := store.CreateCalibrationPrediction(rec); err != nil {
+	if err := store.CreateCalibrationPrediction(context.Background(), rec); err != nil {
 		t.Fatalf("create prediction: %v", err)
 	}
 
-	got, err := store.GetCalibrationRecord("P1", "L1")
+	got, err := store.GetCalibrationRecord(context.Background(), "P1", "L1")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -182,10 +183,10 @@ func TestCalibrationLifecycle(t *testing.T) {
 	}
 
 	// Complete the prediction.
-	if err := store.CompleteCalibrationRecord("P1", "L1", 0.8, -0.2); err != nil {
+	if err := store.CompleteCalibrationRecord(context.Background(), "P1", "L1", 0.8, -0.2); err != nil {
 		t.Fatalf("complete: %v", err)
 	}
-	got, err = store.GetCalibrationRecord("P1", "L1")
+	got, err = store.GetCalibrationRecord(context.Background(), "P1", "L1")
 	if err != nil {
 		t.Fatalf("re-get: %v", err)
 	}
@@ -197,12 +198,12 @@ func TestCalibrationLifecycle(t *testing.T) {
 	}
 
 	// Completing missing prediction returns the "not found" error.
-	if err := store.CompleteCalibrationRecord("does-not-exist", "L1", 0, 0); err == nil {
+	if err := store.CompleteCalibrationRecord(context.Background(), "does-not-exist", "L1", 0, 0); err == nil {
 		t.Fatal("expected error completing missing record")
 	}
 
 	// GetCalibrationRecord on missing prediction also errors.
-	if _, err := store.GetCalibrationRecord("does-not-exist", "L1"); err == nil {
+	if _, err := store.GetCalibrationRecord(context.Background(), "does-not-exist", "L1"); err == nil {
 		t.Fatal("expected error getting missing record")
 	}
 }
@@ -218,17 +219,17 @@ func TestGetCalibrationRecord_FiltersByLearnerID(t *testing.T) {
 		ConceptID:    "C1",
 		Predicted:    0.5,
 	}
-	if err := store.CreateCalibrationPrediction(rec); err != nil {
+	if err := store.CreateCalibrationPrediction(context.Background(), rec); err != nil {
 		t.Fatalf("create prediction: %v", err)
 	}
 
 	// Fetching with the wrong learner must error with "calibration record not found".
-	if _, err := store.GetCalibrationRecord("P_owner", "learner_B"); err == nil {
+	if _, err := store.GetCalibrationRecord(context.Background(), "P_owner", "learner_B"); err == nil {
 		t.Fatal("expected error when fetching another learner's calibration record")
 	}
 
 	// Sanity: rightful owner still resolves.
-	got, err := store.GetCalibrationRecord("P_owner", "learner_A")
+	got, err := store.GetCalibrationRecord(context.Background(), "P_owner", "learner_A")
 	if err != nil {
 		t.Fatalf("owner fetch failed: %v", err)
 	}
@@ -248,17 +249,17 @@ func TestCompleteCalibrationRecord_FiltersByLearnerID(t *testing.T) {
 		ConceptID:    "C1",
 		Predicted:    0.5,
 	}
-	if err := store.CreateCalibrationPrediction(rec); err != nil {
+	if err := store.CreateCalibrationPrediction(context.Background(), rec); err != nil {
 		t.Fatalf("create prediction: %v", err)
 	}
 
 	// Completing as the wrong learner must error "calibration record not found".
-	if err := store.CompleteCalibrationRecord("P_owner", "learner_B", 0.5, 0.0); err == nil {
+	if err := store.CompleteCalibrationRecord(context.Background(), "P_owner", "learner_B", 0.5, 0.0); err == nil {
 		t.Fatal("expected error when completing another learner's calibration record")
 	}
 
 	// And the row must remain unmodified (Actual still nil).
-	got, err := store.GetCalibrationRecord("P_owner", "learner_A")
+	got, err := store.GetCalibrationRecord(context.Background(), "P_owner", "learner_A")
 	if err != nil {
 		t.Fatalf("owner fetch failed: %v", err)
 	}
@@ -267,7 +268,7 @@ func TestCompleteCalibrationRecord_FiltersByLearnerID(t *testing.T) {
 	}
 
 	// Sanity: rightful owner still completes.
-	if err := store.CompleteCalibrationRecord("P_owner", "learner_A", 0.7, -0.2); err != nil {
+	if err := store.CompleteCalibrationRecord(context.Background(), "P_owner", "learner_A", 0.7, -0.2); err != nil {
 		t.Fatalf("owner complete failed: %v", err)
 	}
 }
@@ -276,14 +277,14 @@ func TestGetCalibrationBiasAndHistory(t *testing.T) {
 	store := setupTestDB(t)
 
 	// Empty case: bias is 0, history is empty.
-	bias, err := store.GetCalibrationBias("L1", 5)
+	bias, err := store.GetCalibrationBias(context.Background(), "L1", 5)
 	if err != nil {
 		t.Fatalf("bias empty: %v", err)
 	}
 	if bias != 0 {
 		t.Errorf("expected 0 bias on empty, got %v", bias)
 	}
-	hist, err := store.GetCalibrationBiasHistory("L1", 5)
+	hist, err := store.GetCalibrationBiasHistory(context.Background(), "L1", 5)
 	if err != nil {
 		t.Fatalf("history empty: %v", err)
 	}
@@ -300,15 +301,15 @@ func TestGetCalibrationBiasAndHistory(t *testing.T) {
 			ConceptID:    "C1",
 			Predicted:    0.5,
 		}
-		if err := store.CreateCalibrationPrediction(rec); err != nil {
+		if err := store.CreateCalibrationPrediction(context.Background(), rec); err != nil {
 			t.Fatalf("create: %v", err)
 		}
-		if err := store.CompleteCalibrationRecord(rec.PredictionID, "L1", 0.5-d, d); err != nil {
+		if err := store.CompleteCalibrationRecord(context.Background(), rec.PredictionID, "L1", 0.5-d, d); err != nil {
 			t.Fatalf("complete: %v", err)
 		}
 	}
 
-	bias, err = store.GetCalibrationBias("L1", 10)
+	bias, err = store.GetCalibrationBias(context.Background(), "L1", 10)
 	if err != nil {
 		t.Fatalf("bias: %v", err)
 	}
@@ -317,7 +318,7 @@ func TestGetCalibrationBiasAndHistory(t *testing.T) {
 		t.Errorf("bias = %v want %v", bias, want)
 	}
 
-	hist, err = store.GetCalibrationBiasHistory("L1", 10)
+	hist, err = store.GetCalibrationBiasHistory(context.Background(), "L1", 10)
 	if err != nil {
 		t.Fatalf("history: %v", err)
 	}
@@ -326,7 +327,7 @@ func TestGetCalibrationBiasAndHistory(t *testing.T) {
 	}
 
 	// Limit caps the bias window.
-	if _, err := store.GetCalibrationBias("L1", 1); err != nil {
+	if _, err := store.GetCalibrationBias(context.Background(), "L1", 1); err != nil {
 		t.Errorf("bias limit=1: %v", err)
 	}
 }
@@ -353,12 +354,12 @@ func TestTransferRecord_CreateAndGet(t *testing.T) {
 			Score:       c.score,
 			SessionID:   c.sess,
 		}
-		if err := store.CreateTransferRecord(r); err != nil {
+		if err := store.CreateTransferRecord(context.Background(), r); err != nil {
 			t.Fatalf("create %s: %v", c.ctx, err)
 		}
 	}
 
-	got, err := store.GetTransferScores("L1", "C1")
+	got, err := store.GetTransferScores(context.Background(), "L1", "C1")
 	if err != nil {
 		t.Fatalf("GetTransferScores: %v", err)
 	}
@@ -380,7 +381,7 @@ func TestTransferRecord_CreateAndGet(t *testing.T) {
 	}
 
 	// Different concept yields nothing.
-	got, _ = store.GetTransferScores("L1", "C-other")
+	got, _ = store.GetTransferScores(context.Background(), "L1", "C-other")
 	if len(got) != 0 {
 		t.Errorf("expected 0 for other concept, got %d", len(got))
 	}
@@ -424,7 +425,7 @@ func TestGetHintStatsForMastered(t *testing.T) {
 		 VALUES ('L1','C-novice','RECALL_EXERCISE',1,5,?)`, now,
 	)
 
-	hints, total, err := store.GetHintStatsForMastered("L1", 0.7)
+	hints, total, err := store.GetHintStatsForMastered(context.Background(), "L1", 0.7)
 	if err != nil {
 		t.Fatalf("stats: %v", err)
 	}
@@ -436,7 +437,7 @@ func TestGetHintStatsForMastered(t *testing.T) {
 	}
 
 	// Threshold above all mastery values returns zeros.
-	hints, total, err = store.GetHintStatsForMastered("L1", 0.99)
+	hints, total, err = store.GetHintStatsForMastered(context.Background(), "L1", 0.99)
 	if err != nil {
 		t.Fatalf("stats high threshold: %v", err)
 	}
@@ -481,7 +482,7 @@ func TestCountProactiveReviews(t *testing.T) {
 		 VALUES ('L1','C1','RECALL_EXERCISE',1,1,?)`, now.Add(-48*time.Hour),
 	)
 
-	proactive, total, err := store.CountProactiveReviews("L1", now.Add(-1*time.Hour))
+	proactive, total, err := store.CountProactiveReviews(context.Background(), "L1", now.Add(-1*time.Hour))
 	if err != nil {
 		t.Fatalf("count: %v", err)
 	}

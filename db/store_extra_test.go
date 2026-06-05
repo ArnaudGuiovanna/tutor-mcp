@@ -4,6 +4,7 @@
 package db
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -44,14 +45,14 @@ func TestIsSafeWebhookURL(t *testing.T) {
 
 func TestCreateLearner_GetByIDAndEmail(t *testing.T) {
 	store := setupTestDB(t)
-	l, err := store.CreateLearner("alice@example.com", "h", "go-mastery", "")
+	l, err := store.CreateLearner(context.Background(), "alice@example.com", "h", "go-mastery", "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if l.ID == "" {
 		t.Fatal("expected non-empty id")
 	}
-	got, err := store.GetLearnerByID(l.ID)
+	got, err := store.GetLearnerByID(context.Background(), l.ID)
 	if err != nil {
 		t.Fatalf("by id: %v", err)
 	}
@@ -63,7 +64,7 @@ func TestCreateLearner_GetByIDAndEmail(t *testing.T) {
 		t.Errorf("ProfileJSON = %q want '{}'", got.ProfileJSON)
 	}
 
-	got2, err := store.GetLearnerByEmail("alice@example.com")
+	got2, err := store.GetLearnerByEmail(context.Background(), "alice@example.com")
 	if err != nil {
 		t.Fatalf("by email: %v", err)
 	}
@@ -72,24 +73,24 @@ func TestCreateLearner_GetByIDAndEmail(t *testing.T) {
 	}
 
 	// Missing learner returns error (sql.ErrNoRows wrapped).
-	if _, err := store.GetLearnerByID("nope"); err == nil {
+	if _, err := store.GetLearnerByID(context.Background(), "nope"); err == nil {
 		t.Error("expected error for missing id")
 	}
-	if _, err := store.GetLearnerByEmail("nope@nope"); err == nil {
+	if _, err := store.GetLearnerByEmail(context.Background(), "nope@nope"); err == nil {
 		t.Error("expected error for missing email")
 	}
 }
 
 func TestCreateLearner_RejectsBadWebhook(t *testing.T) {
 	store := setupTestDB(t)
-	if _, err := store.CreateLearner("x@y", "h", "obj", "https://evil.example/wh"); err == nil {
+	if _, err := store.CreateLearner(context.Background(), "x@y", "h", "obj", "https://evil.example/wh"); err == nil {
 		t.Fatal("expected webhook validation error")
 	}
 }
 
 func TestUpdateLastActive_AndProfile(t *testing.T) {
 	store := setupTestDB(t)
-	if err := store.UpdateLastActive("L1"); err != nil {
+	if err := store.UpdateLastActive(context.Background(), "L1"); err != nil {
 		t.Fatalf("UpdateLastActive: %v", err)
 	}
 	var lastActive *time.Time
@@ -100,10 +101,10 @@ func TestUpdateLastActive_AndProfile(t *testing.T) {
 		t.Errorf("last_active not set: %v", lastActive)
 	}
 
-	if err := store.UpdateLearnerProfile("L1", `{"foo":"bar"}`); err != nil {
+	if err := store.UpdateLearnerProfile(context.Background(), "L1", `{"foo":"bar"}`); err != nil {
 		t.Fatalf("UpdateLearnerProfile: %v", err)
 	}
-	got, err := store.GetLearnerByID("L1")
+	got, err := store.GetLearnerByID(context.Background(), "L1")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -127,7 +128,7 @@ func TestGetActiveLearners(t *testing.T) {
 	); err != nil {
 		t.Fatalf("insert L3: %v", err)
 	}
-	got, err := store.GetActiveLearners()
+	got, err := store.GetActiveLearners(context.Background())
 	if err != nil {
 		t.Fatalf("active: %v", err)
 	}
@@ -156,27 +157,27 @@ func TestWebhookPushLogLifecycle(t *testing.T) {
 		OpenLoop:          "I kept a small loop bug.",
 		NextAction:        "Open Claude and revisit loops.",
 	}
-	if _, err := store.CreateWebhookPushLog("L1", 42, brief, now); err != nil {
+	if _, err := store.CreateWebhookPushLog(context.Background(), "L1", 42, brief, now); err != nil {
 		t.Fatalf("CreateWebhookPushLog: %v", err)
 	}
-	push, err := store.GetLatestOpenWebhookPush("L1", "d1", now.Add(-time.Hour))
+	push, err := store.GetLatestOpenWebhookPush(context.Background(), "L1", "d1", now.Add(-time.Hour))
 	if err != nil {
 		t.Fatalf("GetLatestOpenWebhookPush: %v", err)
 	}
 	if push == nil || push.Concept != "loops" || push.QueueID != 42 {
 		t.Fatalf("unexpected push: %+v", push)
 	}
-	if err := store.MarkWebhookPushSessionOpened("L1", now.Add(time.Minute), now.Add(-time.Hour)); err != nil {
+	if err := store.MarkWebhookPushSessionOpened(context.Background(), "L1", now.Add(time.Minute), now.Add(-time.Hour)); err != nil {
 		t.Fatalf("MarkWebhookPushSessionOpened: %v", err)
 	}
-	push, _ = store.GetLatestOpenWebhookPush("L1", "d1", now.Add(-time.Hour))
+	push, _ = store.GetLatestOpenWebhookPush(context.Background(), "L1", "d1", now.Add(-time.Hour))
 	if push == nil || push.OpenedSessionAt == nil {
 		t.Fatalf("expected opened session marker, got %+v", push)
 	}
-	if err := store.MarkWebhookPushConceptAddressed("L1", "d1", "loops", now.Add(2*time.Minute), now.Add(-time.Hour)); err != nil {
+	if err := store.MarkWebhookPushConceptAddressed(context.Background(), "L1", "d1", "loops", now.Add(2*time.Minute), now.Add(-time.Hour)); err != nil {
 		t.Fatalf("MarkWebhookPushConceptAddressed: %v", err)
 	}
-	push, err = store.GetLatestOpenWebhookPush("L1", "d1", now.Add(-time.Hour))
+	push, err = store.GetLatestOpenWebhookPush(context.Background(), "L1", "d1", now.Add(-time.Hour))
 	if err != nil {
 		t.Fatalf("GetLatestOpenWebhookPush after address: %v", err)
 	}
@@ -189,7 +190,7 @@ func TestWebhookPushLogLifecycle(t *testing.T) {
 
 func TestRefreshTokenLifecycle(t *testing.T) {
 	store := setupTestDB(t)
-	rt, err := store.CreateRefreshToken("L1", "client-A")
+	rt, err := store.CreateRefreshToken(context.Background(), "L1", "client-A")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -197,7 +198,7 @@ func TestRefreshTokenLifecycle(t *testing.T) {
 		t.Errorf("unexpected: %+v", rt)
 	}
 
-	got, err := store.GetRefreshToken(rt.Token)
+	got, err := store.GetRefreshToken(context.Background(), rt.Token)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -205,10 +206,10 @@ func TestRefreshTokenLifecycle(t *testing.T) {
 		t.Errorf("get mismatch: %+v", got)
 	}
 
-	if err := store.DeleteRefreshToken(rt.Token); err != nil {
+	if err := store.DeleteRefreshToken(context.Background(), rt.Token); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	if _, err := store.GetRefreshToken(rt.Token); err == nil {
+	if _, err := store.GetRefreshToken(context.Background(), rt.Token); err == nil {
 		t.Error("expected error after delete")
 	}
 }
@@ -229,7 +230,7 @@ func TestCleanupExpiredRefreshTokens(t *testing.T) {
 	); err != nil {
 		t.Fatalf("insert valid: %v", err)
 	}
-	n, err := store.CleanupExpiredRefreshTokens()
+	n, err := store.CleanupExpiredRefreshTokens(context.Background())
 	if err != nil {
 		t.Fatalf("cleanup: %v", err)
 	}
@@ -246,13 +247,13 @@ func TestCleanupExpiredRefreshTokens(t *testing.T) {
 func TestCleanupExpiredCodes(t *testing.T) {
 	store := setupTestDB(t)
 	now := time.Now().UTC()
-	if err := store.CreateAuthCode("c-old", "L1", "ch", "client-A", now.Add(-1*time.Hour)); err != nil {
+	if err := store.CreateAuthCode(context.Background(), "c-old", "L1", "ch", "client-A", now.Add(-1*time.Hour)); err != nil {
 		t.Fatalf("create old: %v", err)
 	}
-	if err := store.CreateAuthCode("c-new", "L1", "ch", "client-A", now.Add(1*time.Hour)); err != nil {
+	if err := store.CreateAuthCode(context.Background(), "c-new", "L1", "ch", "client-A", now.Add(1*time.Hour)); err != nil {
 		t.Fatalf("create new: %v", err)
 	}
-	n, err := store.CleanupExpiredCodes()
+	n, err := store.CleanupExpiredCodes(context.Background())
 	if err != nil {
 		t.Fatalf("cleanup: %v", err)
 	}
@@ -278,7 +279,7 @@ func makeKS(concepts ...string) models.KnowledgeSpace {
 func TestDomainCRUDAndArchive(t *testing.T) {
 	store := setupTestDB(t)
 	graph := makeKS("Goroutines", "Channels")
-	d, err := store.CreateDomainWithValueFramings("L1", "go", "ship feature", graph, `{"axis":"financial"}`)
+	d, err := store.CreateDomainWithValueFramings(context.Background(), "L1", "go", "ship feature", graph, `{"axis":"financial"}`)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -286,7 +287,7 @@ func TestDomainCRUDAndArchive(t *testing.T) {
 		t.Fatal("expected non-empty id")
 	}
 
-	got, err := store.GetDomainByID(d.ID)
+	got, err := store.GetDomainByID(context.Background(), d.ID)
 	if err != nil {
 		t.Fatalf("by id: %v", err)
 	}
@@ -301,7 +302,7 @@ func TestDomainCRUDAndArchive(t *testing.T) {
 	}
 
 	// GetDomainByLearner: most recent active.
-	got2, err := store.GetDomainByLearner("L1")
+	got2, err := store.GetDomainByLearner(context.Background(), "L1")
 	if err != nil {
 		t.Fatalf("by learner: %v", err)
 	}
@@ -310,16 +311,16 @@ func TestDomainCRUDAndArchive(t *testing.T) {
 	}
 
 	// Updates.
-	if err := store.UpdateDomainValueFramings(d.ID, `{"axis":"intellectual"}`); err != nil {
+	if err := store.UpdateDomainValueFramings(context.Background(), d.ID, `{"axis":"intellectual"}`); err != nil {
 		t.Fatalf("update vf: %v", err)
 	}
-	if err := store.UpdateDomainLastValueAxis(d.ID, "intellectual"); err != nil {
+	if err := store.UpdateDomainLastValueAxis(context.Background(), d.ID, "intellectual"); err != nil {
 		t.Fatalf("update axis: %v", err)
 	}
-	if err := store.UpdateDomainGraph(d.ID, makeKS("Goroutines", "Channels", "Mutexes")); err != nil {
+	if err := store.UpdateDomainGraph(context.Background(), d.ID, makeKS("Goroutines", "Channels", "Mutexes")); err != nil {
 		t.Fatalf("update graph: %v", err)
 	}
-	got3, _ := store.GetDomainByID(d.ID)
+	got3, _ := store.GetDomainByID(context.Background(), d.ID)
 	if got3.ValueFramingsJSON != `{"axis":"intellectual"}` {
 		t.Errorf("vf after update: %q", got3.ValueFramingsJSON)
 	}
@@ -331,38 +332,38 @@ func TestDomainCRUDAndArchive(t *testing.T) {
 	}
 
 	// Archive.
-	if err := store.ArchiveDomain(d.ID, "L1"); err != nil {
+	if err := store.ArchiveDomain(context.Background(), d.ID, "L1"); err != nil {
 		t.Fatalf("archive: %v", err)
 	}
-	got4, _ := store.GetDomainByID(d.ID)
+	got4, _ := store.GetDomainByID(context.Background(), d.ID)
 	if !got4.Archived {
 		t.Error("expected Archived=true after archive")
 	}
 
 	// GetDomainByLearner now should return ErrNoRows-wrapped error.
-	if _, err := store.GetDomainByLearner("L1"); err == nil {
+	if _, err := store.GetDomainByLearner(context.Background(), "L1"); err == nil {
 		t.Error("expected error after archive")
 	}
 
 	// Unarchive.
-	if err := store.UnarchiveDomain(d.ID, "L1"); err != nil {
+	if err := store.UnarchiveDomain(context.Background(), d.ID, "L1"); err != nil {
 		t.Fatalf("unarchive: %v", err)
 	}
-	got5, _ := store.GetDomainByID(d.ID)
+	got5, _ := store.GetDomainByID(context.Background(), d.ID)
 	if got5.Archived {
 		t.Error("expected Archived=false after unarchive")
 	}
 
 	// Archive/Unarchive missing returns "not found".
-	if err := store.ArchiveDomain("nope", "L1"); err == nil {
+	if err := store.ArchiveDomain(context.Background(), "nope", "L1"); err == nil {
 		t.Error("expected error archiving missing")
 	}
-	if err := store.UnarchiveDomain("nope", "L1"); err == nil {
+	if err := store.UnarchiveDomain(context.Background(), "nope", "L1"); err == nil {
 		t.Error("expected error unarchiving missing")
 	}
 
 	// CreateDomain (legacy entry) wraps CreateDomainWithValueFramings.
-	d2, err := store.CreateDomain("L1", "second", "g2", makeKS("X"))
+	d2, err := store.CreateDomain(context.Background(), "L1", "second", "g2", makeKS("X"))
 	if err != nil {
 		t.Fatalf("create legacy: %v", err)
 	}
@@ -371,7 +372,7 @@ func TestDomainCRUDAndArchive(t *testing.T) {
 	}
 
 	// GetDomainsByLearner: should return both active domains; with includeArchived=false same.
-	all, err := store.GetDomainsByLearner("L1", false)
+	all, err := store.GetDomainsByLearner(context.Background(), "L1", false)
 	if err != nil {
 		t.Fatalf("get all: %v", err)
 	}
@@ -379,20 +380,20 @@ func TestDomainCRUDAndArchive(t *testing.T) {
 		t.Errorf("expected 2 domains, got %d", len(all))
 	}
 	// Archive d, then check filter.
-	if err := store.ArchiveDomain(d.ID, "L1"); err != nil {
+	if err := store.ArchiveDomain(context.Background(), d.ID, "L1"); err != nil {
 		t.Fatalf("archive again: %v", err)
 	}
-	active, _ := store.GetDomainsByLearner("L1", false)
+	active, _ := store.GetDomainsByLearner(context.Background(), "L1", false)
 	if len(active) != 1 || active[0].ID != d2.ID {
 		t.Errorf("expected only d2 active, got %+v", active)
 	}
-	includeAll, _ := store.GetDomainsByLearner("L1", true)
+	includeAll, _ := store.GetDomainsByLearner(context.Background(), "L1", true)
 	if len(includeAll) != 2 {
 		t.Errorf("expected 2 with includeArchived, got %d", len(includeAll))
 	}
 
 	// ActiveDomainConceptSet: union of active domain concepts.
-	set, err := store.ActiveDomainConceptSet("L1")
+	set, err := store.ActiveDomainConceptSet(context.Background(), "L1")
 	if err != nil {
 		t.Fatalf("active concept set: %v", err)
 	}
@@ -404,10 +405,10 @@ func TestDomainCRUDAndArchive(t *testing.T) {
 	}
 
 	// Delete: actually removes the row.
-	if err := store.DeleteDomain(d2.ID, "L1"); err != nil {
+	if err := store.DeleteDomain(context.Background(), d2.ID, "L1"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	if err := store.DeleteDomain("nope", "L1"); err == nil {
+	if err := store.DeleteDomain(context.Background(), "nope", "L1"); err == nil {
 		t.Error("expected error deleting missing")
 	}
 }
@@ -423,39 +424,39 @@ func TestDeleteDomainCleansAuxiliaryRowsAndKeepsPedagogicalHistory(t *testing.T)
 		t.Fatalf("insert L2: %v", err)
 	}
 
-	d, err := store.CreateDomain("L1", "go", "ship feature", makeKS("Goroutines"))
+	d, err := store.CreateDomain(context.Background(), "L1", "go", "ship feature", makeKS("Goroutines"))
 	if err != nil {
 		t.Fatalf("create domain: %v", err)
 	}
-	other, err := store.CreateDomain("L1", "rust", "ship feature", makeKS("Borrowing"))
+	other, err := store.CreateDomain(context.Background(), "L1", "rust", "ship feature", makeKS("Borrowing"))
 	if err != nil {
 		t.Fatalf("create other domain: %v", err)
 	}
 
-	if _, err := store.InsertImplementationIntention("L1", d.ID, "after coffee", "review goroutines", now); err != nil {
+	if _, err := store.InsertImplementationIntention(context.Background(), "L1", d.ID, "after coffee", "review goroutines", now); err != nil {
 		t.Fatalf("insert implementation intention: %v", err)
 	}
-	if _, err := store.InsertImplementationIntention("L1", other.ID, "after lunch", "review borrowing", now); err != nil {
+	if _, err := store.InsertImplementationIntention(context.Background(), "L1", other.ID, "after lunch", "review borrowing", now); err != nil {
 		t.Fatalf("insert other implementation intention: %v", err)
 	}
-	if _, err := store.InsertImplementationIntention("L2", d.ID, "after work", "foreign row", now); err != nil {
+	if _, err := store.InsertImplementationIntention(context.Background(), "L2", d.ID, "after work", "foreign row", now); err != nil {
 		t.Fatalf("insert foreign implementation intention: %v", err)
 	}
 
-	if _, err := store.EnqueueWebhookMessage("L1", "olm:"+d.ID, "domain olm", now, time.Time{}, 0); err != nil {
+	if _, err := store.EnqueueWebhookMessage(context.Background(), "L1", "olm:"+d.ID, "domain olm", now, time.Time{}, 0); err != nil {
 		t.Fatalf("enqueue domain olm: %v", err)
 	}
-	if _, err := store.EnqueueWebhookMessage("L1", "olm:"+other.ID, "other olm", now, time.Time{}, 0); err != nil {
+	if _, err := store.EnqueueWebhookMessage(context.Background(), "L1", "olm:"+other.ID, "other olm", now, time.Time{}, 0); err != nil {
 		t.Fatalf("enqueue other olm: %v", err)
 	}
-	if _, err := store.EnqueueWebhookMessage("L1", "daily_motivation", "daily", now, time.Time{}, 0); err != nil {
+	if _, err := store.EnqueueWebhookMessage(context.Background(), "L1", "daily_motivation", "daily", now, time.Time{}, 0); err != nil {
 		t.Fatalf("enqueue daily: %v", err)
 	}
-	if _, err := store.EnqueueWebhookMessage("L2", "olm:"+d.ID, "foreign olm", now, time.Time{}, 0); err != nil {
+	if _, err := store.EnqueueWebhookMessage(context.Background(), "L2", "olm:"+d.ID, "foreign olm", now, time.Time{}, 0); err != nil {
 		t.Fatalf("enqueue foreign olm: %v", err)
 	}
 
-	if err := store.UpsertConceptState(&models.ConceptState{
+	if err := store.UpsertConceptState(context.Background(), &models.ConceptState{
 		LearnerID: "L1",
 		Concept:   "Goroutines",
 		CardState: "review",
@@ -463,7 +464,7 @@ func TestDeleteDomainCleansAuxiliaryRowsAndKeepsPedagogicalHistory(t *testing.T)
 	}); err != nil {
 		t.Fatalf("upsert concept state: %v", err)
 	}
-	if err := store.CreateInteraction(&models.Interaction{
+	if err := store.CreateInteraction(context.Background(), &models.Interaction{
 		LearnerID:      "L1",
 		DomainID:       d.ID,
 		Concept:        "Goroutines",
@@ -486,7 +487,7 @@ func TestDeleteDomainCleansAuxiliaryRowsAndKeepsPedagogicalHistory(t *testing.T)
 		return n
 	}
 
-	if err := store.DeleteDomain(d.ID, "L2"); err == nil {
+	if err := store.DeleteDomain(context.Background(), d.ID, "L2"); err == nil {
 		t.Fatal("expected error deleting another learner's domain")
 	}
 	if count(`SELECT COUNT(*) FROM domains WHERE id = ?`, d.ID) != 1 {
@@ -499,7 +500,7 @@ func TestDeleteDomainCleansAuxiliaryRowsAndKeepsPedagogicalHistory(t *testing.T)
 		t.Fatal("foreign delete attempt removed webhook queue rows")
 	}
 
-	if err := store.DeleteDomain(d.ID, "L1"); err != nil {
+	if err := store.DeleteDomain(context.Background(), d.ID, "L1"); err != nil {
 		t.Fatalf("delete domain: %v", err)
 	}
 
@@ -554,11 +555,11 @@ func TestConceptStateUpsertAndRead(t *testing.T) {
 		NextReview: nil,
 		UpdatedAt:  now,
 	}
-	if err := store.InsertConceptStateIfNotExists(cs); err != nil {
+	if err := store.InsertConceptStateIfNotExists(context.Background(), cs); err != nil {
 		t.Fatalf("insert if not exists: %v", err)
 	}
 	// Second call should be a no-op (no error).
-	if err := store.InsertConceptStateIfNotExists(cs); err != nil {
+	if err := store.InsertConceptStateIfNotExists(context.Background(), cs); err != nil {
 		t.Fatalf("insert if not exists (2nd): %v", err)
 	}
 
@@ -570,11 +571,11 @@ func TestConceptStateUpsertAndRead(t *testing.T) {
 	cs.LastReview = &last
 	cs.CardState = "review"
 	cs.Reps = 5
-	if err := store.UpsertConceptState(cs); err != nil {
+	if err := store.UpsertConceptState(context.Background(), cs); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
 
-	got, err := store.GetConceptState("L1", "C1")
+	got, err := store.GetConceptState(context.Background(), "L1", "C1")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -591,7 +592,7 @@ func TestConceptStateUpsertAndRead(t *testing.T) {
 		t.Errorf("LastReview = %v want %v", got.LastReview, last)
 	}
 
-	all, err := store.GetConceptStatesByLearner("L1")
+	all, err := store.GetConceptStatesByLearner(context.Background(), "L1")
 	if err != nil {
 		t.Fatalf("by learner: %v", err)
 	}
@@ -600,7 +601,7 @@ func TestConceptStateUpsertAndRead(t *testing.T) {
 	}
 
 	// Missing concept returns wrapped sql.ErrNoRows.
-	if _, err := store.GetConceptState("L1", "missing"); err == nil {
+	if _, err := store.GetConceptState(context.Background(), "L1", "missing"); err == nil {
 		t.Error("expected error for missing concept")
 	}
 }
@@ -648,7 +649,7 @@ func TestGetConceptsDueForReview(t *testing.T) {
 		now,
 	)
 
-	got, err := store.GetConceptsDueForReview("L1")
+	got, err := store.GetConceptsDueForReview(context.Background(), "L1")
 	if err != nil {
 		t.Fatalf("due: %v", err)
 	}
@@ -691,7 +692,7 @@ func TestInteractionsLifecycle(t *testing.T) {
 		{"C2", true, ""},
 	} {
 		i := mk(args.concept, args.success, args.misc)
-		if err := store.CreateInteraction(i); err != nil {
+		if err := store.CreateInteraction(context.Background(), i); err != nil {
 			t.Fatalf("create %+v: %v", args, err)
 		}
 		if i.ID == 0 {
@@ -700,7 +701,7 @@ func TestInteractionsLifecycle(t *testing.T) {
 	}
 
 	// GetRecentInteractions filters by concept.
-	got, err := store.GetRecentInteractions("L1", "C1", 10)
+	got, err := store.GetRecentInteractions(context.Background(), "L1", "C1", 10)
 	if err != nil {
 		t.Fatalf("recent C1: %v", err)
 	}
@@ -720,7 +721,7 @@ func TestInteractionsLifecycle(t *testing.T) {
 	}
 
 	// GetRecentInteractionsByLearner returns all 3.
-	all, err := store.GetRecentInteractionsByLearner("L1", 10)
+	all, err := store.GetRecentInteractionsByLearner(context.Background(), "L1", 10)
 	if err != nil {
 		t.Fatalf("recent learner: %v", err)
 	}
@@ -729,7 +730,7 @@ func TestInteractionsLifecycle(t *testing.T) {
 	}
 
 	// GetSessionInteractions: cutoff is 2h, all rows are fresh.
-	sess, err := store.GetSessionInteractions("L1")
+	sess, err := store.GetSessionInteractions(context.Background(), "L1")
 	if err != nil {
 		t.Fatalf("session: %v", err)
 	}
@@ -738,7 +739,7 @@ func TestInteractionsLifecycle(t *testing.T) {
 	}
 
 	// GetInteractionsSince filters by created_at.
-	since, err := store.GetInteractionsSince("L1", time.Now().UTC().Add(-1*time.Hour))
+	since, err := store.GetInteractionsSince(context.Background(), "L1", time.Now().UTC().Add(-1*time.Hour))
 	if err != nil {
 		t.Fatalf("since: %v", err)
 	}
@@ -750,7 +751,7 @@ func TestInteractionsLifecycle(t *testing.T) {
 	// The MIN() aggregate path is exercised in TestGetSessionStart_Empty below;
 	// when rows exist, the modernc/sqlite driver returns MIN(time) as text and
 	// the production caller swallows the error (see tools/get_dashboard_state.go).
-	start2, err := store.GetSessionStart("L-missing")
+	start2, err := store.GetSessionStart(context.Background(), "L-missing")
 	if err != nil {
 		t.Fatalf("session start missing: %v", err)
 	}
@@ -761,7 +762,7 @@ func TestInteractionsLifecycle(t *testing.T) {
 
 func TestGetSessionStart_Empty(t *testing.T) {
 	store := setupTestDB(t)
-	ts, err := store.GetSessionStart("L1")
+	ts, err := store.GetSessionStart(context.Background(), "L1")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -776,7 +777,7 @@ func TestGetSessionStart_Empty(t *testing.T) {
 func TestAvailability(t *testing.T) {
 	store := setupTestDB(t)
 	// Default: GetAvailability returns the canonical defaults when no row exists.
-	got, err := store.GetAvailability("L1")
+	got, err := store.GetAvailability(context.Background(), "L1")
 	if err != nil {
 		t.Fatalf("default: %v", err)
 	}
@@ -792,10 +793,10 @@ func TestAvailability(t *testing.T) {
 		SessionsWeek: 5,
 		DoNotDisturb: true,
 	}
-	if err := store.UpsertAvailability(a); err != nil {
+	if err := store.UpsertAvailability(context.Background(), a); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
-	got, err = store.GetAvailability("L1")
+	got, err = store.GetAvailability(context.Background(), "L1")
 	if err != nil {
 		t.Fatalf("after upsert: %v", err)
 	}
@@ -806,10 +807,10 @@ func TestAvailability(t *testing.T) {
 	// Update via a second upsert (ON CONFLICT path).
 	a.AvgDuration = 60
 	a.DoNotDisturb = false
-	if err := store.UpsertAvailability(a); err != nil {
+	if err := store.UpsertAvailability(context.Background(), a); err != nil {
 		t.Fatalf("second upsert: %v", err)
 	}
-	got, _ = store.GetAvailability("L1")
+	got, _ = store.GetAvailability(context.Background(), "L1")
 	if got.AvgDuration != 60 || got.DoNotDisturb {
 		t.Errorf("after second upsert: %+v", got)
 	}
@@ -821,14 +822,14 @@ func TestScheduledAlerts(t *testing.T) {
 	store := setupTestDB(t)
 	now := time.Now().UTC()
 
-	if err := store.CreateScheduledAlert("L1", "FORGETTING", "C1", now); err != nil {
+	if err := store.CreateScheduledAlert(context.Background(), "L1", "FORGETTING", "C1", now); err != nil {
 		t.Fatalf("create alert 1: %v", err)
 	}
-	if err := store.CreateScheduledAlert("L1", "PLATEAU", "C2", now); err != nil {
+	if err := store.CreateScheduledAlert(context.Background(), "L1", "PLATEAU", "C2", now); err != nil {
 		t.Fatalf("create alert 2: %v", err)
 	}
 
-	got, err := store.GetUnsentAlerts("L1")
+	got, err := store.GetUnsentAlerts(context.Background(), "L1")
 	if err != nil {
 		t.Fatalf("unsent: %v", err)
 	}
@@ -842,16 +843,16 @@ func TestScheduledAlerts(t *testing.T) {
 	}
 
 	// Mark first as sent.
-	if err := store.MarkAlertSent(got[0].ID); err != nil {
+	if err := store.MarkAlertSent(context.Background(), got[0].ID); err != nil {
 		t.Fatalf("mark sent: %v", err)
 	}
-	leftover, _ := store.GetUnsentAlerts("L1")
+	leftover, _ := store.GetUnsentAlerts(context.Background(), "L1")
 	if len(leftover) != 1 {
 		t.Errorf("expected 1 unsent, got %d", len(leftover))
 	}
 
 	// WasAlertSentToday: the alert was just created, so YES.
-	sent, err := store.WasAlertSentToday("L1", "FORGETTING")
+	sent, err := store.WasAlertSentToday(context.Background(), "L1", "FORGETTING")
 	if err != nil {
 		t.Fatalf("was sent: %v", err)
 	}
@@ -859,7 +860,7 @@ func TestScheduledAlerts(t *testing.T) {
 		t.Error("expected WasAlertSentToday=true")
 	}
 	// Different alert type today: false.
-	sent, _ = store.WasAlertSentToday("L1", "OVERLOAD")
+	sent, _ = store.WasAlertSentToday(context.Background(), "L1", "OVERLOAD")
 	if sent {
 		t.Error("expected false for unused type")
 	}
@@ -897,7 +898,7 @@ func TestStreakAndTodayStats(t *testing.T) {
 	// Day before yesterday: 1 interaction (so streak is 3 days).
 	insertInteractionAtSQLTime(t, store, "C1", 1, today.AddDate(0, 0, -2).Add(2*time.Hour))
 
-	count, err := store.GetTodayInteractionCount("L1")
+	count, err := store.GetTodayInteractionCount(context.Background(), "L1")
 	if err != nil {
 		t.Fatalf("today count: %v", err)
 	}
@@ -905,7 +906,7 @@ func TestStreakAndTodayStats(t *testing.T) {
 		t.Errorf("today count = %d want 3", count)
 	}
 
-	rate, total, err := store.GetTodaySuccessRate("L1")
+	rate, total, err := store.GetTodaySuccessRate(context.Background(), "L1")
 	if err != nil {
 		t.Fatalf("today rate: %v", err)
 	}
@@ -917,7 +918,7 @@ func TestStreakAndTodayStats(t *testing.T) {
 	}
 
 	// Empty learner: rate=0, total=0.
-	rate, total, err = store.GetTodaySuccessRate("L-missing")
+	rate, total, err = store.GetTodaySuccessRate(context.Background(), "L-missing")
 	if err != nil {
 		t.Fatalf("rate empty: %v", err)
 	}
@@ -925,7 +926,7 @@ func TestStreakAndTodayStats(t *testing.T) {
 		t.Errorf("expected (0,0), got (%v,%d)", rate, total)
 	}
 
-	streak, err := store.GetDailyStreak("L1")
+	streak, err := store.GetDailyStreak(context.Background(), "L1")
 	if err != nil {
 		t.Fatalf("streak: %v", err)
 	}
@@ -934,7 +935,7 @@ func TestStreakAndTodayStats(t *testing.T) {
 	}
 
 	// Empty learner streak = 0.
-	streak, err = store.GetDailyStreak("L-missing")
+	streak, err = store.GetDailyStreak(context.Background(), "L-missing")
 	if err != nil {
 		t.Fatalf("streak empty: %v", err)
 	}
@@ -950,7 +951,7 @@ func TestGetDailyStreak_GapsBreakStreak(t *testing.T) {
 	// terminate the streak at 1.
 	insertInteractionAtSQLTime(t, store, "C", 1, now.Add(1*time.Hour))
 	insertInteractionAtSQLTime(t, store, "C", 1, now.AddDate(0, 0, -3).Add(1*time.Hour))
-	streak, err := store.GetDailyStreak("L1")
+	streak, err := store.GetDailyStreak(context.Background(), "L1")
 	if err != nil {
 		t.Fatalf("streak: %v", err)
 	}
@@ -963,7 +964,7 @@ func TestGetDailyStreak_StaleStartReturnsZero(t *testing.T) {
 	store := setupTestDB(t)
 	// Last interaction is 5 days ago — too stale to start a streak.
 	insertInteractionAtSQLTime(t, store, "C", 1, time.Now().UTC().AddDate(0, 0, -5))
-	streak, err := store.GetDailyStreak("L1")
+	streak, err := store.GetDailyStreak(context.Background(), "L1")
 	if err != nil {
 		t.Fatalf("streak: %v", err)
 	}
@@ -1014,7 +1015,7 @@ func TestGetConceptsDueForReview_ExcludesArchivedDomain(t *testing.T) {
 		}
 	}
 
-	got, err := store.GetConceptsDueForReview("L2")
+	got, err := store.GetConceptsDueForReview(context.Background(), "L2")
 	if err != nil {
 		t.Fatalf("GetConceptsDueForReview: %v", err)
 	}
@@ -1027,10 +1028,10 @@ func TestGetConceptsDueForReview_ExcludesArchivedDomain(t *testing.T) {
 
 func TestCreateOAuthClientWithSecret(t *testing.T) {
 	store := setupTestDB(t)
-	if err := store.CreateOAuthClientWithSecret("c-conf", "Confidential", `["https://x"]`, "deadbeef"); err != nil {
+	if err := store.CreateOAuthClientWithSecret(context.Background(), "c-conf", "Confidential", `["https://x"]`, "deadbeef"); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	got, err := store.GetOAuthClient("c-conf")
+	got, err := store.GetOAuthClient(context.Background(), "c-conf")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -1068,7 +1069,7 @@ func TestGetRecentLearnerEvents_ReturnsMasteryThresholdAndStreakStart(t *testing
 		}
 	}
 
-	events, err := store.GetRecentLearnerEvents("L1", now.AddDate(0, 0, -7))
+	events, err := store.GetRecentLearnerEvents(context.Background(), "L1", now.AddDate(0, 0, -7))
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -1100,7 +1101,7 @@ func TestGetActivityStreak(t *testing.T) {
 
 	// Learner with no interactions → 0
 	mustExec(`INSERT INTO learners (id,email,password_hash,objective,created_at) VALUES ('Lzero','z@t.com','h','o',?)`, now)
-	got, err := store.GetActivityStreak("Lzero")
+	got, err := store.GetActivityStreak(context.Background(), "Lzero")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -1116,7 +1117,7 @@ func TestGetActivityStreak(t *testing.T) {
 			"L3", day(off),
 		)
 	}
-	got, err = store.GetActivityStreak("L3")
+	got, err = store.GetActivityStreak(context.Background(), "L3")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -1132,7 +1133,7 @@ func TestGetActivityStreak(t *testing.T) {
 			"Lhole", day(off),
 		)
 	}
-	got, err = store.GetActivityStreak("Lhole")
+	got, err = store.GetActivityStreak(context.Background(), "Lhole")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}

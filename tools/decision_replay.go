@@ -47,7 +47,7 @@ func registerGetDecisionReplaySummary(server *mcp.Server, deps *Deps) {
 
 		domainID := params.DomainID
 		if domainID != "" {
-			domain, err := resolveDomain(deps.Store, learnerID, domainID)
+			domain, err := resolveDomain(ctx, deps.Store, learnerID, domainID)
 			if err != nil || domain == nil {
 				deps.Logger.Error("get_decision_replay_summary: domain not found", "err", err, "learner", learnerID, "domain_id", params.DomainID)
 				r, _ := errorResult("domain not found")
@@ -57,7 +57,7 @@ func registerGetDecisionReplaySummary(server *mcp.Server, deps *Deps) {
 		}
 
 		limit := boundedDecisionReplaySnapshotsLimit(params.Limit)
-		snapshots, err := deps.Store.GetPedagogicalSnapshots(learnerID, domainID, params.Concept, limit)
+		snapshots, err := deps.Store.GetPedagogicalSnapshots(ctx, learnerID, domainID, params.Concept, limit)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to fetch pedagogical snapshots", err)
 			return r, nil, nil
@@ -69,7 +69,7 @@ func registerGetDecisionReplaySummary(server *mcp.Server, deps *Deps) {
 		} else {
 			since = since.Add(-time.Minute)
 		}
-		interactions, err := deps.Store.GetInteractionsSince(learnerID, since)
+		interactions, err := deps.Store.GetInteractionsSince(ctx, learnerID, since)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to fetch replay interactions", err)
 			return r, nil, nil

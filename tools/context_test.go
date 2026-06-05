@@ -4,6 +4,7 @@
 package tools
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -43,8 +44,8 @@ func TestGetLearnerContext_WithDomain(t *testing.T) {
 	cs.CardState = "review"
 	cs.Stability = 1.0
 	cs.ElapsedDays = 14
-	_ = store.InsertConceptStateIfNotExists(cs)
-	_ = store.UpsertConceptState(cs)
+	_ = store.InsertConceptStateIfNotExists(context.Background(), cs)
+	_ = store.UpsertConceptState(context.Background(), cs)
 
 	res := callTool(t, deps, registerGetLearnerContext, "L_owner", "get_learner_context", map[string]any{
 		"domain_id": d.ID,
@@ -93,7 +94,7 @@ func TestGetLearnerContext_OmitsPriorityConceptDomainIDWithoutPriority(t *testin
 func TestGetLearnerContext_PriorityConceptDomainIDUsesSourceDomain(t *testing.T) {
 	store, deps := setupToolsTest(t)
 
-	priorityDomain, err := store.CreateDomainWithValueFramings("L_owner", "math", "", models.KnowledgeSpace{
+	priorityDomain, err := store.CreateDomainWithValueFramings(context.Background(), "L_owner", "math", "", models.KnowledgeSpace{
 		Concepts:      []string{"slow_forgetting"},
 		Prerequisites: map[string][]string{},
 	}, "")
@@ -101,14 +102,14 @@ func TestGetLearnerContext_PriorityConceptDomainIDUsesSourceDomain(t *testing.T)
 		t.Fatalf("create priority domain: %v", err)
 	}
 	time.Sleep(time.Millisecond)
-	defaultDomain, err := store.CreateDomainWithValueFramings("L_owner", "physics", "", models.KnowledgeSpace{
+	defaultDomain, err := store.CreateDomainWithValueFramings(context.Background(), "L_owner", "physics", "", models.KnowledgeSpace{
 		Concepts:      []string{"fresh_review"},
 		Prerequisites: map[string][]string{},
 	}, "")
 	if err != nil {
 		t.Fatalf("create default domain: %v", err)
 	}
-	gotDefault, err := store.GetDomainByLearner("L_owner")
+	gotDefault, err := store.GetDomainByLearner(context.Background(), "L_owner")
 	if err != nil {
 		t.Fatalf("get default domain: %v", err)
 	}
@@ -120,7 +121,7 @@ func TestGetLearnerContext_PriorityConceptDomainIDUsesSourceDomain(t *testing.T)
 	priorityState.CardState = "review"
 	priorityState.Stability = 1.0
 	priorityState.ElapsedDays = 14
-	if err := store.UpsertConceptState(priorityState); err != nil {
+	if err := store.UpsertConceptState(context.Background(), priorityState); err != nil {
 		t.Fatalf("upsert priority state: %v", err)
 	}
 
@@ -128,7 +129,7 @@ func TestGetLearnerContext_PriorityConceptDomainIDUsesSourceDomain(t *testing.T)
 	defaultState.CardState = "review"
 	defaultState.Stability = 100.0
 	defaultState.ElapsedDays = 1
-	if err := store.UpsertConceptState(defaultState); err != nil {
+	if err := store.UpsertConceptState(context.Background(), defaultState); err != nil {
 		t.Fatalf("upsert default state: %v", err)
 	}
 
@@ -148,7 +149,7 @@ func TestGetLearnerContext_PriorityConceptDomainIDUsesSourceDomain(t *testing.T)
 func TestGetLearnerContext_DomainsExposePriorityRank(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	d := makeOwnerDomain(t, store, "L_owner", "math")
-	if err := store.SetDomainPriority(d.ID, "L_owner", 1); err != nil {
+	if err := store.SetDomainPriority(context.Background(), d.ID, "L_owner", 1); err != nil {
 		t.Fatalf("set domain priority: %v", err)
 	}
 
@@ -175,11 +176,11 @@ func TestGetLearnerContext_DomainsExposePriorityRank(t *testing.T) {
 func TestBuildProgressNarrative_ReturnsNilWhenNoData(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	d := makeOwnerDomain(t, store, "L_owner", "math")
-	learner, err := store.GetLearnerByID("L_owner")
+	learner, err := store.GetLearnerByID(context.Background(), "L_owner")
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := buildProgressNarrative(deps, "L_owner", learner, d)
+	got := buildProgressNarrative(context.Background(), deps, "L_owner", learner, d)
 	if got != nil {
 		t.Fatalf("expected nil narrative when no signals, got %+v", got)
 	}

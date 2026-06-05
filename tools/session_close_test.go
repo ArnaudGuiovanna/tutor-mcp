@@ -4,6 +4,7 @@
 package tools
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -34,7 +35,7 @@ func TestRecordSessionClose_HappyPath_NoIntention(t *testing.T) {
 	d := makeOwnerDomain(t, store, "L_owner", "math")
 
 	// Seed a successful session interaction so RecapBrief shows wins.
-	if err := store.CreateInteraction(&models.Interaction{
+	if err := store.CreateInteraction(context.Background(), &models.Interaction{
 		LearnerID:    "L_owner",
 		Concept:      "a",
 		ActivityType: "RECALL_EXERCISE",
@@ -87,7 +88,7 @@ func TestRecordSessionClose_PersistsImplementationIntention(t *testing.T) {
 	}
 
 	// DB state: intention persisted.
-	intentions, err := store.GetRecentImplementationIntentions("L_owner", time.Now().UTC().Add(-time.Hour), 10)
+	intentions, err := store.GetRecentImplementationIntentions(context.Background(), "L_owner", time.Now().UTC().Add(-time.Hour), 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +115,7 @@ func TestRecordSessionClose_EmptyIntentionFieldsSkipped(t *testing.T) {
 		t.Fatalf("got %q", resultText(res))
 	}
 
-	intentions, _ := store.GetRecentImplementationIntentions("L_owner", time.Now().UTC().Add(-time.Hour), 10)
+	intentions, _ := store.GetRecentImplementationIntentions(context.Background(), "L_owner", time.Now().UTC().Add(-time.Hour), 10)
 	if len(intentions) != 0 {
 		t.Fatalf("should not have persisted intention with empty action, got %d", len(intentions))
 	}

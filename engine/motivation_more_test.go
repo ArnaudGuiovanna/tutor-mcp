@@ -4,6 +4,7 @@
 package engine
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"sync/atomic"
@@ -57,7 +58,7 @@ func TestNewMotivationEngine(t *testing.T) {
 func TestBuild_NoDomain(t *testing.T) {
 	_, store, learnerID := newMotivationStore(t)
 	m := NewMotivationEngine(store)
-	brief, err := m.Build(learnerID, nil, "", models.ActivityRest, false, 5)
+	brief, err := m.Build(context.Background(), learnerID, nil, "", models.ActivityRest, false, 5)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -76,7 +77,7 @@ func TestBuild_CompetenceValueRotatesAxis(t *testing.T) {
 	rawDB, store, learnerID := newMotivationStore(t)
 
 	// Create domain via store helper.
-	domain, err := store.CreateDomainWithValueFramings(
+	domain, err := store.CreateDomainWithValueFramings(context.Background(),
 		learnerID, "Go", "Become SRE",
 		models.KnowledgeSpace{Concepts: []string{"Goroutines"}},
 		`{"financial":"salaire 80k+","employment":"jobs DevOps"}`,
@@ -86,14 +87,14 @@ func TestBuild_CompetenceValueRotatesAxis(t *testing.T) {
 	}
 
 	// Concept state with low mastery so milestone won't fire.
-	if err := store.UpsertConceptState(&models.ConceptState{
+	if err := store.UpsertConceptState(context.Background(), &models.ConceptState{
 		LearnerID: learnerID, Concept: "Goroutines", PMastery: 0.2, CardState: "learning",
 	}); err != nil {
 		t.Fatalf("upsert concept state: %v", err)
 	}
 
 	m := NewMotivationEngine(store)
-	brief, err := m.Build(learnerID, domain, "Goroutines", models.ActivityNewConcept, false, 1)
+	brief, err := m.Build(context.Background(), learnerID, domain, "Goroutines", models.ActivityNewConcept, false, 1)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
@@ -119,12 +120,12 @@ func TestBuild_CompetenceValueRotatesAxis(t *testing.T) {
 func TestBuild_WithDomainAndConcept(t *testing.T) {
 	rawDB, store, learnerID := newMotivationStore(t)
 
-	domain, err := store.CreateDomain(learnerID, "Go", "Become SRE",
+	domain, err := store.CreateDomain(context.Background(), learnerID, "Go", "Become SRE",
 		models.KnowledgeSpace{Concepts: []string{"Channels"}})
 	if err != nil {
 		t.Fatalf("create domain: %v", err)
 	}
-	if err := store.UpsertConceptState(&models.ConceptState{
+	if err := store.UpsertConceptState(context.Background(), &models.ConceptState{
 		LearnerID: learnerID, Concept: "Channels", PMastery: 0.3, CardState: "learning",
 	}); err != nil {
 		t.Fatalf("upsert: %v", err)
@@ -144,7 +145,7 @@ func TestBuild_WithDomainAndConcept(t *testing.T) {
 	}
 
 	m := NewMotivationEngine(store)
-	brief, err := m.Build(learnerID, domain, "Channels", models.ActivityRecall, false, 1)
+	brief, err := m.Build(context.Background(), learnerID, domain, "Channels", models.ActivityRecall, false, 1)
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}

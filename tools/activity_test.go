@@ -71,8 +71,8 @@ func TestGetNextActivity_HappyPath(t *testing.T) {
 	// Seed concept state in domain.
 	cs := models.NewConceptState("L_owner", "a")
 	cs.PMastery = 0.5
-	_ = store.InsertConceptStateIfNotExists(cs)
-	_ = store.UpsertConceptState(cs)
+	_ = store.InsertConceptStateIfNotExists(context.Background(), cs)
+	_ = store.UpsertConceptState(context.Background(), cs)
 
 	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{
 		"domain_id": d.ID,
@@ -126,8 +126,8 @@ func TestGetNextActivity_IncludesEpisodicContextAndReasoningRequest(t *testing.T
 	d := makeOwnerDomain(t, store, "L_owner", "math")
 	cs := models.NewConceptState("L_owner", "a")
 	cs.PMastery = 0.5
-	_ = store.InsertConceptStateIfNotExists(cs)
-	_ = store.UpsertConceptState(cs)
+	_ = store.InsertConceptStateIfNotExists(context.Background(), cs)
+	_ = store.UpsertConceptState(context.Background(), cs)
 	ts := time.Date(2026, 5, 14, 9, 30, 0, 0, time.UTC)
 	if err := memory.Write(memory.WriteRequest{
 		LearnerID: "L_owner",
@@ -175,7 +175,7 @@ func TestGetNextActivity_AttachesClientInitiatedConsolidationRequest(t *testing.
 	d := makeOwnerDomain(t, store, "L_owner", "math")
 	cs := models.NewConceptState("L_owner", "a")
 	cs.PMastery = 0.5
-	if err := store.UpsertConceptState(cs); err != nil {
+	if err := store.UpsertConceptState(context.Background(), cs); err != nil {
 		t.Fatalf("seed state: %v", err)
 	}
 	if err := memory.Write(memory.WriteRequest{LearnerID: "L_owner", Scope: memory.ScopeMemory, Operation: memory.OpReplaceFile, Content: "# Stable memory\n"}); err != nil {
@@ -204,7 +204,7 @@ func TestGetNextActivity_AttachesClientInitiatedConsolidationRequest(t *testing.
 			t.Fatalf("write session: %v", err)
 		}
 	}
-	if err := store.UpsertPendingConsolidation("L_owner", "monthly", "2026-04", time.Date(2026, time.May, 3, 13, 30, 0, 0, time.UTC)); err != nil {
+	if err := store.UpsertPendingConsolidation(context.Background(), "L_owner", "monthly", "2026-04", time.Date(2026, time.May, 3, 13, 30, 0, 0, time.UTC)); err != nil {
 		t.Fatalf("UpsertPendingConsolidation: %v", err)
 	}
 
@@ -237,7 +237,7 @@ func TestGetNextActivity_AttachesClientInitiatedConsolidationRequest(t *testing.
 	if concepts, _ := job["touched_concepts"].([]any); len(concepts) != 1 {
 		t.Fatalf("touched_concepts = %v", job["touched_concepts"])
 	}
-	item, err := store.GetConsolidation("L_owner", "monthly", "2026-04")
+	item, err := store.GetConsolidation(context.Background(), "L_owner", "monthly", "2026-04")
 	if err != nil {
 		t.Fatalf("GetConsolidation delivered: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestGetNextActivity_AttachesClientInitiatedConsolidationRequest(t *testing.
 	if archive.IsError {
 		t.Fatalf("archive write failed: %s", resultText(archive))
 	}
-	item, _ = store.GetConsolidation("L_owner", "monthly", "2026-04")
+	item, _ = store.GetConsolidation(context.Background(), "L_owner", "monthly", "2026-04")
 	if item.Status != "completed" {
 		t.Fatalf("status after archive = %q, want completed", item.Status)
 	}
@@ -276,8 +276,8 @@ func TestGetNextActivity_OLMInconsistencyActivatesReasoningRequest(t *testing.T)
 	cs.CardState = "review"
 	cs.ElapsedDays = 200
 	cs.Stability = 1
-	_ = store.InsertConceptStateIfNotExists(cs)
-	_ = store.UpsertConceptState(cs)
+	_ = store.InsertConceptStateIfNotExists(context.Background(), cs)
+	_ = store.UpsertConceptState(context.Background(), cs)
 
 	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{
 		"domain_id": d.ID,
@@ -318,7 +318,7 @@ func TestGetNextActivity_OverloadUsesRealSessionStart(t *testing.T) {
 	d := makeOwnerDomain(t, store, "L_owner", "math")
 	cs := models.NewConceptState("L_owner", "a")
 	cs.PMastery = 0.5
-	if err := store.UpsertConceptState(cs); err != nil {
+	if err := store.UpsertConceptState(context.Background(), cs); err != nil {
 		t.Fatalf("seed state: %v", err)
 	}
 
@@ -401,14 +401,14 @@ func TestGetNextActivity_ForeignDomainFallsBackToSetup(t *testing.T) {
 
 func TestGetNextActivity_DomainNameSelectsMatchingDomain(t *testing.T) {
 	store, deps := setupToolsTest(t)
-	goDomain, err := store.CreateDomainWithValueFramings("L_owner", "Golang", "", models.KnowledgeSpace{
+	goDomain, err := store.CreateDomainWithValueFramings(context.Background(), "L_owner", "Golang", "", models.KnowledgeSpace{
 		Concepts:      []string{"Pointers"},
 		Prerequisites: map[string][]string{},
 	}, "")
 	if err != nil {
 		t.Fatalf("create go domain: %v", err)
 	}
-	if _, err := store.CreateDomainWithValueFramings("L_owner", "Conditional Probability", "", models.KnowledgeSpace{
+	if _, err := store.CreateDomainWithValueFramings(context.Background(), "L_owner", "Conditional Probability", "", models.KnowledgeSpace{
 		Concepts:      []string{"Bayes"},
 		Prerequisites: map[string][]string{},
 	}, ""); err != nil {
@@ -429,14 +429,14 @@ func TestGetNextActivity_DomainNameSelectsMatchingDomain(t *testing.T) {
 
 func TestGetNextActivity_ReviewIntentAvoidsNewConcept(t *testing.T) {
 	store, deps := setupToolsTest(t)
-	d, err := store.CreateDomainWithValueFramings("L_owner", "Golang", "", models.KnowledgeSpace{
+	d, err := store.CreateDomainWithValueFramings(context.Background(), "L_owner", "Golang", "", models.KnowledgeSpace{
 		Concepts:      []string{"Pointers", "Generics"},
 		Prerequisites: map[string][]string{},
 	}, "")
 	if err != nil {
 		t.Fatalf("create domain: %v", err)
 	}
-	if _, err := store.MergeDomainGoalRelevance(d.ID, map[string]float64{
+	if _, err := store.MergeDomainGoalRelevance(context.Background(), d.ID, map[string]float64{
 		"Pointers": 0.2,
 		"Generics": 1.0,
 	}); err != nil {
@@ -450,7 +450,7 @@ func TestGetNextActivity_ReviewIntentAvoidsNewConcept(t *testing.T) {
 	cs.ElapsedDays = 10
 	cs.Reps = 2
 	cs.LastReview = &lastReview
-	if err := store.UpsertConceptState(cs); err != nil {
+	if err := store.UpsertConceptState(context.Background(), cs); err != nil {
 		t.Fatalf("seed state: %v", err)
 	}
 
@@ -479,7 +479,7 @@ func TestGetNextActivity_ReviewIntentAvoidsNewConcept(t *testing.T) {
 
 func TestGetNextActivity_ReviewIntentNoReviewedConceptDoesNotIntroduce(t *testing.T) {
 	store, deps := setupToolsTest(t)
-	d, err := store.CreateDomainWithValueFramings("L_owner", "Golang", "", models.KnowledgeSpace{
+	d, err := store.CreateDomainWithValueFramings(context.Background(), "L_owner", "Golang", "", models.KnowledgeSpace{
 		Concepts:      []string{"Generics"},
 		Prerequisites: map[string][]string{},
 	}, "")
@@ -522,8 +522,8 @@ func TestGetNextActivity_FlagOff_NoFadeFields(t *testing.T) {
 	d := makeOwnerDomain(t, store, "L_owner", "math")
 	cs := models.NewConceptState("L_owner", "a")
 	cs.PMastery = 0.5
-	_ = store.InsertConceptStateIfNotExists(cs)
-	_ = store.UpsertConceptState(cs)
+	_ = store.InsertConceptStateIfNotExists(context.Background(), cs)
+	_ = store.UpsertConceptState(context.Background(), cs)
 
 	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity",
 		map[string]any{"domain_id": d.ID})
@@ -556,8 +556,8 @@ func TestGetNextActivity_FadeFlagOn_VerbosityDecreasesAsAutonomyRises(t *testing
 	d := makeOwnerDomain(t, store, "L_owner", "math")
 	cs := models.NewConceptState("L_owner", "a")
 	cs.PMastery = 0.5
-	_ = store.InsertConceptStateIfNotExists(cs)
-	_ = store.UpsertConceptState(cs)
+	_ = store.InsertConceptStateIfNotExists(context.Background(), cs)
+	_ = store.UpsertConceptState(context.Background(), cs)
 
 	// Steps: at each step, seed enough affect rows to drive the
 	// autonomy_score to the target tier. We use direct UpsertAffectState
@@ -597,7 +597,7 @@ func TestGetNextActivity_FadeFlagOn_VerbosityDecreasesAsAutonomyRises(t *testing
 				Energy:        3,
 				AutonomyScore: st.affectScores[i],
 			}
-			if err := store.UpsertAffectState(a); err != nil {
+			if err := store.UpsertAffectState(context.Background(), a); err != nil {
 				t.Fatalf("step %s: upsert affect %s: %v", st.name, sid, err)
 			}
 			// CASE WHEN excluded.autonomy_score > 0: setting it
@@ -663,10 +663,10 @@ func TestGetNextActivity_PostOrchestratePhaseMatchesDB(t *testing.T) {
 
 	// Seed phase = INSTRUCTION and goal-relevance so the FSM has
 	// something to evaluate.
-	if err := store.UpdateDomainPhase(d.ID, models.PhaseInstruction, 0, time.Now().UTC()); err != nil {
+	if err := store.UpdateDomainPhase(context.Background(), d.ID, models.PhaseInstruction, 0, time.Now().UTC()); err != nil {
 		t.Fatalf("seed phase: %v", err)
 	}
-	if _, err := store.MergeDomainGoalRelevance(d.ID, map[string]float64{
+	if _, err := store.MergeDomainGoalRelevance(context.Background(), d.ID, map[string]float64{
 		"a": 1.0, "b": 0.8,
 	}); err != nil {
 		t.Fatalf("seed goal_relevance: %v", err)
@@ -680,8 +680,8 @@ func TestGetNextActivity_PostOrchestratePhaseMatchesDB(t *testing.T) {
 		cs.CardState = "review"
 		cs.Stability = 30
 		cs.ElapsedDays = 1
-		_ = store.InsertConceptStateIfNotExists(cs)
-		if err := store.UpsertConceptState(cs); err != nil {
+		_ = store.InsertConceptStateIfNotExists(context.Background(), cs)
+		if err := store.UpsertConceptState(context.Background(), cs); err != nil {
 			t.Fatalf("seed state %s: %v", c, err)
 		}
 	}
@@ -701,7 +701,7 @@ func TestGetNextActivity_PostOrchestratePhaseMatchesDB(t *testing.T) {
 	// observed (via the OrchestrateWithPhase return value) matches
 	// what's in the DB — i.e. the perf #91 change preserves the
 	// audit-log invariant.
-	got, err := store.GetDomainByID(d.ID)
+	got, err := store.GetDomainByID(context.Background(), d.ID)
 	if err != nil {
 		t.Fatalf("get domain: %v", err)
 	}
@@ -733,10 +733,10 @@ func BenchmarkGetNextActivity(b *testing.B) {
 	// Seed enough state to exercise the typical hot path: a domain
 	// with concepts, goal-relevance, and mastered states so the FSM
 	// has work to do but doesn't bail early.
-	if err := store.UpdateDomainPhase(d.ID, models.PhaseInstruction, 0, time.Now().UTC()); err != nil {
+	if err := store.UpdateDomainPhase(context.Background(), d.ID, models.PhaseInstruction, 0, time.Now().UTC()); err != nil {
 		b.Fatalf("seed phase: %v", err)
 	}
-	if _, err := store.MergeDomainGoalRelevance(d.ID, map[string]float64{"a": 0.9, "b": 0.6}); err != nil {
+	if _, err := store.MergeDomainGoalRelevance(context.Background(), d.ID, map[string]float64{"a": 0.9, "b": 0.6}); err != nil {
 		b.Fatalf("seed goal_relevance: %v", err)
 	}
 	for _, c := range []string{"a", "b"} {
@@ -745,8 +745,8 @@ func BenchmarkGetNextActivity(b *testing.B) {
 		cs.CardState = "review"
 		cs.Stability = 30
 		cs.ElapsedDays = 1
-		_ = store.InsertConceptStateIfNotExists(cs)
-		if err := store.UpsertConceptState(cs); err != nil {
+		_ = store.InsertConceptStateIfNotExists(context.Background(), cs)
+		if err := store.UpsertConceptState(context.Background(), cs); err != nil {
 			b.Fatalf("seed state %s: %v", c, err)
 		}
 	}
@@ -772,10 +772,10 @@ func BenchmarkGetNextActivityLargeDomain(b *testing.B) {
 		relevance[concepts[i]] = 1.0 - float64(i%10)*0.03
 	}
 	d := makeBenchDomainWithConcepts(b, store, "L_owner", concepts)
-	if err := store.UpdateDomainPhase(d.ID, models.PhaseInstruction, 0, time.Now().UTC()); err != nil {
+	if err := store.UpdateDomainPhase(context.Background(), d.ID, models.PhaseInstruction, 0, time.Now().UTC()); err != nil {
 		b.Fatalf("seed phase: %v", err)
 	}
-	if _, err := store.MergeDomainGoalRelevance(d.ID, relevance); err != nil {
+	if _, err := store.MergeDomainGoalRelevance(context.Background(), d.ID, relevance); err != nil {
 		b.Fatalf("seed goal_relevance: %v", err)
 	}
 
@@ -785,7 +785,7 @@ func BenchmarkGetNextActivityLargeDomain(b *testing.B) {
 		cs.CardState = "review"
 		cs.Stability = 30
 		cs.ElapsedDays = 1
-		if err := store.UpsertConceptState(cs); err != nil {
+		if err := store.UpsertConceptState(context.Background(), cs); err != nil {
 			b.Fatalf("seed state %s: %v", c, err)
 		}
 	}
@@ -804,7 +804,7 @@ func BenchmarkGetNextActivityLargeDomain(b *testing.B) {
 			interaction.MisconceptionType = "bench_misconception"
 			interaction.MisconceptionDetail = "benchmark detail"
 		}
-		if err := store.CreateInteraction(interaction); err != nil {
+		if err := store.CreateInteraction(context.Background(), interaction); err != nil {
 			b.Fatalf("seed interaction: %v", err)
 		}
 	}
@@ -868,7 +868,7 @@ func makeBenchDomain(b *testing.B, store *db.Store, ownerID string) *models.Doma
 
 func makeBenchDomainWithConcepts(b *testing.B, store *db.Store, ownerID string, concepts []string) *models.Domain {
 	b.Helper()
-	d, err := store.CreateDomainWithValueFramings(ownerID, "math", "", models.KnowledgeSpace{
+	d, err := store.CreateDomainWithValueFramings(context.Background(), ownerID, "math", "", models.KnowledgeSpace{
 		Concepts:      concepts,
 		Prerequisites: map[string][]string{},
 	}, "")

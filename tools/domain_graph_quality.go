@@ -31,7 +31,7 @@ func registerValidateDomainGraph(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		domain, err := resolveDomain(deps.Store, learnerID, params.DomainID)
+		domain, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
 		if err != nil || domain == nil {
 			if params.DomainID != "" {
 				deps.Logger.Error("validate_domain_graph: domain not found", "err", err, "learner", learnerID, "domain_id", params.DomainID)

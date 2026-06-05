@@ -4,6 +4,7 @@
 package tools
 
 import (
+	"context"
 	"testing"
 
 	"tutor-mcp/models"
@@ -52,12 +53,12 @@ func TestGetAutonomyMetrics_DomainIDFiltersForeignInteractions(t *testing.T) {
 
 	// Seed two domains. Only D1 will be queried; D2's interactions
 	// must be filtered out.
-	d1, err := store.CreateDomain("L_owner", "active", "",
+	d1, err := store.CreateDomain(context.Background(), "L_owner", "active", "",
 		models.KnowledgeSpace{Concepts: []string{"a"}, Prerequisites: map[string][]string{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	d2, err := store.CreateDomain("L_owner", "foreign", "",
+	d2, err := store.CreateDomain(context.Background(), "L_owner", "foreign", "",
 		models.KnowledgeSpace{Concepts: []string{"x"}, Prerequisites: map[string][]string{}})
 	if err != nil {
 		t.Fatal(err)
@@ -73,7 +74,7 @@ func TestGetAutonomyMetrics_DomainIDFiltersForeignInteractions(t *testing.T) {
 			SelfInitiated:     true,
 			ResponseTime:      4.0,
 		}
-		if err := store.CreateInteraction(interaction); err != nil {
+		if err := store.CreateInteraction(context.Background(), interaction); err != nil {
 			t.Fatal(err)
 		}
 	}

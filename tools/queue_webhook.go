@@ -86,7 +86,7 @@ func registerQueueWebhookMessage(server *mcp.Server, deps *Deps) {
 			expiresAt = parsed
 		}
 
-		id, err := deps.Store.EnqueueWebhookMessage(learnerID, params.Kind, content, scheduledFor, expiresAt, params.Priority)
+		id, err := deps.Store.EnqueueWebhookMessage(ctx, learnerID, params.Kind, content, scheduledFor, expiresAt, params.Priority)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to enqueue", err)
 			return r, nil, nil

@@ -58,7 +58,7 @@ func registerUpdateLearnerMemory(server *mcp.Server, deps *Deps) {
 			r, _ := jsonResult(map[string]any{"ok": false, "status": "not_enabled"})
 			return r, nil, nil
 		}
-		if err := validateMemoryWriteParams(deps, learnerID, params); err != nil {
+		if err := validateMemoryWriteParams(ctx, deps, learnerID, params); err != nil {
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
 		}
@@ -89,7 +89,7 @@ func registerUpdateLearnerMemory(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 		if scope == memory.ScopeArchive && params.PeriodType != "" && periodKey != "" {
-			if err := deps.Store.MarkConsolidationCompleted(learnerID, params.PeriodType, periodKey, time.Now().UTC()); err != nil {
+			if err := deps.Store.MarkConsolidationCompleted(ctx, learnerID, params.PeriodType, periodKey, time.Now().UTC()); err != nil {
 				deps.Logger.Warn("update_learner_memory: mark consolidation completed failed", "err", err, "learner", learnerID, "period_type", params.PeriodType, "period_key", periodKey)
 			}
 		}
@@ -197,7 +197,7 @@ func registerGetMemoryState(server *mcp.Server, deps *Deps) {
 	})
 }
 
-func validateMemoryWriteParams(deps *Deps, learnerID string, params UpdateLearnerMemoryParams) error {
+func validateMemoryWriteParams(ctx context.Context, deps *Deps, learnerID string, params UpdateLearnerMemoryParams) error {
 	for _, f := range []struct {
 		name  string
 		value string
@@ -244,7 +244,7 @@ func validateMemoryWriteParams(deps *Deps, learnerID string, params UpdateLearne
 		if params.ConceptSlug == "" {
 			return fmt.Errorf("concept_slug is required for concept scope")
 		}
-		active, err := deps.Store.ActiveDomainConceptSet(learnerID)
+		active, err := deps.Store.ActiveDomainConceptSet(ctx, learnerID)
 		if err != nil {
 			return fmt.Errorf("active concept lookup failed: %w", err)
 		}

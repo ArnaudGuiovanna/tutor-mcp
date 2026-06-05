@@ -6,6 +6,7 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -52,7 +53,7 @@ func setupOrchStore(t *testing.T) *db.Store {
 // "Orch" suffix to avoid collision with engine/olm_test.go's seedDomain.
 func seedOrchDomain(t *testing.T, store *db.Store, concepts []string, prereqs map[string][]string, phase models.Phase) string {
 	t.Helper()
-	domain, err := store.CreateDomain("L1", "TestDomain", "personal goal", models.KnowledgeSpace{
+	domain, err := store.CreateDomain(context.Background(), "L1", "TestDomain", "personal goal", models.KnowledgeSpace{
 		Concepts: concepts, Prerequisites: prereqs,
 	})
 	if err != nil {
@@ -60,7 +61,7 @@ func seedOrchDomain(t *testing.T, store *db.Store, concepts []string, prereqs ma
 	}
 	for _, c := range concepts {
 		cs := models.NewConceptState("L1", c)
-		if err := store.InsertConceptStateIfNotExists(cs); err != nil {
+		if err := store.InsertConceptStateIfNotExists(context.Background(), cs); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -68,14 +69,14 @@ func seedOrchDomain(t *testing.T, store *db.Store, concepts []string, prereqs ma
 		// Snapshot current entropy ONLY for DIAGNOSTIC entries.
 		entry := 0.0
 		if phase == models.PhaseDiagnostic {
-			states, _ := store.GetConceptStatesByLearner("L1")
+			states, _ := store.GetConceptStatesByLearner(context.Background(), "L1")
 			sm := map[string]*models.ConceptState{}
 			for _, s := range states {
 				sm[s.Concept] = s
 			}
 			entry = MeanBinaryEntropyOverGraph(domain.Graph, sm)
 		}
-		if err := store.UpdateDomainPhase(domain.ID, phase, entry, time.Now().UTC()); err != nil {
+		if err := store.UpdateDomainPhase(context.Background(), domain.ID, phase, entry, time.Now().UTC()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -84,7 +85,7 @@ func seedOrchDomain(t *testing.T, store *db.Store, concepts []string, prereqs ma
 
 func setMastery(t *testing.T, store *db.Store, concept string, p float64) {
 	t.Helper()
-	cs, err := store.GetConceptState("L1", concept)
+	cs, err := store.GetConceptState(context.Background(), "L1", concept)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,14 +93,14 @@ func setMastery(t *testing.T, store *db.Store, concept string, p float64) {
 	cs.CardState = "review"
 	cs.Stability = 30
 	cs.ElapsedDays = 1
-	if err := store.UpsertConceptState(cs); err != nil {
+	if err := store.UpsertConceptState(context.Background(), cs); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func setGoalRelevance(t *testing.T, store *db.Store, domainID string, rel map[string]float64) {
 	t.Helper()
-	if _, err := store.MergeDomainGoalRelevance(domainID, rel); err != nil {
+	if _, err := store.MergeDomainGoalRelevance(context.Background(), domainID, rel); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -115,7 +116,7 @@ func defaultInput(domainID string) OrchestratorInput {
 
 func setReviewState(t *testing.T, store *db.Store, concept string, p, stability float64, elapsedDays int) {
 	t.Helper()
-	cs, err := store.GetConceptState("L1", concept)
+	cs, err := store.GetConceptState(context.Background(), "L1", concept)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +125,7 @@ func setReviewState(t *testing.T, store *db.Store, concept string, p, stability 
 	cs.Stability = stability
 	cs.ElapsedDays = elapsedDays
 	cs.Reps = 3
-	if err := store.UpsertConceptState(cs); err != nil {
+	if err := store.UpsertConceptState(context.Background(), cs); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -136,7 +137,7 @@ func TestOrchestrate_DomainPhaseNull_DefaultsToInstruction(t *testing.T) {
 	domainID := seedOrchDomain(t, store, []string{"A", "B"}, nil, "") // empty phase = NULL
 	setGoalRelevance(t, store, domainID, map[string]float64{"A": 0.9, "B": 0.5})
 
-	activity, err := Orchestrate(store, defaultInput(domainID))
+	activity, err := Orchestrate(context.Background(), store, defaultInput(domainID))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -145,7 +146,7 @@ func TestOrchestrate_DomainPhaseNull_DefaultsToInstruction(t *testing.T) {
 	}
 	// The phase remains NULL in DB (orchestrator only read, did not
 	// write — no transition because already in INSTRUCTION).
-	d, _ := store.GetDomainByID(domainID)
+	d, _ := store.GetDomainByID(context.Background(), domainID)
 	if d.Phase != "" {
 		t.Errorf("expected phase to remain NULL on legacy domain, got %q", d.Phase)
 	}
@@ -167,7 +168,7 @@ func TestOrchestrate_ForgettingCriticalBypassesInstructionPrereqAndArgmax(t *tes
 	setReviewState(t, store, "forgotten", 0.95, 1, 80)
 	setReviewState(t, store, "fresh", 0.10, 30, 1)
 
-	activity, err := Orchestrate(store, defaultInput(domainID))
+	activity, err := Orchestrate(context.Background(), store, defaultInput(domainID))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -187,7 +188,7 @@ func TestOrchestrate_ForgettingCriticalBypassesInstructionPrereqAndArgmax(t *tes
 
 func TestOrchestrate_UnknownDomain_ReturnsError(t *testing.T) {
 	store := setupOrchStore(t)
-	_, err := Orchestrate(store, defaultInput("nonexistent"))
+	_, err := Orchestrate(context.Background(), store, defaultInput("nonexistent"))
 	if !errors.Is(err, ErrUnknownDomain) {
 		t.Errorf("expected ErrUnknownDomain, got %v", err)
 	}
@@ -206,14 +207,14 @@ func TestOrchestrate_Diagnostic_NMaxReached_TransitionsToInstruction(t *testing.
 		_, _ = recordSyntheticInteraction(t, store, "A", true, now.Add(time.Duration(i)*time.Second))
 	}
 	// Force phase_changed_at far in the past so all 8 count.
-	if err := store.UpdateDomainPhase(domainID, models.PhaseDiagnostic, 0.469, now.Add(-1*time.Hour)); err != nil {
+	if err := store.UpdateDomainPhase(context.Background(), domainID, models.PhaseDiagnostic, 0.469, now.Add(-1*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := Orchestrate(store, defaultInput(domainID)); err != nil {
+	if _, err := Orchestrate(context.Background(), store, defaultInput(domainID)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	d, _ := store.GetDomainByID(domainID)
+	d, _ := store.GetDomainByID(context.Background(), domainID)
 	if d.Phase != models.PhaseInstruction {
 		t.Errorf("expected transition to INSTRUCTION via NMax, got phase=%q", d.Phase)
 	}
@@ -228,10 +229,10 @@ func TestOrchestrate_Instruction_AllGoalMastered_TransitionsToMaintenance(t *tes
 	setMastery(t, store, "A", 0.95)
 	setMastery(t, store, "B", 0.95)
 
-	if _, err := Orchestrate(store, defaultInput(domainID)); err != nil {
+	if _, err := Orchestrate(context.Background(), store, defaultInput(domainID)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	d, _ := store.GetDomainByID(domainID)
+	d, _ := store.GetDomainByID(context.Background(), domainID)
 	if d.Phase != models.PhaseMaintenance {
 		t.Errorf("expected transition to MAINTENANCE, got phase=%q", d.Phase)
 	}
@@ -257,7 +258,7 @@ func TestOrchestrate_UsesInjectedLoggerLevelForFSM(t *testing.T) {
 			input := defaultInput(domainID)
 			input.Logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: tc.level}))
 
-			if _, err := Orchestrate(store, input); err != nil {
+			if _, err := Orchestrate(context.Background(), store, input); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			gotLog := strings.Contains(buf.String(), "phase transition (FSM)")
@@ -275,19 +276,19 @@ func TestOrchestrate_Maintenance_RetentionLow_TransitionsToInstruction(t *testin
 	domainID := seedOrchDomain(t, store, []string{"A"}, nil, models.PhaseMaintenance)
 	setGoalRelevance(t, store, domainID, map[string]float64{"A": 1.0})
 	// Set state with low retention (high elapsed, low stability).
-	cs, _ := store.GetConceptState("L1", "A")
+	cs, _ := store.GetConceptState(context.Background(), "L1", "A")
 	cs.PMastery = 0.95
 	cs.CardState = "review"
 	cs.Stability = 1
 	cs.ElapsedDays = 30 // retention << 0.5
-	if err := store.UpsertConceptState(cs); err != nil {
+	if err := store.UpsertConceptState(context.Background(), cs); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := Orchestrate(store, defaultInput(domainID)); err != nil {
+	if _, err := Orchestrate(context.Background(), store, defaultInput(domainID)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	d, _ := store.GetDomainByID(domainID)
+	d, _ := store.GetDomainByID(context.Background(), domainID)
 	if d.Phase != models.PhaseInstruction {
 		t.Errorf("expected transition to INSTRUCTION on retention drop, got phase=%q", d.Phase)
 	}
@@ -304,10 +305,10 @@ func TestOrchestrate_GoalRelevant_RestrictiveGoal_FastMaintenance(t *testing.T) 
 	setMastery(t, store, "A", 0.95)                                    // only A mastered
 	// B-E remain at mastery=0.1 default — not goal-relevant
 
-	if _, err := Orchestrate(store, defaultInput(domainID)); err != nil {
+	if _, err := Orchestrate(context.Background(), store, defaultInput(domainID)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	d, _ := store.GetDomainByID(domainID)
+	d, _ := store.GetDomainByID(context.Background(), domainID)
 	if d.Phase != models.PhaseMaintenance {
 		t.Errorf("expected MAINTENANCE (only goal-relevant mastered), got %q", d.Phase)
 	}
@@ -323,10 +324,10 @@ func TestOrchestrate_GoalRelevant_BroadGoal_StaysInstruction(t *testing.T) {
 	setMastery(t, store, "A", 0.95) // only A mastered
 	// B-E at 0.1 default
 
-	if _, err := Orchestrate(store, defaultInput(domainID)); err != nil {
+	if _, err := Orchestrate(context.Background(), store, defaultInput(domainID)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	d, _ := store.GetDomainByID(domainID)
+	d, _ := store.GetDomainByID(context.Background(), domainID)
 	if d.Phase == models.PhaseMaintenance {
 		t.Errorf("expected stay INSTRUCTION (4/5 not mastered), got %q", d.Phase)
 	}
@@ -343,7 +344,7 @@ func TestOrchestrate_PhaseCorruptedInDB_FallsBackGracefully(t *testing.T) {
 	domainID := seedOrchDomain(t, store, []string{"A"}, nil, models.Phase("BOGUS"))
 	setGoalRelevance(t, store, domainID, map[string]float64{"A": 1.0})
 
-	_, err := Orchestrate(store, defaultInput(domainID))
+	_, err := Orchestrate(context.Background(), store, defaultInput(domainID))
 	// Gate returns ErrGateUnknownPhase → propagated as a pipeline
 	// error. This is the expected behaviour (consistent with
 	// OQ-4.1/OQ-2.5 explicit-error).
@@ -361,10 +362,10 @@ func TestOrchestrate_NoTransition_PhasePersists(t *testing.T) {
 	setMastery(t, store, "A", 0.5) // not mastered → no transition
 	setMastery(t, store, "B", 0.5)
 
-	if _, err := Orchestrate(store, defaultInput(domainID)); err != nil {
+	if _, err := Orchestrate(context.Background(), store, defaultInput(domainID)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	d, _ := store.GetDomainByID(domainID)
+	d, _ := store.GetDomainByID(context.Background(), domainID)
 	if d.Phase != models.PhaseInstruction {
 		t.Errorf("expected phase to remain INSTRUCTION, got %q", d.Phase)
 	}
@@ -385,14 +386,14 @@ func TestOrchestrateWithPhase_ReturnedPhaseMatchesPersisted(t *testing.T) {
 	setMastery(t, store, "A", 0.95)
 	setMastery(t, store, "B", 0.95)
 
-	_, gotPhase, err := OrchestrateWithPhase(store, defaultInput(domainID))
+	_, gotPhase, err := OrchestrateWithPhase(context.Background(), store, defaultInput(domainID))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if gotPhase != models.PhaseMaintenance {
 		t.Errorf("returned phase = %q, want MAINTENANCE", gotPhase)
 	}
-	d, err := store.GetDomainByID(domainID)
+	d, err := store.GetDomainByID(context.Background(), domainID)
 	if err != nil {
 		t.Fatalf("get domain: %v", err)
 	}
@@ -411,14 +412,14 @@ func TestOrchestrateWithPhase_NoTransition_ReturnsCurrentPhase(t *testing.T) {
 	setMastery(t, store, "A", 0.5)
 	setMastery(t, store, "B", 0.5)
 
-	_, gotPhase, err := OrchestrateWithPhase(store, defaultInput(domainID))
+	_, gotPhase, err := OrchestrateWithPhase(context.Background(), store, defaultInput(domainID))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if gotPhase != models.PhaseInstruction {
 		t.Errorf("returned phase = %q, want INSTRUCTION", gotPhase)
 	}
-	d, _ := store.GetDomainByID(domainID)
+	d, _ := store.GetDomainByID(context.Background(), domainID)
 	// DB phase may be empty (no transition was persisted) but the
 	// effective phase reported is the resolved INSTRUCTION default.
 	if d.Phase != "" && d.Phase != gotPhase {
@@ -451,7 +452,7 @@ func TestOrchestrateWithPhase_NoTransition_ReturnsCurrentPhase(t *testing.T) {
 //  1. gotPhase == PhaseInstruction (the fallback target — vice-versa of
 //     the docstring's INSTRUCTION→MAINTENANCE example, but exercises the
 //     same noFringeFallbackPhase code path).
-//  2. store.GetDomainByID(domainID).Phase == gotPhase (DB consistency
+//  2. store.GetDomainByID(context.Background(), domainID).Phase == gotPhase (DB consistency
 //     after the fallback's UpdateDomainPhase write).
 func TestOrchestrateWithPhase_NoFringeFallback_ReturnedPhaseMatchesPersisted(t *testing.T) {
 	store := setupOrchStore(t)
@@ -463,7 +464,7 @@ func TestOrchestrateWithPhase_NoFringeFallback_ReturnedPhaseMatchesPersisted(t *
 	// the default state is "new", the retention check is skipped).
 	// Fallback path → INSTRUCTION → A in fringe → activity produced.
 
-	activity, gotPhase, err := OrchestrateWithPhase(store, defaultInput(domainID))
+	activity, gotPhase, err := OrchestrateWithPhase(context.Background(), store, defaultInput(domainID))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -476,7 +477,7 @@ func TestOrchestrateWithPhase_NoFringeFallback_ReturnedPhaseMatchesPersisted(t *
 	if gotPhase != models.PhaseInstruction {
 		t.Errorf("returned phase = %q, want INSTRUCTION (NoFringe fallback target)", gotPhase)
 	}
-	d, err := store.GetDomainByID(domainID)
+	d, err := store.GetDomainByID(context.Background(), domainID)
 	if err != nil {
 		t.Fatalf("get domain: %v", err)
 	}

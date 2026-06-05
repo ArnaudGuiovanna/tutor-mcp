@@ -5,6 +5,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -122,11 +123,11 @@ func (s *OAuthServer) HandleProtectedResourceMetadata(w http.ResponseWriter, r *
 
 // validateRedirectURI checks that the supplied redirectURI is strictly equal
 // to one of the URIs registered for the given clientID. No prefix / wildcard.
-func (s *OAuthServer) validateRedirectURI(clientID, redirectURI string) error {
+func (s *OAuthServer) validateRedirectURI(ctx context.Context, clientID, redirectURI string) error {
 	if clientID == "" || redirectURI == "" {
 		return fmt.Errorf("missing client_id or redirect_uri")
 	}
-	client, err := s.store.GetOAuthClient(clientID)
+	client, err := s.store.GetOAuthClient(ctx, clientID)
 	if err != nil {
 		return fmt.Errorf("unknown client")
 	}
@@ -143,16 +144,17 @@ func (s *OAuthServer) validateRedirectURI(clientID, redirectURI string) error {
 }
 
 func (s *OAuthServer) HandleAuthorizeGet(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	q := r.URL.Query()
 	clientID := q.Get("client_id")
 	redirectURI := q.Get("redirect_uri")
 
-	if err := s.validateRedirectURI(clientID, redirectURI); err != nil {
+	if err := s.validateRedirectURI(ctx, clientID, redirectURI); err != nil {
 		s.logger.Debug("authorize GET: redirect_uri rejected", "err", err, "client_id", clientID)
 		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
 		return
 	}
-	client, err := s.store.GetOAuthClient(clientID)
+	client, err := s.store.GetOAuthClient(ctx, clientID)
 	if err != nil {
 		s.logger.Debug("authorize GET: client lookup failed", "err", err, "client_id", clientID)
 		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
@@ -161,7 +163,7 @@ func (s *OAuthServer) HandleAuthorizeGet(w http.ResponseWriter, r *http.Request)
 
 	codeChallenge := q.Get("code_challenge")
 	codeChallengeMethod := q.Get("code_challenge_method")
-	if err := s.requirePKCEForPublicClient(clientID, codeChallenge, codeChallengeMethod); err != nil {
+	if err := s.requirePKCEForPublicClient(ctx, clientID, codeChallenge, codeChallengeMethod); err != nil {
 		s.logger.Debug("authorize GET: PKCE missing for public client", "err", err, "client_id", clientID)
 		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
 		return
@@ -201,11 +203,11 @@ func (s *OAuthServer) HandleAuthorizeGet(w http.ResponseWriter, r *http.Request)
 // requirePKCEForPublicClient enforces RFC 9700 §2.1.1: public clients
 // (no stored secret) MUST use PKCE with S256. Confidential clients are
 // still allowed to skip PKCE — they authenticate via client_secret.
-func (s *OAuthServer) requirePKCEForPublicClient(clientID, codeChallenge, method string) error {
+func (s *OAuthServer) requirePKCEForPublicClient(ctx context.Context, clientID, codeChallenge, method string) error {
 	if clientID == "" {
 		return fmt.Errorf("missing client_id")
 	}
-	client, err := s.store.GetOAuthClient(clientID)
+	client, err := s.store.GetOAuthClient(ctx, clientID)
 	if err != nil {
 		return fmt.Errorf("unknown client")
 	}
@@ -223,6 +225,7 @@ func (s *OAuthServer) requirePKCEForPublicClient(clientID, codeChallenge, method
 }
 
 func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -238,12 +241,12 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 
 	clientID := r.FormValue("client_id")
 	redirectURI := r.FormValue("redirect_uri")
-	if err := s.validateRedirectURI(clientID, redirectURI); err != nil {
+	if err := s.validateRedirectURI(ctx, clientID, redirectURI); err != nil {
 		s.logger.Debug("authorize POST: redirect_uri rejected", "err", err, "client_id", clientID)
 		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
 		return
 	}
-	client, err := s.store.GetOAuthClient(clientID)
+	client, err := s.store.GetOAuthClient(ctx, clientID)
 	if err != nil {
 		s.logger.Debug("authorize POST: client lookup failed", "err", err, "client_id", clientID)
 		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
@@ -252,7 +255,7 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 
 	codeChallenge := r.FormValue("code_challenge")
 	codeChallengeMethod := r.FormValue("code_challenge_method")
-	if err := s.requirePKCEForPublicClient(clientID, codeChallenge, codeChallengeMethod); err != nil {
+	if err := s.requirePKCEForPublicClient(ctx, clientID, codeChallenge, codeChallengeMethod); err != nil {
 		s.logger.Debug("authorize POST: PKCE missing for public client", "err", err, "client_id", clientID)
 		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
 		return
@@ -305,7 +308,7 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 		}
 
 		// Check if email already taken
-		if existing, _ := s.store.GetLearnerByEmail(email); existing != nil {
+		if existing, _ := s.store.GetLearnerByEmail(ctx, email); existing != nil {
 			renderAuthPage(w, data, "An account with this email already exists.", "register")
 			return
 		}
@@ -322,7 +325,7 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 			renderAuthPage(w, data, "Internal error. Please try again.", "register")
 			return
 		}
-		learner, err := s.store.CreateLearner(email, string(hash), "", "")
+		learner, err := s.store.CreateLearner(ctx, email, string(hash), "", "")
 		if err != nil {
 			s.logger.Error("create learner failed", "err", err)
 			renderAuthPage(w, data, "Could not create account. Please try again.", "register")
@@ -331,7 +334,7 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 		learnerID = learner.ID
 		// R001: persist the freshly-granted approval so the next login on
 		// the same (client, redirect_uri) doesn't re-prompt the learner.
-		if err := s.store.ApproveClient(learnerID, clientID, redirectURI); err != nil {
+		if err := s.store.ApproveClient(ctx, learnerID, clientID, redirectURI); err != nil {
 			s.logger.Warn("persist client approval failed", "err", err, "learner", learnerID, "client", clientID)
 		}
 	} else {
@@ -345,7 +348,7 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 			renderAuthPage(w, data, "Too many failed attempts. Try again in a few minutes.", "login")
 			return
 		}
-		existing, err := s.store.GetLearnerByEmail(email)
+		existing, err := s.store.GetLearnerByEmail(ctx, email)
 		if err != nil {
 			s.loginFailures.Record(email)
 			renderAuthPage(w, data, "Invalid email or password.", "login")
@@ -363,13 +366,13 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 		// trust-on-first-use guarantee against a malicious dynamic-client
 		// registration. The approval is scoped to redirect_uri so a phishing
 		// client cannot reuse a previously-granted consent at a different URL.
-		approved, _ := s.store.IsClientApproved(existing.ID, clientID, redirectURI)
+		approved, _ := s.store.IsClientApproved(ctx, existing.ID, clientID, redirectURI)
 		if !approved && r.FormValue("approve_client") != "yes" {
 			renderAuthPage(w, data, "Please confirm that you recognize and approve this OAuth client before continuing.", "login")
 			return
 		}
 		if !approved {
-			if err := s.store.ApproveClient(existing.ID, clientID, redirectURI); err != nil {
+			if err := s.store.ApproveClient(ctx, existing.ID, clientID, redirectURI); err != nil {
 				s.logger.Warn("persist client approval failed", "err", err, "learner", existing.ID, "client", clientID)
 			}
 		}
@@ -384,7 +387,7 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := s.store.CreateAuthCode(code, learnerID, codeChallenge, clientID, time.Now().Add(5*time.Minute)); err != nil {
+	if err := s.store.CreateAuthCode(ctx, code, learnerID, codeChallenge, clientID, time.Now().Add(5*time.Minute)); err != nil {
 		s.logger.Error("create auth code failed", "err", err)
 		renderAuthPage(w, data, "Internal error. Please try again.", mode)
 		return
@@ -453,6 +456,7 @@ func (s *OAuthServer) HandleToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *OAuthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	code := r.FormValue("code")
 	codeVerifier := r.FormValue("code_verifier")
 	clientID, clientSecret := extractClientCredentials(r)
@@ -470,7 +474,7 @@ func (s *OAuthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *htt
 		return
 	}
 
-	client, err := s.store.GetOAuthClient(clientID)
+	client, err := s.store.GetOAuthClient(ctx, clientID)
 	if err != nil {
 		s.logger.Debug("token exchange: unknown client", "client_id", clientID)
 		writeTokenError(w, "invalid_client", http.StatusUnauthorized)
@@ -482,7 +486,7 @@ func (s *OAuthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *htt
 		return
 	}
 
-	authCode, err := s.store.ConsumeAuthCode(code, clientID)
+	authCode, err := s.store.ConsumeAuthCode(ctx, code, clientID)
 	if err != nil || time.Now().After(authCode.ExpiresAt) {
 		s.logger.Debug("token exchange: code not found or expired", "err", err)
 		writeTokenError(w, "invalid_grant", http.StatusBadRequest)
@@ -530,7 +534,7 @@ func (s *OAuthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *htt
 
 	// Bind the refresh token to the authenticated client (issue #30 part 2)
 	// so a stolen token redeemed by a different client is rejected later.
-	rt, err := s.store.CreateRefreshToken(authCode.LearnerID, clientID)
+	rt, err := s.store.CreateRefreshToken(ctx, authCode.LearnerID, clientID)
 	if err != nil {
 		s.logger.Error("create refresh token failed", "err", err)
 		writeTokenError(w, "server_error", http.StatusInternalServerError)
@@ -541,6 +545,7 @@ func (s *OAuthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *htt
 }
 
 func (s *OAuthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	refreshToken := r.FormValue("refresh_token")
 	if refreshToken == "" {
 		writeTokenError(w, "invalid_request", http.StatusBadRequest)
@@ -556,7 +561,7 @@ func (s *OAuthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Req
 		writeTokenError(w, "invalid_client", http.StatusUnauthorized)
 		return
 	}
-	client, err := s.store.GetOAuthClient(clientID)
+	client, err := s.store.GetOAuthClient(ctx, clientID)
 	if err != nil {
 		writeTokenError(w, "invalid_client", http.StatusUnauthorized)
 		return
@@ -566,7 +571,7 @@ func (s *OAuthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	rt, err := s.store.GetRefreshToken(refreshToken)
+	rt, err := s.store.GetRefreshToken(ctx, refreshToken)
 	if err != nil {
 		writeTokenError(w, "invalid_grant", http.StatusBadRequest)
 		return
@@ -582,7 +587,7 @@ func (s *OAuthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Req
 	}
 
 	// Delete old refresh token (rotation).
-	if err := s.store.DeleteRefreshToken(refreshToken); err != nil {
+	if err := s.store.DeleteRefreshToken(ctx, refreshToken); err != nil {
 		s.logger.Error("delete refresh token failed", "err", err)
 		writeTokenError(w, "server_error", http.StatusInternalServerError)
 		return
@@ -595,7 +600,7 @@ func (s *OAuthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	newRT, err := s.store.CreateRefreshToken(rt.LearnerID, clientID)
+	newRT, err := s.store.CreateRefreshToken(ctx, rt.LearnerID, clientID)
 	if err != nil {
 		s.logger.Error("create refresh token failed", "err", err)
 		writeTokenError(w, "server_error", http.StatusInternalServerError)
@@ -686,6 +691,7 @@ func isPrivateIP(ip net.IP) bool {
 // HandleRegister implements RFC 7591 dynamic client registration.
 // Claude.ai must register as an OAuth client before starting the auth flow.
 func (s *OAuthServer) HandleRegister(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	if r.ContentLength > registerBodyLimitBytes {
 		writeRegistrationErrorStatus(w, http.StatusRequestEntityTooLarge, "invalid_client_metadata", "request body too large")
 		return
@@ -782,7 +788,7 @@ func (s *OAuthServer) HandleRegister(w http.ResponseWriter, r *http.Request) {
 		secretHash = string(hash)
 	}
 
-	if err := s.store.CreateOAuthClientWithSecretCapped(clientID, clientName, string(redirectURIsJSON), secretHash, s.maxRegisteredClients); err != nil {
+	if err := s.store.CreateOAuthClientWithSecretCapped(ctx, clientID, clientName, string(redirectURIsJSON), secretHash, s.maxRegisteredClients); err != nil {
 		if errors.Is(err, db.ErrOAuthClientLimitReached) {
 			writeRegistrationError(w, "registration_disabled", "client cap reached")
 			return
@@ -832,7 +838,7 @@ func (s *OAuthServer) requireRegistrationCapacity(w http.ResponseWriter) error {
 	if s.maxRegisteredClients <= 0 {
 		return nil
 	}
-	n, err := s.store.CountOAuthClients()
+	n, err := s.store.CountOAuthClients(context.Background())
 	if err != nil {
 		s.logger.Error("count oauth clients failed", "err", err)
 		http.Error(w, `{"error":"server_error"}`, http.StatusInternalServerError)

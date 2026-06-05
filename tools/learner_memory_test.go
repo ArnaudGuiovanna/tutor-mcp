@@ -4,6 +4,7 @@
 package tools
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -90,7 +91,7 @@ func TestUpdateLearnerMemory_ArchiveMarksConsolidationCompleted(t *testing.T) {
 	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
 	store, deps := setupToolsTest(t)
 	now := time.Date(2026, time.May, 3, 13, 30, 0, 0, time.UTC)
-	if err := store.UpsertPendingConsolidation("L_owner", "monthly", "2026-04", now); err != nil {
+	if err := store.UpsertPendingConsolidation(context.Background(), "L_owner", "monthly", "2026-04", now); err != nil {
 		t.Fatalf("UpsertPendingConsolidation: %v", err)
 	}
 
@@ -103,7 +104,7 @@ func TestUpdateLearnerMemory_ArchiveMarksConsolidationCompleted(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("update_learner_memory archive failed: %s", resultText(res))
 	}
-	item, err := store.GetConsolidation("L_owner", "monthly", "2026-04")
+	item, err := store.GetConsolidation(context.Background(), "L_owner", "monthly", "2026-04")
 	if err != nil {
 		t.Fatalf("GetConsolidation: %v", err)
 	}

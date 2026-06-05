@@ -98,7 +98,7 @@ func TestRecordCalibrationResult_OwnerAllowed(t *testing.T) {
 		ConceptID:    "Concept_A",
 		Predicted:    0.75,
 	}
-	if err := store.CreateCalibrationPrediction(rec); err != nil {
+	if err := store.CreateCalibrationPrediction(context.Background(), rec); err != nil {
 		t.Fatal(err)
 	}
 
@@ -117,7 +117,7 @@ func TestRecordCalibrationResult_OwnerAllowed(t *testing.T) {
 	}
 
 	// Verify the record was actually updated.
-	saved, err := store.GetCalibrationRecord("cal_owner_1", "L_owner")
+	saved, err := store.GetCalibrationRecord(context.Background(), "cal_owner_1", "L_owner")
 	if err != nil {
 		t.Fatalf("get record: %v", err)
 	}
@@ -187,7 +187,7 @@ func TestRecordCalibrationResult_ActualScoreOutOfRange(t *testing.T) {
 				ConceptID:    "Concept_A",
 				Predicted:    0.5,
 			}
-			if err := store.CreateCalibrationPrediction(rec); err != nil {
+			if err := store.CreateCalibrationPrediction(context.Background(), rec); err != nil {
 				t.Fatal(err)
 			}
 
@@ -219,7 +219,7 @@ func TestRecordCalibrationResult_ActualScoreOutOfRange(t *testing.T) {
 			}
 
 			// Record must NOT be mutated when validation rejects.
-			saved, err := store.GetCalibrationRecord(predictionID, "L_owner")
+			saved, err := store.GetCalibrationRecord(context.Background(), predictionID, "L_owner")
 			if err != nil {
 				t.Fatalf("get record: %v", err)
 			}
@@ -247,7 +247,7 @@ func TestRecordCalibrationResult_RejectsForeignPredictionID(t *testing.T) {
 		ConceptID:    "Concept_A",
 		Predicted:    0.40,
 	}
-	if err := store.CreateCalibrationPrediction(rec); err != nil {
+	if err := store.CreateCalibrationPrediction(context.Background(), rec); err != nil {
 		t.Fatal(err)
 	}
 
@@ -260,7 +260,7 @@ func TestRecordCalibrationResult_RejectsForeignPredictionID(t *testing.T) {
 	}
 
 	// Row must remain unmodified — Actual still nil, owner still L_owner.
-	saved, err := store.GetCalibrationRecord("cal_foreign_1", "L_owner")
+	saved, err := store.GetCalibrationRecord(context.Background(), "cal_foreign_1", "L_owner")
 	if err != nil {
 		t.Fatalf("get record: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestRecordCalibrationResult_ForeignLearnerRejected(t *testing.T) {
 		ConceptID:    "Concept_A",
 		Predicted:    0.30,
 	}
-	if err := store.CreateCalibrationPrediction(rec); err != nil {
+	if err := store.CreateCalibrationPrediction(context.Background(), rec); err != nil {
 		t.Fatal(err)
 	}
 
@@ -303,7 +303,7 @@ func TestRecordCalibrationResult_ForeignLearnerRejected(t *testing.T) {
 	}
 
 	// Verify the record was NOT modified.
-	saved, err := store.GetCalibrationRecord("cal_victim_1", "L_owner")
+	saved, err := store.GetCalibrationRecord(context.Background(), "cal_victim_1", "L_owner")
 	if err != nil {
 		t.Fatalf("get record: %v", err)
 	}

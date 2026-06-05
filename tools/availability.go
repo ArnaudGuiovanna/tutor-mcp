@@ -27,7 +27,7 @@ func registerGetAvailabilityModel(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		avail, err := deps.Store.GetAvailability(learnerID)
+		avail, err := deps.Store.GetAvailability(ctx, learnerID)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to get availability", err)
 			return r, nil, nil
@@ -41,7 +41,7 @@ func registerGetAvailabilityModel(server *mcp.Server, deps *Deps) {
 		}
 
 		// Get last active
-		learner, _ := deps.Store.GetLearnerByID(learnerID)
+		learner, _ := deps.Store.GetLearnerByID(ctx, learnerID)
 		lastActive := ""
 		if learner != nil && !learner.LastActive.IsZero() {
 			lastActive = learner.LastActive.Format("2006-01-02T15:04:05Z")

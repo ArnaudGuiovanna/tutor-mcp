@@ -5,6 +5,7 @@
 package tools
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -174,7 +175,7 @@ func TestInitDomain_RejectsCyclicGraph(t *testing.T) {
 	if !strings.Contains(strings.ToLower(resultText(res)), "cycle") {
 		t.Fatalf("expected error mentioning cycle, got %q", resultText(res))
 	}
-	if d, _ := store.GetDomainByLearner("L_owner"); d != nil {
+	if d, _ := store.GetDomainByLearner(context.Background(), "L_owner"); d != nil {
 		t.Fatalf("domain should not have been persisted on cycle reject, got %+v", d)
 	}
 }

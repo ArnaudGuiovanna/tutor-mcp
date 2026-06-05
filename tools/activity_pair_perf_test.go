@@ -122,17 +122,17 @@ func seedAlertActivityPairFixture(tb testing.TB, store *db.Store, activeLearners
 		for conceptIdx, concept := range concepts {
 			relevance[concept] = 1.0 - float64(conceptIdx%6)*0.08
 		}
-		domain, err := store.CreateDomainWithValueFramings(learnerID, "math", "ship a stable MVP", models.KnowledgeSpace{
+		domain, err := store.CreateDomainWithValueFramings(context.Background(), learnerID, "math", "ship a stable MVP", models.KnowledgeSpace{
 			Concepts:      concepts,
 			Prerequisites: pairPerfPrerequisites(concepts),
 		}, "")
 		if err != nil {
 			tb.Fatalf("seed domain for %s: %v", learnerID, err)
 		}
-		if err := store.UpdateDomainPhase(domain.ID, models.PhaseInstruction, 0, base); err != nil {
+		if err := store.UpdateDomainPhase(context.Background(), domain.ID, models.PhaseInstruction, 0, base); err != nil {
 			tb.Fatalf("seed phase for %s: %v", learnerID, err)
 		}
-		if _, err := store.MergeDomainGoalRelevance(domain.ID, relevance); err != nil {
+		if _, err := store.MergeDomainGoalRelevance(context.Background(), domain.ID, relevance); err != nil {
 			tb.Fatalf("seed goal relevance for %s: %v", learnerID, err)
 		}
 
@@ -150,7 +150,7 @@ func seedAlertActivityPairFixture(tb testing.TB, store *db.Store, activeLearners
 			cs.ScheduledDays = 1 + conceptIdx%3
 			cs.Reps = 2 + conceptIdx%4
 			cs.LastReview = &lastReview
-			if err := store.UpsertConceptState(cs); err != nil {
+			if err := store.UpsertConceptState(context.Background(), cs); err != nil {
 				tb.Fatalf("seed concept state %s/%s: %v", learnerID, concept, err)
 			}
 		}

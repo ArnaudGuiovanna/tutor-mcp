@@ -10,6 +10,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"time"
@@ -72,16 +73,16 @@ type GlobalOLMSnapshot struct {
 
 // BuildGlobalOLMSnapshot aggregates across all non-archived domains for a
 // learner — powers get_olm_snapshot(scope:"global").
-func BuildGlobalOLMSnapshot(store *db.Store, learnerID string) (*GlobalOLMSnapshot, error) {
+func BuildGlobalOLMSnapshot(ctx context.Context, store *db.Store, learnerID string) (*GlobalOLMSnapshot, error) {
 	g := &GlobalOLMSnapshot{}
 
-	domains, err := store.GetDomainsByLearner(learnerID, false /*includeArchived*/)
+	domains, err := store.GetDomainsByLearner(ctx, learnerID, false /*includeArchived*/)
 	if err != nil {
 		return nil, fmt.Errorf("global olm: list domains: %w", err)
 	}
 
 	for _, d := range domains {
-		snap, err := BuildOLMSnapshot(store, learnerID, d.ID)
+		snap, err := BuildOLMSnapshot(ctx, store, learnerID, d.ID)
 		if err != nil {
 			// Skip a broken domain rather than fail the whole view, but log it so
 			// the failure is visible.
@@ -106,13 +107,13 @@ func BuildGlobalOLMSnapshot(store *db.Store, learnerID string) (*GlobalOLMSnapsh
 		})
 	}
 
-	g.Streak, _ = store.GetActivityStreak(learnerID)
+	g.Streak, _ = store.GetActivityStreak(ctx, learnerID)
 
 	// Calibration sparkline — last 30 samples. GetCalibrationBiasHistory returns
 	// DESC (newest-first); reverse-iterate so the resulting slice is oldest-first
 	// to match the autonomy/satisfaction sparklines. Each entry's Day is its own
 	// day-offset (i=0 newest → today; i=len-1 oldest → today - (len-1)).
-	if hist, err := store.GetCalibrationBiasHistory(learnerID, sparklineWindow); err == nil {
+	if hist, err := store.GetCalibrationBiasHistory(ctx, learnerID, sparklineWindow); err == nil {
 		now := time.Now().UTC()
 		for i := len(hist) - 1; i >= 0; i-- {
 			day := now.AddDate(0, 0, -i).Format("2006-01-02")
@@ -121,7 +122,7 @@ func BuildGlobalOLMSnapshot(store *db.Store, learnerID string) (*GlobalOLMSnapsh
 	}
 
 	// Autonomy + satisfaction sparklines — best-effort UI enrichment, empty on err.
-	if affects, err := store.GetRecentAffectStates(learnerID, sparklineWindow); err == nil {
+	if affects, err := store.GetRecentAffectStates(ctx, learnerID, sparklineWindow); err == nil {
 		for i := len(affects) - 1; i >= 0; i-- {
 			af := affects[i]
 			day := af.CreatedAt.UTC().Format("2006-01-02")
@@ -133,7 +134,7 @@ func BuildGlobalOLMSnapshot(store *db.Store, learnerID string) (*GlobalOLMSnapsh
 	// Recent events — past 7 days. GetRecentLearnerEvents returns DESC
 	// (newest-first), preserved as the natural "newest at top" ordering.
 	since := time.Now().UTC().AddDate(0, 0, -recentEventDays)
-	if rawEvents, err := store.GetRecentLearnerEvents(learnerID, since); err == nil {
+	if rawEvents, err := store.GetRecentLearnerEvents(ctx, learnerID, since); err == nil {
 		for _, re := range rawEvents {
 			g.RecentEvents = append(g.RecentEvents, LearnerEvent{
 				At: re.At, Kind: re.Kind, Message: re.Message, Concept: re.Concept,

@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -39,13 +40,13 @@ func insertSimpleInteraction(t *testing.T, store *Store, concept string, success
 func TestImplementationIntentionsInsertAndRecent(t *testing.T) {
 	store := setupTestDB(t)
 
-	_, err := store.InsertImplementationIntention("L1", "D1", "demain matin", "ferai 1 exercice", time.Time{})
+	_, err := store.InsertImplementationIntention(context.Background(), "L1", "D1", "demain matin", "ferai 1 exercice", time.Time{})
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
 	// Should find it within the last hour.
-	has, err := store.HasRecentImplementationIntention("L1", "D1", time.Now().UTC().Add(-1*time.Hour))
+	has, err := store.HasRecentImplementationIntention(context.Background(), "L1", "D1", time.Now().UTC().Add(-1*time.Hour))
 	if err != nil {
 		t.Fatalf("has recent: %v", err)
 	}
@@ -54,13 +55,13 @@ func TestImplementationIntentionsInsertAndRecent(t *testing.T) {
 	}
 
 	// Should NOT find it when looking in the future.
-	has, _ = store.HasRecentImplementationIntention("L1", "D1", time.Now().UTC().Add(1*time.Hour))
+	has, _ = store.HasRecentImplementationIntention(context.Background(), "L1", "D1", time.Now().UTC().Add(1*time.Hour))
 	if has {
 		t.Errorf("expected has=false for future cutoff")
 	}
 
 	// Any-domain check works too.
-	hasAny, _ := store.HasRecentImplementationIntention("L1", "", time.Now().UTC().Add(-1*time.Hour))
+	hasAny, _ := store.HasRecentImplementationIntention(context.Background(), "L1", "", time.Now().UTC().Add(-1*time.Hour))
 	if !hasAny {
 		t.Errorf("expected any-domain has=true")
 	}
@@ -71,13 +72,13 @@ func TestImplementationIntentionsInsertAndRecent(t *testing.T) {
 func TestImplementationIntentionsDomainScope(t *testing.T) {
 	store := setupTestDB(t)
 
-	_, err := store.InsertImplementationIntention("L1", "D1", "t", "a", time.Time{})
+	_, err := store.InsertImplementationIntention(context.Background(), "L1", "D1", "t", "a", time.Time{})
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
 	// D2 must not see D1's intention.
-	has, _ := store.HasRecentImplementationIntention("L1", "D2", time.Now().UTC().Add(-1*time.Hour))
+	has, _ := store.HasRecentImplementationIntention(context.Background(), "L1", "D2", time.Now().UTC().Add(-1*time.Hour))
 	if has {
 		t.Errorf("expected D2 has=false, intention belongs to D1")
 	}
@@ -90,7 +91,7 @@ func TestWebhookQueueEnqueueDequeueLifecycle(t *testing.T) {
 
 	now := time.Now().UTC()
 	scheduled := now.Add(5 * time.Minute) // within a 30min dispatch window
-	id, err := store.EnqueueWebhookMessage("L1", "daily_motivation", "hello", scheduled, time.Time{}, 0)
+	id, err := store.EnqueueWebhookMessage(context.Background(), "L1", "daily_motivation", "hello", scheduled, time.Time{}, 0)
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
@@ -99,7 +100,7 @@ func TestWebhookQueueEnqueueDequeueLifecycle(t *testing.T) {
 	}
 
 	// Dequeue with 30min window.
-	item, err := store.DequeueNextPending("L1", "daily_motivation", now, 30*time.Minute)
+	item, err := store.DequeueNextPending(context.Background(), "L1", "daily_motivation", now, 30*time.Minute)
 	if err != nil {
 		t.Fatalf("dequeue: %v", err)
 	}
@@ -111,12 +112,12 @@ func TestWebhookQueueEnqueueDequeueLifecycle(t *testing.T) {
 	}
 
 	// Mark sent.
-	if err := store.MarkWebhookSent(item.ID, "L1", now); err != nil {
+	if err := store.MarkWebhookSent(context.Background(), item.ID, "L1", now); err != nil {
 		t.Fatalf("mark sent: %v", err)
 	}
 
 	// Next dequeue should find nothing.
-	item2, _ := store.DequeueNextPending("L1", "daily_motivation", now, 30*time.Minute)
+	item2, _ := store.DequeueNextPending(context.Background(), "L1", "daily_motivation", now, 30*time.Minute)
 	if item2 != nil {
 		t.Errorf("expected nil after mark sent, got id=%d", item2.ID)
 	}
@@ -129,11 +130,11 @@ func TestWebhookQueuePriorityOrdering(t *testing.T) {
 	now := time.Now().UTC()
 
 	// Lower priority
-	_, _ = store.EnqueueWebhookMessage("L1", "daily_motivation", "low", now, time.Time{}, 0)
+	_, _ = store.EnqueueWebhookMessage(context.Background(), "L1", "daily_motivation", "low", now, time.Time{}, 0)
 	// Higher priority
-	_, _ = store.EnqueueWebhookMessage("L1", "daily_motivation", "high", now, time.Time{}, 5)
+	_, _ = store.EnqueueWebhookMessage(context.Background(), "L1", "daily_motivation", "high", now, time.Time{}, 5)
 
-	item, _ := store.DequeueNextPending("L1", "daily_motivation", now, 30*time.Minute)
+	item, _ := store.DequeueNextPending(context.Background(), "L1", "daily_motivation", now, 30*time.Minute)
 	if item == nil || item.Content != "high" {
 		t.Errorf("expected 'high', got %+v", item)
 	}
@@ -147,17 +148,17 @@ func TestWebhookQueueExpiry(t *testing.T) {
 
 	scheduled := now.Add(-10 * time.Minute)
 	expired := now.Add(-1 * time.Minute) // already expired
-	_, err := store.EnqueueWebhookMessage("L1", "daily_recap", "stale", scheduled, expired, 0)
+	_, err := store.EnqueueWebhookMessage(context.Background(), "L1", "daily_recap", "stale", scheduled, expired, 0)
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	item, _ := store.DequeueNextPending("L1", "daily_recap", now, 30*time.Minute)
+	item, _ := store.DequeueNextPending(context.Background(), "L1", "daily_recap", now, 30*time.Minute)
 	if item != nil {
 		t.Errorf("expected nil for expired item, got id=%d", item.ID)
 	}
 
-	n, err := store.ExpirePastWebhookMessages(now)
+	n, err := store.ExpirePastWebhookMessages(context.Background(), now)
 	if err != nil {
 		t.Fatalf("expire: %v", err)
 	}
@@ -177,7 +178,7 @@ func TestConceptMasteryDelta(t *testing.T) {
 	insertSimpleInteraction(t, store, "Goroutines", false, since.Add(-5*24*time.Hour))
 	insertSimpleInteraction(t, store, "Goroutines", false, since.Add(-10*24*time.Hour))
 
-	deltas, err := store.ConceptMasteryDelta("L1", []string{"Goroutines"}, since, 3)
+	deltas, err := store.ConceptMasteryDelta(context.Background(), "L1", []string{"Goroutines"}, since, 3)
 	if err != nil {
 		t.Fatalf("mastery delta: %v", err)
 	}
@@ -207,7 +208,7 @@ func TestMilestonesInWindow(t *testing.T) {
 	seedConceptState(t, store, "Channels", 0.3)
 	insertSimpleInteraction(t, store, "Channels", true, time.Now().UTC().Add(-1*time.Hour))
 
-	milestones, err := store.MilestonesInWindow("L1", []string{"Goroutines", "Interfaces", "Channels"}, since)
+	milestones, err := store.MilestonesInWindow(context.Background(), "L1", []string{"Goroutines", "Interfaces", "Channels"}, since)
 	if err != nil {
 		t.Fatalf("milestones: %v", err)
 	}
@@ -231,7 +232,7 @@ func TestCountSessionsOnConcept(t *testing.T) {
 	insertSimpleInteraction(t, store, "Goroutines", false, twoDaysAgoMidnight.Add(8*time.Hour))
 	insertSimpleInteraction(t, store, "Goroutines", true, time.Now().UTC().Add(-1*time.Hour))
 
-	count, err := store.CountSessionsOnConcept("L1", "Goroutines")
+	count, err := store.CountSessionsOnConcept(context.Background(), "L1", "Goroutines")
 	if err != nil {
 		t.Fatalf("count: %v", err)
 	}
@@ -246,7 +247,7 @@ func TestLastFailureOnConcept_WithinWindow(t *testing.T) {
 	store := setupTestDB(t)
 
 	insertSimpleInteraction(t, store, "Goroutines", false, time.Now().UTC().Add(-2*time.Hour))
-	failure, err := store.LastFailureOnConcept("L1", "Goroutines", 24*time.Hour)
+	failure, err := store.LastFailureOnConcept(context.Background(), "L1", "Goroutines", 24*time.Hour)
 	if err != nil {
 		t.Fatalf("last failure: %v", err)
 	}
@@ -258,7 +259,7 @@ func TestLastFailureOnConcept_WithinWindow(t *testing.T) {
 	}
 
 	// Outside window
-	none, _ := store.LastFailureOnConcept("L1", "Goroutines", 30*time.Minute)
+	none, _ := store.LastFailureOnConcept(context.Background(), "L1", "Goroutines", 30*time.Minute)
 	if none != nil {
 		t.Errorf("expected nil outside window, got id=%d", none.ID)
 	}

@@ -5,6 +5,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -282,9 +283,9 @@ const MirrorAlertKind = "MIRROR_MESSAGE"
 // *db.Store. Keeping it as an interface lets the call sites (and tests) wire
 // up a real or mock store without dragging the whole Store API into engine.
 type mirrorWebhookStore interface {
-	WasAlertSentToday(learnerID, alertType string) (bool, error)
-	EnqueueWebhookMessage(learnerID, kind, content string, scheduledFor, expiresAt time.Time, priority int) (int64, error)
-	CreateScheduledAlert(learnerID, alertType, concept string, scheduledAt time.Time) error
+	WasAlertSentToday(ctx context.Context, learnerID, alertType string) (bool, error)
+	EnqueueWebhookMessage(ctx context.Context, learnerID, kind, content string, scheduledFor, expiresAt time.Time, priority int) (int64, error)
+	CreateScheduledAlert(ctx context.Context, learnerID, alertType, concept string, scheduledAt time.Time) error
 }
 
 // MirrorWebhookContent is the JSON shape persisted into webhook_message_queue.content
@@ -311,14 +312,14 @@ type MirrorWebhookContent struct {
 //
 // scheduledFor defaults to `now`; the message expires 24h later (mirrors are
 // time-sensitive — a stale dependency-pattern nudge is noise, not signal).
-func EnqueueMirrorWebhook(store mirrorWebhookStore, learnerID string, mirror *models.MirrorMessage, now time.Time) (int64, bool, error) {
+func EnqueueMirrorWebhook(ctx context.Context, store mirrorWebhookStore, learnerID string, mirror *models.MirrorMessage, now time.Time) (int64, bool, error) {
 	if store == nil || mirror == nil || learnerID == "" {
 		return 0, false, nil
 	}
 
 	// Per-day dedup: if a mirror was already pushed today for this learner,
 	// don't enqueue another one. Same pattern as OLM / DAILY_MOTIVATION.
-	sent, err := store.WasAlertSentToday(learnerID, MirrorAlertKind)
+	sent, err := store.WasAlertSentToday(ctx, learnerID, MirrorAlertKind)
 	if err != nil {
 		return 0, false, fmt.Errorf("mirror dedup check: %w", err)
 	}
@@ -339,6 +340,7 @@ func EnqueueMirrorWebhook(store mirrorWebhookStore, learnerID string, mirror *mo
 	scheduledFor := now.UTC()
 	expiresAt := scheduledFor.Add(24 * time.Hour)
 	id, err := store.EnqueueWebhookMessage(
+		ctx,
 		learnerID,
 		models.WebhookKindMirror,
 		string(body),
@@ -353,7 +355,7 @@ func EnqueueMirrorWebhook(store mirrorWebhookStore, learnerID string, mirror *mo
 	// Record the alert so the dedup check above blocks subsequent same-day
 	// emissions. Stored under the same alert_type the scheduler will mark
 	// when the message is actually dispatched.
-	if err := store.CreateScheduledAlert(learnerID, MirrorAlertKind, "", now.UTC()); err != nil {
+	if err := store.CreateScheduledAlert(ctx, learnerID, MirrorAlertKind, "", now.UTC()); err != nil {
 		// The webhook is already in the queue — log via error return so the
 		// caller can surface it, but treat enqueue as success (dedup will
 		// just not work today; better than losing the nudge entirely).

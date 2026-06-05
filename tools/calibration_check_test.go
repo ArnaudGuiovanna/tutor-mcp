@@ -4,6 +4,7 @@
 package tools
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -46,7 +47,7 @@ func TestCalibrationCheck_HappyPath(t *testing.T) {
 		t.Fatalf("expected prediction_id starting with cal_, got %q", pid)
 	}
 
-	rec, err := store.GetCalibrationRecord(pid, "L_owner")
+	rec, err := store.GetCalibrationRecord(context.Background(), pid, "L_owner")
 	if err != nil {
 		t.Fatalf("GetCalibrationRecord: %v", err)
 	}
@@ -73,7 +74,7 @@ func TestCalibrationCheck_AcceptsLegacyConceptID(t *testing.T) {
 	}
 	out := decodeResult(t, res)
 	pid, _ := out["prediction_id"].(string)
-	rec, err := store.GetCalibrationRecord(pid, "L_owner")
+	rec, err := store.GetCalibrationRecord(context.Background(), pid, "L_owner")
 	if err != nil {
 		t.Fatalf("GetCalibrationRecord: %v", err)
 	}

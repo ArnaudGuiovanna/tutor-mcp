@@ -5,6 +5,7 @@
 package db
 
 import (
+	"context"
 	"testing"
 
 	"tutor-mcp/models"
@@ -16,7 +17,7 @@ func mkDomain(t *testing.T, store *Store, concepts []string) *models.Domain {
 		Concepts:      concepts,
 		Prerequisites: map[string][]string{},
 	}
-	d, err := store.CreateDomain("L1", "TestDomain", "ship a Go backend", graph)
+	d, err := store.CreateDomain(context.Background(), "L1", "TestDomain", "ship a Go backend", graph)
 	if err != nil {
 		t.Fatalf("create domain: %v", err)
 	}
@@ -27,7 +28,7 @@ func TestMergeDomainGoalRelevance_FreshDomain(t *testing.T) {
 	store := setupTestDB(t)
 	d := mkDomain(t, store, []string{"Goroutines", "Channels", "Interfaces"})
 
-	merged, err := store.MergeDomainGoalRelevance(d.ID, map[string]float64{
+	merged, err := store.MergeDomainGoalRelevance(context.Background(), d.ID, map[string]float64{
 		"Goroutines": 0.9,
 		"Channels":   0.7,
 	})
@@ -49,10 +50,10 @@ func TestMergeDomainGoalRelevance_IncrementalKeepsExisting(t *testing.T) {
 	store := setupTestDB(t)
 	d := mkDomain(t, store, []string{"A", "B", "C"})
 
-	if _, err := store.MergeDomainGoalRelevance(d.ID, map[string]float64{"A": 0.9, "B": 0.5}); err != nil {
+	if _, err := store.MergeDomainGoalRelevance(context.Background(), d.ID, map[string]float64{"A": 0.9, "B": 0.5}); err != nil {
 		t.Fatalf("first set: %v", err)
 	}
-	merged, err := store.MergeDomainGoalRelevance(d.ID, map[string]float64{"C": 0.3})
+	merged, err := store.MergeDomainGoalRelevance(context.Background(), d.ID, map[string]float64{"C": 0.3})
 	if err != nil {
 		t.Fatalf("second set: %v", err)
 	}
@@ -68,8 +69,8 @@ func TestMergeDomainGoalRelevance_OverwritesSameConcept(t *testing.T) {
 	store := setupTestDB(t)
 	d := mkDomain(t, store, []string{"A", "B"})
 
-	_, _ = store.MergeDomainGoalRelevance(d.ID, map[string]float64{"A": 0.9, "B": 0.5})
-	merged, err := store.MergeDomainGoalRelevance(d.ID, map[string]float64{"A": 0.2})
+	_, _ = store.MergeDomainGoalRelevance(context.Background(), d.ID, map[string]float64{"A": 0.9, "B": 0.5})
+	merged, err := store.MergeDomainGoalRelevance(context.Background(), d.ID, map[string]float64{"A": 0.2})
 	if err != nil {
 		t.Fatalf("overwrite: %v", err)
 	}
@@ -86,10 +87,10 @@ func TestMergeDomainGoalRelevance_IncrementsVersion(t *testing.T) {
 	d := mkDomain(t, store, []string{"A"})
 
 	for i := 1; i <= 3; i++ {
-		if _, err := store.MergeDomainGoalRelevance(d.ID, map[string]float64{"A": 0.5}); err != nil {
+		if _, err := store.MergeDomainGoalRelevance(context.Background(), d.ID, map[string]float64{"A": 0.5}); err != nil {
 			t.Fatalf("set %d: %v", i, err)
 		}
-		fresh, _ := store.GetDomainByID(d.ID)
+		fresh, _ := store.GetDomainByID(context.Background(), d.ID)
 		if fresh.GoalRelevanceVersion != i {
 			t.Errorf("after set %d: GoalRelevanceVersion want %d, got %d", i, i, fresh.GoalRelevanceVersion)
 		}
@@ -104,11 +105,11 @@ func TestUpdateDomainGraph_BumpsGraphVersion(t *testing.T) {
 	}
 
 	d.Graph.Concepts = append(d.Graph.Concepts, "B")
-	if err := store.UpdateDomainGraph(d.ID, d.Graph); err != nil {
+	if err := store.UpdateDomainGraph(context.Background(), d.ID, d.Graph); err != nil {
 		t.Fatalf("update graph: %v", err)
 	}
 
-	fresh, _ := store.GetDomainByID(d.ID)
+	fresh, _ := store.GetDomainByID(context.Background(), d.ID)
 	if fresh.GraphVersion != 2 {
 		t.Errorf("after add: GraphVersion want 2, got %d", fresh.GraphVersion)
 	}
@@ -118,18 +119,18 @@ func TestIsGoalRelevanceStale_AfterAddConcepts(t *testing.T) {
 	store := setupTestDB(t)
 	d := mkDomain(t, store, []string{"A", "B"})
 
-	if _, err := store.MergeDomainGoalRelevance(d.ID, map[string]float64{"A": 0.9, "B": 0.4}); err != nil {
+	if _, err := store.MergeDomainGoalRelevance(context.Background(), d.ID, map[string]float64{"A": 0.9, "B": 0.4}); err != nil {
 		t.Fatalf("set: %v", err)
 	}
-	d1, _ := store.GetDomainByID(d.ID)
+	d1, _ := store.GetDomainByID(context.Background(), d.ID)
 	if d1.IsGoalRelevanceStale() {
 		t.Error("immediately after set, should NOT be stale")
 	}
 
 	d1.Graph.Concepts = append(d1.Graph.Concepts, "C")
-	_ = store.UpdateDomainGraph(d1.ID, d1.Graph)
+	_ = store.UpdateDomainGraph(context.Background(), d1.ID, d1.Graph)
 
-	d2, _ := store.GetDomainByID(d1.ID)
+	d2, _ := store.GetDomainByID(context.Background(), d1.ID)
 	if !d2.IsGoalRelevanceStale() {
 		t.Error("after add_concepts, should be stale (graph_version > for_graph_version)")
 	}
@@ -143,7 +144,7 @@ func TestGetDomainGoalRelevance_EmptyReturnsNil(t *testing.T) {
 	store := setupTestDB(t)
 	d := mkDomain(t, store, []string{"A"})
 
-	gr, err := store.GetDomainGoalRelevance(d.ID)
+	gr, err := store.GetDomainGoalRelevance(context.Background(), d.ID)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -156,8 +157,8 @@ func TestGetDomainGoalRelevance_RoundTrip(t *testing.T) {
 	store := setupTestDB(t)
 	d := mkDomain(t, store, []string{"A", "B"})
 
-	_, _ = store.MergeDomainGoalRelevance(d.ID, map[string]float64{"A": 0.9, "B": 0.4})
-	gr, err := store.GetDomainGoalRelevance(d.ID)
+	_, _ = store.MergeDomainGoalRelevance(context.Background(), d.ID, map[string]float64{"A": 0.9, "B": 0.4})
+	gr, err := store.GetDomainGoalRelevance(context.Background(), d.ID)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -170,7 +171,7 @@ func TestMergeDomainGoalRelevance_RejectsNil(t *testing.T) {
 	store := setupTestDB(t)
 	d := mkDomain(t, store, []string{"A"})
 
-	if _, err := store.MergeDomainGoalRelevance(d.ID, nil); err == nil {
+	if _, err := store.MergeDomainGoalRelevance(context.Background(), d.ID, nil); err == nil {
 		t.Error("expected error for nil relevance map")
 	}
 }

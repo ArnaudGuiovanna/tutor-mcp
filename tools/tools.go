@@ -91,9 +91,9 @@ func filterInteractionsByDomainID(interactions []*models.Interaction, domainID s
 // specific tools (archive_domain, unarchive_domain, delete_domain) do not go
 // through resolveDomain — they call store.GetDomainByID directly because they
 // legitimately need to operate on archived rows.
-func resolveDomain(store *db.Store, learnerID, domainID string) (*models.Domain, error) {
+func resolveDomain(ctx context.Context, store *db.Store, learnerID, domainID string) (*models.Domain, error) {
 	if domainID != "" {
-		d, err := store.GetDomainByID(domainID)
+		d, err := store.GetDomainByID(ctx, domainID)
 		if err != nil {
 			return nil, err
 		}
@@ -105,7 +105,7 @@ func resolveDomain(store *db.Store, learnerID, domainID string) (*models.Domain,
 		}
 		return d, nil
 	}
-	return store.GetDomainByLearner(learnerID)
+	return store.GetDomainByLearner(ctx, learnerID)
 }
 
 func jsonResult(v interface{}) (*mcp.CallToolResult, error) {

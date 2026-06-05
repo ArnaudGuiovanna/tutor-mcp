@@ -4,6 +4,7 @@
 package tools
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -45,8 +46,8 @@ func TestFeynmanChallenge_RejectsConceptOutsideDomain(t *testing.T) {
 	// challenge for a stale/hallucinated concept name.
 	cs := models.NewConceptState("L_owner", "orphan")
 	cs.PMastery = 0.95
-	_ = store.InsertConceptStateIfNotExists(cs)
-	_ = store.UpsertConceptState(cs)
+	_ = store.InsertConceptStateIfNotExists(context.Background(), cs)
+	_ = store.UpsertConceptState(context.Background(), cs)
 	seedDomain(t, store, "L_owner", "calc") // domain does NOT contain "orphan"
 
 	res := callTool(t, deps, registerFeynmanChallenge, "L_owner", "feynman_challenge", map[string]any{"concept": "orphan"})
@@ -60,8 +61,8 @@ func TestFeynmanChallenge_NotMastered(t *testing.T) {
 	seedDomain(t, store, "L_owner", "calc")
 	cs := models.NewConceptState("L_owner", "calc")
 	cs.PMastery = 0.4
-	_ = store.InsertConceptStateIfNotExists(cs)
-	_ = store.UpsertConceptState(cs)
+	_ = store.InsertConceptStateIfNotExists(context.Background(), cs)
+	_ = store.UpsertConceptState(context.Background(), cs)
 
 	res := callTool(t, deps, registerFeynmanChallenge, "L_owner", "feynman_challenge", map[string]any{"concept": "calc"})
 	if res.IsError {
@@ -78,8 +79,8 @@ func TestFeynmanChallenge_EligibleHappyPath(t *testing.T) {
 	seedDomain(t, store, "L_owner", "calc")
 	cs := models.NewConceptState("L_owner", "calc")
 	cs.PMastery = 0.95
-	_ = store.InsertConceptStateIfNotExists(cs)
-	_ = store.UpsertConceptState(cs)
+	_ = store.InsertConceptStateIfNotExists(context.Background(), cs)
+	_ = store.UpsertConceptState(context.Background(), cs)
 
 	res := callTool(t, deps, registerFeynmanChallenge, "L_owner", "feynman_challenge", map[string]any{"concept": "calc"})
 	if res.IsError {
@@ -102,8 +103,8 @@ func TestFeynmanChallenge_AcceptsLegacyConceptID(t *testing.T) {
 	seedDomain(t, store, "L_owner", "legacy_calc")
 	cs := models.NewConceptState("L_owner", "legacy_calc")
 	cs.PMastery = 0.95
-	_ = store.InsertConceptStateIfNotExists(cs)
-	_ = store.UpsertConceptState(cs)
+	_ = store.InsertConceptStateIfNotExists(context.Background(), cs)
+	_ = store.UpsertConceptState(context.Background(), cs)
 
 	res := callTool(t, deps, registerFeynmanChallenge, "L_owner", "feynman_challenge", map[string]any{"concept_id": "legacy_calc"})
 	if res.IsError {

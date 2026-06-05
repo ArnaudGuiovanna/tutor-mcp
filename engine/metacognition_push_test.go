@@ -5,6 +5,7 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -29,7 +30,7 @@ func TestEnqueueMirrorWebhook_PersistsAndDedups(t *testing.T) {
 	now := time.Now().UTC()
 
 	// First emission: row should land in webhook_message_queue.
-	id, enqueued, err := EnqueueMirrorWebhook(store, learnerID, mirror, now)
+	id, enqueued, err := EnqueueMirrorWebhook(context.Background(), store, learnerID, mirror, now)
 	if err != nil {
 		t.Fatalf("EnqueueMirrorWebhook: %v", err)
 	}
@@ -77,7 +78,7 @@ func TestEnqueueMirrorWebhook_PersistsAndDedups(t *testing.T) {
 	}
 
 	// Per-day dedup: a second emission on the same UTC day must be a no-op.
-	id2, enqueued2, err := EnqueueMirrorWebhook(store, learnerID, mirror, now.Add(2*time.Hour))
+	id2, enqueued2, err := EnqueueMirrorWebhook(context.Background(), store, learnerID, mirror, now.Add(2*time.Hour))
 	if err != nil {
 		t.Fatalf("second EnqueueMirrorWebhook: %v", err)
 	}
@@ -103,7 +104,7 @@ func TestEnqueueMirrorWebhook_PersistsAndDedups(t *testing.T) {
 func TestEnqueueMirrorWebhook_NilMirrorIsNoOp(t *testing.T) {
 	rawDB, store, learnerID := rawTestSetup(t, "")
 
-	id, enqueued, err := EnqueueMirrorWebhook(store, learnerID, nil, time.Now().UTC())
+	id, enqueued, err := EnqueueMirrorWebhook(context.Background(), store, learnerID, nil, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("nil mirror should not error, got %v", err)
 	}
@@ -150,7 +151,7 @@ func TestSendMirrorMessages_DispatchesQueuedItem(t *testing.T) {
 	body, _ := json.Marshal(MirrorWebhookContent{
 		Pattern: mirror.Pattern, Message: mirror.Message, OpenQuestion: mirror.OpenQuestion,
 	})
-	if _, err := store.EnqueueWebhookMessage(
+	if _, err := store.EnqueueWebhookMessage(context.Background(),
 		learnerID, models.WebhookKindMirror, string(body), now, now.Add(2*time.Hour), 0,
 	); err != nil {
 		t.Fatalf("enqueue: %v", err)
@@ -183,7 +184,7 @@ func TestSendMirrorMessages_DispatchesQueuedItem(t *testing.T) {
 
 	// A scheduled_alert tagged MirrorAlertKind must be recorded so the next
 	// tick today is a no-op.
-	sent, err := store.WasAlertSentToday(learnerID, MirrorAlertKind)
+	sent, err := store.WasAlertSentToday(context.Background(), learnerID, MirrorAlertKind)
 	if err != nil {
 		t.Fatalf("WasAlertSentToday: %v", err)
 	}
@@ -212,7 +213,7 @@ func TestSendMirrorMessages_DedupSameDay(t *testing.T) {
 	body, _ := json.Marshal(MirrorWebhookContent{
 		Pattern: "calibration_drift", Message: "You overestimate your level.", OpenQuestion: "Should we calibrate?",
 	})
-	if _, err := store.EnqueueWebhookMessage(
+	if _, err := store.EnqueueWebhookMessage(context.Background(),
 		learnerID, models.WebhookKindMirror, string(body), now, now.Add(2*time.Hour), 0,
 	); err != nil {
 		t.Fatalf("enqueue: %v", err)
@@ -248,7 +249,7 @@ func TestEnqueueMirrorWebhook_ThenSchedulerSeesDedup(t *testing.T) {
 		Message:      "Your autonomy score has dropped.",
 		OpenQuestion: "More guidance?",
 	}
-	if _, _, err := EnqueueMirrorWebhook(store, learnerID, mirror, time.Now().UTC()); err != nil {
+	if _, _, err := EnqueueMirrorWebhook(context.Background(), store, learnerID, mirror, time.Now().UTC()); err != nil {
 		t.Fatalf("EnqueueMirrorWebhook: %v", err)
 	}
 

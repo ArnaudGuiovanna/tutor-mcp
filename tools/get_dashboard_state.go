@@ -53,9 +53,9 @@ func registerGetDashboardState(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		states, _ := deps.Store.GetConceptStatesByLearner(learnerID)
-		interactions, _ := deps.Store.GetRecentInteractionsByLearner(learnerID, engine.DefaultRecentInteractionsWindow)
-		sessionStart, _ := deps.Store.GetSessionStart(learnerID)
+		states, _ := deps.Store.GetConceptStatesByLearner(ctx, learnerID)
+		interactions, _ := deps.Store.GetRecentInteractionsByLearner(ctx, learnerID, engine.DefaultRecentInteractionsWindow)
+		sessionStart, _ := deps.Store.GetSessionStart(ctx, learnerID)
 
 		stateMap := make(map[string]*models.ConceptState)
 		for _, cs := range states {
@@ -64,7 +64,7 @@ func registerGetDashboardState(server *mcp.Server, deps *Deps) {
 
 		var domains []*models.Domain
 		if params.DomainID != "" {
-			d, derr := deps.Store.GetDomainByID(params.DomainID)
+			d, derr := deps.Store.GetDomainByID(ctx, params.DomainID)
 			if derr != nil {
 				r, _ := safeErrorResult(deps.Logger, "domain not found", derr)
 				return r, nil, nil
@@ -75,7 +75,7 @@ func registerGetDashboardState(server *mcp.Server, deps *Deps) {
 			}
 			domains = []*models.Domain{d}
 		} else {
-			allDomains, derr := deps.Store.GetDomainsByLearner(learnerID, params.IncludeArchived)
+			allDomains, derr := deps.Store.GetDomainsByLearner(ctx, learnerID, params.IncludeArchived)
 			if derr != nil {
 				deps.Logger.Error("get_dashboard_state: failed to get domains", "err", derr, "learner", learnerID)
 				r, _ := errorResult("no active domain configured")
@@ -223,8 +223,8 @@ func registerGetDashboardState(server *mcp.Server, deps *Deps) {
 		}
 
 		since := time.Now().UTC().Add(-30 * 24 * time.Hour)
-		allInteractions, _ := deps.Store.GetInteractionsSince(learnerID, since)
-		calibBias, _ := deps.Store.GetCalibrationBias(learnerID, 20)
+		allInteractions, _ := deps.Store.GetInteractionsSince(ctx, learnerID, since)
+		calibBias, _ := deps.Store.GetCalibrationBias(ctx, learnerID, 20)
 
 		autonomy := engine.ComputeAutonomyMetrics(engine.AutonomyInput{
 			Interactions:    allInteractions,
@@ -233,7 +233,7 @@ func registerGetDashboardState(server *mcp.Server, deps *Deps) {
 			SessionGap:      2 * time.Hour,
 		})
 
-		affects, _ := deps.Store.GetRecentAffectStates(learnerID, 10)
+		affects, _ := deps.Store.GetRecentAffectStates(ctx, learnerID, 10)
 		var autonomyScores []float64
 		var affectLastN []interface{}
 		for _, a := range affects {

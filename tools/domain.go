@@ -302,7 +302,7 @@ func registerInitDomain(server *mcp.Server, deps *Deps) {
 			}
 		}
 
-		domain, err := deps.Store.CreateDomainWithValueFramings(learnerID, params.Name, params.PersonalGoal, graph, valueFramingsJSON)
+		domain, err := deps.Store.CreateDomainWithValueFramings(ctx, learnerID, params.Name, params.PersonalGoal, graph, valueFramingsJSON)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to create domain", err)
 			return r, nil, nil
@@ -311,7 +311,7 @@ func registerInitDomain(server *mcp.Server, deps *Deps) {
 		// Initialize ConceptState for each concept — INSERT OR IGNORE preserves existing progress
 		for _, concept := range params.Concepts {
 			cs := models.NewConceptState(learnerID, concept)
-			if err := deps.Store.InsertConceptStateIfNotExists(cs); err != nil {
+			if err := deps.Store.InsertConceptStateIfNotExists(ctx, cs); err != nil {
 				r, _ := safeErrorResult(deps.Logger, fmt.Sprintf("failed to initialize concept %s", concept), err)
 				return r, nil, nil
 			}
@@ -320,13 +320,13 @@ func registerInitDomain(server *mcp.Server, deps *Deps) {
 		// [2] PhaseController — initialises the domain in DIAGNOSTIC.
 		// The concept_states were just created at PMastery=0.1 —
 		// the entry entropy is now computable.
-		states, _ := deps.Store.GetConceptStatesByLearner(learnerID)
+		states, _ := deps.Store.GetConceptStatesByLearner(ctx, learnerID)
 		stateMap := map[string]*models.ConceptState{}
 		for _, cs := range states {
 			stateMap[cs.Concept] = cs
 		}
 		entryEntropy := engine.MeanBinaryEntropyOverGraph(domain.Graph, stateMap)
-		if err := deps.Store.UpdateDomainPhase(domain.ID, models.PhaseDiagnostic, entryEntropy, time.Now().UTC()); err != nil {
+		if err := deps.Store.UpdateDomainPhase(ctx, domain.ID, models.PhaseDiagnostic, entryEntropy, time.Now().UTC()); err != nil {
 			deps.Logger.Error("init_domain: failed to set initial phase",
 				"err", err, "domain", domain.ID)
 			// Non-fatal: domain stays in phase NULL → INSTRUCTION
@@ -387,7 +387,7 @@ func registerAddConcepts(server *mcp.Server, deps *Deps) {
 
 		// Resolve domain — needed so we can validate prerequisites
 		// against the merged (existing + new) concept universe.
-		domain, err := resolveDomain(deps.Store, learnerID, params.DomainID)
+		domain, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "domain not found", err)
 			return r, nil, nil
@@ -436,7 +436,7 @@ func registerAddConcepts(server *mcp.Server, deps *Deps) {
 		domain.Graph = candidateGraph
 
 		// Persist updated graph
-		if err := deps.Store.UpdateDomainGraph(domain.ID, domain.Graph); err != nil {
+		if err := deps.Store.UpdateDomainGraph(ctx, domain.ID, domain.Graph); err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to update domain graph", err)
 			return r, nil, nil
 		}
@@ -444,7 +444,7 @@ func registerAddConcepts(server *mcp.Server, deps *Deps) {
 		// Initialize concept states for new concepts only (INSERT OR IGNORE)
 		for _, concept := range params.Concepts {
 			cs := models.NewConceptState(learnerID, concept)
-			if err := deps.Store.InsertConceptStateIfNotExists(cs); err != nil {
+			if err := deps.Store.InsertConceptStateIfNotExists(ctx, cs); err != nil {
 				r, _ := safeErrorResult(deps.Logger, fmt.Sprintf("failed to initialize concept %s", concept), err)
 				return r, nil, nil
 			}

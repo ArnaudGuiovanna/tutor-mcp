@@ -119,13 +119,13 @@ func boolToInt(b bool) int {
 
 // ─── Learners ────────────────────────────────────────────────────────────────
 
-func (s *Store) CreateLearner(email, passwordHash, objective, webhookURL string) (*models.Learner, error) {
+func (s *Store) CreateLearner(ctx context.Context, email, passwordHash, objective, webhookURL string) (*models.Learner, error) {
 	if webhookURL != "" && !IsSafeWebhookURL(webhookURL) {
 		return nil, fmt.Errorf("invalid webhook_url: must be https://discord.com/...")
 	}
 	id := generateID()
 	now := time.Now().UTC()
-	_, err := s.db.Exec(
+	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO learners (id, email, password_hash, objective, webhook_url, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		id, email, passwordHash, objective, webhookURL, now,
@@ -143,16 +143,16 @@ func (s *Store) CreateLearner(email, passwordHash, objective, webhookURL string)
 	}, nil
 }
 
-func (s *Store) GetLearnerByID(id string) (*models.Learner, error) {
-	row := s.db.QueryRow(
+func (s *Store) GetLearnerByID(ctx context.Context, id string) (*models.Learner, error) {
+	row := s.db.QueryRowContext(ctx,
 		`SELECT id, email, password_hash, objective, webhook_url, profile_json, created_at, last_active
 		 FROM learners WHERE id = ?`, id,
 	)
 	return scanLearner(row)
 }
 
-func (s *Store) GetLearnerByEmail(email string) (*models.Learner, error) {
-	row := s.db.QueryRow(
+func (s *Store) GetLearnerByEmail(ctx context.Context, email string) (*models.Learner, error) {
+	row := s.db.QueryRowContext(ctx,
 		`SELECT id, email, password_hash, objective, webhook_url, profile_json, created_at, last_active
 		 FROM learners WHERE email = ?`, email,
 	)
@@ -180,8 +180,8 @@ func scanLearner(row *sql.Row) (*models.Learner, error) {
 	return l, nil
 }
 
-func (s *Store) UpdateLastActive(id string) error {
-	_, err := s.db.Exec(
+func (s *Store) UpdateLastActive(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx,
 		`UPDATE learners SET last_active = ? WHERE id = ?`,
 		time.Now().UTC(), id,
 	)
@@ -191,8 +191,8 @@ func (s *Store) UpdateLastActive(id string) error {
 	return nil
 }
 
-func (s *Store) GetActiveLearners() ([]*models.Learner, error) {
-	rows, err := s.db.Query(
+func (s *Store) GetActiveLearners(ctx context.Context) ([]*models.Learner, error) {
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, email, password_hash, objective, webhook_url, profile_json, created_at, last_active
 		 FROM learners WHERE webhook_url != ''`,
 	)
@@ -224,8 +224,8 @@ func (s *Store) GetActiveLearners() ([]*models.Learner, error) {
 	return learners, rows.Err()
 }
 
-func (s *Store) UpdateLearnerProfile(learnerID, profileJSON string) error {
-	_, err := s.db.Exec(
+func (s *Store) UpdateLearnerProfile(ctx context.Context, learnerID, profileJSON string) error {
+	_, err := s.db.ExecContext(ctx,
 		`UPDATE learners SET profile_json = ? WHERE id = ?`,
 		profileJSON, learnerID,
 	)
@@ -242,7 +242,7 @@ func (s *Store) UpdateLearnerProfile(learnerID, profileJSON string) error {
 // binding so a stolen token cannot be redeemed by a different (e.g. self-
 // registered confidential) client. Pre-existing rows have NULL client_id and
 // the refresh-grant handler treats NULL as "any client" for backward compat.
-func (s *Store) CreateRefreshToken(learnerID, clientID string) (*models.RefreshToken, error) {
+func (s *Store) CreateRefreshToken(ctx context.Context, learnerID, clientID string) (*models.RefreshToken, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return nil, fmt.Errorf("generate token: %w", err)
@@ -251,7 +251,7 @@ func (s *Store) CreateRefreshToken(learnerID, clientID string) (*models.RefreshT
 	now := time.Now().UTC()
 	expiresAt := now.Add(30 * 24 * time.Hour)
 
-	_, err := s.db.Exec(
+	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO refresh_tokens (token, learner_id, client_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?)`,
 		token, learnerID, nullString(clientID), expiresAt, now,
 	)
@@ -267,10 +267,10 @@ func (s *Store) CreateRefreshToken(learnerID, clientID string) (*models.RefreshT
 	}, nil
 }
 
-func (s *Store) GetRefreshToken(token string) (*models.RefreshToken, error) {
+func (s *Store) GetRefreshToken(ctx context.Context, token string) (*models.RefreshToken, error) {
 	rt := &models.RefreshToken{}
 	var clientID sql.NullString
-	err := s.db.QueryRow(
+	err := s.db.QueryRowContext(ctx,
 		`SELECT token, learner_id, client_id, expires_at, created_at
 		 FROM refresh_tokens WHERE token = ? AND expires_at > ?`,
 		token, time.Now().UTC(),
@@ -284,8 +284,8 @@ func (s *Store) GetRefreshToken(token string) (*models.RefreshToken, error) {
 	return rt, nil
 }
 
-func (s *Store) DeleteRefreshToken(token string) error {
-	_, err := s.db.Exec(`DELETE FROM refresh_tokens WHERE token = ?`, token)
+func (s *Store) DeleteRefreshToken(ctx context.Context, token string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM refresh_tokens WHERE token = ?`, token)
 	if err != nil {
 		return fmt.Errorf("delete refresh token: %w", err)
 	}
@@ -294,13 +294,13 @@ func (s *Store) DeleteRefreshToken(token string) error {
 
 // ─── Domains ──────────────────────────────────────────────────────────────────
 
-func (s *Store) CreateDomain(learnerID, name, personalGoal string, graph models.KnowledgeSpace) (*models.Domain, error) {
-	return s.CreateDomainWithValueFramings(learnerID, name, personalGoal, graph, "")
+func (s *Store) CreateDomain(ctx context.Context, learnerID, name, personalGoal string, graph models.KnowledgeSpace) (*models.Domain, error) {
+	return s.CreateDomainWithValueFramings(ctx, learnerID, name, personalGoal, graph, "")
 }
 
 // CreateDomainWithValueFramings creates a domain and optionally persists a JSON-encoded
 // set of value framings (4 axes: financial, employment, intellectual, innovation).
-func (s *Store) CreateDomainWithValueFramings(learnerID, name, personalGoal string, graph models.KnowledgeSpace, valueFramingsJSON string) (*models.Domain, error) {
+func (s *Store) CreateDomainWithValueFramings(ctx context.Context, learnerID, name, personalGoal string, graph models.KnowledgeSpace, valueFramingsJSON string) (*models.Domain, error) {
 	id := generateID()
 	now := time.Now().UTC()
 
@@ -309,7 +309,7 @@ func (s *Store) CreateDomainWithValueFramings(learnerID, name, personalGoal stri
 		return nil, fmt.Errorf("marshal graph: %w", err)
 	}
 
-	_, err = s.db.Exec(
+	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO domains (id, learner_id, name, personal_goal, graph_json, value_framings_json, graph_version, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
 		id, learnerID, name, personalGoal, string(graphJSON), valueFramingsJSON, now,
@@ -392,8 +392,8 @@ func scanDomainRows(rows *sql.Rows) (*models.Domain, error) {
 	return scanDomainFields(rows)
 }
 
-func (s *Store) GetDomainByLearner(learnerID string) (*models.Domain, error) {
-	row := s.db.QueryRow(
+func (s *Store) GetDomainByLearner(ctx context.Context, learnerID string) (*models.Domain, error) {
+	row := s.db.QueryRowContext(ctx,
 		`SELECT `+domainCols+` FROM domains WHERE learner_id = ? AND archived = 0
 		 ORDER BY CASE WHEN priority_rank IS NULL THEN 1 ELSE 0 END, priority_rank ASC, created_at DESC LIMIT 1`,
 		learnerID,
@@ -405,8 +405,8 @@ func (s *Store) GetDomainByLearner(learnerID string) (*models.Domain, error) {
 	return d, nil
 }
 
-func (s *Store) GetDomainByID(id string) (*models.Domain, error) {
-	row := s.db.QueryRow(`SELECT `+domainCols+` FROM domains WHERE id = ?`, id)
+func (s *Store) GetDomainByID(ctx context.Context, id string) (*models.Domain, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT `+domainCols+` FROM domains WHERE id = ?`, id)
 	d, err := scanDomainRow(row)
 	if err != nil {
 		return nil, fmt.Errorf("get domain by id: %w", err)
@@ -414,13 +414,13 @@ func (s *Store) GetDomainByID(id string) (*models.Domain, error) {
 	return d, nil
 }
 
-func (s *Store) GetDomainsByLearner(learnerID string, includeArchived bool) ([]*models.Domain, error) {
+func (s *Store) GetDomainsByLearner(ctx context.Context, learnerID string, includeArchived bool) ([]*models.Domain, error) {
 	query := `SELECT ` + domainCols + ` FROM domains WHERE learner_id = ?`
 	if !includeArchived {
 		query += ` AND archived = 0`
 	}
 	query += ` ORDER BY created_at DESC`
-	rows, err := s.db.Query(query, learnerID)
+	rows, err := s.db.QueryContext(ctx, query, learnerID)
 	if err != nil {
 		return nil, fmt.Errorf("get domains by learner: %w", err)
 	}
@@ -437,11 +437,11 @@ func (s *Store) GetDomainsByLearner(learnerID string, includeArchived bool) ([]*
 	return domains, rows.Err()
 }
 
-func (s *Store) SetDomainPriority(domainID, learnerID string, rank int) error {
+func (s *Store) SetDomainPriority(ctx context.Context, domainID, learnerID string, rank int) error {
 	if rank < 1 {
 		return fmt.Errorf("rank must be >= 1")
 	}
-	result, err := s.db.Exec(
+	result, err := s.db.ExecContext(ctx,
 		`UPDATE domains SET priority_rank = ? WHERE id = ? AND learner_id = ? AND archived = 0`,
 		rank, domainID, learnerID,
 	)
@@ -456,8 +456,8 @@ func (s *Store) SetDomainPriority(domainID, learnerID string, rank int) error {
 }
 
 // UpdateDomainValueFramings stores the JSON-encoded value framings for a domain.
-func (s *Store) UpdateDomainValueFramings(domainID, valueFramingsJSON string) error {
-	_, err := s.db.Exec(
+func (s *Store) UpdateDomainValueFramings(ctx context.Context, domainID, valueFramingsJSON string) error {
+	_, err := s.db.ExecContext(ctx,
 		`UPDATE domains SET value_framings_json = ? WHERE id = ?`,
 		valueFramingsJSON, domainID,
 	)
@@ -468,8 +468,8 @@ func (s *Store) UpdateDomainValueFramings(domainID, valueFramingsJSON string) er
 }
 
 // UpdateDomainLastValueAxis records which axis was surfaced most recently (used for rotation).
-func (s *Store) UpdateDomainLastValueAxis(domainID, axis string) error {
-	_, err := s.db.Exec(
+func (s *Store) UpdateDomainLastValueAxis(ctx context.Context, domainID, axis string) error {
+	_, err := s.db.ExecContext(ctx,
 		`UPDATE domains SET last_value_axis = ? WHERE id = ?`,
 		axis, domainID,
 	)
@@ -479,7 +479,7 @@ func (s *Store) UpdateDomainLastValueAxis(domainID, axis string) error {
 	return nil
 }
 
-func (s *Store) UpdateDomainGraph(domainID string, graph models.KnowledgeSpace) error {
+func (s *Store) UpdateDomainGraph(ctx context.Context, domainID string, graph models.KnowledgeSpace) error {
 	graphJSON, err := json.Marshal(graph)
 	if err != nil {
 		return fmt.Errorf("marshal graph: %w", err)
@@ -488,7 +488,7 @@ func (s *Store) UpdateDomainGraph(domainID string, graph models.KnowledgeSpace) 
 	// per OQ-1.1 / IsGoalRelevanceStale(). Existing entries remain valid;
 	// only the new concepts will appear in UncoveredConcepts() until a
 	// new set_goal_relevance call covers them.
-	_, err = s.db.Exec(
+	_, err = s.db.ExecContext(ctx,
 		`UPDATE domains SET graph_json = ?, graph_version = graph_version + 1 WHERE id = ?`,
 		string(graphJSON), domainID,
 	)
@@ -498,8 +498,8 @@ func (s *Store) UpdateDomainGraph(domainID string, graph models.KnowledgeSpace) 
 	return nil
 }
 
-func (s *Store) ArchiveDomain(domainID, learnerID string) error {
-	result, err := s.db.Exec(
+func (s *Store) ArchiveDomain(ctx context.Context, domainID, learnerID string) error {
+	result, err := s.db.ExecContext(ctx,
 		`UPDATE domains SET archived = 1 WHERE id = ? AND learner_id = ?`,
 		domainID, learnerID,
 	)
@@ -513,8 +513,8 @@ func (s *Store) ArchiveDomain(domainID, learnerID string) error {
 	return nil
 }
 
-func (s *Store) UnarchiveDomain(domainID, learnerID string) error {
-	result, err := s.db.Exec(
+func (s *Store) UnarchiveDomain(ctx context.Context, domainID, learnerID string) error {
+	result, err := s.db.ExecContext(ctx,
 		`UPDATE domains SET archived = 0 WHERE id = ? AND learner_id = ?`,
 		domainID, learnerID,
 	)
@@ -532,8 +532,8 @@ func (s *Store) UnarchiveDomain(domainID, learnerID string) error {
 // one non-archived domain owned by the learner. Used by readers to filter out
 // orphan concept_states / interactions left behind by delete_domain (which
 // intentionally preserves history but removes the domain row).
-func (s *Store) ActiveDomainConceptSet(learnerID string) (map[string]bool, error) {
-	domains, err := s.GetDomainsByLearner(learnerID, false)
+func (s *Store) ActiveDomainConceptSet(ctx context.Context, learnerID string) (map[string]bool, error) {
+	domains, err := s.GetDomainsByLearner(ctx, learnerID, false)
 	if err != nil {
 		return nil, fmt.Errorf("active domain concept set: %w", err)
 	}
@@ -546,14 +546,14 @@ func (s *Store) ActiveDomainConceptSet(learnerID string) (map[string]bool, error
 	return set, nil
 }
 
-func (s *Store) DeleteDomain(domainID, learnerID string) error {
-	tx, err := s.db.Begin()
+func (s *Store) DeleteDomain(ctx context.Context, domainID, learnerID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin delete domain tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	result, err := tx.Exec(
+	result, err := tx.ExecContext(ctx,
 		`DELETE FROM domains WHERE id = ? AND learner_id = ?`,
 		domainID, learnerID,
 	)
@@ -565,13 +565,13 @@ func (s *Store) DeleteDomain(domainID, learnerID string) error {
 		return fmt.Errorf("domain not found")
 	}
 
-	if _, err := tx.Exec(
+	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM implementation_intentions WHERE learner_id = ? AND domain_id = ?`,
 		learnerID, domainID,
 	); err != nil {
 		return fmt.Errorf("delete domain implementation intentions: %w", err)
 	}
-	if _, err := tx.Exec(
+	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM webhook_message_queue WHERE learner_id = ? AND kind = ?`,
 		learnerID, "olm:"+domainID,
 	); err != nil {
@@ -584,9 +584,9 @@ func (s *Store) DeleteDomain(domainID, learnerID string) error {
 	return nil
 }
 
-func (s *Store) InsertConceptStateIfNotExists(cs *models.ConceptState) error {
+func (s *Store) InsertConceptStateIfNotExists(ctx context.Context, cs *models.ConceptState) error {
 	cs.UpdatedAt = time.Now().UTC()
-	_, err := s.db.Exec(
+	_, err := s.db.ExecContext(ctx,
 		`INSERT OR IGNORE INTO concept_states
 		    (learner_id, concept, stability, difficulty, elapsed_days, scheduled_days,
 		     reps, lapses, card_state, last_review, next_review, p_mastery, p_learn, p_forget,
@@ -605,7 +605,7 @@ func (s *Store) InsertConceptStateIfNotExists(cs *models.ConceptState) error {
 
 // ─── Concept States ───────────────────────────────────────────────────────────
 
-func (s *Store) GetConceptState(learnerID, concept string) (*models.ConceptState, error) {
+func (s *Store) GetConceptState(ctx context.Context, learnerID, concept string) (*models.ConceptState, error) {
 	return getConceptStateWithQ(s.db, learnerID, concept)
 }
 
@@ -643,7 +643,7 @@ func getConceptStateWithQ(q querier, learnerID, concept string) (*models.Concept
 	return cs, nil
 }
 
-func (s *Store) UpsertConceptState(cs *models.ConceptState) error {
+func (s *Store) UpsertConceptState(ctx context.Context, cs *models.ConceptState) error {
 	return upsertConceptStateWithQ(s.db, cs)
 }
 
@@ -688,8 +688,8 @@ func upsertConceptStateWithQ(q querier, cs *models.ConceptState) error {
 	return nil
 }
 
-func (s *Store) GetConceptStatesByLearner(learnerID string) ([]*models.ConceptState, error) {
-	rows, err := s.db.Query(
+func (s *Store) GetConceptStatesByLearner(ctx context.Context, learnerID string) ([]*models.ConceptState, error) {
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, learner_id, concept, stability, difficulty, elapsed_days, scheduled_days,
 		        reps, lapses, card_state, last_review, next_review, p_mastery, p_learn, p_forget,
 		        p_slip, p_guess, theta, updated_at
@@ -729,7 +729,7 @@ func (s *Store) GetConceptStatesByLearner(learnerID string) ([]*models.ConceptSt
 
 const interactionCols = `id, learner_id, concept, activity_type, success, response_time, confidence, error_type, notes, hints_requested, self_initiated, calibration_id, is_proactive_review, misconception_type, misconception_detail, domain_id, bkt_slip, bkt_guess, rubric_json, rubric_score_json, created_at`
 
-func (s *Store) CreateInteraction(i *models.Interaction) error {
+func (s *Store) CreateInteraction(ctx context.Context, i *models.Interaction) error {
 	return createInteractionWithQ(s.db, i)
 }
 
@@ -763,7 +763,7 @@ func createInteractionWithQ(q querier, i *models.Interaction) error {
 	return nil
 }
 
-func (s *Store) GetRecentInteractions(learnerID, concept string, limit int) ([]*models.Interaction, error) {
+func (s *Store) GetRecentInteractions(ctx context.Context, learnerID, concept string, limit int) ([]*models.Interaction, error) {
 	return getRecentInteractionsWithQ(s.db, learnerID, concept, limit)
 }
 
@@ -785,8 +785,8 @@ func getRecentInteractionsWithQ(q querier, learnerID, concept string, limit int)
 	return scanInteractions(rows)
 }
 
-func (s *Store) GetRecentInteractionsByLearner(learnerID string, limit int) ([]*models.Interaction, error) {
-	rows, err := s.db.Query(
+func (s *Store) GetRecentInteractionsByLearner(ctx context.Context, learnerID string, limit int) ([]*models.Interaction, error) {
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+interactionCols+` FROM interactions WHERE learner_id = ?
 		 ORDER BY created_at DESC LIMIT ?`,
 		learnerID, limit,
@@ -798,9 +798,9 @@ func (s *Store) GetRecentInteractionsByLearner(learnerID string, limit int) ([]*
 	return scanInteractions(rows)
 }
 
-func (s *Store) GetSessionInteractions(learnerID string) ([]*models.Interaction, error) {
+func (s *Store) GetSessionInteractions(ctx context.Context, learnerID string) ([]*models.Interaction, error) {
 	cutoff := time.Now().UTC().Add(-2 * time.Hour)
-	rows, err := s.db.Query(
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+interactionCols+` FROM interactions WHERE learner_id = ? AND created_at > ?
 		 ORDER BY created_at DESC`,
 		learnerID, cutoff,
@@ -870,8 +870,8 @@ func scanInteractions(rows *sql.Rows) ([]*models.Interaction, error) {
 	return interactions, rows.Err()
 }
 
-func (s *Store) GetInteractionsSince(learnerID string, since time.Time) ([]*models.Interaction, error) {
-	rows, err := s.db.Query(
+func (s *Store) GetInteractionsSince(ctx context.Context, learnerID string, since time.Time) ([]*models.Interaction, error) {
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+interactionCols+` FROM interactions WHERE learner_id = ? AND created_at >= ? ORDER BY created_at ASC`,
 		learnerID, since,
 	)
@@ -882,10 +882,10 @@ func (s *Store) GetInteractionsSince(learnerID string, since time.Time) ([]*mode
 	return scanInteractions(rows)
 }
 
-func (s *Store) GetSessionStart(learnerID string) (time.Time, error) {
+func (s *Store) GetSessionStart(ctx context.Context, learnerID string) (time.Time, error) {
 	cutoff := time.Now().UTC().Add(-2 * time.Hour)
 	var sessionStart sql.NullString
-	err := s.db.QueryRow(
+	err := s.db.QueryRowContext(ctx,
 		`SELECT MIN(created_at) FROM interactions WHERE learner_id = ? AND created_at > ?`,
 		learnerID, cutoff,
 	).Scan(&sessionStart)
@@ -905,10 +905,10 @@ func (s *Store) GetSessionStart(learnerID string) (time.Time, error) {
 
 // ─── Availability ─────────────────────────────────────────────────────────────
 
-func (s *Store) GetAvailability(learnerID string) (*models.Availability, error) {
+func (s *Store) GetAvailability(ctx context.Context, learnerID string) (*models.Availability, error) {
 	a := &models.Availability{}
 	var dndInt int
-	err := s.db.QueryRow(
+	err := s.db.QueryRowContext(ctx,
 		`SELECT learner_id, windows_json, avg_duration, sessions_week, do_not_disturb
 		 FROM availability WHERE learner_id = ?`,
 		learnerID,
@@ -929,8 +929,8 @@ func (s *Store) GetAvailability(learnerID string) (*models.Availability, error) 
 	return a, nil
 }
 
-func (s *Store) UpsertAvailability(a *models.Availability) error {
-	_, err := s.db.Exec(
+func (s *Store) UpsertAvailability(ctx context.Context, a *models.Availability) error {
+	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO availability (learner_id, windows_json, avg_duration, sessions_week, do_not_disturb)
 		 VALUES (?, ?, ?, ?, ?)
 		 ON CONFLICT(learner_id) DO UPDATE SET
@@ -948,8 +948,8 @@ func (s *Store) UpsertAvailability(a *models.Availability) error {
 
 // ─── Scheduled Alerts ─────────────────────────────────────────────────────────
 
-func (s *Store) CreateScheduledAlert(learnerID, alertType, concept string, scheduledAt time.Time) error {
-	_, err := s.db.Exec(
+func (s *Store) CreateScheduledAlert(ctx context.Context, learnerID, alertType, concept string, scheduledAt time.Time) error {
+	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO scheduled_alerts (learner_id, alert_type, concept, scheduled_at) VALUES (?, ?, ?, ?)`,
 		learnerID, alertType, concept, scheduledAt,
 	)
@@ -959,8 +959,8 @@ func (s *Store) CreateScheduledAlert(learnerID, alertType, concept string, sched
 	return nil
 }
 
-func (s *Store) GetUnsentAlerts(learnerID string) ([]*models.ScheduledAlert, error) {
-	rows, err := s.db.Query(
+func (s *Store) GetUnsentAlerts(ctx context.Context, learnerID string) ([]*models.ScheduledAlert, error) {
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, learner_id, alert_type, concept, scheduled_at, sent, created_at
 		 FROM scheduled_alerts WHERE learner_id = ? AND sent = 0`,
 		learnerID,
@@ -986,18 +986,18 @@ func (s *Store) GetUnsentAlerts(learnerID string) ([]*models.ScheduledAlert, err
 	return alerts, rows.Err()
 }
 
-func (s *Store) MarkAlertSent(id int64) error {
-	_, err := s.db.Exec(`UPDATE scheduled_alerts SET sent = 1 WHERE id = ?`, id)
+func (s *Store) MarkAlertSent(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE scheduled_alerts SET sent = 1 WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("mark alert sent: %w", err)
 	}
 	return nil
 }
 
-func (s *Store) WasAlertSentToday(learnerID, alertType string) (bool, error) {
+func (s *Store) WasAlertSentToday(ctx context.Context, learnerID, alertType string) (bool, error) {
 	today := time.Now().UTC().Truncate(24 * time.Hour)
 	var count int
-	err := s.db.QueryRow(
+	err := s.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM scheduled_alerts
 		 WHERE learner_id = ? AND alert_type = ? AND created_at >= ?`,
 		learnerID, alertType, today,
@@ -1011,8 +1011,8 @@ func (s *Store) WasAlertSentToday(learnerID, alertType string) (bool, error) {
 // ─── Stats for Scheduler ─────────────────────────────────────────────────────
 
 // GetDailyStreak returns how many consecutive days the learner has had interactions.
-func (s *Store) GetDailyStreak(learnerID string) (int, error) {
-	rows, err := s.db.Query(
+func (s *Store) GetDailyStreak(ctx context.Context, learnerID string) (int, error) {
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT DISTINCT DATE(created_at) as d FROM interactions
 		 WHERE learner_id = ? ORDER BY d DESC`,
 		learnerID,
@@ -1054,10 +1054,10 @@ func (s *Store) GetDailyStreak(learnerID string) (int, error) {
 }
 
 // GetTodayInteractionCount returns the number of interactions today.
-func (s *Store) GetTodayInteractionCount(learnerID string) (int, error) {
+func (s *Store) GetTodayInteractionCount(ctx context.Context, learnerID string) (int, error) {
 	today := time.Now().UTC().Truncate(24 * time.Hour)
 	var count int
-	err := s.db.QueryRow(
+	err := s.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM interactions WHERE learner_id = ? AND created_at >= ?`,
 		learnerID, today,
 	).Scan(&count)
@@ -1068,10 +1068,10 @@ func (s *Store) GetTodayInteractionCount(learnerID string) (int, error) {
 }
 
 // GetTodaySuccessRate returns success rate for today's interactions.
-func (s *Store) GetTodaySuccessRate(learnerID string) (float64, int, error) {
+func (s *Store) GetTodaySuccessRate(ctx context.Context, learnerID string) (float64, int, error) {
 	today := time.Now().UTC().Truncate(24 * time.Hour)
 	var total, successes int
-	err := s.db.QueryRow(
+	err := s.db.QueryRowContext(ctx,
 		`SELECT COUNT(*), COALESCE(SUM(success), 0) FROM interactions
 		 WHERE learner_id = ? AND created_at >= ?`,
 		learnerID, today,
@@ -1086,9 +1086,9 @@ func (s *Store) GetTodaySuccessRate(learnerID string) (float64, int, error) {
 }
 
 // GetConceptsDueForReview returns concepts where next_review is in the past.
-func (s *Store) GetConceptsDueForReview(learnerID string) ([]string, error) {
+func (s *Store) GetConceptsDueForReview(ctx context.Context, learnerID string) ([]string, error) {
 	now := time.Now().UTC()
-	rows, err := s.db.Query(
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT concept FROM concept_states
 		 WHERE learner_id = ? AND next_review IS NOT NULL AND next_review <= ? AND card_state != 'new'
 		 ORDER BY next_review ASC`,
@@ -1110,7 +1110,7 @@ func (s *Store) GetConceptsDueForReview(learnerID string) ([]string, error) {
 
 	// Filter out concepts whose domain is archived or deleted.
 	// ActiveDomainConceptSet returns concepts from non-archived, non-deleted domains only.
-	activeSet, err := s.ActiveDomainConceptSet(learnerID)
+	activeSet, err := s.ActiveDomainConceptSet(ctx, learnerID)
 	if err != nil {
 		return nil, fmt.Errorf("get concepts due for review: filter active: %w", err)
 	}
@@ -1144,8 +1144,8 @@ type OAuthClient struct {
 	ClientSecretHash string
 }
 
-func (s *Store) CreateAuthCode(code, learnerID, codeChallenge, clientID string, expiresAt time.Time) error {
-	_, err := s.db.Exec(
+func (s *Store) CreateAuthCode(ctx context.Context, code, learnerID, codeChallenge, clientID string, expiresAt time.Time) error {
+	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO oauth_codes (code, learner_id, code_challenge, client_id, expires_at) VALUES (?, ?, ?, ?, ?)`,
 		code, learnerID, codeChallenge, clientID, expiresAt,
 	)
@@ -1157,15 +1157,15 @@ func (s *Store) CreateAuthCode(code, learnerID, codeChallenge, clientID string, 
 
 // ConsumeAuthCode retrieves and deletes an auth code in one operation.
 // Binds the code to the requesting client_id: returns invalid_grant if mismatch.
-func (s *Store) ConsumeAuthCode(code, clientID string) (*AuthCode, error) {
-	tx, err := s.db.Begin()
+func (s *Store) ConsumeAuthCode(ctx context.Context, code, clientID string) (*AuthCode, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback()
 
 	ac := &AuthCode{}
-	err = tx.QueryRow(
+	err = tx.QueryRowContext(ctx,
 		`SELECT code, learner_id, code_challenge, client_id, expires_at FROM oauth_codes WHERE code = ? AND client_id = ?`,
 		code, clientID,
 	).Scan(&ac.Code, &ac.LearnerID, &ac.CodeChallenge, &ac.ClientID, &ac.ExpiresAt)
@@ -1176,7 +1176,7 @@ func (s *Store) ConsumeAuthCode(code, clientID string) (*AuthCode, error) {
 		return nil, fmt.Errorf("consume auth code: %w", err)
 	}
 
-	if _, err := tx.Exec(`DELETE FROM oauth_codes WHERE code = ?`, code); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM oauth_codes WHERE code = ?`, code); err != nil {
 		return nil, fmt.Errorf("delete auth code: %w", err)
 	}
 
@@ -1186,14 +1186,14 @@ func (s *Store) ConsumeAuthCode(code, clientID string) (*AuthCode, error) {
 	return ac, nil
 }
 
-func (s *Store) CreateOAuthClient(clientID, clientName, redirectURIs string) error {
-	return s.CreateOAuthClientWithSecret(clientID, clientName, redirectURIs, "")
+func (s *Store) CreateOAuthClient(ctx context.Context, clientID, clientName, redirectURIs string) error {
+	return s.CreateOAuthClientWithSecret(ctx, clientID, clientName, redirectURIs, "")
 }
 
 // CreateOAuthClientWithSecret persists a confidential client when secretHash != "".
 // secretHash should be a bcrypt digest of the issued secret; pass "" for public (PKCE) clients.
-func (s *Store) CreateOAuthClientWithSecret(clientID, clientName, redirectURIs, secretHash string) error {
-	_, err := s.db.Exec(
+func (s *Store) CreateOAuthClientWithSecret(ctx context.Context, clientID, clientName, redirectURIs, secretHash string) error {
+	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO oauth_clients (client_id, client_name, redirect_uris, client_secret_hash) VALUES (?, ?, ?, ?)`,
 		clientID, clientName, redirectURIs, secretHash,
 	)
@@ -1205,11 +1205,11 @@ func (s *Store) CreateOAuthClientWithSecret(clientID, clientName, redirectURIs, 
 
 // CreateOAuthClientWithSecretCapped persists a client only if the current row
 // count is still below maxClients. maxClients <= 0 disables the cap.
-func (s *Store) CreateOAuthClientWithSecretCapped(clientID, clientName, redirectURIs, secretHash string, maxClients int) error {
+func (s *Store) CreateOAuthClientWithSecretCapped(ctx context.Context, clientID, clientName, redirectURIs, secretHash string, maxClients int) error {
 	if maxClients <= 0 {
-		return s.CreateOAuthClientWithSecret(clientID, clientName, redirectURIs, secretHash)
+		return s.CreateOAuthClientWithSecret(ctx, clientID, clientName, redirectURIs, secretHash)
 	}
-	result, err := s.db.Exec(
+	result, err := s.db.ExecContext(ctx,
 		`INSERT INTO oauth_clients (client_id, client_name, redirect_uris, client_secret_hash)
 		 SELECT ?, ?, ?, ?
 		 WHERE (SELECT COUNT(*) FROM oauth_clients) < ?`,
@@ -1228,18 +1228,18 @@ func (s *Store) CreateOAuthClientWithSecretCapped(clientID, clientName, redirect
 	return nil
 }
 
-func (s *Store) CountOAuthClients() (int, error) {
+func (s *Store) CountOAuthClients(ctx context.Context) (int, error) {
 	var count int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM oauth_clients`).Scan(&count); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM oauth_clients`).Scan(&count); err != nil {
 		return 0, fmt.Errorf("count oauth clients: %w", err)
 	}
 	return count, nil
 }
 
-func (s *Store) GetOAuthClient(clientID string) (*OAuthClient, error) {
+func (s *Store) GetOAuthClient(ctx context.Context, clientID string) (*OAuthClient, error) {
 	c := &OAuthClient{}
 	var secretHash sql.NullString
-	err := s.db.QueryRow(
+	err := s.db.QueryRowContext(ctx,
 		`SELECT client_id, client_name, redirect_uris, client_secret_hash FROM oauth_clients WHERE client_id = ?`,
 		clientID,
 	).Scan(&c.ClientID, &c.ClientName, &c.RedirectURIs, &secretHash)
@@ -1258,9 +1258,9 @@ func (s *Store) GetOAuthClient(clientID string) (*OAuthClient, error) {
 // redirect_uri) triple is on file, the next /authorize POST may skip the
 // approve_client prompt. A different redirect_uri (even on the same client)
 // re-prompts because the approval is scoped to redirect_uri, not client_id.
-func (s *Store) IsClientApproved(learnerID, clientID, redirectURI string) (bool, error) {
+func (s *Store) IsClientApproved(ctx context.Context, learnerID, clientID, redirectURI string) (bool, error) {
 	var one int
-	err := s.db.QueryRow(
+	err := s.db.QueryRowContext(ctx,
 		`SELECT 1 FROM learner_approved_clients
 		 WHERE learner_id = ? AND client_id = ? AND redirect_uri = ?`,
 		learnerID, clientID, redirectURI,
@@ -1277,8 +1277,8 @@ func (s *Store) IsClientApproved(learnerID, clientID, redirectURI string) (bool,
 // ApproveClient records that the learner has consented to the OAuth client for
 // this exact redirect_uri. Idempotent: re-approving the same triple is a no-op
 // (ON CONFLICT DO NOTHING preserves the original approved_at timestamp). R001.
-func (s *Store) ApproveClient(learnerID, clientID, redirectURI string) error {
-	_, err := s.db.Exec(
+func (s *Store) ApproveClient(ctx context.Context, learnerID, clientID, redirectURI string) error {
+	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO learner_approved_clients (learner_id, client_id, redirect_uri)
 		 VALUES (?, ?, ?)
 		 ON CONFLICT(learner_id, client_id, redirect_uri) DO NOTHING`,
@@ -1290,16 +1290,16 @@ func (s *Store) ApproveClient(learnerID, clientID, redirectURI string) error {
 	return nil
 }
 
-func (s *Store) CleanupExpiredCodes() (int64, error) {
-	result, err := s.db.Exec(`DELETE FROM oauth_codes WHERE expires_at < ?`, time.Now().UTC())
+func (s *Store) CleanupExpiredCodes(ctx context.Context) (int64, error) {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM oauth_codes WHERE expires_at < ?`, time.Now().UTC())
 	if err != nil {
 		return 0, fmt.Errorf("cleanup expired codes: %w", err)
 	}
 	return result.RowsAffected()
 }
 
-func (s *Store) CleanupExpiredRefreshTokens() (int64, error) {
-	result, err := s.db.Exec(`DELETE FROM refresh_tokens WHERE expires_at < ?`, time.Now().UTC())
+func (s *Store) CleanupExpiredRefreshTokens(ctx context.Context) (int64, error) {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM refresh_tokens WHERE expires_at < ?`, time.Now().UTC())
 	if err != nil {
 		return 0, fmt.Errorf("cleanup expired refresh tokens: %w", err)
 	}
@@ -1312,10 +1312,10 @@ func (s *Store) CleanupExpiredRefreshTokens() (int64, error) {
 //
 // Implementation: pulls all distinct interaction days (DESC), then counts
 // from today backwards until the first gap.
-func (s *Store) GetActivityStreak(learnerID string) (int, error) {
+func (s *Store) GetActivityStreak(ctx context.Context, learnerID string) (int, error) {
 	// substr — modernc/sqlite stores time.Time as RFC3339 with nanoseconds, on
 	// which SQLite's date() returns NULL. substr reliably extracts YYYY-MM-DD.
-	rows, err := s.db.Query(
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT DISTINCT substr(created_at, 1, 10) AS d
 		 FROM interactions
 		 WHERE learner_id = ?
@@ -1387,10 +1387,10 @@ const fragileThreshold = 0.30
 //
 // (calibration_threshold derivable from calibration_history but skipped in v1
 // to keep the query simple — covered by the calibration sparkline.)
-func (s *Store) GetRecentLearnerEvents(learnerID string, since time.Time) ([]RawLearnerEvent, error) {
+func (s *Store) GetRecentLearnerEvents(ctx context.Context, learnerID string, since time.Time) ([]RawLearnerEvent, error) {
 	var events []RawLearnerEvent
 
-	rows, err := s.db.Query(
+	rows, err := s.db.QueryContext(ctx,
 		`SELECT concept, p_mastery, updated_at
 		 FROM concept_states
 		 WHERE learner_id = ? AND updated_at >= ?
@@ -1425,7 +1425,7 @@ func (s *Store) GetRecentLearnerEvents(learnerID string, since time.Time) ([]Raw
 		return nil, fmt.Errorf("get learner events rows: %w", err)
 	}
 
-	if streak, _ := s.GetActivityStreak(learnerID); streak > 0 {
+	if streak, _ := s.GetActivityStreak(ctx, learnerID); streak > 0 {
 		startedAt := time.Now().UTC().AddDate(0, 0, -streak+1).Truncate(24 * time.Hour)
 		if !startedAt.Before(since) {
 			events = append(events, RawLearnerEvent{

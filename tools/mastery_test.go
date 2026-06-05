@@ -4,6 +4,7 @@
 package tools
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -38,7 +39,7 @@ func TestCheckMastery_NotReady(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	cs := models.NewConceptState("L_owner", "calc")
 	cs.PMastery = 0.4
-	if err := store.InsertConceptStateIfNotExists(cs); err != nil {
+	if err := store.InsertConceptStateIfNotExists(context.Background(), cs); err != nil {
 		t.Fatal(err)
 	}
 
@@ -62,11 +63,11 @@ func TestCheckMastery_Ready(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	cs := models.NewConceptState("L_owner", "calc")
 	cs.PMastery = 0.95
-	if err := store.InsertConceptStateIfNotExists(cs); err != nil {
+	if err := store.InsertConceptStateIfNotExists(context.Background(), cs); err != nil {
 		t.Fatal(err)
 	}
 	// InsertConceptStateIfNotExists does not update if exists. Use Upsert to set mastery.
-	if err := store.UpsertConceptState(cs); err != nil {
+	if err := store.UpsertConceptState(context.Background(), cs); err != nil {
 		t.Fatal(err)
 	}
 	for _, activityType := range []models.ActivityType{
@@ -74,7 +75,7 @@ func TestCheckMastery_Ready(t *testing.T) {
 		models.ActivityPractice,
 		models.ActivityMasteryChallenge,
 	} {
-		if err := store.CreateInteraction(&models.Interaction{
+		if err := store.CreateInteraction(context.Background(), &models.Interaction{
 			LearnerID:    "L_owner",
 			Concept:      "calc",
 			ActivityType: string(activityType),
@@ -104,7 +105,7 @@ func TestCheckMastery_AcceptsLegacyConceptID(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	cs := models.NewConceptState("L_owner", "legacy_calc")
 	cs.PMastery = 0.4
-	if err := store.InsertConceptStateIfNotExists(cs); err != nil {
+	if err := store.InsertConceptStateIfNotExists(context.Background(), cs); err != nil {
 		t.Fatal(err)
 	}
 
@@ -125,7 +126,7 @@ func TestCheckMastery_HighBKTWeakEvidenceNotReady(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	cs := models.NewConceptState("L_owner", "calc")
 	cs.PMastery = 0.95
-	if err := store.UpsertConceptState(cs); err != nil {
+	if err := store.UpsertConceptState(context.Background(), cs); err != nil {
 		t.Fatal(err)
 	}
 

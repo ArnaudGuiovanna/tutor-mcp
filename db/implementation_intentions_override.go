@@ -5,6 +5,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"time"
@@ -28,14 +29,14 @@ type LearningNegotiationOverridePayloadResult struct {
 // InsertLearningNegotiationOverridePayload stores a pending one-shot activity
 // override in the existing implementation_intentions table. A new override
 // supersedes any older pending override for the same learner/domain pair.
-func (s *Store) InsertLearningNegotiationOverridePayload(learnerID, domainID, payload string, expiresAt, now time.Time) (int64, error) {
-	tx, err := s.db.Begin()
+func (s *Store) InsertLearningNegotiationOverridePayload(ctx context.Context, learnerID, domainID, payload string, expiresAt, now time.Time) (int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("begin learning negotiation override insert: %w", err)
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec(
+	if _, err := tx.ExecContext(ctx,
 		`UPDATE implementation_intentions
 		 SET honored = 0
 		 WHERE learner_id = ? AND domain_id = ? AND trigger_text = ? AND honored IS NULL`,
@@ -44,7 +45,7 @@ func (s *Store) InsertLearningNegotiationOverridePayload(learnerID, domainID, pa
 		return 0, fmt.Errorf("supersede learning negotiation override: %w", err)
 	}
 
-	result, err := tx.Exec(
+	result, err := tx.ExecContext(ctx,
 		`INSERT INTO implementation_intentions
 		 (learner_id, domain_id, trigger_text, action_text, scheduled_for, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
@@ -65,8 +66,8 @@ func (s *Store) InsertLearningNegotiationOverridePayload(learnerID, domainID, pa
 
 // ConsumeLearningNegotiationOverridePayload atomically marks the latest pending
 // override consumed. Expired overrides are marked missed and returned as expired.
-func (s *Store) ConsumeLearningNegotiationOverridePayload(learnerID, domainID string, now time.Time) (*LearningNegotiationOverridePayloadResult, error) {
-	tx, err := s.db.Begin()
+func (s *Store) ConsumeLearningNegotiationOverridePayload(ctx context.Context, learnerID, domainID string, now time.Time) (*LearningNegotiationOverridePayloadResult, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin learning negotiation override consume: %w", err)
 	}
@@ -75,7 +76,7 @@ func (s *Store) ConsumeLearningNegotiationOverridePayload(learnerID, domainID st
 	var id int64
 	var payload string
 	var expiresAt sql.NullTime
-	err = tx.QueryRow(
+	err = tx.QueryRowContext(ctx,
 		`SELECT id, action_text, scheduled_for
 		 FROM implementation_intentions
 		 WHERE learner_id = ? AND domain_id = ? AND trigger_text = ? AND honored IS NULL
@@ -98,7 +99,7 @@ func (s *Store) ConsumeLearningNegotiationOverridePayload(learnerID, domainID st
 		t := expiresAt.Time.UTC()
 		expires = &t
 		if !t.After(now.UTC()) {
-			if _, err := tx.Exec(
+			if _, err := tx.ExecContext(ctx,
 				`UPDATE implementation_intentions SET honored = 0 WHERE id = ? AND honored IS NULL`,
 				id,
 			); err != nil {
@@ -115,7 +116,7 @@ func (s *Store) ConsumeLearningNegotiationOverridePayload(learnerID, domainID st
 		}
 	}
 
-	result, err := tx.Exec(
+	result, err := tx.ExecContext(ctx,
 		`UPDATE implementation_intentions SET honored = 1 WHERE id = ? AND honored IS NULL`,
 		id,
 	)

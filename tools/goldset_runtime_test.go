@@ -4,6 +4,7 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"testing"
@@ -63,7 +64,7 @@ func TestRuntimeGoldsetStatic(t *testing.T) {
 			if scenario.SetupPMastery != nil {
 				cs := models.NewConceptState("L_owner", goldsetConcept)
 				cs.PMastery = *scenario.SetupPMastery
-				if err := store.UpsertConceptState(cs); err != nil {
+				if err := store.UpsertConceptState(context.Background(), cs); err != nil {
 					t.Fatalf("%s: setup concept state: %v", scenario.Name, err)
 				}
 			}

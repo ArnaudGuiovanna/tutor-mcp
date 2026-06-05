@@ -25,6 +25,7 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -79,8 +80,8 @@ const orchestratorMaxRetries = 1
 //
 // Thin wrapper around OrchestrateWithPhase for callers that don't
 // need the post-orchestrate phase (e.g. learning_negotiation).
-func Orchestrate(store *db.Store, input OrchestratorInput) (models.Activity, error) {
-	activity, _, err := OrchestrateWithPhase(store, input)
+func Orchestrate(ctx context.Context, store *db.Store, input OrchestratorInput) (models.Activity, error) {
+	activity, _, err := OrchestrateWithPhase(ctx, store, input)
 	return activity, err
 }
 
@@ -93,9 +94,9 @@ func Orchestrate(store *db.Store, input OrchestratorInput) (models.Activity, err
 // store.UpdateDomainPhase during the call.
 //
 // On error, the returned phase is the empty string ("").
-func OrchestrateWithPhase(store *db.Store, input OrchestratorInput) (models.Activity, models.Phase, error) {
+func OrchestrateWithPhase(ctx context.Context, store *db.Store, input OrchestratorInput) (models.Activity, models.Phase, error) {
 	logger := input.logger()
-	domain, err := store.GetDomainByID(input.DomainID)
+	domain, err := store.GetDomainByID(ctx, input.DomainID)
 	if err != nil {
 		return models.Activity{}, "", fmt.Errorf("%w: %q: %v", ErrUnknownDomain, input.DomainID, err)
 	}
@@ -107,7 +108,7 @@ func OrchestrateWithPhase(store *db.Store, input OrchestratorInput) (models.Acti
 	}
 
 	// 2. Fetch observables (states, recent, misconceptions, alerts).
-	pf, err := fetchPipelineFixtures(store, domain, input)
+	pf, err := fetchPipelineFixtures(ctx, store, domain, input)
 	if err != nil {
 		return models.Activity{}, "", err
 	}
@@ -130,7 +131,7 @@ func OrchestrateWithPhase(store *db.Store, input OrchestratorInput) (models.Acti
 			logger.Info("phase transition (FSM)",
 				"domain", domain.ID, "from", eval.From, "to", eval.To,
 				"entry_entropy", entryEntropy, "rationale", eval.Rationale)
-			if persistErr := store.UpdateDomainPhase(domain.ID, eval.To, entryEntropy, input.Now); persistErr != nil {
+			if persistErr := store.UpdateDomainPhase(ctx, domain.ID, eval.To, entryEntropy, input.Now); persistErr != nil {
 				logger.Error("orchestrator: failed to persist phase transition",
 					"domain", domain.ID, "from", eval.From, "to", eval.To, "err", persistErr)
 				// The transition is informative — failing to persist
@@ -150,7 +151,7 @@ func OrchestrateWithPhase(store *db.Store, input OrchestratorInput) (models.Acti
 	// retry sends us back to MAINTENANCE). The FSM decision wins ;
 	// NoFringe in the new phase is reported via REST.
 	for retry := 0; retry <= orchestratorMaxRetries; retry++ {
-		activity, sig, err := runPipeline(store, domain, pf, currentPhase, input)
+		activity, sig, err := runPipeline(ctx, store, domain, pf, currentPhase, input)
 		if err != nil {
 			return models.Activity{}, "", err
 		}
@@ -171,7 +172,7 @@ func OrchestrateWithPhase(store *db.Store, input OrchestratorInput) (models.Acti
 		}
 		logger.Info("phase fallback (NoFringe)",
 			"domain", domain.ID, "from", currentPhase, "to", next, "retry", retry)
-		if persistErr := store.UpdateDomainPhase(domain.ID, next, 0, input.Now); persistErr != nil {
+		if persistErr := store.UpdateDomainPhase(ctx, domain.ID, next, 0, input.Now); persistErr != nil {
 			logger.Error("orchestrator: failed to persist NoFringe fallback transition",
 				"domain", domain.ID, "from", currentPhase, "to", next, "err", persistErr)
 		}
@@ -220,8 +221,8 @@ type pipelineFixtures struct {
 	DiagnosticItems    int // count since phase_changed_at
 }
 
-func fetchPipelineFixtures(store *db.Store, domain *models.Domain, input OrchestratorInput) (*pipelineFixtures, error) {
-	states, err := store.GetConceptStatesByLearner(input.LearnerID)
+func fetchPipelineFixtures(ctx context.Context, store *db.Store, domain *models.Domain, input OrchestratorInput) (*pipelineFixtures, error) {
+	states, err := store.GetConceptStatesByLearner(ctx, input.LearnerID)
 	if err != nil {
 		return nil, fmt.Errorf("get states: %w", err)
 	}
@@ -244,12 +245,12 @@ func fetchPipelineFixtures(store *db.Store, domain *models.Domain, input Orchest
 		goalRelevance = gr.Relevance
 	}
 
-	activeMisc, err := store.GetActiveMisconceptionsBatch(input.LearnerID, domain.Graph.Concepts)
+	activeMisc, err := store.GetActiveMisconceptionsBatch(ctx, input.LearnerID, domain.Graph.Concepts)
 	if err != nil {
 		return nil, fmt.Errorf("get active misconceptions: %w", err)
 	}
 
-	recent, err := store.GetRecentConceptsByDomain(input.LearnerID, domain.Graph.Concepts, 20)
+	recent, err := store.GetRecentConceptsByDomain(ctx, input.LearnerID, domain.Graph.Concepts, 20)
 	if err != nil {
 		return nil, fmt.Errorf("get recent concepts: %w", err)
 	}
@@ -259,7 +260,7 @@ func fetchPipelineFixtures(store *db.Store, domain *models.Domain, input Orchest
 	// fetch.
 	var diagItems int
 	if !domain.PhaseChangedAt.IsZero() {
-		diagItems, err = store.CountInteractionsSince(input.LearnerID, domain.PhaseChangedAt, domain.Graph.Concepts)
+		diagItems, err = store.CountInteractionsSince(ctx, input.LearnerID, domain.PhaseChangedAt, domain.Graph.Concepts)
 		if err != nil {
 			return nil, fmt.Errorf("count diagnostic items: %w", err)
 		}
@@ -267,7 +268,7 @@ func fetchPipelineFixtures(store *db.Store, domain *models.Domain, input Orchest
 
 	// Alerts: re-derive from current state + recent interactions.
 	// Match what the existing get_next_activity flow does.
-	recentInteractions, err := store.GetRecentInteractionsByLearner(input.LearnerID, 50)
+	recentInteractions, err := store.GetRecentInteractionsByLearner(ctx, input.LearnerID, 50)
 	if err != nil {
 		return nil, fmt.Errorf("get recent interactions: %w", err)
 	}
@@ -280,7 +281,7 @@ func fetchPipelineFixtures(store *db.Store, domain *models.Domain, input Orchest
 	sessionStart := input.SessionStart
 	if sessionStart.IsZero() {
 		var sessionErr error
-		sessionStart, sessionErr = store.GetSessionStart(input.LearnerID)
+		sessionStart, sessionErr = store.GetSessionStart(ctx, input.LearnerID)
 		if sessionErr != nil {
 			return nil, fmt.Errorf("get session start: %w", sessionErr)
 		}
@@ -378,6 +379,7 @@ func noFringeFallbackPhase(current models.Phase) models.Phase {
 // when [3] or [4] signal an empty pool (so Orchestrate can attempt
 // the one-shot phase retry).
 func runPipeline(
+	ctx context.Context,
 	store *db.Store,
 	domain *models.Domain,
 	pf *pipelineFixtures,
@@ -407,7 +409,7 @@ func runPipeline(
 	}
 	if !input.ReviewOnly {
 		if selection, ok := criticalForgettingBypassSelection(pf.Alerts, phase); ok {
-			action, err := selectActionForSelection(store, pf, selection, input)
+			action, err := selectActionForSelection(ctx, store, pf, selection, input)
 			if err != nil {
 				return models.Activity{}, pipelineSignal{}, err
 			}
@@ -442,7 +444,7 @@ func runPipeline(
 	}
 
 	// ── [5] ActionSelector — on the chosen concept ────────────────
-	action, err := selectActionForSelection(store, pf, selection, input)
+	action, err := selectActionForSelection(ctx, store, pf, selection, input)
 	if err != nil {
 		return models.Activity{}, pipelineSignal{}, err
 	}
@@ -489,6 +491,7 @@ func criticalForgettingBypassSelection(alerts []models.Alert, phase models.Phase
 }
 
 func selectActionForSelection(
+	ctx context.Context,
 	store *db.Store,
 	pf *pipelineFixtures,
 	selection Selection,
@@ -503,12 +506,12 @@ func selectActionForSelection(
 	var mc *db.MisconceptionGroup
 	if pf.ActiveMisc[selection.Concept] {
 		var err error
-		mc, err = store.GetFirstActiveMisconception(input.LearnerID, selection.Concept)
+		mc, err = store.GetFirstActiveMisconception(ctx, input.LearnerID, selection.Concept)
 		if err != nil {
 			return Action{}, fmt.Errorf("fetch misconception: %w", err)
 		}
 	}
-	history, err := store.GetActionHistoryForConcept(input.LearnerID, selection.Concept, 50)
+	history, err := store.GetActionHistoryForConcept(ctx, input.LearnerID, selection.Concept, 50)
 	if err != nil {
 		return Action{}, fmt.Errorf("action history: %w", err)
 	}

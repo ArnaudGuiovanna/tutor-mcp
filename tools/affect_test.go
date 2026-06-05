@@ -4,6 +4,7 @@
 package tools
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -41,7 +42,7 @@ func TestRecordAffect_StartOfSession(t *testing.T) {
 		t.Fatalf("expected affect_state in response")
 	}
 
-	saved, err := store.GetAffectBySession("L_owner", "s1")
+	saved, err := store.GetAffectBySession(context.Background(), "L_owner", "s1")
 	if err != nil || saved == nil {
 		t.Fatalf("expected saved affect: %v", err)
 	}
@@ -97,7 +98,7 @@ func TestRecordAffect_RejectsOutOfRangeLikert(t *testing.T) {
 	}
 
 	// And nothing should be persisted.
-	if saved, err := store.GetAffectBySession("L_owner", "s_bad"); err == nil && saved != nil {
+	if saved, err := store.GetAffectBySession(context.Background(), "L_owner", "s_bad"); err == nil && saved != nil {
 		t.Fatalf("expected no affect row persisted, got %+v", saved)
 	}
 }
@@ -120,7 +121,7 @@ func TestRecordAffect_EndOfSessionAutonomyAndDelta(t *testing.T) {
 	store, deps := setupToolsTest(t)
 
 	// Seed with a successful interaction so calibration delta is computed.
-	if err := store.CreateInteraction(&models.Interaction{
+	if err := store.CreateInteraction(context.Background(), &models.Interaction{
 		LearnerID:    "L_owner",
 		Concept:      "x",
 		ActivityType: "RECALL_EXERCISE",
@@ -147,7 +148,7 @@ func TestRecordAffect_EndOfSessionAutonomyAndDelta(t *testing.T) {
 	}
 
 	// DB: autonomy persisted on the affect row.
-	saved, err := store.GetAffectBySession("L_owner", "s_end")
+	saved, err := store.GetAffectBySession(context.Background(), "L_owner", "s_end")
 	if err != nil {
 		t.Fatal(err)
 	}

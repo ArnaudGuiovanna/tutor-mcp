@@ -4,6 +4,7 @@
 package engine
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"net/http"
@@ -212,7 +213,7 @@ func TestDispatchQueued_UsesQueuedItem(t *testing.T) {
 	rawDB, store, learnerID := rawTestSetup(t, srv.URL)
 
 	now := time.Now().UTC()
-	if _, err := store.EnqueueWebhookMessage(
+	if _, err := store.EnqueueWebhookMessage(context.Background(),
 		learnerID, "daily_motivation", "tu peux le faire", now, now.Add(2*time.Hour), 5,
 	); err != nil {
 		t.Fatalf("enqueue: %v", err)
@@ -296,7 +297,7 @@ func TestDispatchQueued_MarksFailedOnWebhookError(t *testing.T) {
 
 	rawDB, store, learnerID := rawTestSetup(t, srv.URL)
 	now := time.Now().UTC()
-	if _, err := store.EnqueueWebhookMessage(
+	if _, err := store.EnqueueWebhookMessage(context.Background(),
 		learnerID, "daily_motivation", "msg", now, now.Add(2*time.Hour), 5,
 	); err != nil {
 		t.Fatalf("enqueue: %v", err)

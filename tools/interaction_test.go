@@ -4,6 +4,7 @@
 package tools
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"io"
@@ -92,7 +93,7 @@ func TestRecordInteraction_NoLostUpdateUnderConcurrency(t *testing.T) {
 				ResponseTimeSeconds: 5.0,
 				Confidence:          0.8,
 			}
-			if _, _, err := applyInteraction(deps, "L_owner", input, now); err != nil {
+			if _, _, err := applyInteraction(context.Background(), deps, "L_owner", input, now); err != nil {
 				errs <- err
 			}
 		}(i)
@@ -105,7 +106,7 @@ func TestRecordInteraction_NoLostUpdateUnderConcurrency(t *testing.T) {
 	}
 
 	// All N interactions must be persisted.
-	recents, err := store.GetRecentInteractionsByLearner("L_owner", N+10)
+	recents, err := store.GetRecentInteractionsByLearner(context.Background(), "L_owner", N+10)
 	if err != nil {
 		t.Fatalf("GetRecentInteractionsByLearner: %v", err)
 	}
@@ -120,7 +121,7 @@ func TestRecordInteraction_NoLostUpdateUnderConcurrency(t *testing.T) {
 	}
 
 	// Concept state must reflect every update (lost-update detector).
-	cs, err := store.GetConceptState("L_owner", "a")
+	cs, err := store.GetConceptState(context.Background(), "L_owner", "a")
 	if err != nil {
 		t.Fatalf("GetConceptState: %v", err)
 	}
@@ -196,7 +197,7 @@ func TestRecordInteraction_HappyPath_Success(t *testing.T) {
 	}
 
 	// DB: interaction created.
-	recents, err := store.GetRecentInteractionsByLearner("L_owner", 10)
+	recents, err := store.GetRecentInteractionsByLearner(context.Background(), "L_owner", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +209,7 @@ func TestRecordInteraction_HappyPath_Success(t *testing.T) {
 	}
 
 	// DB: concept state upserted.
-	cs, err := store.GetConceptState("L_owner", "a")
+	cs, err := store.GetConceptState(context.Background(), "L_owner", "a")
 	if err != nil {
 		t.Fatalf("expected concept state: %v", err)
 	}
@@ -260,7 +261,7 @@ func TestRecordInteraction_ReturnsRubricObservation(t *testing.T) {
 	if _, ok := obs["rubric_schema_warnings"].([]any); !ok {
 		t.Fatalf("expected rubric schema warnings, got %v", obs)
 	}
-	recents, err := store.GetRecentInteractionsByLearner("L_owner", 1)
+	recents, err := store.GetRecentInteractionsByLearner(context.Background(), "L_owner", 1)
 	if err != nil {
 		t.Fatalf("get interactions: %v", err)
 	}
@@ -270,7 +271,7 @@ func TestRecordInteraction_ReturnsRubricObservation(t *testing.T) {
 	if recents[0].RubricJSON == "" || recents[0].RubricScoreJSON == "" {
 		t.Fatalf("expected rubric JSON to be persisted on interaction: %+v", recents[0])
 	}
-	snapshots, err := store.GetPedagogicalSnapshots("L_owner", recents[0].DomainID, "a", 5)
+	snapshots, err := store.GetPedagogicalSnapshots(context.Background(), "L_owner", recents[0].DomainID, "a", 5)
 	if err != nil {
 		t.Fatalf("get snapshots: %v", err)
 	}
@@ -297,7 +298,7 @@ func TestRecordInteraction_PersistsInterpretationBrief(t *testing.T) {
 	if res.IsError {
 		t.Fatalf("got %q", resultText(res))
 	}
-	snapshots, err := store.GetPedagogicalSnapshots("L_owner", "", "a", 5)
+	snapshots, err := store.GetPedagogicalSnapshots(context.Background(), "L_owner", "", "a", 5)
 	if err != nil {
 		t.Fatalf("get snapshots: %v", err)
 	}
@@ -339,14 +340,14 @@ func TestRecordInteraction_ReturnsSemanticObservation(t *testing.T) {
 		t.Fatalf("reasoning_quality = %v, want brittle", got)
 	}
 
-	recents, err := store.GetRecentInteractionsByLearner("L_owner", 1)
+	recents, err := store.GetRecentInteractionsByLearner(context.Background(), "L_owner", 1)
 	if err != nil {
 		t.Fatalf("get interactions: %v", err)
 	}
 	if len(recents) != 1 {
 		t.Fatalf("got %d interactions, want 1", len(recents))
 	}
-	snapshots, err := store.GetPedagogicalSnapshots("L_owner", recents[0].DomainID, "a", 5)
+	snapshots, err := store.GetPedagogicalSnapshots(context.Background(), "L_owner", recents[0].DomainID, "a", 5)
 	if err != nil {
 		t.Fatalf("get snapshots: %v", err)
 	}
@@ -401,11 +402,11 @@ func TestRecordInteraction_ReturnsPedagogicalModelObservation(t *testing.T) {
 		t.Fatalf("semantic_observation should be absent when semantic_observation_json is omitted: %v", obs)
 	}
 
-	recents, err := store.GetRecentInteractionsByLearner("L_owner", 1)
+	recents, err := store.GetRecentInteractionsByLearner(context.Background(), "L_owner", 1)
 	if err != nil || len(recents) != 1 {
 		t.Fatalf("expected persisted interaction, got len=%d err=%v", len(recents), err)
 	}
-	snapshots, err := store.GetPedagogicalSnapshots("L_owner", recents[0].DomainID, "a", 5)
+	snapshots, err := store.GetPedagogicalSnapshots(context.Background(), "L_owner", recents[0].DomainID, "a", 5)
 	if err != nil {
 		t.Fatalf("get snapshots: %v", err)
 	}
@@ -442,7 +443,7 @@ func TestRecordInteraction_RejectsInvalidRubricJSON(t *testing.T) {
 		t.Fatalf("expected rubric_json JSON error, got %q", msg)
 	}
 
-	recents, _ := store.GetRecentInteractionsByLearner("L_owner", 5)
+	recents, _ := store.GetRecentInteractionsByLearner(context.Background(), "L_owner", 5)
 	if len(recents) != 0 {
 		t.Fatalf("expected no interactions persisted on bad rubric_json, got %d", len(recents))
 	}
@@ -500,7 +501,7 @@ func TestRecordInteraction_RejectsInvalidSemanticObservationJSON(t *testing.T) {
 				t.Fatalf("expected semantic_observation_json %q error, got %q", tc.want, msg)
 			}
 
-			recents, _ := store.GetRecentInteractionsByLearner("L_owner", 5)
+			recents, _ := store.GetRecentInteractionsByLearner(context.Background(), "L_owner", 5)
 			if len(recents) != 0 {
 				t.Fatalf("expected no interactions persisted on bad semantic_observation_json, got %d", len(recents))
 			}
@@ -547,7 +548,7 @@ func TestRecordInteraction_StoresMisconceptionOnFailure(t *testing.T) {
 		t.Fatalf("got %q", resultText(res))
 	}
 
-	recents, _ := store.GetRecentInteractionsByLearner("L_owner", 5)
+	recents, _ := store.GetRecentInteractionsByLearner(context.Background(), "L_owner", 5)
 	if len(recents) == 0 {
 		t.Fatal("no interactions recorded")
 	}
@@ -575,7 +576,7 @@ func TestRecordInteraction_MisconceptionIgnoredOnSuccess(t *testing.T) {
 		t.Fatalf("got %q", resultText(res))
 	}
 
-	recents, _ := store.GetRecentInteractionsByLearner("L_owner", 5)
+	recents, _ := store.GetRecentInteractionsByLearner(context.Background(), "L_owner", 5)
 	if len(recents) == 0 {
 		t.Fatal("no interactions")
 	}
@@ -604,7 +605,7 @@ func TestRecordInteraction_DomainIDIsPersistedOnRow(t *testing.T) {
 		t.Fatalf("expected success, got %q", resultText(res))
 	}
 
-	recents, _ := store.GetRecentInteractionsByLearner("L_owner", 1)
+	recents, _ := store.GetRecentInteractionsByLearner(context.Background(), "L_owner", 1)
 	if len(recents) != 1 {
 		t.Fatalf("expected 1 interaction row, got %d", len(recents))
 	}
@@ -619,7 +620,7 @@ func TestRecordInteraction_DomainIDIsPersistedOnRow(t *testing.T) {
 func TestRecordInteraction_DomainIDRejectsForeignDomain(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	makeOwnerDomain(t, store, "L_owner", "math")
-	foreign, err := store.CreateDomain("L_other", "shared", "", models.KnowledgeSpace{
+	foreign, err := store.CreateDomain(context.Background(), "L_other", "shared", "", models.KnowledgeSpace{
 		Concepts: []string{"a"},
 	})
 	if err != nil {
@@ -661,7 +662,7 @@ func TestRecordInteraction_RejectsUnknownConcept(t *testing.T) {
 	}
 
 	// And no orphan ConceptState row should have been created.
-	if cs, err := store.GetConceptState("L_owner", "ghost"); err == nil && cs != nil {
+	if cs, err := store.GetConceptState(context.Background(), "L_owner", "ghost"); err == nil && cs != nil {
 		t.Fatalf("orphan concept_state row created for unknown concept: %+v", cs)
 	}
 }
@@ -705,7 +706,7 @@ func TestRecordInteraction_RejectsOutOfRangeConfidence(t *testing.T) {
 	}
 
 	// And nothing should have been written to the cognitive store.
-	recents, _ := store.GetRecentInteractionsByLearner("L_owner", 5)
+	recents, _ := store.GetRecentInteractionsByLearner(context.Background(), "L_owner", 5)
 	if len(recents) != 0 {
 		t.Fatalf("expected no interactions persisted, got %d", len(recents))
 	}
@@ -773,7 +774,7 @@ func TestRecordInteraction_AuditRowCarriesHeuristicSlipGuess_SyntaxError(t *test
 		t.Fatalf("got %q", resultText(res))
 	}
 
-	recents, _ := store.GetRecentInteractionsByLearner("L_owner", 1)
+	recents, _ := store.GetRecentInteractionsByLearner(context.Background(), "L_owner", 1)
 	if len(recents) != 1 {
 		t.Fatalf("expected 1 interaction, got %d", len(recents))
 	}
@@ -810,7 +811,7 @@ func TestRecordInteraction_AuditRowCarriesHeuristicSlipGuess_KnowledgeGap(t *tes
 		t.Fatalf("got %q", resultText(res))
 	}
 
-	recents, _ := store.GetRecentInteractionsByLearner("L_owner", 1)
+	recents, _ := store.GetRecentInteractionsByLearner(context.Background(), "L_owner", 1)
 	if len(recents) != 1 {
 		t.Fatalf("expected 1 interaction, got %d", len(recents))
 	}
@@ -845,7 +846,7 @@ func TestRecordInteraction_AuditRowCarriesHeuristicSlipGuess_Success(t *testing.
 		t.Fatalf("got %q", resultText(res))
 	}
 
-	recents, _ := store.GetRecentInteractionsByLearner("L_owner", 1)
+	recents, _ := store.GetRecentInteractionsByLearner(context.Background(), "L_owner", 1)
 	if len(recents) != 1 {
 		t.Fatalf("expected 1 interaction, got %d", len(recents))
 	}
@@ -887,7 +888,7 @@ func TestRecordInteraction_RejectsUnknownActivityType(t *testing.T) {
 	}
 
 	// And nothing should have been persisted.
-	recents, _ := store.GetRecentInteractionsByLearner("L_owner", 5)
+	recents, _ := store.GetRecentInteractionsByLearner(context.Background(), "L_owner", 5)
 	if len(recents) != 0 {
 		t.Fatalf("expected no interactions persisted on bad activity_type, got %d", len(recents))
 	}
@@ -924,7 +925,7 @@ func TestRecordInteraction_RejectsUnknownErrorType(t *testing.T) {
 	}
 
 	// And nothing should have been persisted.
-	recents, _ := store.GetRecentInteractionsByLearner("L_owner", 5)
+	recents, _ := store.GetRecentInteractionsByLearner(context.Background(), "L_owner", 5)
 	if len(recents) != 0 {
 		t.Fatalf("expected no interactions persisted on bad error_type, got %d", len(recents))
 	}
@@ -1035,7 +1036,7 @@ func TestApplyInteraction_IRTReadsPreFSRSDifficulty(t *testing.T) {
 		// vs post-FSRS difficulty cases.
 		Theta: 2.0,
 	}
-	if err := store.UpsertConceptState(seed); err != nil {
+	if err := store.UpsertConceptState(context.Background(), seed); err != nil {
 		t.Fatalf("seed concept state: %v", err)
 	}
 
@@ -1070,7 +1071,7 @@ func TestApplyInteraction_IRTReadsPreFSRSDifficulty(t *testing.T) {
 		t.Fatalf("test setup is vacuous: pre/post FSRS thetas are identical (%v)", expectedTheta)
 	}
 
-	cs, _, err := applyInteraction(deps, "L_owner", interactionInput{
+	cs, _, err := applyInteraction(context.Background(), deps, "L_owner", interactionInput{
 		Concept:             "a",
 		ActivityType:        "RECALL_EXERCISE",
 		Success:             false, // → FSRS rating Again

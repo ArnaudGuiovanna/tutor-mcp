@@ -4,6 +4,7 @@
 package tools
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -33,7 +34,7 @@ func TestInitDomain_ReturnsGraphQualityReport(t *testing.T) {
 
 func TestValidateDomainGraph_ReturnsReportForActiveDomain(t *testing.T) {
 	store, deps := setupToolsTest(t)
-	_, err := store.CreateDomain("L_owner", "flat", "", models.KnowledgeSpace{
+	_, err := store.CreateDomain(context.Background(), "L_owner", "flat", "", models.KnowledgeSpace{
 		Concepts:      []string{"Basics", "channels", "goroutines", "interfaces"},
 		Prerequisites: map[string][]string{},
 	})
@@ -73,7 +74,7 @@ func TestAddConcepts_RejectsCycleAfterMergingExistingGraph(t *testing.T) {
 	if !strings.Contains(strings.ToLower(resultText(res)), "cycle") {
 		t.Fatalf("expected cycle error, got %q", resultText(res))
 	}
-	got, err := store.GetDomainByID(d.ID)
+	got, err := store.GetDomainByID(context.Background(), d.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

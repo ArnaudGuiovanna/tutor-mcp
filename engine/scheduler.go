@@ -6,6 +6,7 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -190,7 +191,8 @@ func (s *Scheduler) sendDailyRecap() {
 // (kind + ±30min scheduling window) and posts it. Falls back to a sober template
 // when the queue is empty.
 func (s *Scheduler) dispatchQueued(kind, alertTag string, fallback func(*models.Learner) discordPayload) {
-	learners, err := s.store.GetActiveLearners()
+	ctx := context.Background()
+	learners, err := s.store.GetActiveLearners(ctx)
 	if err != nil {
 		s.logger.Error("scheduler: dispatch get learners", "err", err, "kind", kind)
 		return
@@ -201,18 +203,18 @@ func (s *Scheduler) dispatchQueued(kind, alertTag string, fallback func(*models.
 		if learner.WebhookURL == "" {
 			continue
 		}
-		avail, _ := s.store.GetAvailability(learner.ID)
+		avail, _ := s.store.GetAvailability(ctx, learner.ID)
 		if avail != nil && avail.DoNotDisturb {
 			continue
 		}
 
 		// Dedup at the alert layer — don't fire twice in one day.
-		sent, _ := s.store.WasAlertSentToday(learner.ID, alertTag)
+		sent, _ := s.store.WasAlertSentToday(ctx, learner.ID, alertTag)
 		if sent {
 			continue
 		}
 
-		item, err := s.store.DequeueNextPending(learner.ID, kind, now, 30*time.Minute)
+		item, err := s.store.DequeueNextPending(ctx, learner.ID, kind, now, 30*time.Minute)
 		if err != nil {
 			s.logger.Error("scheduler: dequeue", "err", err, "learner", learner.ID, "kind", kind)
 			continue
@@ -236,23 +238,23 @@ func (s *Scheduler) dispatchQueued(kind, alertTag string, fallback func(*models.
 		if err := s.sendDiscordEmbed(learner.WebhookURL, payload); err != nil {
 			s.logger.Error("scheduler: dispatch webhook", "err", err, "learner", learner.ID, "kind", kind)
 			if item != nil {
-				_ = s.store.MarkWebhookFailed(item.ID, learner.ID)
+				_ = s.store.MarkWebhookFailed(ctx, item.ID, learner.ID)
 			}
 			continue
 		}
 		if item != nil {
-			_ = s.store.MarkWebhookSent(item.ID, learner.ID, now)
+			_ = s.store.MarkWebhookSent(ctx, item.ID, learner.ID, now)
 		}
 		if briefForLog != nil {
 			queueID := int64(0)
 			if item != nil {
 				queueID = item.ID
 			}
-			if _, err := s.store.CreateWebhookPushLog(learner.ID, queueID, briefForLog, now); err != nil {
+			if _, err := s.store.CreateWebhookPushLog(ctx, learner.ID, queueID, briefForLog, now); err != nil {
 				s.logger.Warn("scheduler: push log", "err", err, "learner", learner.ID, "kind", kind)
 			}
 		}
-		s.store.CreateScheduledAlert(learner.ID, alertTag, "", time.Now())
+		s.store.CreateScheduledAlert(ctx, learner.ID, alertTag, "", time.Now())
 		s.logger.Info("scheduler: dispatched", "learner", learner.ID, "kind", kind, "source", source)
 	}
 }
@@ -455,21 +457,22 @@ func fallbackDailyRecap(_ *models.Learner) discordPayload {
 // ─── Cleanup (hourly) ─────────────────────────────────────────────────────
 
 func (s *Scheduler) cleanupExpiredData() {
-	codes, err := s.store.CleanupExpiredCodes()
+	ctx := context.Background()
+	codes, err := s.store.CleanupExpiredCodes(ctx)
 	if err != nil {
 		s.logger.Error("scheduler: cleanup codes", "err", err)
 	} else if codes > 0 {
 		s.logger.Info("scheduler: cleaned expired codes", "count", codes)
 	}
 
-	tokens, err := s.store.CleanupExpiredRefreshTokens()
+	tokens, err := s.store.CleanupExpiredRefreshTokens(ctx)
 	if err != nil {
 		s.logger.Error("scheduler: cleanup tokens", "err", err)
 	} else if tokens > 0 {
 		s.logger.Info("scheduler: cleaned expired refresh tokens", "count", tokens)
 	}
 
-	expired, err := s.store.ExpirePastWebhookMessages(time.Now().UTC())
+	expired, err := s.store.ExpirePastWebhookMessages(ctx, time.Now().UTC())
 	if err != nil {
 		s.logger.Error("scheduler: expire webhook queue", "err", err)
 	} else if expired > 0 {
@@ -610,7 +613,8 @@ func (s *Scheduler) sleepOrStop(d time.Duration) bool {
 // in one Discord message. Falls back to FormatOLMEmbed when no LLM-authored
 // message is queued.
 func (s *Scheduler) sendOLM() {
-	learners, err := s.store.GetActiveLearners()
+	ctx := context.Background()
+	learners, err := s.store.GetActiveLearners(ctx)
 	if err != nil {
 		s.logger.Error("scheduler: olm get learners", "err", err)
 		return
@@ -621,15 +625,15 @@ func (s *Scheduler) sendOLM() {
 		if learner.WebhookURL == "" {
 			continue
 		}
-		avail, _ := s.store.GetAvailability(learner.ID)
+		avail, _ := s.store.GetAvailability(ctx, learner.ID)
 		if avail != nil && avail.DoNotDisturb {
 			continue
 		}
-		if sent, _ := s.store.WasAlertSentToday(learner.ID, alertKindOLM); sent {
+		if sent, _ := s.store.WasAlertSentToday(ctx, learner.ID, alertKindOLM); sent {
 			continue
 		}
 
-		domains, err := s.store.GetDomainsByLearner(learner.ID, false /*includeArchived*/)
+		domains, err := s.store.GetDomainsByLearner(ctx, learner.ID, false /*includeArchived*/)
 		if err != nil {
 			s.logger.Error("scheduler: olm list domains", "err", err, "learner", learner.ID)
 			continue
@@ -640,7 +644,7 @@ func (s *Scheduler) sendOLM() {
 			if len(prepared) >= 3 {
 				break
 			}
-			snap, err := BuildOLMSnapshot(s.store, learner.ID, d.ID)
+			snap, err := BuildOLMSnapshot(ctx, s.store, learner.ID, d.ID)
 			if err != nil {
 				s.logger.Warn("scheduler: olm build", "err", err, "learner", learner.ID, "domain", d.ID)
 				continue
@@ -661,7 +665,7 @@ func (s *Scheduler) sendOLM() {
 			}
 
 			kind := "olm:" + d.ID
-			item, _ := s.store.DequeueNextPending(learner.ID, kind, now, 30*time.Minute)
+			item, _ := s.store.DequeueNextPending(ctx, learner.ID, kind, now, 30*time.Minute)
 			if item != nil && item.Content != "" {
 				embed, brief := embedFromWebhookContent(kind, item.Content, snap.FocusUrgency)
 				prepared = append(prepared, preparedWebhookEmbed{Embed: embed, Item: item, Brief: brief})
@@ -687,15 +691,15 @@ func (s *Scheduler) sendOLM() {
 			queueID := int64(0)
 			if p.Item != nil {
 				queueID = p.Item.ID
-				_ = s.store.MarkWebhookSent(p.Item.ID, learner.ID, now)
+				_ = s.store.MarkWebhookSent(ctx, p.Item.ID, learner.ID, now)
 			}
 			if p.Brief != nil {
-				if _, err := s.store.CreateWebhookPushLog(learner.ID, queueID, p.Brief, now); err != nil {
+				if _, err := s.store.CreateWebhookPushLog(ctx, learner.ID, queueID, p.Brief, now); err != nil {
 					s.logger.Warn("scheduler: olm push log", "err", err, "learner", learner.ID)
 				}
 			}
 		}
-		_ = s.store.CreateScheduledAlert(learner.ID, alertKindOLM, "", now)
+		_ = s.store.CreateScheduledAlert(ctx, learner.ID, alertKindOLM, "", now)
 		s.logger.Info("scheduler: olm dispatched", "learner", learner.ID, "embeds", len(embeds))
 	}
 }
@@ -708,7 +712,8 @@ func (s *Scheduler) runConsolidationCycleAt(now time.Time) {
 	if !memory.Enabled() {
 		return
 	}
-	learners, err := s.store.GetActiveLearners()
+	ctx := context.Background()
+	learners, err := s.store.GetActiveLearners(ctx)
 	if err != nil {
 		s.logger.Error("scheduler: consolidation get learners", "err", err)
 		return
@@ -720,7 +725,7 @@ func (s *Scheduler) runConsolidationCycleAt(now time.Time) {
 			continue
 		}
 		for _, job := range jobs {
-			if err := s.store.UpsertPendingConsolidation(learner.ID, string(job.Period), job.PeriodKey, now); err != nil {
+			if err := s.store.UpsertPendingConsolidation(ctx, learner.ID, string(job.Period), job.PeriodKey, now); err != nil {
 				s.logger.Warn("scheduler: consolidation enqueue failed", "err", err, "learner", learner.ID, "period", job.PeriodKey)
 			} else {
 				s.logger.Info("scheduler: consolidation pending", "learner", learner.ID, "period_type", job.Period, "period", job.PeriodKey)
@@ -733,8 +738,9 @@ func (s *Scheduler) requeueStaleConsolidations() {
 	if !memory.Enabled() {
 		return
 	}
+	ctx := context.Background()
 	cutoff := time.Now().UTC().Add(-consolidationDeliveryTimeout())
-	count, err := s.store.RequeueStaleDeliveredConsolidations(cutoff)
+	count, err := s.store.RequeueStaleDeliveredConsolidations(ctx, cutoff)
 	if err != nil {
 		s.logger.Warn("scheduler: consolidation timeout requeue failed", "err", err)
 		return
@@ -799,7 +805,8 @@ const alertKindOLM = "OLM"
 // Dedup at the alert layer (MirrorAlertKind) so an in-session enqueue won't
 // race with the scheduler tick on the same day.
 func (s *Scheduler) sendMirrorMessages() {
-	learners, err := s.store.GetActiveLearners()
+	ctx := context.Background()
+	learners, err := s.store.GetActiveLearners(ctx)
 	if err != nil {
 		s.logger.Error("scheduler: mirror get learners", "err", err)
 		return
@@ -810,7 +817,7 @@ func (s *Scheduler) sendMirrorMessages() {
 		if learner.WebhookURL == "" {
 			continue
 		}
-		avail, _ := s.store.GetAvailability(learner.ID)
+		avail, _ := s.store.GetAvailability(ctx, learner.ID)
 		if avail != nil && avail.DoNotDisturb {
 			continue
 		}
@@ -818,16 +825,16 @@ func (s *Scheduler) sendMirrorMessages() {
 		// The in-session emission already records a scheduled_alert with
 		// MirrorAlertKind for dedup. WasAlertSentToday catches both the
 		// in-session enqueue AND any prior tick today.
-		if sent, _ := s.store.WasAlertSentToday(learner.ID, MirrorAlertKind); sent {
+		if sent, _ := s.store.WasAlertSentToday(ctx, learner.ID, MirrorAlertKind); sent {
 			// We still want to mark queued items as sent so they don't
 			// pile up — best-effort dequeue + mark.
-			if item, _ := s.store.DequeueNextPending(learner.ID, models.WebhookKindMirror, now, 30*time.Minute); item != nil {
-				_ = s.store.MarkWebhookSent(item.ID, learner.ID, now)
+			if item, _ := s.store.DequeueNextPending(ctx, learner.ID, models.WebhookKindMirror, now, 30*time.Minute); item != nil {
+				_ = s.store.MarkWebhookSent(ctx, item.ID, learner.ID, now)
 			}
 			continue
 		}
 
-		item, err := s.store.DequeueNextPending(learner.ID, models.WebhookKindMirror, now, 30*time.Minute)
+		item, err := s.store.DequeueNextPending(ctx, learner.ID, models.WebhookKindMirror, now, 30*time.Minute)
 		if err != nil {
 			s.logger.Error("scheduler: mirror dequeue", "err", err, "learner", learner.ID)
 			continue
@@ -839,11 +846,11 @@ func (s *Scheduler) sendMirrorMessages() {
 		embed := mirrorEmbedFromContent(item.Content)
 		if err := s.sendDiscordEmbed(learner.WebhookURL, discordPayload{Embeds: []discordEmbed{embed}}); err != nil {
 			s.logger.Error("scheduler: mirror webhook", "err", err, "learner", learner.ID)
-			_ = s.store.MarkWebhookFailed(item.ID, learner.ID)
+			_ = s.store.MarkWebhookFailed(ctx, item.ID, learner.ID)
 			continue
 		}
-		_ = s.store.MarkWebhookSent(item.ID, learner.ID, now)
-		_ = s.store.CreateScheduledAlert(learner.ID, MirrorAlertKind, "", now)
+		_ = s.store.MarkWebhookSent(ctx, item.ID, learner.ID, now)
+		_ = s.store.CreateScheduledAlert(ctx, learner.ID, MirrorAlertKind, "", now)
 		s.logger.Info("scheduler: mirror dispatched", "learner", learner.ID)
 	}
 }

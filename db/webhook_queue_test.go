@@ -4,6 +4,7 @@
 package db
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -24,7 +25,7 @@ func TestEnqueueWebhookMessage_ValidationErrors(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			id, err := store.EnqueueWebhookMessage("L1", tc.kind, tc.content, tc.scheduledFor, time.Time{}, 0)
+			id, err := store.EnqueueWebhookMessage(context.Background(), "L1", tc.kind, tc.content, tc.scheduledFor, time.Time{}, 0)
 			if err == nil {
 				t.Fatalf("expected validation error, got id=%d", id)
 			}
@@ -37,7 +38,7 @@ func TestEnqueueWebhookMessage_PersistsRow(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	expires := now.Add(2 * time.Hour)
 
-	id, err := store.EnqueueWebhookMessage("L1", "daily_motivation", "hello", now, expires, 5)
+	id, err := store.EnqueueWebhookMessage(context.Background(), "L1", "daily_motivation", "hello", now, expires, 5)
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
@@ -61,7 +62,7 @@ func TestEnqueueWebhookMessage_PersistsRow(t *testing.T) {
 	}
 
 	// Enqueue without expires_at - expires column should be NULL.
-	id2, err := store.EnqueueWebhookMessage("L1", "reminder", "remind", now, time.Time{}, 0)
+	id2, err := store.EnqueueWebhookMessage(context.Background(), "L1", "reminder", "remind", now, time.Time{}, 0)
 	if err != nil {
 		t.Fatalf("enqueue no expiry: %v", err)
 	}
@@ -81,39 +82,39 @@ func TestDequeueNextPending(t *testing.T) {
 	now := time.Now().UTC()
 
 	// Out-of-window (before lower bound).
-	if _, err := store.EnqueueWebhookMessage(
+	if _, err := store.EnqueueWebhookMessage(context.Background(),
 		"L1", "daily_motivation", "old", now.Add(-2*time.Hour), time.Time{}, 0,
 	); err != nil {
 		t.Fatalf("enqueue old: %v", err)
 	}
 	// In-window, low priority.
-	idLow, err := store.EnqueueWebhookMessage(
+	idLow, err := store.EnqueueWebhookMessage(context.Background(),
 		"L1", "daily_motivation", "low", now, time.Time{}, 1,
 	)
 	if err != nil {
 		t.Fatalf("enqueue low: %v", err)
 	}
 	// In-window, high priority -> should win.
-	idHigh, err := store.EnqueueWebhookMessage(
+	idHigh, err := store.EnqueueWebhookMessage(context.Background(),
 		"L1", "daily_motivation", "high", now.Add(5*time.Minute), time.Time{}, 9,
 	)
 	if err != nil {
 		t.Fatalf("enqueue high: %v", err)
 	}
 	// Different kind, should not match.
-	if _, err := store.EnqueueWebhookMessage(
+	if _, err := store.EnqueueWebhookMessage(context.Background(),
 		"L1", "reminder", "skip", now, time.Time{}, 99,
 	); err != nil {
 		t.Fatalf("enqueue other kind: %v", err)
 	}
 	// Already-expired pending row in window: should NOT dequeue.
-	if _, err := store.EnqueueWebhookMessage(
+	if _, err := store.EnqueueWebhookMessage(context.Background(),
 		"L1", "daily_motivation", "stale", now, now.Add(-1*time.Minute), 99,
 	); err != nil {
 		t.Fatalf("enqueue stale: %v", err)
 	}
 
-	got, err := store.DequeueNextPending("L1", "daily_motivation", now, 30*time.Minute)
+	got, err := store.DequeueNextPending(context.Background(), "L1", "daily_motivation", now, 30*time.Minute)
 	if err != nil {
 		t.Fatalf("dequeue: %v", err)
 	}
@@ -135,7 +136,7 @@ func TestDequeueNextPending(t *testing.T) {
 
 	// Mark high-priority as sent; next dequeue should pick the low-priority one.
 	sentAt := time.Now().UTC()
-	if err := store.MarkWebhookSent(idHigh, "L1", sentAt); err != nil {
+	if err := store.MarkWebhookSent(context.Background(), idHigh, "L1", sentAt); err != nil {
 		t.Fatalf("mark sent: %v", err)
 	}
 	var status string
@@ -149,7 +150,7 @@ func TestDequeueNextPending(t *testing.T) {
 		t.Errorf("status after MarkWebhookSent = %q want 'sent'", status)
 	}
 
-	got, err = store.DequeueNextPending("L1", "daily_motivation", now, 30*time.Minute)
+	got, err = store.DequeueNextPending(context.Background(), "L1", "daily_motivation", now, 30*time.Minute)
 	if err != nil {
 		t.Fatalf("dequeue after send: %v", err)
 	}
@@ -158,7 +159,7 @@ func TestDequeueNextPending(t *testing.T) {
 	}
 
 	// Empty case for unknown learner returns (nil, nil).
-	got, err = store.DequeueNextPending("L-missing", "daily_motivation", now, 30*time.Minute)
+	got, err = store.DequeueNextPending(context.Background(), "L-missing", "daily_motivation", now, 30*time.Minute)
 	if err != nil {
 		t.Errorf("expected nil err on no rows, got %v", err)
 	}
@@ -170,11 +171,11 @@ func TestDequeueNextPending(t *testing.T) {
 func TestMarkWebhookFailed(t *testing.T) {
 	store := setupTestDB(t)
 	now := time.Now().UTC()
-	id, err := store.EnqueueWebhookMessage("L1", "reminder", "retry", now, time.Time{}, 0)
+	id, err := store.EnqueueWebhookMessage(context.Background(), "L1", "reminder", "retry", now, time.Time{}, 0)
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-	if err := store.MarkWebhookFailed(id, "L1"); err != nil {
+	if err := store.MarkWebhookFailed(context.Background(), id, "L1"); err != nil {
 		t.Fatalf("MarkWebhookFailed: %v", err)
 	}
 	var status string
@@ -198,19 +199,19 @@ func TestMarkWebhookMutatorsRequireLearnerOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	idSent, err := store.EnqueueWebhookMessage("L2", "reminder", "do not send", now, time.Time{}, 0)
+	idSent, err := store.EnqueueWebhookMessage(context.Background(), "L2", "reminder", "do not send", now, time.Time{}, 0)
 	if err != nil {
 		t.Fatalf("enqueue sent guard row: %v", err)
 	}
-	idFailed, err := store.EnqueueWebhookMessage("L2", "reminder", "do not fail", now, time.Time{}, 0)
+	idFailed, err := store.EnqueueWebhookMessage(context.Background(), "L2", "reminder", "do not fail", now, time.Time{}, 0)
 	if err != nil {
 		t.Fatalf("enqueue failed guard row: %v", err)
 	}
 
-	if err := store.MarkWebhookSent(idSent, "L1", now); err != nil {
+	if err := store.MarkWebhookSent(context.Background(), idSent, "L1", now); err != nil {
 		t.Fatalf("MarkWebhookSent with wrong learner: %v", err)
 	}
-	if err := store.MarkWebhookFailed(idFailed, "L1"); err != nil {
+	if err := store.MarkWebhookFailed(context.Background(), idFailed, "L1"); err != nil {
 		t.Fatalf("MarkWebhookFailed with wrong learner: %v", err)
 	}
 
@@ -241,28 +242,28 @@ func TestExpirePastWebhookMessages(t *testing.T) {
 	now := time.Now().UTC()
 
 	// One pending row with expires_at in the past.
-	idStale, err := store.EnqueueWebhookMessage(
+	idStale, err := store.EnqueueWebhookMessage(context.Background(),
 		"L1", "reminder", "stale", now, now.Add(-5*time.Minute), 0,
 	)
 	if err != nil {
 		t.Fatalf("enqueue stale: %v", err)
 	}
 	// One pending row with expires_at in the future.
-	idFresh, err := store.EnqueueWebhookMessage(
+	idFresh, err := store.EnqueueWebhookMessage(context.Background(),
 		"L1", "reminder", "fresh", now, now.Add(1*time.Hour), 0,
 	)
 	if err != nil {
 		t.Fatalf("enqueue fresh: %v", err)
 	}
 	// One pending row with no expires_at (NULL) — should not be expired.
-	idNoExp, err := store.EnqueueWebhookMessage(
+	idNoExp, err := store.EnqueueWebhookMessage(context.Background(),
 		"L1", "reminder", "noexp", now, time.Time{}, 0,
 	)
 	if err != nil {
 		t.Fatalf("enqueue noexp: %v", err)
 	}
 
-	n, err := store.ExpirePastWebhookMessages(now)
+	n, err := store.ExpirePastWebhookMessages(context.Background(), now)
 	if err != nil {
 		t.Fatalf("ExpirePastWebhookMessages: %v", err)
 	}
@@ -301,22 +302,22 @@ func TestGetPendingWebhookMessages(t *testing.T) {
 	now := time.Now().UTC()
 
 	// Insert three pending rows for L1.
-	if _, err := store.EnqueueWebhookMessage("L1", "k", "a", now.Add(1*time.Hour), time.Time{}, 0); err != nil {
+	if _, err := store.EnqueueWebhookMessage(context.Background(), "L1", "k", "a", now.Add(1*time.Hour), time.Time{}, 0); err != nil {
 		t.Fatalf("a: %v", err)
 	}
-	if _, err := store.EnqueueWebhookMessage("L1", "k", "b", now.Add(2*time.Hour), time.Time{}, 0); err != nil {
+	if _, err := store.EnqueueWebhookMessage(context.Background(), "L1", "k", "b", now.Add(2*time.Hour), time.Time{}, 0); err != nil {
 		t.Fatalf("b: %v", err)
 	}
-	idC, err := store.EnqueueWebhookMessage("L1", "k", "c", now.Add(3*time.Hour), time.Time{}, 0)
+	idC, err := store.EnqueueWebhookMessage(context.Background(), "L1", "k", "c", now.Add(3*time.Hour), time.Time{}, 0)
 	if err != nil {
 		t.Fatalf("c: %v", err)
 	}
 	// Mark one as sent: should not appear in pending list.
-	if err := store.MarkWebhookSent(idC, "L1", now); err != nil {
+	if err := store.MarkWebhookSent(context.Background(), idC, "L1", now); err != nil {
 		t.Fatalf("mark sent: %v", err)
 	}
 
-	got, err := store.GetPendingWebhookMessages("L1")
+	got, err := store.GetPendingWebhookMessages(context.Background(), "L1")
 	if err != nil {
 		t.Fatalf("get pending: %v", err)
 	}
@@ -329,7 +330,7 @@ func TestGetPendingWebhookMessages(t *testing.T) {
 	}
 
 	// Other learner: empty list.
-	got, _ = store.GetPendingWebhookMessages("L-other")
+	got, _ = store.GetPendingWebhookMessages(context.Background(), "L-other")
 	if len(got) != 0 {
 		t.Errorf("expected 0 for other learner, got %d", len(got))
 	}

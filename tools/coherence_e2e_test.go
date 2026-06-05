@@ -19,6 +19,7 @@ package tools
 // re-litigate design decisions.
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -118,7 +119,7 @@ func TestCoherenceE2E_AddConceptsCycleRejected(t *testing.T) {
 	}); res.IsError {
 		t.Fatalf("init_domain failed: %s", resultText(res))
 	}
-	d, err := store.GetDomainByLearner("L_owner")
+	d, err := store.GetDomainByLearner(context.Background(), "L_owner")
 	if err != nil || d == nil {
 		t.Fatalf("could not look up seeded domain: %v", err)
 	}
@@ -140,7 +141,7 @@ func TestCoherenceE2E_AddConceptsCycleRejected(t *testing.T) {
 
 	// And the domain graph must not have been mutated — neither concept
 	// from the rejected batch should appear.
-	got, err := store.GetDomainByID(d.ID)
+	got, err := store.GetDomainByID(context.Background(), d.ID)
 	if err != nil {
 		t.Fatalf("GetDomainByID after rejected add: %v", err)
 	}

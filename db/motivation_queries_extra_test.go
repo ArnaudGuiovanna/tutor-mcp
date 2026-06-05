@@ -4,6 +4,7 @@
 package db
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -28,7 +29,7 @@ func TestCountInteractionsByConcept(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.concept, func(t *testing.T) {
-			got, err := store.CountInteractionsByConcept("L1", tc.concept)
+			got, err := store.CountInteractionsByConcept(context.Background(), "L1", tc.concept)
 			if err != nil {
 				t.Fatalf("count: %v", err)
 			}
@@ -46,7 +47,7 @@ func TestSelfInitiatedRatio(t *testing.T) {
 	now := time.Now().UTC()
 
 	// Empty: 0 ratio.
-	r, err := store.SelfInitiatedRatio("L1", "C1")
+	r, err := store.SelfInitiatedRatio(context.Background(), "L1", "C1")
 	if err != nil {
 		t.Fatalf("empty ratio: %v", err)
 	}
@@ -77,7 +78,7 @@ func TestSelfInitiatedRatio(t *testing.T) {
 		now,
 	)
 
-	r, err = store.SelfInitiatedRatio("L1", "C1")
+	r, err = store.SelfInitiatedRatio(context.Background(), "L1", "C1")
 	if err != nil {
 		t.Fatalf("ratio: %v", err)
 	}
@@ -98,7 +99,7 @@ func TestCountLearnerSessionStreak(t *testing.T) {
 	insertInteractionAtSQLTime(t, store, "C", 1, now.AddDate(0, 0, -1).Add(1*time.Hour))
 	insertInteractionAtSQLTime(t, store, "C", 1, now.AddDate(0, 0, -2).Add(1*time.Hour))
 
-	streak, err := store.CountLearnerSessionStreak("L1")
+	streak, err := store.CountLearnerSessionStreak(context.Background(), "L1")
 	if err != nil {
 		t.Fatalf("streak: %v", err)
 	}
@@ -107,7 +108,7 @@ func TestCountLearnerSessionStreak(t *testing.T) {
 	}
 
 	// Empty learner: streak = 0.
-	streak, err = store.CountLearnerSessionStreak("L-missing")
+	streak, err = store.CountLearnerSessionStreak(context.Background(), "L-missing")
 	if err != nil {
 		t.Fatalf("streak missing: %v", err)
 	}
@@ -120,7 +121,7 @@ func TestCountLearnerSessionStreak_StaleStart(t *testing.T) {
 	store := setupTestDB(t)
 	// Last interaction is 5 days ago — too stale to start a streak.
 	insertInteractionAtSQLTime(t, store, "C", 1, time.Now().UTC().AddDate(0, 0, -5))
-	streak, err := store.CountLearnerSessionStreak("L1")
+	streak, err := store.CountLearnerSessionStreak(context.Background(), "L1")
 	if err != nil {
 		t.Fatalf("streak: %v", err)
 	}
@@ -135,7 +136,7 @@ func TestCountLearnerSessionStreak_GapTerminates(t *testing.T) {
 	// Today and 3 days ago — gap at -1 and -2 — streak terminates at 1.
 	insertInteractionAtSQLTime(t, store, "C", 1, now.Add(1*time.Hour))
 	insertInteractionAtSQLTime(t, store, "C", 1, now.AddDate(0, 0, -3).Add(1*time.Hour))
-	streak, err := store.CountLearnerSessionStreak("L1")
+	streak, err := store.CountLearnerSessionStreak(context.Background(), "L1")
 	if err != nil {
 		t.Fatalf("streak: %v", err)
 	}

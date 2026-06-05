@@ -4,6 +4,7 @@
 package db
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -22,7 +23,7 @@ func TestPedagogicalSnapshots_CreateAndFilter(t *testing.T) {
 		DomainID:     "domain-1",
 		CreatedAt:    now,
 	}
-	if err := store.CreateInteraction(interaction); err != nil {
+	if err := store.CreateInteraction(context.Background(), interaction); err != nil {
 		t.Fatalf("create interaction: %v", err)
 	}
 
@@ -39,14 +40,14 @@ func TestPedagogicalSnapshots_CreateAndFilter(t *testing.T) {
 		InterpretationBrief: "The learner likely confuses part-whole and ratio meanings.",
 		CreatedAt:           now,
 	}
-	if err := store.CreatePedagogicalSnapshot(snapshot); err != nil {
+	if err := store.CreatePedagogicalSnapshot(context.Background(), snapshot); err != nil {
 		t.Fatalf("create snapshot: %v", err)
 	}
 	if snapshot.ID == 0 {
 		t.Fatal("expected snapshot id to be populated")
 	}
 
-	got, err := store.GetPedagogicalSnapshots("L1", "domain-1", "fractions", 10)
+	got, err := store.GetPedagogicalSnapshots(context.Background(), "L1", "domain-1", "fractions", 10)
 	if err != nil {
 		t.Fatalf("get snapshots: %v", err)
 	}
@@ -57,7 +58,7 @@ func TestPedagogicalSnapshots_CreateAndFilter(t *testing.T) {
 		t.Fatalf("unexpected snapshot: %+v", got[0])
 	}
 
-	empty, err := store.GetPedagogicalSnapshots("L1", "domain-1", "other", 10)
+	empty, err := store.GetPedagogicalSnapshots(context.Background(), "L1", "domain-1", "other", 10)
 	if err != nil {
 		t.Fatalf("get filtered snapshots: %v", err)
 	}

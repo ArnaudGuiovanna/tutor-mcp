@@ -5,6 +5,7 @@
 package tools
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -79,7 +80,7 @@ func TestInitDomain_HappyPath(t *testing.T) {
 	}
 
 	// Domain saved
-	d, err := store.GetDomainByLearner("L_owner")
+	d, err := store.GetDomainByLearner(context.Background(), "L_owner")
 	if err != nil {
 		t.Fatalf("domain not saved: %v", err)
 	}
@@ -95,7 +96,7 @@ func TestInitDomain_HappyPath(t *testing.T) {
 
 	// ConceptStates initialised
 	for _, c := range []string{"derivative", "integral"} {
-		cs, err := store.GetConceptState("L_owner", c)
+		cs, err := store.GetConceptState(context.Background(), "L_owner", c)
 		if err != nil || cs == nil {
 			t.Fatalf("concept state for %q missing: %v", c, err)
 		}
@@ -144,7 +145,7 @@ func TestAddConcepts_HappyPath(t *testing.T) {
 		t.Fatalf("expected added=2, got %v", out["added"])
 	}
 
-	got, _ := store.GetDomainByID(d.ID)
+	got, _ := store.GetDomainByID(context.Background(), d.ID)
 	expected := []string{"a", "b", "c", "d"}
 	if len(got.Graph.Concepts) != len(expected) {
 		t.Fatalf("expected %d concepts, got %d (%v)", len(expected), len(got.Graph.Concepts), got.Graph.Concepts)

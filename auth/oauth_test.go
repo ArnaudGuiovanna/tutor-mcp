@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
@@ -45,7 +46,7 @@ func newTestServer(t *testing.T) (*OAuthServer, *db.Store) {
 
 func seedClient(t *testing.T, store *db.Store, clientID, redirectURI string) {
 	t.Helper()
-	if err := store.CreateOAuthClient(clientID, "Test Client", fmt.Sprintf(`[%q]`, redirectURI)); err != nil {
+	if err := store.CreateOAuthClient(context.Background(), clientID, "Test Client", fmt.Sprintf(`[%q]`, redirectURI)); err != nil {
 		t.Fatalf("seed client: %v", err)
 	}
 }
@@ -56,7 +57,7 @@ func seedLearner(t *testing.T, store *db.Store, email, password string) string {
 	if err != nil {
 		t.Fatalf("bcrypt: %v", err)
 	}
-	l, err := store.CreateLearner(email, string(hash), "", "")
+	l, err := store.CreateLearner(context.Background(), email, string(hash), "", "")
 	if err != nil {
 		t.Fatalf("create learner: %v", err)
 	}
@@ -336,7 +337,7 @@ func TestAuthorizePost_CSRFMatch_InvalidCreds(t *testing.T) {
 func TestRefreshTokenGrant_RejectsMissingClientID(t *testing.T) {
 	s, store := newTestServer(t)
 	learnerID := seedLearner(t, store, "rt-noclient@example.com", "pw")
-	rt, err := store.CreateRefreshToken(learnerID, "")
+	rt, err := store.CreateRefreshToken(context.Background(), learnerID, "")
 	if err != nil {
 		t.Fatalf("seed refresh token: %v", err)
 	}
@@ -357,7 +358,7 @@ func TestRefreshTokenGrant_RejectsMissingClientID(t *testing.T) {
 		t.Fatalf("body missing invalid_client: %q", rec.Body.String())
 	}
 	// And the refresh token must NOT have been rotated/consumed.
-	if _, err := store.GetRefreshToken(rt.Token); err != nil {
+	if _, err := store.GetRefreshToken(context.Background(), rt.Token); err != nil {
 		t.Fatalf("refresh token must remain valid after rejected request: %v", err)
 	}
 }
@@ -375,7 +376,7 @@ func TestRefreshTokenGrant_RejectsCrossClientRedemption(t *testing.T) {
 	seedClient(t, store, "client-B", "https://b.example/cb")
 	learnerID := seedLearner(t, store, "rt-bound@example.com", "pw")
 	// Bind the refresh token to client-A.
-	rt, err := store.CreateRefreshToken(learnerID, "client-A")
+	rt, err := store.CreateRefreshToken(context.Background(), learnerID, "client-A")
 	if err != nil {
 		t.Fatalf("seed refresh token: %v", err)
 	}
@@ -398,7 +399,7 @@ func TestRefreshTokenGrant_RejectsCrossClientRedemption(t *testing.T) {
 		t.Fatalf("body missing invalid_grant: %q", rec.Body.String())
 	}
 	// Token must NOT have been rotated.
-	if _, err := store.GetRefreshToken(rt.Token); err != nil {
+	if _, err := store.GetRefreshToken(context.Background(), rt.Token); err != nil {
 		t.Fatalf("refresh token must remain valid after rejected cross-client redemption: %v", err)
 	}
 }
@@ -484,7 +485,7 @@ func seedConfidentialClient(t *testing.T, store *db.Store, clientID, redirectURI
 	if err != nil {
 		t.Fatalf("bcrypt: %v", err)
 	}
-	if err := store.CreateOAuthClientWithSecret(clientID, "Conf 114", fmt.Sprintf(`[%q]`, redirectURI), string(hash)); err != nil {
+	if err := store.CreateOAuthClientWithSecret(context.Background(), clientID, "Conf 114", fmt.Sprintf(`[%q]`, redirectURI), string(hash)); err != nil {
 		t.Fatalf("create confidential client: %v", err)
 	}
 }
@@ -696,7 +697,7 @@ func TestTokenEndpoint_PublicClientStillRequiresPKCE(t *testing.T) {
 	// Direct seed: empty code_challenge for a public client. /token must
 	// still require a verifier (or otherwise refuse) because public clients
 	// have no secret to authenticate with.
-	if err := store.CreateAuthCode("pub-code-114", learner, "", "cid-pub", time.Now().Add(time.Hour)); err != nil {
+	if err := store.CreateAuthCode(context.Background(), "pub-code-114", learner, "", "cid-pub", time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("seed auth code: %v", err)
 	}
 

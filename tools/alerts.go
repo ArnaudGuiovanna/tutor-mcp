@@ -33,9 +33,9 @@ func registerGetPendingAlerts(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		states, _ := deps.Store.GetConceptStatesByLearner(learnerID)
-		interactions, _ := deps.Store.GetRecentInteractionsByLearner(learnerID, engine.DefaultRecentInteractionsWindow)
-		sessionStart, _ := deps.Store.GetSessionStart(learnerID)
+		states, _ := deps.Store.GetConceptStatesByLearner(ctx, learnerID)
+		interactions, _ := deps.Store.GetRecentInteractionsByLearner(ctx, learnerID, engine.DefaultRecentInteractionsWindow)
+		sessionStart, _ := deps.Store.GetSessionStart(ctx, learnerID)
 
 		// Resolve which domain(s) constrain this alert computation. The
 		// README contract for the Alert Engine is that orphan concept
@@ -46,7 +46,7 @@ func registerGetPendingAlerts(server *mcp.Server, deps *Deps) {
 			// Single-domain branch: explicit domain_id given, scope to
 			// that domain's concepts (or refuse if the lookup fails or
 			// the domain doesn't belong to this learner).
-			domain, domainErr := resolveDomain(deps.Store, learnerID, params.DomainID)
+			domain, domainErr := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
 			if domainErr != nil || domain == nil {
 				deps.Logger.Error("get_pending_alerts: domain not found", "err", domainErr, "learner", learnerID, "domain_id", params.DomainID)
 				r, _ := errorResult("domain not found")
@@ -63,7 +63,7 @@ func registerGetPendingAlerts(server *mcp.Server, deps *Deps) {
 			// concepts across all non-archived domains. If the learner
 			// has zero active domains, return a clean empty payload with
 			// needs_domain_setup so the LLM can self-correct.
-			activeDomains, _ := deps.Store.GetDomainsByLearner(learnerID, false)
+			activeDomains, _ := deps.Store.GetDomainsByLearner(ctx, learnerID, false)
 			if len(activeDomains) == 0 {
 				r, _ := jsonResult(map[string]interface{}{
 					"alerts":             []models.Alert{},
@@ -91,13 +91,13 @@ func registerGetPendingAlerts(server *mcp.Server, deps *Deps) {
 		// input are tolerated — the missing input simply skips its branch
 		// inside ComputeMetacognitiveAlerts (defensive: a corrupt affect
 		// row shouldn't block the whole alert payload).
-		affects, _ := deps.Store.GetRecentAffectStates(learnerID, 10)
+		affects, _ := deps.Store.GetRecentAffectStates(ctx, learnerID, 10)
 		var autonomyScores []float64
 		for _, a := range affects {
 			autonomyScores = append(autonomyScores, a.AutonomyScore)
 		}
-		calibBias, _ := deps.Store.GetCalibrationBias(learnerID, 20)
-		transfers, _ := deps.Store.GetTransferRecordsByLearner(learnerID)
+		calibBias, _ := deps.Store.GetCalibrationBias(ctx, learnerID, 20)
+		transfers, _ := deps.Store.GetTransferRecordsByLearner(ctx, learnerID)
 		metaAlerts := engine.ComputeMetacognitiveAlerts(
 			autonomyScores,
 			calibBias,

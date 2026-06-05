@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"testing"
 
 	"tutor-mcp/models"
@@ -14,14 +15,14 @@ import (
 func TestActiveDomainConceptSet_FiltersOutDeletedDomain(t *testing.T) {
 	store := setupTestDB(t)
 
-	cuisine, err := store.CreateDomain("L1", "cuisine", "", models.KnowledgeSpace{
+	cuisine, err := store.CreateDomain(context.Background(), "L1", "cuisine", "", models.KnowledgeSpace{
 		Concepts:      []string{"Bases de la cuisine", "Sauces"},
 		Prerequisites: map[string][]string{},
 	})
 	if err != nil {
 		t.Fatalf("create cuisine: %v", err)
 	}
-	if _, err := store.CreateDomain("L1", "info", "", models.KnowledgeSpace{
+	if _, err := store.CreateDomain(context.Background(), "L1", "info", "", models.KnowledgeSpace{
 		Concepts:      []string{"Variables", "Boucles"},
 		Prerequisites: map[string][]string{},
 	}); err != nil {
@@ -32,11 +33,11 @@ func TestActiveDomainConceptSet_FiltersOutDeletedDomain(t *testing.T) {
 	seedConceptState(t, store, "Bases de la cuisine", 0.4)
 	seedConceptState(t, store, "Variables", 0.6)
 
-	if err := store.DeleteDomain(cuisine.ID, "L1"); err != nil {
+	if err := store.DeleteDomain(context.Background(), cuisine.ID, "L1"); err != nil {
 		t.Fatalf("delete cuisine: %v", err)
 	}
 
-	set, err := store.ActiveDomainConceptSet("L1")
+	set, err := store.ActiveDomainConceptSet(context.Background(), "L1")
 	if err != nil {
 		t.Fatalf("active concept set: %v", err)
 	}
@@ -48,7 +49,7 @@ func TestActiveDomainConceptSet_FiltersOutDeletedDomain(t *testing.T) {
 	}
 
 	// concept_states themselves are still there — that's the design intent.
-	states, _ := store.GetConceptStatesByLearner("L1")
+	states, _ := store.GetConceptStatesByLearner(context.Background(), "L1")
 	if len(states) != 2 {
 		t.Errorf("expected 2 concept_states preserved after delete, got %d", len(states))
 	}
@@ -60,18 +61,18 @@ func TestActiveDomainConceptSet_FiltersOutDeletedDomain(t *testing.T) {
 func TestActiveDomainConceptSet_ExcludesArchived(t *testing.T) {
 	store := setupTestDB(t)
 
-	d, err := store.CreateDomain("L1", "info", "", models.KnowledgeSpace{
+	d, err := store.CreateDomain(context.Background(), "L1", "info", "", models.KnowledgeSpace{
 		Concepts:      []string{"Variables"},
 		Prerequisites: map[string][]string{},
 	})
 	if err != nil {
 		t.Fatalf("create domain: %v", err)
 	}
-	if err := store.ArchiveDomain(d.ID, "L1"); err != nil {
+	if err := store.ArchiveDomain(context.Background(), d.ID, "L1"); err != nil {
 		t.Fatalf("archive: %v", err)
 	}
 
-	set, err := store.ActiveDomainConceptSet("L1")
+	set, err := store.ActiveDomainConceptSet(context.Background(), "L1")
 	if err != nil {
 		t.Fatalf("active concept set: %v", err)
 	}
@@ -85,7 +86,7 @@ func TestActiveDomainConceptSet_ExcludesArchived(t *testing.T) {
 func TestActiveDomainConceptSet_NoDomains(t *testing.T) {
 	store := setupTestDB(t)
 
-	set, err := store.ActiveDomainConceptSet("L1")
+	set, err := store.ActiveDomainConceptSet(context.Background(), "L1")
 	if err != nil {
 		t.Fatalf("active concept set: %v", err)
 	}

@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"testing"
@@ -55,7 +56,7 @@ func TestGetMisconceptionGroups_Basic(t *testing.T) {
 	insertInteraction(t, store, "Goroutines", false, "confusion goroutine/thread", "mixed up scheduler", now.Add(-1*time.Hour))
 	insertInteraction(t, store, "Goroutines", false, "missing sync", "forgot to use WaitGroup", now.Add(-2*time.Hour))
 
-	groups, err := store.GetMisconceptionGroups("L1", nil)
+	groups, err := store.GetMisconceptionGroups(context.Background(), "L1", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -94,7 +95,7 @@ func TestMisconceptionStatus_Active(t *testing.T) {
 	insertInteraction(t, store, "Goroutines", true, "", "", now.Add(-2*time.Hour))
 	insertInteraction(t, store, "Goroutines", false, "confusion goroutine/thread", "detail2", now.Add(-1*time.Hour))
 
-	groups, err := store.GetMisconceptionGroups("L1", nil)
+	groups, err := store.GetMisconceptionGroups(context.Background(), "L1", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -118,7 +119,7 @@ func TestMisconceptionStatus_Resolved(t *testing.T) {
 	insertInteraction(t, store, "Goroutines", true, "", "", now.Add(-2*time.Hour))
 	insertInteraction(t, store, "Goroutines", true, "", "", now.Add(-1*time.Hour))
 
-	groups, err := store.GetMisconceptionGroups("L1", nil)
+	groups, err := store.GetMisconceptionGroups(context.Background(), "L1", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -146,7 +147,7 @@ func TestGetActiveMisconceptions(t *testing.T) {
 	insertInteraction(t, store, "Interfaces", true, "", "", now.Add(-3*time.Hour))
 	insertInteraction(t, store, "Interfaces", true, "", "", now.Add(-2*time.Hour))
 
-	active, err := store.GetActiveMisconceptions("L1", "Goroutines")
+	active, err := store.GetActiveMisconceptions(context.Background(), "L1", "Goroutines")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -171,7 +172,7 @@ func TestGetDistinctMisconceptionTypes(t *testing.T) {
 	insertInteraction(t, store, "Goroutines", false, "missing sync", "d2", now.Add(-2*time.Hour))
 	insertInteraction(t, store, "Goroutines", true, "", "", now.Add(-1*time.Hour)) // no misconception
 
-	types, err := store.GetDistinctMisconceptionTypes("L1", "Goroutines")
+	types, err := store.GetDistinctMisconceptionTypes(context.Background(), "L1", "Goroutines")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -198,7 +199,7 @@ func TestConceptFilter(t *testing.T) {
 	insertInteraction(t, store, "Interfaces", false, "type assertion error", "d2", now.Add(-1*time.Hour))
 
 	filter := map[string]bool{"Goroutines": true}
-	groups, err := store.GetMisconceptionGroups("L1", filter)
+	groups, err := store.GetMisconceptionGroups(context.Background(), "L1", filter)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

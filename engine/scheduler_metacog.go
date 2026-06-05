@@ -5,6 +5,7 @@
 package engine
 
 import (
+	"context"
 	"time"
 
 	"tutor-mcp/models"
@@ -50,7 +51,8 @@ func (s *Scheduler) dispatchMetacognitiveAlerts() {
 	if s.store == nil {
 		return
 	}
-	learners, err := s.store.GetActiveLearners()
+	ctx := context.Background()
+	learners, err := s.store.GetActiveLearners(ctx)
 	if err != nil {
 		s.logger.Error("scheduler: metacog get learners", "err", err)
 		return
@@ -64,7 +66,7 @@ func (s *Scheduler) dispatchMetacognitiveAlerts() {
 		if learner.WebhookURL == "" {
 			continue
 		}
-		avail, _ := s.store.GetAvailability(learner.ID)
+		avail, _ := s.store.GetAvailability(ctx, learner.ID)
 		if avail != nil && avail.DoNotDisturb {
 			continue
 		}
@@ -73,15 +75,15 @@ func (s *Scheduler) dispatchMetacognitiveAlerts() {
 		// missing input simply skips its branch in
 		// ComputeMetacognitiveAlerts (no alert is better than panicking
 		// the cron tick on a single learner with corrupt rows).
-		states, _ := s.store.GetConceptStatesByLearner(learner.ID)
-		interactions, _ := s.store.GetRecentInteractionsByLearner(learner.ID, 20)
-		affects, _ := s.store.GetRecentAffectStates(learner.ID, 10)
+		states, _ := s.store.GetConceptStatesByLearner(ctx, learner.ID)
+		interactions, _ := s.store.GetRecentInteractionsByLearner(ctx, learner.ID, 20)
+		affects, _ := s.store.GetRecentAffectStates(ctx, learner.ID, 10)
 		var autonomyScores []float64
 		for _, a := range affects {
 			autonomyScores = append(autonomyScores, a.AutonomyScore)
 		}
-		calibBias, _ := s.store.GetCalibrationBias(learner.ID, 20)
-		transfers, _ := s.store.GetTransferRecordsByLearner(learner.ID)
+		calibBias, _ := s.store.GetCalibrationBias(ctx, learner.ID, 20)
+		transfers, _ := s.store.GetTransferRecordsByLearner(ctx, learner.ID)
 
 		alerts := ComputeMetacognitiveAlerts(
 			autonomyScores,
@@ -91,13 +93,13 @@ func (s *Scheduler) dispatchMetacognitiveAlerts() {
 			WithTransferData(states, transfers),
 		)
 
-		domains, _ := s.store.GetDomainsByLearner(learner.ID, false)
+		domains, _ := s.store.GetDomainsByLearner(ctx, learner.ID, false)
 		candidates := BuildMetacognitiveNudgeCandidates(learner, domains, alerts)
 		for _, candidate := range candidates {
 			// One metacognitive push per tick is intentional: Discord should
 			// surface the highest-learning-value next action, not a bundle of
 			// weak observations.
-			alreadySent, _ := s.store.WasAlertSentToday(learner.ID, candidate.AlertTag)
+			alreadySent, _ := s.store.WasAlertSentToday(ctx, learner.ID, candidate.AlertTag)
 			if alreadySent {
 				continue
 			}
@@ -108,7 +110,7 @@ func (s *Scheduler) dispatchMetacognitiveAlerts() {
 				continue
 			}
 			if _, err := s.store.EnqueueWebhookMessage(
-				learner.ID, candidate.Kind, content, now, now.Add(2*time.Hour), candidate.Priority,
+				ctx, learner.ID, candidate.Kind, content, now, now.Add(2*time.Hour), candidate.Priority,
 			); err != nil {
 				s.logger.Error("scheduler: metacog enqueue",
 					"err", err, "learner", learner.ID, "kind", candidate.Kind)

@@ -5,6 +5,7 @@
 package db
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -18,10 +19,10 @@ func TestUpdateDomainPhase_DiagnosticPersistsEntropy(t *testing.T) {
 	d := mkDomain(t, store, []string{"A", "B"})
 
 	now := time.Now().UTC().Truncate(time.Second)
-	if err := store.UpdateDomainPhase(d.ID, models.PhaseDiagnostic, 0.42, now); err != nil {
+	if err := store.UpdateDomainPhase(context.Background(), d.ID, models.PhaseDiagnostic, 0.42, now); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	got, err := store.GetDomainByID(d.ID)
+	got, err := store.GetDomainByID(context.Background(), d.ID)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -41,15 +42,15 @@ func TestUpdateDomainPhase_NonDiagnosticNullifiesEntropy(t *testing.T) {
 	d := mkDomain(t, store, []string{"A"})
 
 	// First write DIAGNOSTIC with entropy populated.
-	if err := store.UpdateDomainPhase(d.ID, models.PhaseDiagnostic, 0.55, time.Now().UTC()); err != nil {
+	if err := store.UpdateDomainPhase(context.Background(), d.ID, models.PhaseDiagnostic, 0.55, time.Now().UTC()); err != nil {
 		t.Fatalf("set diag: %v", err)
 	}
 	// Then transition to INSTRUCTION — entropy column must reset to NULL.
-	if err := store.UpdateDomainPhase(d.ID, models.PhaseInstruction, 999, time.Now().UTC()); err != nil {
+	if err := store.UpdateDomainPhase(context.Background(), d.ID, models.PhaseInstruction, 999, time.Now().UTC()); err != nil {
 		t.Fatalf("set instruction: %v", err)
 	}
 
-	got, err := store.GetDomainByID(d.ID)
+	got, err := store.GetDomainByID(context.Background(), d.ID)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -67,13 +68,13 @@ func TestUpdateDomainPhase_MaintenanceAlsoNullifiesEntropy(t *testing.T) {
 	store := setupTestDB(t)
 	d := mkDomain(t, store, []string{"A"})
 
-	if err := store.UpdateDomainPhase(d.ID, models.PhaseDiagnostic, 0.7, time.Now().UTC()); err != nil {
+	if err := store.UpdateDomainPhase(context.Background(), d.ID, models.PhaseDiagnostic, 0.7, time.Now().UTC()); err != nil {
 		t.Fatalf("set diag: %v", err)
 	}
-	if err := store.UpdateDomainPhase(d.ID, models.PhaseMaintenance, 999, time.Now().UTC()); err != nil {
+	if err := store.UpdateDomainPhase(context.Background(), d.ID, models.PhaseMaintenance, 999, time.Now().UTC()); err != nil {
 		t.Fatalf("set maint: %v", err)
 	}
-	got, _ := store.GetDomainByID(d.ID)
+	got, _ := store.GetDomainByID(context.Background(), d.ID)
 	if got.Phase != models.PhaseMaintenance {
 		t.Errorf("phase: want MAINTENANCE, got %q", got.Phase)
 	}
@@ -86,7 +87,7 @@ func TestUpdateDomainPhase_NonexistentDomainNoError(t *testing.T) {
 	// SQL UPDATE on a missing PK is a no-op, not an error. Pin the
 	// behaviour: callers don't need to pre-check existence.
 	store := setupTestDB(t)
-	err := store.UpdateDomainPhase("nonexistent", models.PhaseInstruction, 0, time.Now().UTC())
+	err := store.UpdateDomainPhase(context.Background(), "nonexistent", models.PhaseInstruction, 0, time.Now().UTC())
 	if err != nil {
 		t.Errorf("nonexistent domain: want no error, got %v", err)
 	}
@@ -97,14 +98,14 @@ func TestUpdateDomainPhase_Idempotent(t *testing.T) {
 	d := mkDomain(t, store, []string{"A"})
 
 	t1 := time.Now().UTC().Truncate(time.Second)
-	if err := store.UpdateDomainPhase(d.ID, models.PhaseInstruction, 0, t1); err != nil {
+	if err := store.UpdateDomainPhase(context.Background(), d.ID, models.PhaseInstruction, 0, t1); err != nil {
 		t.Fatalf("first: %v", err)
 	}
 	t2 := t1.Add(1 * time.Hour)
-	if err := store.UpdateDomainPhase(d.ID, models.PhaseInstruction, 0, t2); err != nil {
+	if err := store.UpdateDomainPhase(context.Background(), d.ID, models.PhaseInstruction, 0, t2); err != nil {
 		t.Fatalf("second: %v", err)
 	}
-	got, _ := store.GetDomainByID(d.ID)
+	got, _ := store.GetDomainByID(context.Background(), d.ID)
 	if !got.PhaseChangedAt.Equal(t2) {
 		t.Errorf("phase_changed_at: want updated to %v, got %v", t2, got.PhaseChangedAt)
 	}
@@ -114,7 +115,7 @@ func TestUpdateDomainPhase_Idempotent(t *testing.T) {
 
 func TestGetActiveMisconceptionsBatch_EmptyConceptsReturnsEmptyMap(t *testing.T) {
 	store := setupTestDB(t)
-	got, err := store.GetActiveMisconceptionsBatch("L1", nil)
+	got, err := store.GetActiveMisconceptionsBatch(context.Background(), "L1", nil)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -140,7 +141,7 @@ func TestGetActiveMisconceptionsBatch_OnlyActiveReported(t *testing.T) {
 	insertInteraction(t, store, "Interfaces", true, "", "", now.Add(-2*time.Hour))
 
 	// Concept with no interactions at all.
-	got, err := store.GetActiveMisconceptionsBatch("L1", []string{"Goroutines", "Interfaces", "Channels"})
+	got, err := store.GetActiveMisconceptionsBatch(context.Background(), "L1", []string{"Goroutines", "Interfaces", "Channels"})
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -159,7 +160,7 @@ func TestGetActiveMisconceptionsBatch_OnlyActiveReported(t *testing.T) {
 
 func TestGetFirstActiveMisconception_NoneReturnsNil(t *testing.T) {
 	store := setupTestDB(t)
-	got, err := store.GetFirstActiveMisconception("L1", "Goroutines")
+	got, err := store.GetFirstActiveMisconception(context.Background(), "L1", "Goroutines")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -177,7 +178,7 @@ func TestGetFirstActiveMisconception_ReturnsHighestCount(t *testing.T) {
 	insertInteraction(t, store, "Goroutines", false, "confusion", "d2", now.Add(-1*time.Hour))
 	insertInteraction(t, store, "Goroutines", false, "missing", "d3", now.Add(-2*time.Hour))
 
-	got, err := store.GetFirstActiveMisconception("L1", "Goroutines")
+	got, err := store.GetFirstActiveMisconception(context.Background(), "L1", "Goroutines")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -193,7 +194,7 @@ func TestGetFirstActiveMisconception_ReturnsHighestCount(t *testing.T) {
 
 func TestGetRecentConceptsByDomain_EmptyDomainConcepts(t *testing.T) {
 	store := setupTestDB(t)
-	got, err := store.GetRecentConceptsByDomain("L1", nil, 20)
+	got, err := store.GetRecentConceptsByDomain(context.Background(), "L1", nil, 20)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -204,7 +205,7 @@ func TestGetRecentConceptsByDomain_EmptyDomainConcepts(t *testing.T) {
 
 func TestGetRecentConceptsByDomain_ZeroLimit(t *testing.T) {
 	store := setupTestDB(t)
-	got, err := store.GetRecentConceptsByDomain("L1", []string{"A"}, 0)
+	got, err := store.GetRecentConceptsByDomain(context.Background(), "L1", []string{"A"}, 0)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -215,7 +216,7 @@ func TestGetRecentConceptsByDomain_ZeroLimit(t *testing.T) {
 
 func TestGetRecentConceptsByDomain_NoInteractions(t *testing.T) {
 	store := setupTestDB(t)
-	got, err := store.GetRecentConceptsByDomain("L1", []string{"A", "B"}, 20)
+	got, err := store.GetRecentConceptsByDomain(context.Background(), "L1", []string{"A", "B"}, 20)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -233,7 +234,7 @@ func TestGetRecentConceptsByDomain_DedupAndOrder(t *testing.T) {
 	insertInteraction(t, store, "B", true, "", "", now.Add(-2*time.Hour))
 	insertInteraction(t, store, "C", true, "", "", now.Add(-1*time.Hour))
 
-	got, err := store.GetRecentConceptsByDomain("L1", []string{"A", "B", "C"}, 20)
+	got, err := store.GetRecentConceptsByDomain(context.Background(), "L1", []string{"A", "B", "C"}, 20)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -255,7 +256,7 @@ func TestGetRecentConceptsByDomain_FiltersOutOfDomain(t *testing.T) {
 	insertInteraction(t, store, "OtherDomain", true, "", "", now.Add(-1*time.Hour))
 	insertInteraction(t, store, "A", true, "", "", now.Add(-2*time.Hour))
 
-	got, err := store.GetRecentConceptsByDomain("L1", []string{"A"}, 20)
+	got, err := store.GetRecentConceptsByDomain(context.Background(), "L1", []string{"A"}, 20)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -275,7 +276,7 @@ func TestCountInteractionsSince_AllConcepts_NoFilter(t *testing.T) {
 
 	// nil/empty domainConcepts → no Go-side filter, count everything since.
 	since := now.Add(-2 * time.Hour)
-	n, err := store.CountInteractionsSince("L1", since, nil)
+	n, err := store.CountInteractionsSince(context.Background(), "L1", since, nil)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -293,7 +294,7 @@ func TestCountInteractionsSince_AcrossCutoff(t *testing.T) {
 	insertInteraction(t, store, "A", true, "", "", now.Add(-15*time.Minute))
 
 	since := now.Add(-1 * time.Hour)
-	n, err := store.CountInteractionsSince("L1", since, []string{"A", "B"})
+	n, err := store.CountInteractionsSince(context.Background(), "L1", since, []string{"A", "B"})
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -308,7 +309,7 @@ func TestCountInteractionsSince_FiltersOutOfDomain(t *testing.T) {
 	insertInteraction(t, store, "InDomain", true, "", "", now.Add(-30*time.Minute))
 	insertInteraction(t, store, "OutOfDomain", true, "", "", now.Add(-30*time.Minute))
 
-	n, err := store.CountInteractionsSince("L1", now.Add(-1*time.Hour), []string{"InDomain"})
+	n, err := store.CountInteractionsSince(context.Background(), "L1", now.Add(-1*time.Hour), []string{"InDomain"})
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -322,7 +323,7 @@ func TestCountInteractionsSince_FutureCutoffReturnsZero(t *testing.T) {
 	now := time.Now().UTC()
 	insertInteraction(t, store, "A", true, "", "", now.Add(-1*time.Hour))
 
-	n, err := store.CountInteractionsSince("L1", now.Add(1*time.Hour), nil)
+	n, err := store.CountInteractionsSince(context.Background(), "L1", now.Add(1*time.Hour), nil)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -335,7 +336,7 @@ func TestCountInteractionsSince_FutureCutoffReturnsZero(t *testing.T) {
 
 func TestGetActionHistoryForConcept_NoInteractions(t *testing.T) {
 	store := setupTestDB(t)
-	h, err := store.GetActionHistoryForConcept("L1", "A", 50)
+	h, err := store.GetActionHistoryForConcept(context.Background(), "L1", "A", 50)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -354,7 +355,7 @@ func TestGetActionHistoryForConcept_CountsByActivityType(t *testing.T) {
 	// A different type that's neither MC, Feynman nor Transfer — should not bump any counter.
 	insertInteractionWithType(t, store, "A", true, "PRACTICE", now.Add(-1*time.Hour))
 
-	h, err := store.GetActionHistoryForConcept("L1", "A", 50)
+	h, err := store.GetActionHistoryForConcept(context.Background(), "L1", "A", 50)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -379,7 +380,7 @@ func TestGetActionHistoryForConcept_StreakStopsOnFirstFailure(t *testing.T) {
 	insertInteractionWithType(t, store, "A", true, "PRACTICE", now.Add(-2*time.Hour))
 	insertInteractionWithType(t, store, "A", true, "PRACTICE", now.Add(-1*time.Hour))
 
-	h, err := store.GetActionHistoryForConcept("L1", "A", 50)
+	h, err := store.GetActionHistoryForConcept(context.Background(), "L1", "A", 50)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -396,7 +397,7 @@ func TestGetActionHistoryForConcept_NegativeLimitDefaults(t *testing.T) {
 	now := time.Now().UTC()
 	insertInteractionWithType(t, store, "A", true, "PRACTICE", now.Add(-1*time.Hour))
 
-	h, err := store.GetActionHistoryForConcept("L1", "A", -5)
+	h, err := store.GetActionHistoryForConcept(context.Background(), "L1", "A", -5)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}

@@ -5,6 +5,7 @@
 package tools
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -12,10 +13,10 @@ import (
 )
 
 func makeOwnerDomain(t *testing.T, store interface {
-	CreateDomainWithValueFramings(string, string, string, models.KnowledgeSpace, string) (*models.Domain, error)
+	CreateDomainWithValueFramings(context.Context, string, string, string, models.KnowledgeSpace, string) (*models.Domain, error)
 }, ownerID, name string) *models.Domain {
 	t.Helper()
-	d, err := store.CreateDomainWithValueFramings(ownerID, name, "", models.KnowledgeSpace{
+	d, err := store.CreateDomainWithValueFramings(context.Background(), ownerID, name, "", models.KnowledgeSpace{
 		Concepts:      []string{"a", "b"},
 		Prerequisites: map[string][]string{"b": {"a"}},
 	}, "")
@@ -30,10 +31,10 @@ func makeOwnerDomain(t *testing.T, store interface {
 // domain (feynman_challenge, transfer_challenge — issue #8) need a real domain
 // in place before they will touch concept_state.
 func seedDomain(t *testing.T, store interface {
-	CreateDomainWithValueFramings(string, string, string, models.KnowledgeSpace, string) (*models.Domain, error)
+	CreateDomainWithValueFramings(context.Context, string, string, string, models.KnowledgeSpace, string) (*models.Domain, error)
 }, ownerID string, concepts ...string) *models.Domain {
 	t.Helper()
-	d, err := store.CreateDomainWithValueFramings(ownerID, "seeded", "", models.KnowledgeSpace{
+	d, err := store.CreateDomainWithValueFramings(context.Background(), ownerID, "seeded", "", models.KnowledgeSpace{
 		Concepts: concepts,
 	}, "")
 	if err != nil {
@@ -78,7 +79,7 @@ func TestArchiveDomain_HappyPath(t *testing.T) {
 	}
 
 	// DB state: domain is archived
-	got, err := store.GetDomainByID(d.ID)
+	got, err := store.GetDomainByID(context.Background(), d.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +103,7 @@ func TestArchiveDomain_ForeignDomainRejected(t *testing.T) {
 	}
 
 	// DB state: should remain unarchived
-	got, _ := store.GetDomainByID(d.ID)
+	got, _ := store.GetDomainByID(context.Background(), d.ID)
 	if got.Archived {
 		t.Fatalf("foreign archive should not have modified the domain")
 	}
@@ -124,7 +125,7 @@ func TestArchiveDomain_UnknownID(t *testing.T) {
 func TestUnarchiveDomain_HappyPath(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	d := makeOwnerDomain(t, store, "L_owner", "math")
-	if err := store.ArchiveDomain(d.ID, "L_owner"); err != nil {
+	if err := store.ArchiveDomain(context.Background(), d.ID, "L_owner"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -135,7 +136,7 @@ func TestUnarchiveDomain_HappyPath(t *testing.T) {
 		t.Fatalf("expected success, got %q", resultText(res))
 	}
 
-	got, _ := store.GetDomainByID(d.ID)
+	got, _ := store.GetDomainByID(context.Background(), d.ID)
 	if got.Archived {
 		t.Fatalf("expected unarchived")
 	}
@@ -154,7 +155,7 @@ func TestUnarchiveDomain_MissingID(t *testing.T) {
 func TestUnarchiveDomain_ForeignRejected(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	d := makeOwnerDomain(t, store, "L_owner", "math")
-	_ = store.ArchiveDomain(d.ID, "L_owner")
+	_ = store.ArchiveDomain(context.Background(), d.ID, "L_owner")
 
 	res := callTool(t, deps, registerUnarchiveDomain, "L_attacker", "unarchive_domain", map[string]any{
 		"domain_id": d.ID,
@@ -180,7 +181,7 @@ func TestDeleteDomain_RequiresConfirm(t *testing.T) {
 	}
 
 	// domain still exists
-	got, err := store.GetDomainByID(d.ID)
+	got, err := store.GetDomainByID(context.Background(), d.ID)
 	if err != nil || got == nil {
 		t.Fatalf("domain should still exist after unconfirmed delete")
 	}
@@ -199,7 +200,7 @@ func TestDeleteDomain_HappyPath(t *testing.T) {
 	}
 
 	// domain is gone
-	if _, err := store.GetDomainByID(d.ID); err == nil {
+	if _, err := store.GetDomainByID(context.Background(), d.ID); err == nil {
 		t.Fatalf("expected domain deleted")
 	}
 }
@@ -216,7 +217,7 @@ func TestDeleteDomain_ForeignRejected(t *testing.T) {
 		t.Fatalf("expected error for foreign learner")
 	}
 	// Domain still exists.
-	if _, err := store.GetDomainByID(d.ID); err != nil {
+	if _, err := store.GetDomainByID(context.Background(), d.ID); err != nil {
 		t.Fatalf("expected domain preserved, got err %v", err)
 	}
 }
@@ -239,11 +240,11 @@ func TestDeleteDomain_MissingID(t *testing.T) {
 func TestResolveDomain_RejectsArchived(t *testing.T) {
 	store, _ := setupToolsTest(t)
 	d := makeOwnerDomain(t, store, "L_owner", "math")
-	if err := store.ArchiveDomain(d.ID, "L_owner"); err != nil {
+	if err := store.ArchiveDomain(context.Background(), d.ID, "L_owner"); err != nil {
 		t.Fatalf("archive domain: %v", err)
 	}
 
-	got, err := resolveDomain(store, "L_owner", d.ID)
+	got, err := resolveDomain(context.Background(), store, "L_owner", d.ID)
 	if err == nil {
 		t.Fatalf("expected error resolving archived domain, got %+v", got)
 	}
@@ -258,7 +259,7 @@ func TestResolveDomain_RejectsArchived(t *testing.T) {
 func TestRecordInteraction_RejectsArchivedDomain(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	d := makeOwnerDomain(t, store, "L_owner", "math") // concepts: ["a","b"]
-	if err := store.ArchiveDomain(d.ID, "L_owner"); err != nil {
+	if err := store.ArchiveDomain(context.Background(), d.ID, "L_owner"); err != nil {
 		t.Fatalf("archive domain: %v", err)
 	}
 
@@ -279,7 +280,7 @@ func TestRecordInteraction_RejectsArchivedDomain(t *testing.T) {
 	}
 
 	// DB state: no interaction was recorded against the archived domain.
-	recents, err := store.GetRecentInteractionsByLearner("L_owner", 10)
+	recents, err := store.GetRecentInteractionsByLearner(context.Background(), "L_owner", 10)
 	if err != nil {
 		t.Fatal(err)
 	}

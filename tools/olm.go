@@ -29,7 +29,7 @@ func registerGetOLMSnapshot(server *mcp.Server, deps *Deps) {
 		}
 
 		if params.Scope == "global" {
-			g, err := engine.BuildGlobalOLMSnapshot(deps.Store, learnerID)
+			g, err := engine.BuildGlobalOLMSnapshot(ctx, deps.Store, learnerID)
 			if err != nil {
 				deps.Logger.Error("get_olm_snapshot global: build failed", "err", err, "learner", learnerID)
 				r, _ := errorResult(err.Error())
@@ -40,7 +40,7 @@ func registerGetOLMSnapshot(server *mcp.Server, deps *Deps) {
 		}
 
 		// Default — session scope (existing behavior).
-		snap, err := engine.BuildOLMSnapshot(deps.Store, learnerID, params.DomainID)
+		snap, err := engine.BuildOLMSnapshot(ctx, deps.Store, learnerID, params.DomainID)
 		if err != nil {
 			deps.Logger.Error("get_olm_snapshot: build failed", "err", err, "learner", learnerID)
 			r, _ := errorResult(err.Error())

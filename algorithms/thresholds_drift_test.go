@@ -27,7 +27,7 @@ func TestNoLiteralMasteryThresholds(t *testing.T) {
 	allowed := map[string]bool{
 		// Hidi-Renninger interest phase — intentionally orthogonal to BKT
 		// mastery; coupling rejected in OQ-7.2.
-		"engine/motivation.go:42": true,
+		"engine/motivation.go:43": true,
 		// User-facing description string, not a code comparison.
 		"tools/mastery.go:24": true,
 	}

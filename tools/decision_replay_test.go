@@ -4,6 +4,7 @@
 package tools
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -32,10 +33,10 @@ func TestGetDecisionReplaySummary_ReturnsAuditSummary(t *testing.T) {
 		Success:      true,
 		DomainID:     domain.ID,
 	}
-	if err := store.CreateInteraction(interaction); err != nil {
+	if err := store.CreateInteraction(context.Background(), interaction); err != nil {
 		t.Fatalf("create interaction: %v", err)
 	}
-	if err := store.CreatePedagogicalSnapshot(&models.PedagogicalSnapshot{
+	if err := store.CreatePedagogicalSnapshot(context.Background(), &models.PedagogicalSnapshot{
 		InteractionID:   interaction.ID,
 		LearnerID:       "L_owner",
 		DomainID:        domain.ID,

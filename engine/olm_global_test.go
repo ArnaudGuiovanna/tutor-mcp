@@ -4,6 +4,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -41,7 +42,7 @@ func TestBuildGlobalOLMSnapshot_AggregatesAcrossDomains(t *testing.T) {
 	seedConceptState(t, store, "L1", "a", 0.90, "review")
 	seedConceptState(t, store, "L1", "x", 0.90, "review")
 
-	g, err := BuildGlobalOLMSnapshot(store, "L1")
+	g, err := BuildGlobalOLMSnapshot(context.Background(), store, "L1")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -60,7 +61,7 @@ func TestBuildGlobalOLMSnapshot_NoDomain_ReturnsEmpty(t *testing.T) {
 	store, raw := newOLMTestStore(t)
 	seedLearner(t, raw, "L1")
 
-	g, err := BuildGlobalOLMSnapshot(store, "L1")
+	g, err := BuildGlobalOLMSnapshot(context.Background(), store, "L1")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -92,7 +93,7 @@ func TestBuildGlobalOLMSnapshot_CalibrationSparklineOldestFirst(t *testing.T) {
 		}
 	}
 
-	g, err := BuildGlobalOLMSnapshot(store, "L1")
+	g, err := BuildGlobalOLMSnapshot(context.Background(), store, "L1")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -128,7 +129,7 @@ func TestBuildGlobalOLMSnapshot_PopulatesSparklinesAndEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	g, err := BuildGlobalOLMSnapshot(store, "L1")
+	g, err := BuildGlobalOLMSnapshot(context.Background(), store, "L1")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
