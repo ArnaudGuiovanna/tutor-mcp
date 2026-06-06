@@ -41,8 +41,25 @@ func OpenPostgres(dsn string, maxConns int) (*sql.DB, error) {
 // sql's extended protocol runs one command per Exec, so the schema is split on
 // statement boundaries.
 func MigratePostgres(ctx context.Context, d *sql.DB) error {
+	// Serialize migration across the fleet. CREATE TABLE IF NOT EXISTS is not
+	// atomic against the pg_type catalog, so two instances booting at once race
+	// and one hits 23505 (duplicate key on pg_type_typname_nsp_index). A
+	// session-level advisory lock, held on a single pinned connection for the
+	// whole apply, makes migration single-flight: the loser waits, then its
+	// IF NOT EXISTS statements are no-ops.
+	conn, err := d.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres migrate: acquire conn: %w", err)
+	}
+	defer conn.Close()
+	const migrateLockKey = 0x7E50_0001 // arbitrary constant, stable across instances
+	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", migrateLockKey); err != nil {
+		return fmt.Errorf("postgres migrate: lock: %w", err)
+	}
+	defer conn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", migrateLockKey)
+
 	for _, stmt := range splitSQLStatements(postgresSchema) {
-		if _, err := d.ExecContext(ctx, stmt); err != nil {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("apply postgres schema (%.60s...): %w", stmt, err)
 		}
 	}
