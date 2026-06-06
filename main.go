@@ -50,6 +50,10 @@ func main() {
 	if dbPath == "" {
 		dbPath = "./data/runtime.db"
 	}
+	dbDriver := os.Getenv("DB_DRIVER")
+	if dbDriver == "" {
+		dbDriver = "sqlite"
+	}
 	baseURL := os.Getenv("BASE_URL")
 	if baseURL == "" {
 		baseURL = fmt.Sprintf("http://localhost:%s", port)
@@ -61,22 +65,46 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Open DB
-	os.MkdirAll("data", 0755)
-	database, err := db.OpenDB(dbPath)
-	if err != nil {
-		logger.Error("failed to open database", "err", err)
+	// Open the store. Default: single-node SQLite (no external deps). Set
+	// DB_DRIVER=postgres + DATABASE_URL for horizontal Postgres deployments.
+	var store *db.Store
+	switch dbDriver {
+	case "postgres":
+		dsn := os.Getenv("DATABASE_URL")
+		if dsn == "" {
+			logger.Error("DB_DRIVER=postgres requires DATABASE_URL")
+			os.Exit(1)
+		}
+		database, err := db.OpenPostgres(dsn, envInt("DB_MAX_CONNS", 10))
+		if err != nil {
+			logger.Error("failed to open postgres", "err", err)
+			os.Exit(1)
+		}
+		defer database.Close()
+		if err := db.MigratePostgres(context.Background(), database); err != nil {
+			logger.Error("failed to migrate postgres", "err", err)
+			os.Exit(1)
+		}
+		store = db.NewStoreWithDialect(database, db.DialectPostgres)
+		logger.Info("database ready", "driver", "postgres")
+	case "sqlite":
+		os.MkdirAll("data", 0755)
+		database, err := db.OpenDB(dbPath)
+		if err != nil {
+			logger.Error("failed to open database", "err", err)
+			os.Exit(1)
+		}
+		defer database.Close()
+		if err := db.Migrate(database); err != nil {
+			logger.Error("failed to migrate database", "err", err)
+			os.Exit(1)
+		}
+		store = db.NewStore(database)
+		logger.Info("database ready", "driver", "sqlite", "path", dbPath)
+	default:
+		logger.Error("unknown DB_DRIVER (want sqlite|postgres)", "driver", dbDriver)
 		os.Exit(1)
 	}
-	defer database.Close()
-
-	if err := db.Migrate(database); err != nil {
-		logger.Error("failed to migrate database", "err", err)
-		os.Exit(1)
-	}
-	logger.Info("database ready", "path", dbPath)
-
-	store := db.NewStore(database)
 
 	// Create MCP server
 	mcpServer := mcp.NewServer(&mcp.Implementation{
@@ -108,7 +136,7 @@ func main() {
 	// Health check
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if err := database.Ping(); err != nil {
+		if err := store.Ping(r.Context()); err != nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			w.Write([]byte(`{"status":"unhealthy","error":"database unreachable"}`))
 			return
