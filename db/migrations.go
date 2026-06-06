@@ -252,6 +252,15 @@ var idempotentMigrations = []string{
     created_at           DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 )`,
 	`CREATE INDEX IF NOT EXISTS idx_webhook_push_log_open ON webhook_push_log(learner_id, domain_id, concept_addressed, pushed_at)`,
+	// Phase 4 distributed scheduler: per-run job lease. Each scheduled job
+	// claims (name, window_key) exactly once across a fleet so only one
+	// instance executes the run. Single-node (SQLite) default never claims.
+	`CREATE TABLE IF NOT EXISTS scheduled_job_runs (
+    name        TEXT NOT NULL,
+    window_key  TEXT NOT NULL,
+    claimed_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (name, window_key)
+)`,
 }
 
 // Migrate brings the database schema up to the version expected by this build.

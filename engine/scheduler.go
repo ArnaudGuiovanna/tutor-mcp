@@ -42,6 +42,12 @@ type Scheduler struct {
 	// shutting down. A nil stopCh (e.g. in struct-literal test fixtures)
 	// is a never-fires channel, so the abort path is simply inert. See #2.
 	stopCh chan struct{}
+
+	// distributed enables fleet-wide exactly-once execution: in distributed
+	// mode each scheduled job claims a DB lease keyed by (name, time bucket)
+	// so only one instance runs the job per fire. Default false keeps the
+	// single-node (SQLite) behaviour where every tick runs locally. See Phase 4.
+	distributed bool
 }
 
 // defaultStopTimeout is the production budget for Stop() to wait for
@@ -64,6 +70,37 @@ func NewScheduler(store storeport.Store, logger *slog.Logger) *Scheduler {
 		stopTimeout: defaultStopTimeout,
 		stopCh:      make(chan struct{}),
 	}
+}
+
+// NewDistributedScheduler builds the same scheduler as NewScheduler but in
+// distributed mode: every scheduled job run executes on exactly one fleet
+// instance, gated by a per-run DB lease (Store.ClaimJobRun). Use this in
+// multi-instance deployments to avoid duplicate per-learner enqueues.
+func NewDistributedScheduler(store storeport.Store, logger *slog.Logger) *Scheduler {
+	s := NewScheduler(store, logger)
+	s.distributed = true
+	return s
+}
+
+// schedule registers a cron job. In distributed mode it first claims a lease
+// keyed by (name, current time bucket of size period) so exactly one fleet
+// instance runs the job per fire; in in-process mode it always runs.
+func (s *Scheduler) schedule(name, spec string, period time.Duration, fn func()) error {
+	_, err := s.cron.AddFunc(spec, func() {
+		if s.distributed {
+			key := fmt.Sprintf("%d", time.Now().UTC().Truncate(period).Unix())
+			ok, cerr := s.store.ClaimJobRun(context.Background(), name, key)
+			if cerr != nil {
+				s.logger.Error("claim job run", "job", name, "err", cerr)
+				return
+			}
+			if !ok {
+				return
+			}
+		}
+		fn()
+	})
+	return err
 }
 
 // slogCronLogger adapts robfig/cron's Logger interface onto an *slog.Logger.
@@ -92,39 +129,39 @@ func (s *Scheduler) Start() error {
 	// OLM: once a day at 13h UTC. Replaces the previous critical-alerts
 	// (every 30 min) and review-reminders (3x/day) jobs — see
 	// docs/superpowers/specs/2026-05-03-webhook-olm-design.md.
-	if _, err := s.cron.AddFunc("0 13 * * *", s.sendOLM); err != nil {
+	if err := s.schedule("olm", "0 13 * * *", 24*time.Hour, s.sendOLM); err != nil {
 		return fmt.Errorf("add olm job: %w", err)
 	}
-	if _, err := s.cron.AddFunc("30 13 * * *", s.runConsolidationCycle); err != nil {
+	if err := s.schedule("consolidation", "30 13 * * *", 24*time.Hour, s.runConsolidationCycle); err != nil {
 		return fmt.Errorf("add consolidation job: %w", err)
 	}
-	if _, err := s.cron.AddFunc("*/5 * * * *", s.requeueStaleConsolidations); err != nil {
+	if err := s.schedule("requeue_stale", "*/5 * * * *", 5*time.Minute, s.requeueStaleConsolidations); err != nil {
 		return fmt.Errorf("add consolidation timeout job: %w", err)
 	}
 	// Daily motivation: once at 8h UTC.
-	if _, err := s.cron.AddFunc("0 8 * * *", s.sendDailyMotivation); err != nil {
+	if err := s.schedule("motivation", "0 8 * * *", 24*time.Hour, s.sendDailyMotivation); err != nil {
 		return fmt.Errorf("add daily motivation job: %w", err)
 	}
 	// End-of-day recap: once at 21h UTC.
-	if _, err := s.cron.AddFunc("0 21 * * *", s.sendDailyRecap); err != nil {
+	if err := s.schedule("recap", "0 21 * * *", 24*time.Hour, s.sendDailyRecap); err != nil {
 		return fmt.Errorf("add daily recap job: %w", err)
 	}
 	// Mirror messages: once at 12h UTC. Dispatches any metacognitive mirror
 	// nudges queued during sessions (#59). One per learner per day, dedup'd
 	// at the alert layer (MIRROR_MESSAGE) so an in-session enqueue + the
 	// scheduler tick can't double-fire.
-	if _, err := s.cron.AddFunc("0 12 * * *", s.sendMirrorMessages); err != nil {
+	if err := s.schedule("mirror", "0 12 * * *", 24*time.Hour, s.sendMirrorMessages); err != nil {
 		return fmt.Errorf("add mirror messages job: %w", err)
 	}
 	// Cleanup: hourly.
-	if _, err := s.cron.AddFunc("0 * * * *", s.cleanupExpiredData); err != nil {
+	if err := s.schedule("cleanup", "0 * * * *", time.Hour, s.cleanupExpiredData); err != nil {
 		return fmt.Errorf("add cleanup job: %w", err)
 	}
 	// Metacognitive alerts: every 30 minutes. Each alert kind is fired at
 	// most once per learner per UTC day via WasAlertSentToday so the cron
 	// cadence only controls *latency* (worst case 30 min between the state
 	// being met and the webhook firing), not frequency-of-spam.
-	if _, err := s.cron.AddFunc("*/30 * * * *", s.dispatchMetacognitiveAlerts); err != nil {
+	if err := s.schedule("metacog_alerts", "*/30 * * * *", 30*time.Minute, s.dispatchMetacognitiveAlerts); err != nil {
 		return fmt.Errorf("add metacognitive alerts job: %w", err)
 	}
 
@@ -478,6 +515,15 @@ func (s *Scheduler) cleanupExpiredData() {
 		s.logger.Error("scheduler: expire webhook queue", "err", err)
 	} else if expired > 0 {
 		s.logger.Info("scheduler: expired webhook messages", "count", expired)
+	}
+
+	// Housekeeping for the distributed-scheduler lease table so it doesn't
+	// grow unbounded. Best-effort: a no-op on single-node deployments (the
+	// table is simply empty) and never fails the cleanup tick.
+	if purged, err := s.store.PurgeJobRunsBefore(ctx, time.Now().Add(-7*24*time.Hour)); err != nil {
+		s.logger.Error("scheduler: purge job runs", "err", err)
+	} else if purged > 0 {
+		s.logger.Info("scheduler: purged old job runs", "count", purged)
 	}
 }
 

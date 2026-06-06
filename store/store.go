@@ -192,6 +192,12 @@ type SnapshotStore interface {
 	GetPedagogicalSnapshots(ctx context.Context, learnerID, domainID, concept string, limit int) ([]*models.PedagogicalSnapshot, error)
 }
 
+// SchedulerStore manages distributed scheduler job-run leases (Phase 4).
+type SchedulerStore interface {
+	ClaimJobRun(ctx context.Context, name, windowKey string) (bool, error)
+	PurgeJobRunsBefore(ctx context.Context, cutoff time.Time) (int64, error)
+}
+
 // ---------------------------------------------------------------------------
 // Aggregate interface — the full persistence port
 // ---------------------------------------------------------------------------
@@ -213,6 +219,7 @@ type Store interface {
 	WebhookQueueStore
 	ConsolidationStore
 	SnapshotStore
+	SchedulerStore
 
 	// Lifecycle methods — implemented on *db.Store in the next task.
 	WithTx(ctx context.Context, fn func(s Store) error) error

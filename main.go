@@ -176,8 +176,14 @@ func main() {
 	)
 	mux.Handle("/mcp", mcpProtectedHandler)
 
-	// Start scheduler
+	// Start scheduler. SCHEDULER_MODE=distributed enables fleet-wide
+	// exactly-once job execution via DB leases; default "inprocess" keeps
+	// the single-node behaviour where every cron tick runs locally.
 	scheduler := engine.NewScheduler(store, logger)
+	if os.Getenv("SCHEDULER_MODE") == "distributed" {
+		scheduler = engine.NewDistributedScheduler(store, logger)
+		logger.Info("scheduler mode", "mode", "distributed")
+	}
 	if err := scheduler.Start(); err != nil {
 		logger.Error("failed to start scheduler", "err", err)
 		os.Exit(1)

@@ -239,6 +239,13 @@ CREATE TABLE IF NOT EXISTS webhook_push_log (
     created_at           TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS scheduled_job_runs (
+    name        TEXT NOT NULL,
+    window_key  TEXT NOT NULL,
+    claimed_at  TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (name, window_key)
+);
+
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version    TEXT PRIMARY KEY,
     checksum   TEXT NOT NULL,
