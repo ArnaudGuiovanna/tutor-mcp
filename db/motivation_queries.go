@@ -205,7 +205,7 @@ func (s *Store) CountInteractionsByConcept(ctx context.Context, learnerID, conce
 func (s *Store) CountSessionsOnConcept(ctx context.Context, learnerID, concept string) (int, error) {
 	var count int
 	err := s.queryRow(ctx,
-		`SELECT COUNT(DISTINCT substr(created_at, 1, 10)) FROM interactions
+		`SELECT COUNT(DISTINCT `+s.utcDateExpr("created_at")+`) FROM interactions
 		 WHERE learner_id = ? AND concept = ?`,
 		learnerID, concept,
 	).Scan(&count)
@@ -219,7 +219,7 @@ func (s *Store) CountSessionsOnConcept(ctx context.Context, learnerID, concept s
 // computed via substr-based date extraction (works with modernc's ISO serialization).
 func (s *Store) CountLearnerSessionStreak(ctx context.Context, learnerID string) (int, error) {
 	rows, err := s.query(ctx,
-		`SELECT DISTINCT substr(created_at, 1, 10) AS d FROM interactions
+		`SELECT DISTINCT `+s.utcDateExpr("created_at")+` AS d FROM interactions
 		 WHERE learner_id = ? ORDER BY d DESC`,
 		learnerID,
 	)

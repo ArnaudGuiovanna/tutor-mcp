@@ -58,7 +58,7 @@ func TestSelfInitiatedRatio(t *testing.T) {
 	// 3 interactions on C1, 2 self-initiated => 2/3.
 	mustExec := func(q string, args ...any) {
 		t.Helper()
-		if _, err := store.root.Exec(q, args...); err != nil {
+		if _, err := store.root.Exec(rb(store, q), args...); err != nil {
 			t.Fatalf("exec: %v", err)
 		}
 	}

@@ -118,13 +118,13 @@ func TestGetActiveLearners(t *testing.T) {
 	store := setupTestDB(t)
 	// L1 (no webhook from setupTestDB) won't appear. Add two with webhooks.
 	if _, err := store.root.Exec(
-		`INSERT INTO learners (id, email, password_hash, objective, webhook_url, created_at) VALUES ('L2','b@b','h','o','https://discord.com/x', ?)`,
+		rb(store, `INSERT INTO learners (id, email, password_hash, objective, webhook_url, created_at) VALUES ('L2','b@b','h','o','https://discord.com/x', ?)`),
 		time.Now(),
 	); err != nil {
 		t.Fatalf("insert L2: %v", err)
 	}
 	if _, err := store.root.Exec(
-		`INSERT INTO learners (id, email, password_hash, objective, webhook_url, created_at) VALUES ('L3','c@c','h','o','https://discord.com/y', ?)`,
+		rb(store, `INSERT INTO learners (id, email, password_hash, objective, webhook_url, created_at) VALUES ('L3','c@c','h','o','https://discord.com/y', ?)`),
 		time.Now(),
 	); err != nil {
 		t.Fatalf("insert L3: %v", err)
@@ -220,13 +220,13 @@ func TestCleanupExpiredRefreshTokens(t *testing.T) {
 	now := time.Now().UTC()
 	// Insert one expired and one valid.
 	if _, err := store.root.Exec(
-		`INSERT INTO refresh_tokens (token, learner_id, expires_at, created_at) VALUES ('expired','L1',?,?)`,
+		rb(store, `INSERT INTO refresh_tokens (token, learner_id, expires_at, created_at) VALUES ('expired','L1',?,?)`),
 		now.Add(-1*time.Hour), now,
 	); err != nil {
 		t.Fatalf("insert expired: %v", err)
 	}
 	if _, err := store.root.Exec(
-		`INSERT INTO refresh_tokens (token, learner_id, expires_at, created_at) VALUES ('valid','L1',?,?)`,
+		rb(store, `INSERT INTO refresh_tokens (token, learner_id, expires_at, created_at) VALUES ('valid','L1',?,?)`),
 		now.Add(1*time.Hour), now,
 	); err != nil {
 		t.Fatalf("insert valid: %v", err)
@@ -419,7 +419,7 @@ func TestDeleteDomainCleansAuxiliaryRowsAndKeepsPedagogicalHistory(t *testing.T)
 	now := time.Now().UTC()
 
 	if _, err := store.root.Exec(
-		`INSERT INTO learners (id, email, password_hash, objective, created_at) VALUES ('L2','other@test.com','hash','test',?)`,
+		rb(store, `INSERT INTO learners (id, email, password_hash, objective, created_at) VALUES ('L2','other@test.com','hash','test',?)`),
 		now,
 	); err != nil {
 		t.Fatalf("insert L2: %v", err)
@@ -482,7 +482,7 @@ func TestDeleteDomainCleansAuxiliaryRowsAndKeepsPedagogicalHistory(t *testing.T)
 	count := func(query string, args ...any) int {
 		t.Helper()
 		var n int
-		if err := store.root.QueryRow(query, args...).Scan(&n); err != nil {
+		if err := store.root.QueryRow(rb(store, query), args...).Scan(&n); err != nil {
 			t.Fatalf("count query failed: %v", err)
 		}
 		return n
@@ -542,7 +542,10 @@ func TestDeleteDomainCleansAuxiliaryRowsAndKeepsPedagogicalHistory(t *testing.T)
 func TestConceptStateUpsertAndRead(t *testing.T) {
 	store := setupTestDB(t)
 
-	now := time.Now().UTC()
+	// Truncate to microseconds: Postgres TIMESTAMPTZ has microsecond
+	// resolution, so a nanosecond-precision time would not round-trip to an
+	// exact match. SQLite preserves the truncated value identically.
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	cs := &models.ConceptState{
 		LearnerID:  "L1",
 		Concept:    "C1",
@@ -615,7 +618,7 @@ func TestGetConceptsDueForReview(t *testing.T) {
 	future := now.Add(1 * time.Hour)
 	mustExec := func(q string, args ...any) {
 		t.Helper()
-		if _, err := store.root.Exec(q, args...); err != nil {
+		if _, err := store.root.Exec(rb(store, q), args...); err != nil {
 			t.Fatalf("exec: %v", err)
 		}
 	}
@@ -877,8 +880,8 @@ func insertInteractionAtSQLTime(t *testing.T, store *Store, concept string, succ
 	t.Helper()
 	tsStr := ts.UTC().Format("2006-01-02 15:04:05")
 	if _, err := store.root.Exec(
-		`INSERT INTO interactions (learner_id, concept, activity_type, success, created_at)
-		 VALUES ('L1', ?, 'RECALL_EXERCISE', ?, ?)`,
+		rb(store, `INSERT INTO interactions (learner_id, concept, activity_type, success, created_at)
+		 VALUES ('L1', ?, 'RECALL_EXERCISE', ?, ?)`),
 		concept, success, tsStr,
 	); err != nil {
 		t.Fatalf("exec insert: %v", err)
@@ -984,23 +987,23 @@ func TestGetConceptsDueForReview_ExcludesArchivedDomain(t *testing.T) {
 
 	// Create a second learner (L1 is created by setupTestDB).
 	if _, err := store.root.Exec(
-		`INSERT INTO learners (id, email, password_hash, objective, created_at) VALUES (?, ?, ?, ?, ?)`,
+		rb(store, `INSERT INTO learners (id, email, password_hash, objective, created_at) VALUES (?, ?, ?, ?, ?)`),
 		"L2", "l2@test.com", "h", "obj", now,
 	); err != nil {
 		t.Fatal(err)
 	}
 	// Active domain with concept "active_c".
 	if _, err := store.root.Exec(
-		`INSERT INTO domains (id, learner_id, name, graph_json, personal_goal, archived, value_framings_json, last_value_axis, created_at)
-		 VALUES ('d_active','L2','active','{"concepts":["active_c"],"prerequisites":{}}','goal',0,'','',?)`,
+		rb(store, `INSERT INTO domains (id, learner_id, name, graph_json, personal_goal, archived, value_framings_json, last_value_axis, created_at)
+		 VALUES ('d_active','L2','active','{"concepts":["active_c"],"prerequisites":{}}','goal',0,'','',?)`),
 		now,
 	); err != nil {
 		t.Fatal(err)
 	}
 	// Archived domain with concept "archived_c".
 	if _, err := store.root.Exec(
-		`INSERT INTO domains (id, learner_id, name, graph_json, personal_goal, archived, value_framings_json, last_value_axis, created_at)
-		 VALUES ('d_arch','L2','arch','{"concepts":["archived_c"],"prerequisites":{}}','goal',1,'','',?)`,
+		rb(store, `INSERT INTO domains (id, learner_id, name, graph_json, personal_goal, archived, value_framings_json, last_value_axis, created_at)
+		 VALUES ('d_arch','L2','arch','{"concepts":["archived_c"],"prerequisites":{}}','goal',1,'','',?)`),
 		now,
 	); err != nil {
 		t.Fatal(err)
@@ -1008,8 +1011,8 @@ func TestGetConceptsDueForReview_ExcludesArchivedDomain(t *testing.T) {
 	// Concept states: BOTH due, BOTH non-new.
 	for _, c := range []string{"active_c", "archived_c"} {
 		if _, err := store.root.Exec(
-			`INSERT INTO concept_states (learner_id, concept, p_mastery, stability, difficulty, elapsed_days, scheduled_days, reps, lapses, card_state, last_review, next_review, p_learn, p_forget, p_slip, p_guess, theta)
-			 VALUES (?, ?, 0.5, 5, 5, 1, 1, 1, 0, 'review', ?, ?, 0.15, 0.1, 0.1, 0.2, 0)`,
+			rb(store, `INSERT INTO concept_states (learner_id, concept, p_mastery, stability, difficulty, elapsed_days, scheduled_days, reps, lapses, card_state, last_review, next_review, p_learn, p_forget, p_slip, p_guess, theta)
+			 VALUES (?, ?, 0.5, 5, 5, 1, 1, 1, 0, 'review', ?, ?, 0.15, 0.1, 0.1, 0.2, 0)`),
 			"L2", c, past, past,
 		); err != nil {
 			t.Fatal(err)
@@ -1047,15 +1050,13 @@ func TestGetRecentLearnerEvents_ReturnsMasteryThresholdAndStreakStart(t *testing
 	store := setupTestDB(t)
 	now := time.Now().UTC()
 
-	// L1 is pre-created by setupTestDB; use INSERT OR IGNORE to be safe.
-	if _, err := store.root.Exec(`INSERT OR IGNORE INTO learners (id,email,password_hash,objective,created_at) VALUES ('L1','x@t.com','h','o',?)`, now); err != nil {
-		t.Fatal(err)
-	}
+	// L1 is pre-created by setupTestDB; seed defensively (idempotent).
+	seedLearner(t, store, "L1")
 	// concept_state with p_mastery >= 0.70 today -> mastery_threshold event.
 	// Insert listing the columns we explicitly want; rest take their DEFAULTs.
 	if _, err := store.root.Exec(
-		`INSERT INTO concept_states (learner_id, concept, p_mastery, stability, difficulty, elapsed_days, reps, lapses, card_state, last_review, next_review, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rb(store, `INSERT INTO concept_states (learner_id, concept, p_mastery, stability, difficulty, elapsed_days, reps, lapses, card_state, last_review, next_review, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		"L1", "x", 0.85, 5.0, 0.3, 1, 5, 0, "review", now, now, now,
 	); err != nil {
 		t.Fatal(err)
@@ -1063,7 +1064,7 @@ func TestGetRecentLearnerEvents_ReturnsMasteryThresholdAndStreakStart(t *testing
 	// 3 consecutive interactions (today, -1, -2) -> streak_start at oldest.
 	for _, off := range []int{0, -1, -2} {
 		if _, err := store.root.Exec(
-			`INSERT INTO interactions (learner_id, concept, activity_type, success, created_at) VALUES (?, 'x', 'RECALL', 1, ?)`,
+			rb(store, `INSERT INTO interactions (learner_id, concept, activity_type, success, created_at) VALUES (?, 'x', 'RECALL', 1, ?)`),
 			"L1", now.AddDate(0, 0, off),
 		); err != nil {
 			t.Fatal(err)
@@ -1095,7 +1096,7 @@ func TestGetActivityStreak(t *testing.T) {
 
 	mustExec := func(q string, args ...any) {
 		t.Helper()
-		if _, err := store.root.Exec(q, args...); err != nil {
+		if _, err := store.root.Exec(rb(store, q), args...); err != nil {
 			t.Fatalf("exec: %v", err)
 		}
 	}

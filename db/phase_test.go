@@ -418,8 +418,8 @@ func insertInteractionWithType(t *testing.T, store *Store, concept string, succe
 		successInt = 1
 	}
 	_, err := store.root.Exec(
-		`INSERT INTO interactions (learner_id, concept, activity_type, success, response_time, confidence, notes, misconception_type, misconception_detail, created_at)
-		 VALUES ('L1', ?, ?, ?, 60, 0.5, '', ?, ?, ?)`,
+		rb(store, `INSERT INTO interactions (learner_id, concept, activity_type, success, response_time, confidence, notes, misconception_type, misconception_detail, created_at)
+		 VALUES ('L1', ?, ?, ?, 60, 0.5, '', ?, ?, ?)`),
 		concept, activityType, successInt, nullString(""), nullString(""), createdAt,
 	)
 	if err != nil {

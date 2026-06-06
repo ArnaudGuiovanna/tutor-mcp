@@ -70,8 +70,8 @@ func TestApproveClientIdempotent(t *testing.T) {
 
 	var count int
 	if err := store.root.QueryRow(
-		`SELECT COUNT(*) FROM learner_approved_clients
-		 WHERE learner_id = ? AND client_id = ? AND redirect_uri = ?`,
+		rb(store, `SELECT COUNT(*) FROM learner_approved_clients
+		 WHERE learner_id = ? AND client_id = ? AND redirect_uri = ?`),
 		"L1", "c1", "https://a.example/cb",
 	).Scan(&count); err != nil {
 		t.Fatalf("count: %v", err)

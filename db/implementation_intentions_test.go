@@ -30,7 +30,7 @@ func TestGetRecentImplementationIntentions_OrderingAndLimit(t *testing.T) {
 	rewrite := func(trigger string, createdAt time.Time) {
 		t.Helper()
 		if _, err := store.root.Exec(
-			`UPDATE implementation_intentions SET created_at = ? WHERE trigger_text = ?`,
+			rb(store, `UPDATE implementation_intentions SET created_at = ? WHERE trigger_text = ?`),
 			createdAt, trigger,
 		); err != nil {
 			t.Fatalf("rewrite created_at for %s: %v", trigger, err)
@@ -117,7 +117,7 @@ func TestMarkIntentionHonored(t *testing.T) {
 			}
 			var v int
 			if err := store.root.QueryRow(
-				`SELECT honored FROM implementation_intentions WHERE id = ?`, tc.id,
+				rb(store, `SELECT honored FROM implementation_intentions WHERE id = ?`), tc.id,
 			).Scan(&v); err != nil {
 				t.Fatalf("scan honored: %v", err)
 			}

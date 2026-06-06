@@ -10,8 +10,8 @@ import (
 func seedConceptState(t *testing.T, store *Store, concept string, pMastery float64) {
 	t.Helper()
 	_, err := store.root.Exec(
-		`INSERT INTO concept_states (learner_id, concept, p_mastery, card_state, updated_at)
-		 VALUES ('L1', ?, ?, 'learning', ?)`,
+		rb(store, `INSERT INTO concept_states (learner_id, concept, p_mastery, card_state, updated_at)
+		 VALUES ('L1', ?, ?, 'learning', ?)`),
 		concept, pMastery, time.Now().UTC(),
 	)
 	if err != nil {
@@ -26,8 +26,8 @@ func insertSimpleInteraction(t *testing.T, store *Store, concept string, success
 		succInt = 1
 	}
 	_, err := store.root.Exec(
-		`INSERT INTO interactions (learner_id, concept, activity_type, success, response_time, confidence, notes, created_at)
-		 VALUES ('L1', ?, 'RECALL_EXERCISE', ?, 60, 0.5, '', ?)`,
+		rb(store, `INSERT INTO interactions (learner_id, concept, activity_type, success, response_time, confidence, notes, created_at)
+		 VALUES ('L1', ?, 'RECALL_EXERCISE', ?, 60, 0.5, '', ?)`),
 		concept, succInt, createdAt,
 	)
 	if err != nil {

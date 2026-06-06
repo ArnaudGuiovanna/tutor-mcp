@@ -11,6 +11,34 @@ import (
 
 func TestMigrate_AddsNullableDomainPriorityRank(t *testing.T) {
 	store := setupTestDB(t)
+
+	if store.dialect == DialectPostgres {
+		// Postgres exposes column metadata via information_schema.
+		var dataType, isNullable string
+		var colDefault sql.NullString
+		err := store.root.QueryRow(rb(store,
+			`SELECT data_type, is_nullable, column_default
+			 FROM information_schema.columns
+			 WHERE table_name = 'domains' AND column_name = ?`), "priority_rank").
+			Scan(&dataType, &isNullable, &colDefault)
+		if err == sql.ErrNoRows {
+			t.Fatalf("domains.priority_rank column not found")
+		}
+		if err != nil {
+			t.Fatalf("information_schema lookup: %v", err)
+		}
+		if dataType != "integer" {
+			t.Fatalf("priority_rank data_type = %q, want integer", dataType)
+		}
+		if isNullable != "YES" {
+			t.Fatalf("priority_rank should be nullable, is_nullable=%q", isNullable)
+		}
+		if colDefault.Valid {
+			t.Fatalf("priority_rank should have no default, got %q", colDefault.String)
+		}
+		return
+	}
+
 	rows, err := store.root.Query(`PRAGMA table_info(domains)`)
 	if err != nil {
 		t.Fatalf("table_info domains: %v", err)
@@ -55,7 +83,7 @@ func createPriorityTestDomain(t *testing.T, store *Store, learnerID, name string
 	if err != nil {
 		t.Fatalf("create domain %q: %v", name, err)
 	}
-	if _, err := store.root.Exec(`UPDATE domains SET created_at = ? WHERE id = ?`, createdAt, d.ID); err != nil {
+	if _, err := store.root.Exec(rb(store, `UPDATE domains SET created_at = ? WHERE id = ?`), createdAt, d.ID); err != nil {
 		t.Fatalf("set created_at for %q: %v", name, err)
 	}
 	return d

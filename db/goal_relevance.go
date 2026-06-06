@@ -40,10 +40,11 @@ func (s *Store) MergeDomainGoalRelevance(ctx context.Context, domainID string, r
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	txs := &Store{db: tx, dialect: s.dialect}
 
 	var existingJSON string
 	var graphVersion int
-	err = tx.QueryRowContext(ctx,
+	err = txs.queryRow(ctx,
 		`SELECT goal_relevance_json, graph_version FROM domains WHERE id = ?`,
 		domainID,
 	).Scan(&existingJSON, &graphVersion)
@@ -80,7 +81,7 @@ func (s *Store) MergeDomainGoalRelevance(ctx context.Context, domainID string, r
 		return nil, fmt.Errorf("marshal goal_relevance: %w", err)
 	}
 
-	_, err = tx.ExecContext(ctx,
+	_, err = txs.exec(ctx,
 		`UPDATE domains
 		 SET goal_relevance_json = ?, goal_relevance_version = goal_relevance_version + 1
 		 WHERE id = ?`,

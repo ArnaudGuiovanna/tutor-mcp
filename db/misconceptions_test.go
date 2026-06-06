@@ -15,6 +15,27 @@ import (
 // (e.g. the store conformance subtests) call setupTestDB concurrently.
 var testDBCounter atomic.Int64
 
+// rb rebinds a '?'-placeholder query string for the store's dialect, so raw
+// store.root.Exec/Query/QueryRow calls in tests work on both SQLite and
+// Postgres. (Tests are in-package, so they can reach the store's rebind.)
+func rb(s *Store, q string) string { return s.rebind(q) }
+
+// seedLearner inserts a learner row (idempotent). Postgres enforces the
+// learner_id foreign keys that SQLite leaves unenforced, so tests that create
+// child rows for an ad-hoc learner must seed the learner first to exercise the
+// same code path on both dialects.
+func seedLearner(t *testing.T, s *Store, id string) {
+	t.Helper()
+	_, err := s.root.Exec(
+		rb(s, `INSERT INTO learners (id, email, password_hash, objective, created_at)
+		 VALUES (?, ?, 'h', 'o', ?) ON CONFLICT (id) DO NOTHING`),
+		id, id+"@test.com", time.Now().UTC(),
+	)
+	if err != nil {
+		t.Fatalf("seed learner %q: %v", id, err)
+	}
+}
+
 // setupTestDB returns a fresh, migrated Store seeded with learner 'L1'. By
 // default it uses an isolated in-memory SQLite database. If TUTOR_TEST_PG_DSN
 // is set, it instead provisions an isolated PostgreSQL schema and returns a
@@ -98,8 +119,8 @@ func insertInteraction(t *testing.T, store *Store, concept string, success bool,
 		succInt = 1
 	}
 	_, err := store.root.Exec(
-		`INSERT INTO interactions (learner_id, concept, activity_type, success, response_time, confidence, notes, misconception_type, misconception_detail, created_at)
-		 VALUES ('L1', ?, 'RECALL_EXERCISE', ?, 60, 0.5, '', ?, ?, ?)`,
+		rb(store, `INSERT INTO interactions (learner_id, concept, activity_type, success, response_time, confidence, notes, misconception_type, misconception_detail, created_at)
+		 VALUES ('L1', ?, 'RECALL_EXERCISE', ?, 60, 0.5, '', ?, ?, ?)`),
 		concept, succInt, nullString(miscType), nullString(miscDetail), createdAt,
 	)
 	if err != nil {

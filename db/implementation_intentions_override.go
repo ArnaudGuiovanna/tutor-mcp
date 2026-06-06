@@ -24,11 +24,12 @@ func (s *Store) InsertLearningNegotiationOverridePayload(ctx context.Context, le
 		return 0, fmt.Errorf("begin learning negotiation override insert: %w", err)
 	}
 	defer tx.Rollback()
+	txs := &Store{db: tx, dialect: s.dialect}
 
-	if _, err := tx.ExecContext(ctx, s.rebind(
+	if _, err := txs.exec(ctx,
 		`UPDATE implementation_intentions
 		 SET honored = 0
-		 WHERE learner_id = ? AND domain_id = ? AND trigger_text = ? AND honored IS NULL`),
+		 WHERE learner_id = ? AND domain_id = ? AND trigger_text = ? AND honored IS NULL`,
 		learnerID, domainID, learningNegotiationOverrideTrigger,
 	); err != nil {
 		return 0, fmt.Errorf("supersede learning negotiation override: %w", err)
@@ -39,20 +40,9 @@ func (s *Store) InsertLearningNegotiationOverridePayload(ctx context.Context, le
 		 VALUES (?, ?, ?, ?, ?, ?)`
 	insertArgs := []any{learnerID, domainID, learningNegotiationOverrideTrigger, payload, expiresAt.UTC(), now.UTC()}
 
-	var id int64
-	if s.dialect == DialectPostgres {
-		if err := tx.QueryRowContext(ctx, s.rebind(insertQuery)+" RETURNING id", insertArgs...).Scan(&id); err != nil {
-			return 0, fmt.Errorf("insert learning negotiation override: %w", err)
-		}
-	} else {
-		result, err := tx.ExecContext(ctx, insertQuery, insertArgs...)
-		if err != nil {
-			return 0, fmt.Errorf("insert learning negotiation override: %w", err)
-		}
-		id, err = result.LastInsertId()
-		if err != nil {
-			return 0, fmt.Errorf("get learning negotiation override id: %w", err)
-		}
+	id, err := txs.insertReturningID(ctx, insertQuery, insertArgs...)
+	if err != nil {
+		return 0, fmt.Errorf("insert learning negotiation override: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -69,11 +59,12 @@ func (s *Store) ConsumeLearningNegotiationOverridePayload(ctx context.Context, l
 		return nil, fmt.Errorf("begin learning negotiation override consume: %w", err)
 	}
 	defer tx.Rollback()
+	txs := &Store{db: tx, dialect: s.dialect}
 
 	var id int64
 	var payload string
 	var expiresAt sql.NullTime
-	err = tx.QueryRowContext(ctx,
+	err = txs.queryRow(ctx,
 		`SELECT id, action_text, scheduled_for
 		 FROM implementation_intentions
 		 WHERE learner_id = ? AND domain_id = ? AND trigger_text = ? AND honored IS NULL
@@ -96,7 +87,7 @@ func (s *Store) ConsumeLearningNegotiationOverridePayload(ctx context.Context, l
 		t := expiresAt.Time.UTC()
 		expires = &t
 		if !t.After(now.UTC()) {
-			if _, err := tx.ExecContext(ctx,
+			if _, err := txs.exec(ctx,
 				`UPDATE implementation_intentions SET honored = 0 WHERE id = ? AND honored IS NULL`,
 				id,
 			); err != nil {
@@ -113,7 +104,7 @@ func (s *Store) ConsumeLearningNegotiationOverridePayload(ctx context.Context, l
 		}
 	}
 
-	result, err := tx.ExecContext(ctx,
+	result, err := txs.exec(ctx,
 		`UPDATE implementation_intentions SET honored = 1 WHERE id = ? AND honored IS NULL`,
 		id,
 	)

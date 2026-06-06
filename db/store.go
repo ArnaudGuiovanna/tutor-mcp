@@ -124,6 +124,20 @@ func (s *Store) insertReturningID(ctx context.Context, query string, args ...any
 	return res.LastInsertId()
 }
 
+// utcDateExpr returns a dialect-specific SQL expression that renders the given
+// timestamp column as a 'YYYY-MM-DD' UTC calendar-date string. SQLite stores
+// timestamps as ISO-8601 text whose first 10 chars are the date, so substr is
+// both correct and avoids modernc-sqlite's DATE() not parsing the 'T' separator.
+// On Postgres the column is TIMESTAMPTZ, so substr is invalid; to_char on the
+// value converted to UTC yields the same calendar-date text. Both branches
+// produce identical strings for the consecutive-day streak/session logic.
+func (s *Store) utcDateExpr(col string) string {
+	if s.dialect == DialectPostgres {
+		return "to_char(" + col + " AT TIME ZONE 'UTC', 'YYYY-MM-DD')"
+	}
+	return "substr(" + col + ", 1, 10)"
+}
+
 // flexTime is a dialect-neutral timestamp scan target. Direct column scans on
 // modernc.org/sqlite (and pgx) yield a time.Time, but aggregate result columns
 // such as MIN(created_at)/MAX(created_at) lose type affinity on SQLite and come
@@ -672,8 +686,9 @@ func (s *Store) DeleteDomain(ctx context.Context, domainID, learnerID string) er
 		return fmt.Errorf("begin delete domain tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	txs := &Store{db: tx, dialect: s.dialect}
 
-	result, err := tx.ExecContext(ctx,
+	result, err := txs.exec(ctx,
 		`DELETE FROM domains WHERE id = ? AND learner_id = ?`,
 		domainID, learnerID,
 	)
@@ -685,13 +700,13 @@ func (s *Store) DeleteDomain(ctx context.Context, domainID, learnerID string) er
 		return fmt.Errorf("domain not found")
 	}
 
-	if _, err := tx.ExecContext(ctx,
+	if _, err := txs.exec(ctx,
 		`DELETE FROM implementation_intentions WHERE learner_id = ? AND domain_id = ?`,
 		learnerID, domainID,
 	); err != nil {
 		return fmt.Errorf("delete domain implementation intentions: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx,
+	if _, err := txs.exec(ctx,
 		`DELETE FROM webhook_message_queue WHERE learner_id = ? AND kind = ?`,
 		learnerID, "olm:"+domainID,
 	); err != nil {
@@ -727,13 +742,9 @@ func (s *Store) InsertConceptStateIfNotExists(ctx context.Context, cs *models.Co
 // ─── Concept States ───────────────────────────────────────────────────────────
 
 func (s *Store) GetConceptState(ctx context.Context, learnerID, concept string) (*models.ConceptState, error) {
-	return getConceptStateWithQ(ctx, s.db, learnerID, concept)
-}
-
-func getConceptStateWithQ(ctx context.Context, q sqlExecutor, learnerID, concept string) (*models.ConceptState, error) {
 	cs := &models.ConceptState{}
 	var lastReview, nextReview sql.NullTime
-	err := q.QueryRowContext(ctx,
+	err := s.queryRow(ctx,
 		`SELECT id, learner_id, concept, stability, difficulty, elapsed_days, scheduled_days,
 		        reps, lapses, card_state, last_review, next_review, p_mastery, p_learn, p_forget,
 		        p_slip, p_guess, theta, updated_at
@@ -759,12 +770,8 @@ func getConceptStateWithQ(ctx context.Context, q sqlExecutor, learnerID, concept
 }
 
 func (s *Store) UpsertConceptState(ctx context.Context, cs *models.ConceptState) error {
-	return upsertConceptStateWithQ(ctx, s.db, cs)
-}
-
-func upsertConceptStateWithQ(ctx context.Context, q sqlExecutor, cs *models.ConceptState) error {
 	cs.UpdatedAt = time.Now().UTC()
-	_, err := q.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO concept_states
 		    (learner_id, concept, stability, difficulty, elapsed_days, scheduled_days,
 		     reps, lapses, card_state, last_review, next_review, p_mastery, p_learn, p_forget,
@@ -865,11 +872,7 @@ func createInteractionWithStore(ctx context.Context, s *Store, i *models.Interac
 }
 
 func (s *Store) GetRecentInteractions(ctx context.Context, learnerID, concept string, limit int) ([]*models.Interaction, error) {
-	return getRecentInteractionsWithQ(ctx, s.db, learnerID, concept, limit)
-}
-
-func getRecentInteractionsWithQ(ctx context.Context, q sqlExecutor, learnerID, concept string, limit int) ([]*models.Interaction, error) {
-	rows, err := q.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT `+interactionCols+` FROM interactions WHERE learner_id = ? AND concept = ?
 		 ORDER BY created_at DESC LIMIT ?`,
 		learnerID, concept, limit,
@@ -1104,7 +1107,7 @@ func (s *Store) WasAlertSentToday(ctx context.Context, learnerID, alertType stri
 // GetDailyStreak returns how many consecutive days the learner has had interactions.
 func (s *Store) GetDailyStreak(ctx context.Context, learnerID string) (int, error) {
 	rows, err := s.query(ctx,
-		`SELECT DISTINCT DATE(created_at) as d FROM interactions
+		`SELECT DISTINCT `+s.utcDateExpr("created_at")+` as d FROM interactions
 		 WHERE learner_id = ? ORDER BY d DESC`,
 		learnerID,
 	)
@@ -1235,9 +1238,10 @@ func (s *Store) ConsumeAuthCode(ctx context.Context, code, clientID string) (*mo
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback()
+	txs := &Store{db: tx, dialect: s.dialect}
 
 	ac := &models.AuthCode{}
-	err = tx.QueryRowContext(ctx,
+	err = txs.queryRow(ctx,
 		`SELECT code, learner_id, code_challenge, client_id, expires_at FROM oauth_codes WHERE code = ? AND client_id = ?`,
 		code, clientID,
 	).Scan(&ac.Code, &ac.LearnerID, &ac.CodeChallenge, &ac.ClientID, &ac.ExpiresAt)
@@ -1248,7 +1252,7 @@ func (s *Store) ConsumeAuthCode(ctx context.Context, code, clientID string) (*mo
 		return nil, fmt.Errorf("consume auth code: %w", err)
 	}
 
-	if _, err := tx.ExecContext(ctx, `DELETE FROM oauth_codes WHERE code = ?`, code); err != nil {
+	if _, err := txs.exec(ctx, `DELETE FROM oauth_codes WHERE code = ?`, code); err != nil {
 		return nil, fmt.Errorf("delete auth code: %w", err)
 	}
 
@@ -1388,7 +1392,7 @@ func (s *Store) GetActivityStreak(ctx context.Context, learnerID string) (int, e
 	// substr — modernc/sqlite stores time.Time as RFC3339 with nanoseconds, on
 	// which SQLite's date() returns NULL. substr reliably extracts YYYY-MM-DD.
 	rows, err := s.query(ctx,
-		`SELECT DISTINCT substr(created_at, 1, 10) AS d
+		`SELECT DISTINCT `+s.utcDateExpr("created_at")+` AS d
 		 FROM interactions
 		 WHERE learner_id = ?
 		 ORDER BY d DESC`,

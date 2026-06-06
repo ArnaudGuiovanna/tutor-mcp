@@ -93,7 +93,7 @@ func TestGetRecentAffectStates_OrderingAndLimit(t *testing.T) {
 	rewrite := func(sid string, ts time.Time) {
 		t.Helper()
 		if _, err := store.root.Exec(
-			`UPDATE affect_states SET created_at = ? WHERE session_id = ?`, ts, sid,
+			rb(store, `UPDATE affect_states SET created_at = ? WHERE session_id = ?`), ts, sid,
 		); err != nil {
 			t.Fatalf("rewrite %s: %v", sid, err)
 		}
@@ -213,6 +213,7 @@ func TestCalibrationLifecycle(t *testing.T) {
 // owner — defence-in-depth for issue #87.
 func TestGetCalibrationRecord_FiltersByLearnerID(t *testing.T) {
 	store := setupTestDB(t)
+	seedLearner(t, store, "learner_A")
 	rec := &models.CalibrationRecord{
 		PredictionID: "P_owner",
 		LearnerID:    "learner_A",
@@ -243,6 +244,7 @@ func TestGetCalibrationRecord_FiltersByLearnerID(t *testing.T) {
 // issue #87.
 func TestCompleteCalibrationRecord_FiltersByLearnerID(t *testing.T) {
 	store := setupTestDB(t)
+	seedLearner(t, store, "learner_A")
 	rec := &models.CalibrationRecord{
 		PredictionID: "P_owner",
 		LearnerID:    "learner_A",
@@ -395,7 +397,7 @@ func TestGetHintStatsForMastered(t *testing.T) {
 	// Two concepts: C-mastered (p_mastery=0.9) and C-novice (p_mastery=0.2).
 	mustExec := func(q string, args ...any) {
 		t.Helper()
-		if _, err := store.root.Exec(q, args...); err != nil {
+		if _, err := store.root.Exec(rb(store, q), args...); err != nil {
 			t.Fatalf("exec %q: %v", q, err)
 		}
 	}
@@ -451,7 +453,7 @@ func TestCountProactiveReviews(t *testing.T) {
 	now := time.Now().UTC()
 	mustExec := func(q string, args ...any) {
 		t.Helper()
-		if _, err := store.root.Exec(q, args...); err != nil {
+		if _, err := store.root.Exec(rb(store, q), args...); err != nil {
 			t.Fatalf("exec %q: %v", q, err)
 		}
 	}
