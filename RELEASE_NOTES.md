@@ -1,34 +1,47 @@
-# Tutor MCP v0.3.1
+# Tutor MCP v0.4.0
 
-Tutor MCP v0.3.1 adds a Complementary Learning Systems-inspired learner memory
-layer and switches consolidation to a client-initiated MCP pattern: the server
-detects consolidation work, the connected LLM client authors the archive, and
-no server-side LLM provider or API key is required.
+Tutor MCP v0.4.0 adds an **opt-in PostgreSQL backend** and **stateless
+multi-node operation**, so the runtime can scale horizontally beyond the
+single-node SQLite ceiling. SQLite stays the default — existing single-node
+deployments are unchanged and require no configuration.
 
 ## Highlights
 
-- Markdown-backed learner memory:
-  - `MEMORY.md`
-  - `MEMORY_pending.md`
-  - `sessions/*.md`
-  - `concepts/*.md`
-  - `archives/*.md`
-- New MCP tools:
-  - `update_learner_memory`
-  - `read_raw_session`
-  - `get_memory_state`
-- `get_next_activity` can now return:
-  - `episodic_context`
-  - `pedagogical_contract.reasoning_request`
-  - `consolidation_request`
-- Pedagogical snapshots now store `interpretation_brief` for replay/audit.
-- Consolidation jobs are queued in `pending_consolidations`, delivered to the
-  client, and completed when the client writes the archive.
-- The release binary now supports:
+- **PostgreSQL backend (opt-in).** Set `DB_DRIVER=postgres` + `DATABASE_URL` to
+  run on Postgres via the pure-Go pgx driver (no CGO). The persistence layer was
+  inverted behind a `store.Store` port and a single conformance suite is
+  replayed against both backends, so behaviour stays equivalent. Dialect-aware
+  schema, `?`→`$N` rebind, RETURNING/ON CONFLICT, and `DB_MAX_CONNS` pool tuning.
+- **Stateless multi-node.** Run N instances behind a load balancer against a
+  shared Postgres:
+  - `SCHEDULER_MODE=distributed` — each scheduled run is leased in the DB, so a
+    job/nudge fires exactly once across the fleet.
+  - `RATELIMIT_BACKEND=postgres` — shared rate-limit and login-failure stores
+    for coherent fleet-wide throttling and brute-force lockout.
+  - `JWT_SECRET` shared across instances; concurrent cold-start migrations are
+    serialized with a Postgres advisory lock.
+- **Row-level write concurrency on Postgres.** The `record_interaction` hot path
+  uses `SELECT … FOR UPDATE` and the webhook queue uses `SKIP LOCKED` — the same
+  lost-update protection Postgres-side that `BEGIN IMMEDIATE` gives on SQLite.
 
-```bash
-tutor-mcp --version
-```
+## Fixes
+
+- First-touch lost update on `concept_states` under concurrency on Postgres
+  (new `GetOrCreateConceptStateForUpdate` materializes the row before locking).
+- nil-pointer panic when a self-transacting method runs inside a `WithTx`
+  callback (new `inTx` composes onto the current transaction).
+- Postgres migration anti-drift guard: `MigratePostgres` records the schema
+  checksum and refuses to boot if `schema_pg.sql` drifted (SQLite parity).
+
+All three are covered by regression tests, green on real PostgreSQL and SQLite.
+
+## Upgrading
+
+- **No action required for SQLite users** — `DB_DRIVER` defaults to `sqlite` and
+  behaviour is unchanged.
+- To adopt Postgres, see the multi-node runbook in
+  [`OPERATIONS.md`](OPERATIONS.md) and the configuration table in
+  [`README.md`](README.md).
 
 ## Operational Notes
 
@@ -38,23 +51,13 @@ tutor-mcp --version
 curl -fsSL https://tutor-mcp.dev/install.sh | sh
 ```
 
-- `latest` release assets include stable names such as
+- `latest` release assets keep stable names such as
   `tutor-mcp_linux_amd64.tar.gz`, so installers do not need to know the tag.
-- Memory is enabled by default and can be disabled with:
-
-```bash
-TUTOR_MCP_MEMORY_ENABLED=false
-```
-
-- Memory root defaults to `~/.tutor-mcp/` and can be changed with:
-
-```bash
-TUTOR_MCP_MEMORY_ROOT=/path/to/memory
-```
 
 ## Validation
 
-- `go test ./...`
 - `go build ./...`
+- `go test ./...` (SQLite default and against a real PostgreSQL 17 via
+  `TUTOR_TEST_PG_DSN`)
 
 Full changelog: [`CHANGELOG.md`](CHANGELOG.md).

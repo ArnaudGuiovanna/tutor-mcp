@@ -6,7 +6,7 @@
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
   <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-1.25+-00ADD8.svg?logo=go&logoColor=white" alt="Go 1.25+" /></a>
   <a href="https://modelcontextprotocol.io/"><img src="https://img.shields.io/badge/MCP-server-7c3aed.svg" alt="MCP server" /></a>
-  <a href="https://github.com/ArnaudGuiovanna/tutor-mcp/releases"><img src="https://img.shields.io/badge/release-v0.3.1-orange.svg" alt="Release v0.3.1" /></a>
+  <a href="https://github.com/ArnaudGuiovanna/tutor-mcp/releases"><img src="https://img.shields.io/badge/release-v0.4.0-orange.svg" alt="Release v0.4.0" /></a>
   <a href="https://github.com/ArnaudGuiovanna/tutor-mcp/issues"><img src="https://img.shields.io/badge/status-alpha-yellow.svg" alt="Status: alpha" /></a>
 </p>
 
@@ -16,7 +16,7 @@
 
 Tell the LLM what you want to learn — *Spanish for travel*, *Go for backend*, *medieval history* — and the runtime orchestrates the journey: what to study next, when to review, when you've mastered a concept, when you need a nudge. The next conversation starts from what the learner has mastered, forgotten, misunderstood, felt, and explicitly committed to do next.
 
-**Status — alpha v0.3.1.** The full regulation pipeline (phase FSM + concept/action selectors + gate + threshold resolver) ships default-on; the fade controller is opt-in. Suitable for individual use, small groups, and classroom-scale (≤200 active learners). Single-tenant, single-node, SQLite + in-process scheduler.
+**Status — alpha v0.4.0.** The full regulation pipeline (phase FSM + concept/action selectors + gate + threshold resolver) ships default-on; the fade controller is opt-in. Suitable for individual use, small groups, and classroom-scale (≤200 active learners). Single-tenant; runs single-node on SQLite + in-process scheduler by default, and now scales horizontally on an opt-in PostgreSQL backend (`DB_DRIVER=postgres`) with a distributed scheduler and shared rate-limit store for stateless multi-node deployments.
 
 ## Compatible clients
 

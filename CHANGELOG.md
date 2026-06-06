@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-06-06
+
 ### Added
 
 - **PostgreSQL backend (opt-in) for horizontal scaling.** SQLite stays the
@@ -292,4 +294,6 @@ Three algorithmic refinements deferred for a later release:
 - Go 1.25+ required.
 - SQLite >= 3.35 (DROP COLUMN support).
 
+[0.4.0]: https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/v0.4.0
+[0.3.1]: https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/v0.3.1
 [0.3.0-alpha.1]: https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/v0.3.0-alpha.1
