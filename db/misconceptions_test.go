@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,8 +15,16 @@ import (
 // (e.g. the store conformance subtests) call setupTestDB concurrently.
 var testDBCounter atomic.Int64
 
+// setupTestDB returns a fresh, migrated Store seeded with learner 'L1'. By
+// default it uses an isolated in-memory SQLite database. If TUTOR_TEST_PG_DSN
+// is set, it instead provisions an isolated PostgreSQL schema and returns a
+// Postgres-dialect Store — this is how the full db suite is replayed against a
+// real Postgres to verify cross-dialect equivalence (Phase 2).
 func setupTestDB(t *testing.T) *Store {
 	t.Helper()
+	if pgDSN := os.Getenv("TUTOR_TEST_PG_DSN"); pgDSN != "" {
+		return setupTestPG(t, pgDSN)
+	}
 	n := testDBCounter.Add(1)
 	dsn := fmt.Sprintf("file:memdb_%s_%d?mode=memory&cache=shared", t.Name(), n)
 	db, err := sql.Open("sqlite", dsn)
@@ -30,6 +40,55 @@ func setupTestDB(t *testing.T) *Store {
 	}
 	t.Cleanup(func() { db.Close() })
 	return NewStore(db)
+}
+
+// setupTestPG provisions a uniquely-named Postgres schema, migrates it, seeds
+// learner 'L1', and returns a Postgres-dialect Store scoped to that schema via
+// search_path. The schema is dropped on cleanup. The schema name is digits-only
+// (t_<n>) so it is always a valid, injection-safe identifier.
+func setupTestPG(t *testing.T, baseDSN string) *Store {
+	t.Helper()
+	n := testDBCounter.Add(1)
+	schema := fmt.Sprintf("t_%d", n)
+
+	admin, err := sql.Open("pgx", baseDSN)
+	if err != nil {
+		t.Fatalf("pg admin open: %v", err)
+	}
+	if _, err := admin.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE"); err != nil {
+		admin.Close()
+		t.Fatalf("pg drop schema: %v", err)
+	}
+	if _, err := admin.Exec("CREATE SCHEMA " + schema); err != nil {
+		admin.Close()
+		t.Fatalf("pg create schema: %v", err)
+	}
+
+	sep := "?"
+	if strings.Contains(baseDSN, "?") {
+		sep = "&"
+	}
+	db, err := sql.Open("pgx", baseDSN+sep+"search_path="+schema)
+	if err != nil {
+		admin.Close()
+		t.Fatalf("pg open: %v", err)
+	}
+	if err := MigratePostgres(context.Background(), db); err != nil {
+		db.Close()
+		admin.Close()
+		t.Fatalf("pg migrate: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO learners (id, email, password_hash, objective, created_at) VALUES ('L1', 'test@test.com', 'hash', 'test', $1)`, time.Now()); err != nil {
+		db.Close()
+		admin.Close()
+		t.Fatalf("pg seed L1: %v", err)
+	}
+	t.Cleanup(func() {
+		db.Close()
+		admin.Exec("DROP SCHEMA " + schema + " CASCADE")
+		admin.Close()
+	})
+	return NewStoreWithDialect(db, DialectPostgres)
 }
 
 func insertInteraction(t *testing.T, store *Store, concept string, success bool, miscType, miscDetail string, createdAt time.Time) {
