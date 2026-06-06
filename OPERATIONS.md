@@ -2,9 +2,25 @@
 
 Practical recipes for running the server. Companion to the README, which describes *what* the project does. This file describes *how* to keep it alive.
 
+## Database backend
+
+By default the server stores everything (interactions, OLM, BKT/FSRS/IRT state, refresh tokens, calibration history) in a single SQLite file at `${DB_PATH:-./data/runtime.db}` — the recommended profile for single-node deployments (see *Database backup* below).
+
+For horizontal scaling it can instead run on **PostgreSQL**: set `DB_DRIVER=postgres` and `DATABASE_URL=postgres://user:pass@host:5432/db?sslmode=require`. The schema migrates automatically on boot (advisory-lock serialized, so concurrent cold-starting instances are safe), and is checksum-guarded — a changed `schema_pg.sql` against an already-migrated database fails fast rather than silently diverging. Tune the pool with `DB_MAX_CONNS` (default 10), keeping `DB_MAX_CONNS × instances < Postgres max_connections`.
+
+### Multi-node (stateless) deployment
+
+Run N instances behind a load balancer, all pointed at the same Postgres, with:
+
+- `JWT_SECRET` **identical** on every instance (tokens are verified anywhere).
+- `SCHEDULER_MODE=distributed` — each scheduled run is leased in the DB so a job/nudge fires exactly once across the fleet, not once per instance.
+- `RATELIMIT_BACKEND=postgres` — rate-limit and login-failure counters live in the shared DB, so throttling and brute-force lockout stay coherent across instances (otherwise each instance counts only its own traffic).
+
+With those set, instances hold no per-learner state between requests; the next ceiling is LLM throughput/cost and Postgres `max_connections` (front with PgBouncer if you run many instances).
+
 ## Database backup
 
-The server stores everything (interactions, OLM, BKT/FSRS/IRT state, refresh tokens, calibration history) in a single SQLite file at `${DB_PATH:-./data/runtime.db}`. Loss of that file resets every learner to `PMastery=0.1` and erases trend windows. Backup posture is part of the product premise, not an afterthought.
+The SQLite profile keeps all state in `${DB_PATH:-./data/runtime.db}`. Loss of that file resets every learner to `PMastery=0.1` and erases trend windows. Backup posture is part of the product premise, not an afterthought. (On Postgres, use your standard `pg_dump`/PITR posture instead of the SQLite recipes below.)
 
 ### What ships in the repo
 

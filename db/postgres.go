@@ -5,8 +5,10 @@ package db
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	_ "embed"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -58,10 +60,55 @@ func MigratePostgres(ctx context.Context, d *sql.DB) error {
 	}
 	defer conn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", migrateLockKey)
 
+	// Anti-drift guard, mirroring the SQLite migration runner: record the
+	// SHA-256 of the embedded schema in schema_migrations on first apply, and
+	// on subsequent boots refuse to proceed if it changed. The CREATE ... IF
+	// NOT EXISTS body cannot ALTER an existing table, so a changed schema_pg.sql
+	// would otherwise silently no-op against an already-migrated database and
+	// the deployment would diverge from the schema file undetected.
+	const schemaVersion = "postgres_schema"
+	sum := sha256.Sum256([]byte(postgresSchema))
+	current := hex.EncodeToString(sum[:])
+
+	if _, err := conn.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+    version    TEXT PRIMARY KEY,
+    checksum   TEXT NOT NULL,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`); err != nil {
+		return fmt.Errorf("postgres migrate: ensure schema_migrations: %w", err)
+	}
+
+	var stored string
+	switch err := conn.QueryRowContext(ctx,
+		`SELECT checksum FROM schema_migrations WHERE version = $1`, schemaVersion,
+	).Scan(&stored); err {
+	case nil:
+		if stored != current {
+			return fmt.Errorf(
+				"postgres schema checksum mismatch: stored=%s current=%s "+
+					"(schema_pg.sql changed since it was applied; manual migration required)",
+				stored, current,
+			)
+		}
+		// Already applied and unchanged: nothing to do.
+		return nil
+	case sql.ErrNoRows:
+		// First apply: fall through.
+	default:
+		return fmt.Errorf("postgres migrate: read schema_migrations: %w", err)
+	}
+
 	for _, stmt := range splitSQLStatements(postgresSchema) {
 		if _, err := conn.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("apply postgres schema (%.60s...): %w", stmt, err)
 		}
+	}
+	if _, err := conn.ExecContext(ctx,
+		`INSERT INTO schema_migrations (version, checksum) VALUES ($1, $2)
+		 ON CONFLICT (version) DO NOTHING`,
+		schemaVersion, current,
+	); err != nil {
+		return fmt.Errorf("postgres migrate: record checksum: %w", err)
 	}
 	return nil
 }

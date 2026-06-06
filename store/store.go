@@ -98,6 +98,12 @@ type ConceptStateStore interface {
 	// GetConceptStateForUpdate is identical to GetConceptState under SQLite and
 	// acquires a row-level lock under PostgreSQL. Implemented next task.
 	GetConceptStateForUpdate(ctx context.Context, learnerID, concept string) (*models.ConceptState, error)
+	// GetOrCreateConceptStateForUpdate returns the row-locked concept state,
+	// materializing a default row first when none exists. The materialize-then-
+	// lock order is required for first-touch concurrency safety on Postgres
+	// (a bare SELECT ... FOR UPDATE locks nothing when the row is absent).
+	// Must run inside WithTx.
+	GetOrCreateConceptStateForUpdate(ctx context.Context, learnerID, concept string) (*models.ConceptState, error)
 	UpsertConceptState(ctx context.Context, cs *models.ConceptState) error
 	GetConceptStatesByLearner(ctx context.Context, learnerID string) ([]*models.ConceptState, error)
 	GetConceptsDueForReview(ctx context.Context, learnerID string) ([]string, error)

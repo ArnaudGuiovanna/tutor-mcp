@@ -68,3 +68,54 @@ func TestMigratePostgresConcurrent(t *testing.T) {
 		t.Fatalf("expected full schema, got %d tables", n)
 	}
 }
+
+// TestMigratePostgresDetectsChecksumDrift gives Postgres the same anti-drift
+// guard SQLite has: MigratePostgres records the schema checksum in
+// schema_migrations and refuses to proceed if a prior apply recorded a
+// different one (the embedded schema_pg.sql changed since it was applied).
+func TestMigratePostgresDetectsChecksumDrift(t *testing.T) {
+	base := os.Getenv("TUTOR_TEST_PG_DSN")
+	if base == "" {
+		t.Skip("set TUTOR_TEST_PG_DSN")
+	}
+	schema := "mig_drift"
+	admin, err := sql.Open("pgx", base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	admin.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE")
+	if _, err := admin.Exec("CREATE SCHEMA " + schema); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { admin.Exec("DROP SCHEMA " + schema + " CASCADE") })
+
+	sep := "?"
+	if strings.Contains(base, "?") {
+		sep = "&"
+	}
+	d, err := sql.Open("pgx", base+sep+"search_path="+schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	ctx := context.Background()
+	// First apply records the checksum.
+	if err := db.MigratePostgres(ctx, d); err != nil {
+		t.Fatalf("first migrate: %v", err)
+	}
+	// Re-apply with an unchanged schema must succeed (idempotent, checksum matches).
+	if err := db.MigratePostgres(ctx, d); err != nil {
+		t.Fatalf("idempotent re-migrate: %v", err)
+	}
+	// Simulate a drifted schema body: corrupt the stored checksum so it no
+	// longer matches the embedded schema. Next migrate must refuse.
+	if _, err := d.Exec(`UPDATE schema_migrations SET checksum = 'drifted' WHERE version = 'postgres_schema'`); err != nil {
+		t.Fatalf("corrupt checksum: %v", err)
+	}
+	err = db.MigratePostgres(ctx, d)
+	if err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("expected checksum mismatch error, got: %v", err)
+	}
+}

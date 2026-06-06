@@ -51,71 +51,58 @@ func (b *rateLimitBackend) Allow(ctx context.Context, key string, rate float64, 
 // matches across the memory and shared backends.
 func (s *Store) rateLimitAllow(ctx context.Context, key string, rate float64, burst int, now time.Time) (bool, error) {
 	now = now.UTC()
-	tx, err := s.root.BeginTx(ctx, txOptionsForDialect(s.dialect))
-	if err != nil {
-		return false, fmt.Errorf("rate limit allow: begin: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
-		}
-	}()
-	txs := &Store{db: tx, dialect: s.dialect}
-
-	query := `SELECT tokens, updated_at FROM rate_limit_buckets WHERE bucket_key = ?`
-	if s.dialect == DialectPostgres {
-		query += ` FOR UPDATE`
-	}
-	var tokens float64
-	var updatedAt flexTime
-	err = txs.queryRow(ctx, query, key).Scan(&tokens, &updatedAt)
-	switch {
-	case err == sql.ErrNoRows:
-		// First request for this key: start full, spend one.
-		tokens = float64(burst) - 1
-		if _, err := txs.exec(ctx,
-			`INSERT INTO rate_limit_buckets (bucket_key, tokens, updated_at) VALUES (?, ?, ?)
-			 ON CONFLICT (bucket_key) DO UPDATE SET tokens = excluded.tokens, updated_at = excluded.updated_at`,
-			key, tokens, now,
-		); err != nil {
-			return false, fmt.Errorf("rate limit allow: insert: %w", err)
-		}
-		if err := tx.Commit(); err != nil {
-			return false, fmt.Errorf("rate limit allow: commit: %w", err)
-		}
-		committed = true
-		return true, nil
-	case err != nil:
-		return false, fmt.Errorf("rate limit allow: select: %w", err)
-	}
-
-	// Refill based on elapsed time, capped at burst.
-	elapsed := now.Sub(updatedAt.Time).Seconds()
-	if elapsed < 0 {
-		elapsed = 0
-	}
-	tokens += elapsed * rate
-	if tokens > float64(burst) {
-		tokens = float64(burst)
-	}
-
 	allowed := false
-	if tokens >= 1 {
-		tokens--
-		allowed = true
-	}
+	err := s.inTx(ctx, txOptionsForDialect(s.dialect), func(txs *Store) error {
+		query := `SELECT tokens, updated_at FROM rate_limit_buckets WHERE bucket_key = ?`
+		if txs.dialect == DialectPostgres {
+			query += ` FOR UPDATE`
+		}
+		var tokens float64
+		var updatedAt flexTime
+		err := txs.queryRow(ctx, query, key).Scan(&tokens, &updatedAt)
+		switch {
+		case err == sql.ErrNoRows:
+			// First request for this key: start full, spend one.
+			tokens = float64(burst) - 1
+			if _, err := txs.exec(ctx,
+				`INSERT INTO rate_limit_buckets (bucket_key, tokens, updated_at) VALUES (?, ?, ?)
+				 ON CONFLICT (bucket_key) DO UPDATE SET tokens = excluded.tokens, updated_at = excluded.updated_at`,
+				key, tokens, now,
+			); err != nil {
+				return fmt.Errorf("rate limit allow: insert: %w", err)
+			}
+			allowed = true
+			return nil
+		case err != nil:
+			return fmt.Errorf("rate limit allow: select: %w", err)
+		}
 
-	if _, err := txs.exec(ctx,
-		`UPDATE rate_limit_buckets SET tokens = ?, updated_at = ? WHERE bucket_key = ?`,
-		tokens, now, key,
-	); err != nil {
-		return false, fmt.Errorf("rate limit allow: update: %w", err)
+		// Refill based on elapsed time, capped at burst.
+		elapsed := now.Sub(updatedAt.Time).Seconds()
+		if elapsed < 0 {
+			elapsed = 0
+		}
+		tokens += elapsed * rate
+		if tokens > float64(burst) {
+			tokens = float64(burst)
+		}
+
+		if tokens >= 1 {
+			tokens--
+			allowed = true
+		}
+
+		if _, err := txs.exec(ctx,
+			`UPDATE rate_limit_buckets SET tokens = ?, updated_at = ? WHERE bucket_key = ?`,
+			tokens, now, key,
+		); err != nil {
+			return fmt.Errorf("rate limit allow: update: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
 	}
-	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("rate limit allow: commit: %w", err)
-	}
-	committed = true
 	return allowed, nil
 }
 

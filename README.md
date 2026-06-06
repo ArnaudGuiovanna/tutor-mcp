@@ -206,9 +206,14 @@ Environment variables read at boot:
 
 | Variable | Default | Effect |
 |---|---|---|
-| `JWT_SECRET` | — *(required)* | HS256 secret. Must be valid base64 (plain strings rejected at boot). Use `openssl rand -base64 32` — 32+ decoded bytes recommended for HS256. |
+| `JWT_SECRET` | — *(required)* | HS256 secret. Must be valid base64 (plain strings rejected at boot). Use `openssl rand -base64 32` — 32+ decoded bytes recommended for HS256. **Must be identical on every instance** in a multi-node deployment. |
 | `PORT` | `3000` | HTTP listen port |
-| `DB_PATH` | `./data/runtime.db` | SQLite path |
+| `DB_DRIVER` | `sqlite` | `sqlite` (default, embedded, no external service) or `postgres` (horizontal multi-node). |
+| `DB_PATH` | `./data/runtime.db` | SQLite path (ignored when `DB_DRIVER=postgres`) |
+| `DATABASE_URL` | — | Postgres DSN, **required** when `DB_DRIVER=postgres` (e.g. `postgres://user:pass@host:5432/db?sslmode=require`). |
+| `DB_MAX_CONNS` | `10` | Postgres connection-pool size per instance (ignored on SQLite). Keep `DB_MAX_CONNS × instances < Postgres max_connections`. |
+| `SCHEDULER_MODE` | `inprocess` | `inprocess` (single-node cron) or `distributed` (per-run DB lease for exactly-once across a fleet). |
+| `RATELIMIT_BACKEND` | `memory` | `memory` (per-instance, default) or `postgres`/`db` (shared, fleet-wide rate-limit + login-failure stores — required for coherent throttling across multiple instances). |
 | `BASE_URL` | `http://localhost:$PORT` | Public origin (no trailing slash). Triggers HSTS when `https://`. |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `TRUSTED_PROXY_CIDRS` | — | Comma-separated CIDRs of trusted reverse-proxies. **Required behind a public proxy** — without it every IP-rate-limit collapses under the proxy's loopback bucket. |
@@ -232,7 +237,7 @@ algorithms/          BKT / FSRS / IRT / Rasch-Elo / PFA / KST + thresholds
 engine/              Orchestrator + phase FSM + selectors + gate + fade
                      + alert / motivation / mirror / replay / OLM
 models/              Typed structs (learner, domain, interactions, regulation, …)
-db/                  SQLite store + schema + idempotent migrations
+db/                  Store (SQLite default + Postgres) + dialect-aware schema + checksummed migrations
 memory/              Markdown learner memory (stable / pending / sessions / concepts / archives)
 tools/               MCP tool handlers + system prompt + rubrics
 ```
@@ -250,13 +255,13 @@ Intentionally **single-tenant, single-node** — self-hosted for yourself, a sma
 | **Classroom** | 10–50 | up to 150 | Facilitated sessions |
 | **Small org** | 50–200 | up to 600 | Sustained load |
 
-**Hard ceiling ~200 concurrent active learners** — beyond, the scheduler tick and SQLite's serialised writes become the limit. Switch to Postgres + externalised scheduler at that scale.
+**Hard ceiling ~200 concurrent active learners** on the default single-node SQLite profile — beyond, the scheduler tick and SQLite's serialised writes become the limit. To scale horizontally, opt into the built-in Postgres path: set `DB_DRIVER=postgres` + `DATABASE_URL`, `SCHEDULER_MODE=distributed`, and `RATELIMIT_BACKEND=postgres`, then run N stateless instances behind a load balancer with a shared `JWT_SECRET`. The next ceiling is then LLM throughput / cost and Postgres `max_connections`.
 
 **Idle footprint**: ~30 MB RSS, ~15 MB binary, ~10 MB initial DB (+50 KB/active learner/month). Tested on Raspberry Pi 4 and €5/mo VPS for personal use.
 
 ## Tech stack
 
-Go 1.25 · [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk) · [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) (pure-Go, no CGO) · [robfig/cron](https://github.com/robfig/cron) · [golang-jwt/jwt](https://github.com/golang-jwt/jwt) · bcrypt.
+Go 1.25 · [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk) · [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) (pure-Go, no CGO, default) · [jackc/pgx](https://github.com/jackc/pgx) (Postgres, pure-Go, opt-in) · [robfig/cron](https://github.com/robfig/cron) · [golang-jwt/jwt](https://github.com/golang-jwt/jwt) · bcrypt.
 
 ## Pedagogical reliability
 

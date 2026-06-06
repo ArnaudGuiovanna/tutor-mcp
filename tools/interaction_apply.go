@@ -79,10 +79,14 @@ func applyInteraction(
 	var resultCS *models.ConceptState
 	var resultMeta map[string]any
 	err := deps.Store.WithTx(ctx, func(s store.Store) error {
-		// Load or bootstrap concept state.
-		cs, err := s.GetConceptStateForUpdate(ctx, learnerID, input.Concept)
+		// Load or bootstrap concept state. GetOrCreateConceptStateForUpdate
+		// materializes the row before taking the FOR UPDATE lock so concurrent
+		// first-touch interactions on a brand-new (learner, concept) serialize
+		// on Postgres instead of both bootstrapping and one overwriting the
+		// other (lost update). On SQLite the materialize is a cheap no-op.
+		cs, err := s.GetOrCreateConceptStateForUpdate(ctx, learnerID, input.Concept)
 		if err != nil {
-			cs = models.NewConceptState(learnerID, input.Concept)
+			return fmt.Errorf("load concept state: %w", err)
 		}
 		observation := structuredObservation(input)
 

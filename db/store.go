@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -227,6 +228,29 @@ func (s *Store) WithTx(ctx context.Context, fn func(s store.Store) error) error 
 	return tx.Commit()
 }
 
+// inTx runs fn against a transaction-scoped Store. When s is the root store it
+// opens a new transaction with the given options, commits on success and rolls
+// back on error. When s is ALREADY transaction-scoped (inside a WithTx
+// callback, root == nil), it runs fn on the current transaction so the
+// multi-statement methods below (DeleteDomain, ConsumeAuthCode, …) compose
+// inside WithTx instead of dereferencing a nil root. In that nested case the
+// outer WithTx owns commit/rollback, so inTx neither commits nor rolls back.
+func (s *Store) inTx(ctx context.Context, opts *sql.TxOptions, fn func(txs *Store) error) error {
+	if s.root == nil {
+		return fn(s)
+	}
+	tx, err := s.root.BeginTx(ctx, opts)
+	if err != nil {
+		return err
+	}
+	txs := &Store{db: tx, dialect: s.dialect}
+	if err := fn(txs); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
 // GetConceptStateForUpdate is identical to GetConceptState under SQLite (the
 // serializable tx already holds the writer lock via BEGIN IMMEDIATE). A future
 // PostgresStore overrides this with SELECT ... FOR UPDATE.
@@ -236,6 +260,32 @@ func (s *Store) WithTx(ctx context.Context, fn func(s store.Store) error) error 
 // SQLite the lock is implicit: WithTx opens BEGIN IMMEDIATE, which already
 // holds the single writer lock for the whole transaction.
 func (s *Store) GetConceptStateForUpdate(ctx context.Context, learnerID, concept string) (*models.ConceptState, error) {
+	return s.getConceptState(ctx, learnerID, concept, true)
+}
+
+// GetOrCreateConceptStateForUpdate returns the row-locked concept state for
+// (learner, concept), materializing a default row first when none exists. Must
+// run inside WithTx.
+//
+// The materialize-then-lock order is load-bearing for first-touch concurrency
+// on Postgres: a bare SELECT ... FOR UPDATE locks nothing when the row is
+// absent, so two concurrent first interactions would both read no row, both
+// bootstrap a fresh state, and the second UpsertConceptState would overwrite
+// the first — silently discarding an entire BKT/FSRS/IRT update. Inserting with
+// ON CONFLICT DO NOTHING first guarantees the row exists, so the subsequent
+// FOR UPDATE serializes the read-modify-write. SQLite is already safe via
+// BEGIN IMMEDIATE; the extra insert is a cheap no-op once the row exists.
+func (s *Store) GetOrCreateConceptStateForUpdate(ctx context.Context, learnerID, concept string) (*models.ConceptState, error) {
+	cs, err := s.getConceptState(ctx, learnerID, concept, true)
+	if err == nil {
+		return cs, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	if err := s.InsertConceptStateIfNotExists(ctx, models.NewConceptState(learnerID, concept)); err != nil {
+		return nil, fmt.Errorf("bootstrap concept state: %w", err)
+	}
 	return s.getConceptState(ctx, learnerID, concept, true)
 }
 
@@ -700,42 +750,33 @@ func (s *Store) ActiveDomainConceptSet(ctx context.Context, learnerID string) (m
 }
 
 func (s *Store) DeleteDomain(ctx context.Context, domainID, learnerID string) error {
-	tx, err := s.root.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin delete domain tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	txs := &Store{db: tx, dialect: s.dialect}
+	return s.inTx(ctx, nil, func(txs *Store) error {
+		result, err := txs.exec(ctx,
+			`DELETE FROM domains WHERE id = ? AND learner_id = ?`,
+			domainID, learnerID,
+		)
+		if err != nil {
+			return fmt.Errorf("delete domain: %w", err)
+		}
+		n, _ := result.RowsAffected()
+		if n == 0 {
+			return fmt.Errorf("domain not found")
+		}
 
-	result, err := txs.exec(ctx,
-		`DELETE FROM domains WHERE id = ? AND learner_id = ?`,
-		domainID, learnerID,
-	)
-	if err != nil {
-		return fmt.Errorf("delete domain: %w", err)
-	}
-	n, _ := result.RowsAffected()
-	if n == 0 {
-		return fmt.Errorf("domain not found")
-	}
-
-	if _, err := txs.exec(ctx,
-		`DELETE FROM implementation_intentions WHERE learner_id = ? AND domain_id = ?`,
-		learnerID, domainID,
-	); err != nil {
-		return fmt.Errorf("delete domain implementation intentions: %w", err)
-	}
-	if _, err := txs.exec(ctx,
-		`DELETE FROM webhook_message_queue WHERE learner_id = ? AND kind = ?`,
-		learnerID, "olm:"+domainID,
-	); err != nil {
-		return fmt.Errorf("delete domain webhook queue: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit delete domain tx: %w", err)
-	}
-	return nil
+		if _, err := txs.exec(ctx,
+			`DELETE FROM implementation_intentions WHERE learner_id = ? AND domain_id = ?`,
+			learnerID, domainID,
+		); err != nil {
+			return fmt.Errorf("delete domain implementation intentions: %w", err)
+		}
+		if _, err := txs.exec(ctx,
+			`DELETE FROM webhook_message_queue WHERE learner_id = ? AND kind = ?`,
+			learnerID, "olm:"+domainID,
+		); err != nil {
+			return fmt.Errorf("delete domain webhook queue: %w", err)
+		}
+		return nil
+	})
 }
 
 func (s *Store) InsertConceptStateIfNotExists(ctx context.Context, cs *models.ConceptState) error {
@@ -1256,31 +1297,26 @@ func (s *Store) CreateAuthCode(ctx context.Context, code, learnerID, codeChallen
 // ConsumeAuthCode retrieves and deletes an auth code in one operation.
 // Binds the code to the requesting client_id: returns invalid_grant if mismatch.
 func (s *Store) ConsumeAuthCode(ctx context.Context, code, clientID string) (*models.AuthCode, error) {
-	tx, err := s.root.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
-	}
-	defer tx.Rollback()
-	txs := &Store{db: tx, dialect: s.dialect}
-
 	ac := &models.AuthCode{}
-	err = txs.queryRow(ctx,
-		`SELECT code, learner_id, code_challenge, client_id, expires_at FROM oauth_codes WHERE code = ? AND client_id = ?`,
-		code, clientID,
-	).Scan(&ac.Code, &ac.LearnerID, &ac.CodeChallenge, &ac.ClientID, &ac.ExpiresAt)
-	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("invalid_grant")
-	}
+	err := s.inTx(ctx, nil, func(txs *Store) error {
+		err := txs.queryRow(ctx,
+			`SELECT code, learner_id, code_challenge, client_id, expires_at FROM oauth_codes WHERE code = ? AND client_id = ?`,
+			code, clientID,
+		).Scan(&ac.Code, &ac.LearnerID, &ac.CodeChallenge, &ac.ClientID, &ac.ExpiresAt)
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("invalid_grant")
+		}
+		if err != nil {
+			return fmt.Errorf("consume auth code: %w", err)
+		}
+
+		if _, err := txs.exec(ctx, `DELETE FROM oauth_codes WHERE code = ?`, code); err != nil {
+			return fmt.Errorf("delete auth code: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("consume auth code: %w", err)
-	}
-
-	if _, err := txs.exec(ctx, `DELETE FROM oauth_codes WHERE code = ?`, code); err != nil {
-		return nil, fmt.Errorf("delete auth code: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit consume auth code: %w", err)
+		return nil, err
 	}
 	return ac, nil
 }

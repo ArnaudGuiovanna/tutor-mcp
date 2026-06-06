@@ -6,7 +6,46 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- **PostgreSQL backend (opt-in) for horizontal scaling.** SQLite stays the
+  default (`DB_DRIVER=sqlite`, embedded, no external service); set
+  `DB_DRIVER=postgres` + `DATABASE_URL` to run on Postgres via the pure-Go pgx
+  driver. The persistence layer was inverted behind a `store.Store` port
+  (`engine`/`tools`/`auth` no longer import `db`) with a single conformance
+  suite replayed against both backends so behaviour stays equivalent. Includes
+  a dialect-aware schema (`schema_pg.sql`), `?`→`$N` rebind, RETURNING/ON
+  CONFLICT handling, and `DB_MAX_CONNS` pool tuning.
+- **Stateless multi-node operation.** `SCHEDULER_MODE=distributed` leases each
+  scheduled run in the DB (`ClaimJobRun`) so jobs/nudges fire exactly once
+  across a fleet; `RATELIMIT_BACKEND=postgres` (alias `db`) moves rate-limit and
+  login-failure counters into a shared store for coherent fleet-wide throttling.
+  Concurrent cold-start migrations are serialized with a Postgres advisory lock.
+- **Row-level write concurrency on Postgres.** The `record_interaction` hot path
+  uses `SELECT … FOR UPDATE` and the webhook queue uses `SKIP LOCKED`, giving
+  the same lost-update protection on Postgres that `BEGIN IMMEDIATE` provides on
+  SQLite.
+
 ### Fixed
+
+- **(postgres)** Fix a first-touch lost update on `concept_states` under
+  concurrency on Postgres: the very first interaction on a brand-new
+  (learner, concept) found no row, so `SELECT … FOR UPDATE` locked nothing and
+  two concurrent transactions both bootstrapped and one overwrote the other.
+  New `GetOrCreateConceptStateForUpdate` materializes the row
+  (`INSERT … ON CONFLICT DO NOTHING`) before locking; `applyInteraction` uses
+  it. Guarded by `TestFirstTouchNoLostUpdate` on both backends.
+- **(postgres)** Prevent a nil-pointer panic when a method that opens its own
+  transaction (`DeleteDomain`, `ConsumeAuthCode`, `MergeDomainGoalRelevance`,
+  the learning-negotiation overrides, the shared rate limiter) is invoked from
+  inside a `WithTx` callback. A new `inTx` helper composes onto the current
+  transaction instead of dereferencing the nil root pool. Guarded by
+  `TestNestedTxComposition`.
+- **(postgres)** Give the Postgres migration path the same anti-drift guard as
+  SQLite: `MigratePostgres` records the schema checksum in `schema_migrations`
+  and refuses to boot if `schema_pg.sql` changed since it was applied (rather
+  than silently no-op'ing under `CREATE … IF NOT EXISTS`). Guarded by
+  `TestMigratePostgresDetectsChecksumDrift`.
 
 - **(security)** Transactionalize `record_interaction` to prevent lost updates
   on `concept_states` under concurrent calls on the same (learner, concept)

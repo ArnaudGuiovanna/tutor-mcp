@@ -54,6 +54,59 @@ func TestForUpdateNoLostUpdate(t *testing.T) {
 	}
 }
 
+// TestFirstTouchNoLostUpdate is the first-touch variant of the lost-update
+// guard: unlike TestForUpdateNoLostUpdate it does NOT pre-create the row. N
+// concurrent transactions each materialize-and-lock the (learner, concept)
+// state via GetOrCreateConceptStateForUpdate, bump reps, and upsert. On
+// Postgres a bare SELECT ... FOR UPDATE locks nothing when the row is absent,
+// so without materialize-then-lock two concurrent first interactions both
+// bootstrap a fresh state and the second upsert overwrites the first — a lost
+// update of the entire algorithmic state. The final reps count must equal N.
+func TestFirstTouchNoLostUpdate(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+	const N = 50
+	var wg sync.WaitGroup
+	errs := make(chan error, N)
+	start := make(chan struct{})
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start // release all goroutines together to maximise overlap
+			errs <- s.WithTx(ctx, func(tx store.Store) error {
+				got, err := tx.GetOrCreateConceptStateForUpdate(ctx, "L1", "C-fresh")
+				if err != nil {
+					return err
+				}
+				// Widen the read-modify-write window so every goroutine is past
+				// the lock acquisition before any commits. A correct
+				// materialize-then-lock implementation serializes here on the
+				// row lock; a bare FOR UPDATE on the absent row does not, and
+				// the lost update becomes deterministic rather than flaky.
+				time.Sleep(15 * time.Millisecond)
+				got.Reps++
+				return tx.UpsertConceptState(ctx, got)
+			})
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		if e != nil {
+			t.Fatalf("tx error: %v", e)
+		}
+	}
+	final, err := s.GetConceptState(ctx, "L1", "C-fresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.Reps != N {
+		t.Fatalf("first-touch lost updates: reps=%d, want %d", final.Reps, N)
+	}
+}
+
 // TestSkipLockedExactlyOnce enqueues M pending webhook messages and has N
 // workers concurrently dequeue+mark-sent inside WithTx. Each message must be
 // claimed exactly once (no double dispatch, none lost).
