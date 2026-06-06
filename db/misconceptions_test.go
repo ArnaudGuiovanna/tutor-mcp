@@ -52,6 +52,9 @@ func setupTestDB(t *testing.T) *Store {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Mirror production OpenDB: a single connection serializes writers so
+	// concurrent BEGIN IMMEDIATE transactions queue instead of deadlocking.
+	db.SetMaxOpenConns(1)
 	if err := Migrate(db); err != nil {
 		t.Fatal(err)
 	}

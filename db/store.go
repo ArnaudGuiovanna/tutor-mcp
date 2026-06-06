@@ -202,7 +202,21 @@ func (f *flexTime) parse(s string) error {
 // for read-modify-write patterns where concurrent goroutines would otherwise
 // both read a stale snapshot and one overwrite the other on commit (R008).
 func (s *Store) WithTx(ctx context.Context, fn func(s store.Store) error) error {
-	tx, err := s.root.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	// Isolation differs by dialect on purpose:
+	//   SQLite   — SERIALIZABLE maps to BEGIN IMMEDIATE (DSN _txlock=immediate):
+	//              the single writer lock is taken at tx start, so concurrent
+	//              writers queue on busy_timeout rather than racing.
+	//   Postgres — READ COMMITTED (the default). Row-level exclusivity is
+	//              provided explicitly by SELECT ... FOR UPDATE [SKIP LOCKED],
+	//              which blocks rather than aborting. Using SERIALIZABLE here
+	//              would surface 40001 serialization failures that callers would
+	//              have to retry; READ COMMITTED + FOR UPDATE gives the same
+	//              lost-update protection without retries.
+	iso := sql.LevelSerializable
+	if s.dialect == DialectPostgres {
+		iso = sql.LevelReadCommitted
+	}
+	tx, err := s.root.BeginTx(ctx, &sql.TxOptions{Isolation: iso})
 	if err != nil {
 		return err
 	}
@@ -216,8 +230,13 @@ func (s *Store) WithTx(ctx context.Context, fn func(s store.Store) error) error 
 // GetConceptStateForUpdate is identical to GetConceptState under SQLite (the
 // serializable tx already holds the writer lock via BEGIN IMMEDIATE). A future
 // PostgresStore overrides this with SELECT ... FOR UPDATE.
+// GetConceptStateForUpdate reads the concept state with a row lock so a
+// concurrent read-modify-write on the same (learner, concept) serializes.
+// On Postgres it emits SELECT ... FOR UPDATE (must run inside WithTx). On
+// SQLite the lock is implicit: WithTx opens BEGIN IMMEDIATE, which already
+// holds the single writer lock for the whole transaction.
 func (s *Store) GetConceptStateForUpdate(ctx context.Context, learnerID, concept string) (*models.ConceptState, error) {
-	return s.GetConceptState(ctx, learnerID, concept)
+	return s.getConceptState(ctx, learnerID, concept, true)
 }
 
 func generateID() string {
@@ -742,15 +761,19 @@ func (s *Store) InsertConceptStateIfNotExists(ctx context.Context, cs *models.Co
 // ─── Concept States ───────────────────────────────────────────────────────────
 
 func (s *Store) GetConceptState(ctx context.Context, learnerID, concept string) (*models.ConceptState, error) {
+	return s.getConceptState(ctx, learnerID, concept, false)
+}
+func (s *Store) getConceptState(ctx context.Context, learnerID, concept string, forUpdate bool) (*models.ConceptState, error) {
 	cs := &models.ConceptState{}
 	var lastReview, nextReview sql.NullTime
-	err := s.queryRow(ctx,
-		`SELECT id, learner_id, concept, stability, difficulty, elapsed_days, scheduled_days,
+	query := `SELECT id, learner_id, concept, stability, difficulty, elapsed_days, scheduled_days,
 		        reps, lapses, card_state, last_review, next_review, p_mastery, p_learn, p_forget,
 		        p_slip, p_guess, theta, updated_at
-		 FROM concept_states WHERE learner_id = ? AND concept = ?`,
-		learnerID, concept,
-	).Scan(
+		 FROM concept_states WHERE learner_id = ? AND concept = ?`
+	if forUpdate && s.dialect == DialectPostgres {
+		query += ` FOR UPDATE`
+	}
+	err := s.queryRow(ctx, query, learnerID, concept).Scan(
 		&cs.ID, &cs.LearnerID, &cs.Concept, &cs.Stability, &cs.Difficulty,
 		&cs.ElapsedDays, &cs.ScheduledDays, &cs.Reps, &cs.Lapses, &cs.CardState,
 		&lastReview, &nextReview,

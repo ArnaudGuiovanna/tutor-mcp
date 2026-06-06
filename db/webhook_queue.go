@@ -155,16 +155,22 @@ func (s *Store) MarkWebhookPushConceptAddressed(ctx context.Context, learnerID, 
 func (s *Store) DequeueNextPending(ctx context.Context, learnerID, kind string, now time.Time, window time.Duration) (*models.WebhookQueueItem, error) {
 	lower := now.Add(-window).UTC()
 	upper := now.Add(window).UTC()
-	row := s.queryRow(ctx,
-		`SELECT id, learner_id, kind, scheduled_for, expires_at, content, priority, status, created_at, sent_at
+	query := `SELECT id, learner_id, kind, scheduled_for, expires_at, content, priority, status, created_at, sent_at
 		 FROM webhook_message_queue
 		 WHERE learner_id = ? AND kind = ? AND status = 'pending'
 		   AND scheduled_for BETWEEN ? AND ?
 		   AND (expires_at IS NULL OR expires_at > ?)
 		 ORDER BY priority DESC, scheduled_for ASC
-		 LIMIT 1`,
-		learnerID, kind, lower, upper, now.UTC(),
-	)
+		 LIMIT 1`
+	// On Postgres, lock the claimed row and skip rows already locked by another
+	// worker so multiple scheduler instances dequeuing concurrently each get a
+	// distinct message (exactly-once dispatch). Requires a surrounding tx
+	// (WithTx) to hold the lock until the row is marked sent. SQLite is
+	// single-writer (BEGIN IMMEDIATE), so no row-lock clause is needed.
+	if s.dialect == DialectPostgres {
+		query += ` FOR UPDATE SKIP LOCKED`
+	}
+	row := s.queryRow(ctx, query, learnerID, kind, lower, upper, now.UTC())
 	item, err := scanWebhookQueueItem(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
