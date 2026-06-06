@@ -25,28 +25,36 @@ func (s *Store) InsertLearningNegotiationOverridePayload(ctx context.Context, le
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx,
+	if _, err := tx.ExecContext(ctx, s.rebind(
 		`UPDATE implementation_intentions
 		 SET honored = 0
-		 WHERE learner_id = ? AND domain_id = ? AND trigger_text = ? AND honored IS NULL`,
+		 WHERE learner_id = ? AND domain_id = ? AND trigger_text = ? AND honored IS NULL`),
 		learnerID, domainID, learningNegotiationOverrideTrigger,
 	); err != nil {
 		return 0, fmt.Errorf("supersede learning negotiation override: %w", err)
 	}
 
-	result, err := tx.ExecContext(ctx,
-		`INSERT INTO implementation_intentions
+	insertQuery := `INSERT INTO implementation_intentions
 		 (learner_id, domain_id, trigger_text, action_text, scheduled_for, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		learnerID, domainID, learningNegotiationOverrideTrigger, payload, expiresAt.UTC(), now.UTC(),
-	)
-	if err != nil {
-		return 0, fmt.Errorf("insert learning negotiation override: %w", err)
+		 VALUES (?, ?, ?, ?, ?, ?)`
+	insertArgs := []any{learnerID, domainID, learningNegotiationOverrideTrigger, payload, expiresAt.UTC(), now.UTC()}
+
+	var id int64
+	if s.dialect == DialectPostgres {
+		if err := tx.QueryRowContext(ctx, s.rebind(insertQuery)+" RETURNING id", insertArgs...).Scan(&id); err != nil {
+			return 0, fmt.Errorf("insert learning negotiation override: %w", err)
+		}
+	} else {
+		result, err := tx.ExecContext(ctx, insertQuery, insertArgs...)
+		if err != nil {
+			return 0, fmt.Errorf("insert learning negotiation override: %w", err)
+		}
+		id, err = result.LastInsertId()
+		if err != nil {
+			return 0, fmt.Errorf("get learning negotiation override id: %w", err)
+		}
 	}
-	id, err := result.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("get learning negotiation override id: %w", err)
-	}
+
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit learning negotiation override insert: %w", err)
 	}

@@ -29,17 +29,13 @@ func (s *Store) EnqueueWebhookMessage(ctx context.Context, learnerID, kind, cont
 	if !expiresAt.IsZero() {
 		expires = expiresAt.UTC()
 	}
-	result, err := s.db.ExecContext(ctx,
+	id, err := s.insertReturningID(ctx,
 		`INSERT INTO webhook_message_queue (learner_id, kind, scheduled_for, expires_at, content, priority, status, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`,
 		learnerID, kind, scheduledFor.UTC(), expires, content, priority, time.Now().UTC(),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("enqueue webhook message: %w", err)
-	}
-	id, err := result.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("get webhook queue id: %w", err)
 	}
 	return id, nil
 }
@@ -61,7 +57,7 @@ func (s *Store) CreateWebhookPushLog(ctx context.Context, learnerID string, queu
 	if pushedAt.IsZero() {
 		pushedAt = time.Now().UTC()
 	}
-	result, err := s.db.ExecContext(ctx,
+	id, err := s.insertReturningID(ctx,
 		`INSERT INTO webhook_push_log
 		 (learner_id, queue_id, kind, domain_id, domain_name, concept, trigger_text,
 		  pedagogical_intent, learning_gain, open_loop, next_action, pushed_at, created_at)
@@ -72,10 +68,6 @@ func (s *Store) CreateWebhookPushLog(ctx context.Context, learnerID string, queu
 	)
 	if err != nil {
 		return 0, fmt.Errorf("create webhook push log: %w", err)
-	}
-	id, err := result.LastInsertId()
-	if err != nil {
-		return 0, fmt.Errorf("get webhook push log id: %w", err)
 	}
 	return id, nil
 }
@@ -97,7 +89,7 @@ func (s *Store) GetLatestOpenWebhookPush(ctx context.Context, learnerID, domainI
 		args = append(args, domainID)
 	}
 	query += ` ORDER BY pushed_at DESC LIMIT 1`
-	row := s.db.QueryRowContext(ctx, query, args...)
+	row := s.queryRow(ctx, query, args...)
 	push, err := scanWebhookPushLog(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -115,7 +107,7 @@ func (s *Store) MarkWebhookPushSessionOpened(ctx context.Context, learnerID stri
 	if openedAt.IsZero() {
 		openedAt = time.Now().UTC()
 	}
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`UPDATE webhook_push_log
 		    SET opened_session_at = COALESCE(opened_session_at, ?),
 		        concept_addressed = CASE WHEN concept = '' THEN 1 ELSE concept_addressed END
@@ -151,7 +143,7 @@ func (s *Store) MarkWebhookPushConceptAddressed(ctx context.Context, learnerID, 
 		query += ` AND (domain_id = '' OR domain_id = ?)`
 		args = append(args, domainID)
 	}
-	if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
+	if _, err := s.exec(ctx, query, args...); err != nil {
 		return fmt.Errorf("mark webhook push concept addressed: %w", err)
 	}
 	return nil
@@ -163,7 +155,7 @@ func (s *Store) MarkWebhookPushConceptAddressed(ctx context.Context, learnerID, 
 func (s *Store) DequeueNextPending(ctx context.Context, learnerID, kind string, now time.Time, window time.Duration) (*models.WebhookQueueItem, error) {
 	lower := now.Add(-window).UTC()
 	upper := now.Add(window).UTC()
-	row := s.db.QueryRowContext(ctx,
+	row := s.queryRow(ctx,
 		`SELECT id, learner_id, kind, scheduled_for, expires_at, content, priority, status, created_at, sent_at
 		 FROM webhook_message_queue
 		 WHERE learner_id = ? AND kind = ? AND status = 'pending'
@@ -185,7 +177,7 @@ func (s *Store) DequeueNextPending(ctx context.Context, learnerID, kind string, 
 
 // MarkWebhookSent marks the learner-owned queue item as sent at `now`.
 func (s *Store) MarkWebhookSent(ctx context.Context, id int64, learnerID string, now time.Time) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`UPDATE webhook_message_queue SET status = 'sent', sent_at = ? WHERE id = ? AND learner_id = ?`,
 		now.UTC(), id, learnerID,
 	)
@@ -197,7 +189,7 @@ func (s *Store) MarkWebhookSent(ctx context.Context, id int64, learnerID string,
 
 // MarkWebhookFailed marks the learner-owned queue item as failed (will not be retried).
 func (s *Store) MarkWebhookFailed(ctx context.Context, id int64, learnerID string) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`UPDATE webhook_message_queue SET status = 'failed' WHERE id = ? AND learner_id = ?`,
 		id, learnerID,
 	)
@@ -211,7 +203,7 @@ func (s *Store) MarkWebhookFailed(ctx context.Context, id int64, learnerID strin
 // This is intentionally global: it is a scheduler cleanup pass, not a learner-scoped mutator.
 // Returns the number of rows updated.
 func (s *Store) ExpirePastWebhookMessages(ctx context.Context, now time.Time) (int64, error) {
-	result, err := s.db.ExecContext(ctx,
+	result, err := s.exec(ctx,
 		`UPDATE webhook_message_queue SET status = 'expired'
 		 WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < ?`,
 		now.UTC(),
@@ -224,7 +216,7 @@ func (s *Store) ExpirePastWebhookMessages(ctx context.Context, now time.Time) (i
 
 // GetPendingWebhookMessages returns all pending messages (for monitoring / debugging).
 func (s *Store) GetPendingWebhookMessages(ctx context.Context, learnerID string) ([]*models.WebhookQueueItem, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT id, learner_id, kind, scheduled_for, expires_at, content, priority, status, created_at, sent_at
 		 FROM webhook_message_queue
 		 WHERE learner_id = ? AND status = 'pending'

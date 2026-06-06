@@ -9,30 +9,9 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
-	"time"
 
 	"tutor-mcp/models"
 )
-
-// parseTimeFlex attempts several common SQLite/Go time formats.
-func parseTimeFlex(s string) (time.Time, error) {
-	for _, layout := range []string{
-		time.RFC3339Nano,
-		time.RFC3339,
-		"2006-01-02 15:04:05.999999999 +0000 UTC",
-		"2006-01-02 15:04:05.999999999-07:00",
-		"2006-01-02 15:04:05.999999999Z07:00",
-		"2006-01-02T15:04:05.999999999-07:00",
-		"2006-01-02T15:04:05.999999999Z07:00",
-		"2006-01-02 15:04:05",
-		"2006-01-02T15:04:05",
-	} {
-		if t, err := time.Parse(layout, s); err == nil {
-			return t, nil
-		}
-	}
-	return time.Time{}, fmt.Errorf("cannot parse time %q", s)
-}
 
 // ─── Misconception Groups ──────────────────────────────────────────────────
 
@@ -70,7 +49,7 @@ func (s *Store) GetMisconceptionGroups(ctx context.Context, learnerID string, co
 	}
 	query += ` GROUP BY concept, misconception_type ORDER BY cnt DESC`
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("get misconception groups: %w", err)
 	}
@@ -79,12 +58,12 @@ func (s *Store) GetMisconceptionGroups(ctx context.Context, learnerID string, co
 	var groups []models.MisconceptionGroup
 	for rows.Next() {
 		var g models.MisconceptionGroup
-		var firstSeen, lastSeen string
+		var firstSeen, lastSeen flexTime
 		if err := rows.Scan(&g.Concept, &g.MisconceptionType, &g.Count, &firstSeen, &lastSeen); err != nil {
 			return nil, fmt.Errorf("scan misconception group: %w", err)
 		}
-		g.FirstSeen, _ = parseTimeFlex(firstSeen)
-		g.LastSeen, _ = parseTimeFlex(lastSeen)
+		g.FirstSeen = firstSeen.Time
+		g.LastSeen = lastSeen.Time
 
 		// Go-side concept filtering
 		if conceptFilter != nil && !conceptFilter[g.Concept] {
@@ -149,7 +128,7 @@ func (s *Store) lastMisconceptionDetails(ctx context.Context, learnerID string, 
 		placeholders = append(placeholders, "?")
 		args = append(args, c)
 	}
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT concept, misconception_type, misconception_detail
 		 FROM (
 		    SELECT concept, misconception_type, misconception_detail,
@@ -196,7 +175,7 @@ func (s *Store) misconceptionStatuses(ctx context.Context, learnerID string, con
 		args = append(args, c)
 	}
 	args = append(args, MisconceptionResolutionWindow)
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT concept, misconception_type
 		 FROM (
 		    SELECT concept, misconception_type,
@@ -225,7 +204,7 @@ func (s *Store) misconceptionStatuses(ctx context.Context, learnerID string, con
 // GetDistinctMisconceptionTypes returns all distinct misconception types
 // recorded for a learner on a given concept, in alphabetical order.
 func (s *Store) GetDistinctMisconceptionTypes(ctx context.Context, learnerID, concept string) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT DISTINCT misconception_type FROM interactions
 		 WHERE learner_id = ? AND concept = ? AND misconception_type IS NOT NULL
 		 ORDER BY misconception_type`,

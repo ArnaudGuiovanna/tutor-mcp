@@ -101,7 +101,7 @@ func (s *Store) MergeDomainGoalRelevance(ctx context.Context, domainID string, r
 // treat this as "uniform fallback (1.0 everywhere)" rather than an error.
 func (s *Store) GetDomainGoalRelevance(ctx context.Context, domainID string) (*models.GoalRelevance, error) {
 	var raw string
-	err := s.db.QueryRowContext(ctx,
+	err := s.queryRow(ctx,
 		`SELECT goal_relevance_json FROM domains WHERE id = ?`,
 		domainID,
 	).Scan(&raw)

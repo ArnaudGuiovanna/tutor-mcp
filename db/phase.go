@@ -32,7 +32,7 @@ func (s *Store) UpdateDomainPhase(ctx context.Context, domainID string, phase mo
 		// be stale otherwise.
 		entropyArg = nil
 	}
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`UPDATE domains
 		 SET phase = ?, phase_changed_at = ?, phase_entry_entropy = ?
 		 WHERE id = ?`,
@@ -67,7 +67,7 @@ func (s *Store) GetActiveMisconceptionsBatch(ctx context.Context, learnerID stri
 	}
 	args = append(args, MisconceptionResolutionWindow)
 
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT concept, misconception_type
 		 FROM (
 		    SELECT concept, misconception_type,
@@ -132,7 +132,7 @@ func (s *Store) GetRecentConceptsByDomain(ctx context.Context, learnerID string,
 	for _, c := range domainConcepts {
 		conceptSet[c] = true
 	}
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT concept FROM interactions
 		 WHERE learner_id = ?
 		 ORDER BY created_at DESC
@@ -170,7 +170,7 @@ func (s *Store) GetRecentConceptsByDomain(ctx context.Context, learnerID string,
 func (s *Store) CountInteractionsSince(ctx context.Context, learnerID string, since time.Time, domainConcepts []string) (int, error) {
 	if len(domainConcepts) == 0 {
 		var n int
-		err := s.db.QueryRowContext(ctx,
+		err := s.queryRow(ctx,
 			`SELECT COUNT(*) FROM interactions
 			 WHERE learner_id = ? AND created_at >= ?`,
 			learnerID, since,
@@ -184,7 +184,7 @@ func (s *Store) CountInteractionsSince(ctx context.Context, learnerID string, si
 	for _, c := range domainConcepts {
 		conceptSet[c] = true
 	}
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT concept FROM interactions
 		 WHERE learner_id = ? AND created_at >= ?`,
 		learnerID, since,
@@ -216,7 +216,7 @@ func (s *Store) GetActionHistoryForConcept(ctx context.Context, learnerID, conce
 	if recentLimit <= 0 {
 		recentLimit = 50
 	}
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT activity_type, success FROM interactions
 		 WHERE learner_id = ? AND concept = ?
 		 ORDER BY created_at DESC

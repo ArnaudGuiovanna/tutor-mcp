@@ -61,7 +61,7 @@ func (s *Store) ConceptMasteryDelta(ctx context.Context, learnerID string, domai
 			args = append(args, c)
 		}
 		args = append(args, since.UTC())
-		rows, err := s.db.QueryContext(ctx,
+		rows, err := s.query(ctx,
 			`SELECT concept, COUNT(*), COALESCE(SUM(success), 0)
 			 FROM interactions
 			 WHERE learner_id = ? AND concept IN (`+strings.Join(placeholders, ",")+`)
@@ -158,7 +158,7 @@ func (s *Store) MilestonesInWindow(ctx context.Context, learnerID string, domain
 		args = append(args, c)
 	}
 	args = append(args, since.UTC())
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT DISTINCT concept FROM interactions
 		 WHERE learner_id = ? AND concept IN (`+strings.Join(placeholders, ",")+`)
 		   AND success = 1 AND created_at >= ?`,
@@ -187,7 +187,7 @@ func (s *Store) MilestonesInWindow(ctx context.Context, learnerID string, domain
 // CountInteractionsByConcept returns the total number of interactions on a given concept.
 func (s *Store) CountInteractionsByConcept(ctx context.Context, learnerID, concept string) (int, error) {
 	var count int
-	err := s.db.QueryRowContext(ctx,
+	err := s.queryRow(ctx,
 		`SELECT COUNT(*) FROM interactions WHERE learner_id = ? AND concept = ?`,
 		learnerID, concept,
 	).Scan(&count)
@@ -204,7 +204,7 @@ func (s *Store) CountInteractionsByConcept(ctx context.Context, learnerID, conce
 // serialization (the built-in DATE() doesn't parse the 'T' separator).
 func (s *Store) CountSessionsOnConcept(ctx context.Context, learnerID, concept string) (int, error) {
 	var count int
-	err := s.db.QueryRowContext(ctx,
+	err := s.queryRow(ctx,
 		`SELECT COUNT(DISTINCT substr(created_at, 1, 10)) FROM interactions
 		 WHERE learner_id = ? AND concept = ?`,
 		learnerID, concept,
@@ -218,7 +218,7 @@ func (s *Store) CountSessionsOnConcept(ctx context.Context, learnerID, concept s
 // CountLearnerSessionStreak returns the consecutive-day streak for a learner,
 // computed via substr-based date extraction (works with modernc's ISO serialization).
 func (s *Store) CountLearnerSessionStreak(ctx context.Context, learnerID string) (int, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT DISTINCT substr(created_at, 1, 10) AS d FROM interactions
 		 WHERE learner_id = ? ORDER BY d DESC`,
 		learnerID,
@@ -262,7 +262,7 @@ func (s *Store) CountLearnerSessionStreak(ctx context.Context, learnerID string)
 // (0 if no interactions).
 func (s *Store) SelfInitiatedRatio(ctx context.Context, learnerID, concept string) (float64, error) {
 	var total, selfInit int
-	err := s.db.QueryRowContext(ctx,
+	err := s.queryRow(ctx,
 		`SELECT COUNT(*), COALESCE(SUM(self_initiated), 0)
 		 FROM interactions WHERE learner_id = ? AND concept = ?`,
 		learnerID, concept,
@@ -280,7 +280,7 @@ func (s *Store) SelfInitiatedRatio(ctx context.Context, learnerID, concept strin
 // or nil if none exists within `window`.
 func (s *Store) LastFailureOnConcept(ctx context.Context, learnerID, concept string, window time.Duration) (*models.Interaction, error) {
 	cutoff := time.Now().UTC().Add(-window)
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT `+interactionCols+` FROM interactions
 		 WHERE learner_id = ? AND concept = ? AND success = 0 AND created_at >= ?
 		 ORDER BY created_at DESC LIMIT 1`,

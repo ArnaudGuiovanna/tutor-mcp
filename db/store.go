@@ -12,6 +12,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"tutor-mcp/algorithms"
@@ -33,9 +35,20 @@ type sqlExecutor interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
+// Dialect selects the SQL flavor a Store targets. SQLite is the default; the
+// Postgres dialect rebinds '?' placeholders to $N and uses RETURNING for
+// auto-increment inserts.
+type Dialect int
+
+const (
+	DialectSQLite Dialect = iota
+	DialectPostgres
+)
+
 type Store struct {
-	db   sqlExecutor // *sql.DB normally; *sql.Tx inside WithTx — query methods use this unchanged
-	root *sql.DB     // the real pool. For WithTx/Ping/Close/Migrate + internal BeginTx. nil in a tx-scoped Store.
+	db      sqlExecutor // *sql.DB normally; *sql.Tx inside WithTx — query methods use this unchanged
+	root    *sql.DB     // the real pool. For WithTx/Ping/Close/Migrate + internal BeginTx. nil in a tx-scoped Store.
+	dialect Dialect     // SQL flavor; propagated into tx-scoped Stores by WithTx.
 }
 
 // RawDB returns the underlying *sql.DB. Intended for tests that need
@@ -45,7 +58,12 @@ type Store struct {
 func (s *Store) RawDB() *sql.DB { return s.root }
 
 func NewStore(database *sql.DB) *Store {
-	return &Store{db: database, root: database}
+	return &Store{db: database, root: database, dialect: DialectSQLite}
+}
+
+// NewStoreWithDialect builds a Store targeting the given SQL dialect.
+func NewStoreWithDialect(database *sql.DB, d Dialect) *Store {
+	return &Store{db: database, root: database, dialect: d}
 }
 
 // Ping verifies a live connection to the database.
@@ -56,6 +74,111 @@ func (s *Store) Close() error { return s.root.Close() }
 
 // Migrate runs the schema migrations. (Wraps the package-level Migrate.)
 func (s *Store) Migrate(ctx context.Context) error { return Migrate(s.root) }
+
+// rebind converts '?' placeholders to PostgreSQL's $1,$2,... when the dialect
+// is Postgres. For SQLite it returns the query unchanged. (Queries never embed
+// a literal '?' in string literals, so a positional rewrite is safe.)
+func (s *Store) rebind(query string) string {
+	if s.dialect != DialectPostgres {
+		return query
+	}
+	var b strings.Builder
+	n := 0
+	for i := 0; i < len(query); i++ {
+		if query[i] == '?' {
+			n++
+			b.WriteByte('$')
+			b.WriteString(strconv.Itoa(n))
+		} else {
+			b.WriteByte(query[i])
+		}
+	}
+	return b.String()
+}
+
+func (s *Store) exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	return s.db.ExecContext(ctx, s.rebind(query), args...)
+}
+
+func (s *Store) query(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	return s.db.QueryContext(ctx, s.rebind(query), args...)
+}
+
+func (s *Store) queryRow(ctx context.Context, query string, args ...any) *sql.Row {
+	return s.db.QueryRowContext(ctx, s.rebind(query), args...)
+}
+
+// insertReturningID runs an INSERT and returns the new row's integer id. For
+// SQLite it uses LastInsertId; for Postgres it appends "RETURNING id" and scans.
+// The supplied query MUST NOT already contain a RETURNING clause.
+func (s *Store) insertReturningID(ctx context.Context, query string, args ...any) (int64, error) {
+	if s.dialect == DialectPostgres {
+		var id int64
+		err := s.queryRow(ctx, query+" RETURNING id", args...).Scan(&id)
+		return id, err
+	}
+	res, err := s.exec(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// flexTime is a dialect-neutral timestamp scan target. Direct column scans on
+// modernc.org/sqlite (and pgx) yield a time.Time, but aggregate result columns
+// such as MIN(created_at)/MAX(created_at) lose type affinity on SQLite and come
+// back as a TEXT string. flexTime accepts time.Time, []byte, or string (parsing
+// the latter two with the formats SQLite stores) so the same query works on
+// both dialects. Valid is false for a SQL NULL.
+type flexTime struct {
+	Time  time.Time
+	Valid bool
+}
+
+var flexTimeLayouts = []string{
+	time.RFC3339Nano,
+	time.RFC3339,
+	"2006-01-02 15:04:05.999999999 -0700 MST",
+	"2006-01-02 15:04:05.999999999 +0000 UTC",
+	"2006-01-02 15:04:05.999999999-07:00",
+	"2006-01-02 15:04:05.999999999Z07:00",
+	"2006-01-02T15:04:05.999999999-07:00",
+	"2006-01-02T15:04:05.999999999Z07:00",
+	"2006-01-02 15:04:05",
+	"2006-01-02T15:04:05",
+}
+
+func (f *flexTime) Scan(src any) error {
+	switch v := src.(type) {
+	case nil:
+		f.Time, f.Valid = time.Time{}, false
+		return nil
+	case time.Time:
+		f.Time, f.Valid = v, true
+		return nil
+	case []byte:
+		return f.parse(string(v))
+	case string:
+		return f.parse(v)
+	default:
+		return fmt.Errorf("flexTime: unsupported scan type %T", src)
+	}
+}
+
+func (f *flexTime) parse(s string) error {
+	for _, layout := range flexTimeLayouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			f.Time, f.Valid = t, true
+			return nil
+		}
+	}
+	// Unparseable timestamp (e.g. a Go time.Time String() carrying a monotonic
+	// "m=..." suffix written by a raw test insert). Match the previous
+	// behavior, which discarded the parse error and left a zero time, so a
+	// scan never fails on a malformed stored value.
+	f.Time, f.Valid = time.Time{}, false
+	return nil
+}
 
 // WithTx runs fn inside a single serializable transaction (BEGIN IMMEDIATE on
 // SQLite). The Store passed to fn routes every query through the tx.
@@ -69,7 +192,7 @@ func (s *Store) WithTx(ctx context.Context, fn func(s store.Store) error) error 
 	if err != nil {
 		return err
 	}
-	if err := fn(&Store{db: tx, root: nil}); err != nil {
+	if err := fn(&Store{db: tx, root: nil, dialect: s.dialect}); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
@@ -122,7 +245,7 @@ func (s *Store) CreateLearner(ctx context.Context, email, passwordHash, objectiv
 	}
 	id := generateID()
 	now := time.Now().UTC()
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO learners (id, email, password_hash, objective, webhook_url, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		id, email, passwordHash, objective, webhookURL, now,
@@ -141,7 +264,7 @@ func (s *Store) CreateLearner(ctx context.Context, email, passwordHash, objectiv
 }
 
 func (s *Store) GetLearnerByID(ctx context.Context, id string) (*models.Learner, error) {
-	row := s.db.QueryRowContext(ctx,
+	row := s.queryRow(ctx,
 		`SELECT id, email, password_hash, objective, webhook_url, profile_json, created_at, last_active
 		 FROM learners WHERE id = ?`, id,
 	)
@@ -149,7 +272,7 @@ func (s *Store) GetLearnerByID(ctx context.Context, id string) (*models.Learner,
 }
 
 func (s *Store) GetLearnerByEmail(ctx context.Context, email string) (*models.Learner, error) {
-	row := s.db.QueryRowContext(ctx,
+	row := s.queryRow(ctx,
 		`SELECT id, email, password_hash, objective, webhook_url, profile_json, created_at, last_active
 		 FROM learners WHERE email = ?`, email,
 	)
@@ -178,7 +301,7 @@ func scanLearner(row *sql.Row) (*models.Learner, error) {
 }
 
 func (s *Store) UpdateLastActive(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`UPDATE learners SET last_active = ? WHERE id = ?`,
 		time.Now().UTC(), id,
 	)
@@ -189,7 +312,7 @@ func (s *Store) UpdateLastActive(ctx context.Context, id string) error {
 }
 
 func (s *Store) GetActiveLearners(ctx context.Context) ([]*models.Learner, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT id, email, password_hash, objective, webhook_url, profile_json, created_at, last_active
 		 FROM learners WHERE webhook_url != ''`,
 	)
@@ -222,7 +345,7 @@ func (s *Store) GetActiveLearners(ctx context.Context) ([]*models.Learner, error
 }
 
 func (s *Store) UpdateLearnerProfile(ctx context.Context, learnerID, profileJSON string) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`UPDATE learners SET profile_json = ? WHERE id = ?`,
 		profileJSON, learnerID,
 	)
@@ -248,7 +371,7 @@ func (s *Store) CreateRefreshToken(ctx context.Context, learnerID, clientID stri
 	now := time.Now().UTC()
 	expiresAt := now.Add(30 * 24 * time.Hour)
 
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO refresh_tokens (token, learner_id, client_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?)`,
 		token, learnerID, nullString(clientID), expiresAt, now,
 	)
@@ -267,7 +390,7 @@ func (s *Store) CreateRefreshToken(ctx context.Context, learnerID, clientID stri
 func (s *Store) GetRefreshToken(ctx context.Context, token string) (*models.RefreshToken, error) {
 	rt := &models.RefreshToken{}
 	var clientID sql.NullString
-	err := s.db.QueryRowContext(ctx,
+	err := s.queryRow(ctx,
 		`SELECT token, learner_id, client_id, expires_at, created_at
 		 FROM refresh_tokens WHERE token = ? AND expires_at > ?`,
 		token, time.Now().UTC(),
@@ -282,7 +405,7 @@ func (s *Store) GetRefreshToken(ctx context.Context, token string) (*models.Refr
 }
 
 func (s *Store) DeleteRefreshToken(ctx context.Context, token string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM refresh_tokens WHERE token = ?`, token)
+	_, err := s.exec(ctx, `DELETE FROM refresh_tokens WHERE token = ?`, token)
 	if err != nil {
 		return fmt.Errorf("delete refresh token: %w", err)
 	}
@@ -306,7 +429,7 @@ func (s *Store) CreateDomainWithValueFramings(ctx context.Context, learnerID, na
 		return nil, fmt.Errorf("marshal graph: %w", err)
 	}
 
-	_, err = s.db.ExecContext(ctx,
+	_, err = s.exec(ctx,
 		`INSERT INTO domains (id, learner_id, name, personal_goal, graph_json, value_framings_json, graph_version, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
 		id, learnerID, name, personalGoal, string(graphJSON), valueFramingsJSON, now,
@@ -390,7 +513,7 @@ func scanDomainRows(rows *sql.Rows) (*models.Domain, error) {
 }
 
 func (s *Store) GetDomainByLearner(ctx context.Context, learnerID string) (*models.Domain, error) {
-	row := s.db.QueryRowContext(ctx,
+	row := s.queryRow(ctx,
 		`SELECT `+domainCols+` FROM domains WHERE learner_id = ? AND archived = 0
 		 ORDER BY CASE WHEN priority_rank IS NULL THEN 1 ELSE 0 END, priority_rank ASC, created_at DESC LIMIT 1`,
 		learnerID,
@@ -403,7 +526,7 @@ func (s *Store) GetDomainByLearner(ctx context.Context, learnerID string) (*mode
 }
 
 func (s *Store) GetDomainByID(ctx context.Context, id string) (*models.Domain, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+domainCols+` FROM domains WHERE id = ?`, id)
+	row := s.queryRow(ctx, `SELECT `+domainCols+` FROM domains WHERE id = ?`, id)
 	d, err := scanDomainRow(row)
 	if err != nil {
 		return nil, fmt.Errorf("get domain by id: %w", err)
@@ -417,7 +540,7 @@ func (s *Store) GetDomainsByLearner(ctx context.Context, learnerID string, inclu
 		query += ` AND archived = 0`
 	}
 	query += ` ORDER BY created_at DESC`
-	rows, err := s.db.QueryContext(ctx, query, learnerID)
+	rows, err := s.query(ctx, query, learnerID)
 	if err != nil {
 		return nil, fmt.Errorf("get domains by learner: %w", err)
 	}
@@ -438,7 +561,7 @@ func (s *Store) SetDomainPriority(ctx context.Context, domainID, learnerID strin
 	if rank < 1 {
 		return fmt.Errorf("rank must be >= 1")
 	}
-	result, err := s.db.ExecContext(ctx,
+	result, err := s.exec(ctx,
 		`UPDATE domains SET priority_rank = ? WHERE id = ? AND learner_id = ? AND archived = 0`,
 		rank, domainID, learnerID,
 	)
@@ -454,7 +577,7 @@ func (s *Store) SetDomainPriority(ctx context.Context, domainID, learnerID strin
 
 // UpdateDomainValueFramings stores the JSON-encoded value framings for a domain.
 func (s *Store) UpdateDomainValueFramings(ctx context.Context, domainID, valueFramingsJSON string) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`UPDATE domains SET value_framings_json = ? WHERE id = ?`,
 		valueFramingsJSON, domainID,
 	)
@@ -466,7 +589,7 @@ func (s *Store) UpdateDomainValueFramings(ctx context.Context, domainID, valueFr
 
 // UpdateDomainLastValueAxis records which axis was surfaced most recently (used for rotation).
 func (s *Store) UpdateDomainLastValueAxis(ctx context.Context, domainID, axis string) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`UPDATE domains SET last_value_axis = ? WHERE id = ?`,
 		axis, domainID,
 	)
@@ -485,7 +608,7 @@ func (s *Store) UpdateDomainGraph(ctx context.Context, domainID string, graph mo
 	// per OQ-1.1 / IsGoalRelevanceStale(). Existing entries remain valid;
 	// only the new concepts will appear in UncoveredConcepts() until a
 	// new set_goal_relevance call covers them.
-	_, err = s.db.ExecContext(ctx,
+	_, err = s.exec(ctx,
 		`UPDATE domains SET graph_json = ?, graph_version = graph_version + 1 WHERE id = ?`,
 		string(graphJSON), domainID,
 	)
@@ -496,7 +619,7 @@ func (s *Store) UpdateDomainGraph(ctx context.Context, domainID string, graph mo
 }
 
 func (s *Store) ArchiveDomain(ctx context.Context, domainID, learnerID string) error {
-	result, err := s.db.ExecContext(ctx,
+	result, err := s.exec(ctx,
 		`UPDATE domains SET archived = 1 WHERE id = ? AND learner_id = ?`,
 		domainID, learnerID,
 	)
@@ -511,7 +634,7 @@ func (s *Store) ArchiveDomain(ctx context.Context, domainID, learnerID string) e
 }
 
 func (s *Store) UnarchiveDomain(ctx context.Context, domainID, learnerID string) error {
-	result, err := s.db.ExecContext(ctx,
+	result, err := s.exec(ctx,
 		`UPDATE domains SET archived = 0 WHERE id = ? AND learner_id = ?`,
 		domainID, learnerID,
 	)
@@ -583,12 +706,13 @@ func (s *Store) DeleteDomain(ctx context.Context, domainID, learnerID string) er
 
 func (s *Store) InsertConceptStateIfNotExists(ctx context.Context, cs *models.ConceptState) error {
 	cs.UpdatedAt = time.Now().UTC()
-	_, err := s.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO concept_states
+	_, err := s.exec(ctx,
+		`INSERT INTO concept_states
 		    (learner_id, concept, stability, difficulty, elapsed_days, scheduled_days,
 		     reps, lapses, card_state, last_review, next_review, p_mastery, p_learn, p_forget,
 		     p_slip, p_guess, theta, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT (learner_id, concept) DO NOTHING`,
 		cs.LearnerID, cs.Concept, cs.Stability, cs.Difficulty, cs.ElapsedDays, cs.ScheduledDays,
 		cs.Reps, cs.Lapses, cs.CardState, cs.LastReview, cs.NextReview,
 		cs.PMastery, cs.PLearn, cs.PForget, cs.PSlip, cs.PGuess,
@@ -675,7 +799,7 @@ func upsertConceptStateWithQ(ctx context.Context, q sqlExecutor, cs *models.Conc
 }
 
 func (s *Store) GetConceptStatesByLearner(ctx context.Context, learnerID string) ([]*models.ConceptState, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT id, learner_id, concept, stability, difficulty, elapsed_days, scheduled_days,
 		        reps, lapses, card_state, last_review, next_review, p_mastery, p_learn, p_forget,
 		        p_slip, p_guess, theta, updated_at
@@ -716,12 +840,12 @@ func (s *Store) GetConceptStatesByLearner(ctx context.Context, learnerID string)
 const interactionCols = `id, learner_id, concept, activity_type, success, response_time, confidence, error_type, notes, hints_requested, self_initiated, calibration_id, is_proactive_review, misconception_type, misconception_detail, domain_id, bkt_slip, bkt_guess, rubric_json, rubric_score_json, created_at`
 
 func (s *Store) CreateInteraction(ctx context.Context, i *models.Interaction) error {
-	return createInteractionWithQ(ctx, s.db, i)
+	return createInteractionWithStore(ctx, s, i)
 }
 
-func createInteractionWithQ(ctx context.Context, q sqlExecutor, i *models.Interaction) error {
+func createInteractionWithStore(ctx context.Context, s *Store, i *models.Interaction) error {
 	i.CreatedAt = time.Now().UTC()
-	result, err := q.ExecContext(ctx,
+	id, err := s.insertReturningID(ctx,
 		`INSERT INTO interactions (learner_id, concept, activity_type, success, response_time, confidence, error_type, notes, hints_requested, self_initiated, calibration_id, is_proactive_review, misconception_type, misconception_detail, domain_id, bkt_slip, bkt_guess, rubric_json, rubric_score_json, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		i.LearnerID, i.Concept, i.ActivityType, boolToInt(i.Success),
@@ -735,10 +859,6 @@ func createInteractionWithQ(ctx context.Context, q sqlExecutor, i *models.Intera
 	)
 	if err != nil {
 		return fmt.Errorf("create interaction: %w", err)
-	}
-	id, err := result.LastInsertId()
-	if err != nil {
-		return fmt.Errorf("get interaction id: %w", err)
 	}
 	i.ID = id
 	return nil
@@ -762,7 +882,7 @@ func getRecentInteractionsWithQ(ctx context.Context, q sqlExecutor, learnerID, c
 }
 
 func (s *Store) GetRecentInteractionsByLearner(ctx context.Context, learnerID string, limit int) ([]*models.Interaction, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT `+interactionCols+` FROM interactions WHERE learner_id = ?
 		 ORDER BY created_at DESC LIMIT ?`,
 		learnerID, limit,
@@ -776,7 +896,7 @@ func (s *Store) GetRecentInteractionsByLearner(ctx context.Context, learnerID st
 
 func (s *Store) GetSessionInteractions(ctx context.Context, learnerID string) ([]*models.Interaction, error) {
 	cutoff := time.Now().UTC().Add(-2 * time.Hour)
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT `+interactionCols+` FROM interactions WHERE learner_id = ? AND created_at > ?
 		 ORDER BY created_at DESC`,
 		learnerID, cutoff,
@@ -847,7 +967,7 @@ func scanInteractions(rows *sql.Rows) ([]*models.Interaction, error) {
 }
 
 func (s *Store) GetInteractionsSince(ctx context.Context, learnerID string, since time.Time) ([]*models.Interaction, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT `+interactionCols+` FROM interactions WHERE learner_id = ? AND created_at >= ? ORDER BY created_at ASC`,
 		learnerID, since,
 	)
@@ -860,8 +980,8 @@ func (s *Store) GetInteractionsSince(ctx context.Context, learnerID string, sinc
 
 func (s *Store) GetSessionStart(ctx context.Context, learnerID string) (time.Time, error) {
 	cutoff := time.Now().UTC().Add(-2 * time.Hour)
-	var sessionStart sql.NullString
-	err := s.db.QueryRowContext(ctx,
+	var sessionStart flexTime
+	err := s.queryRow(ctx,
 		`SELECT MIN(created_at) FROM interactions WHERE learner_id = ? AND created_at > ?`,
 		learnerID, cutoff,
 	).Scan(&sessionStart)
@@ -871,12 +991,7 @@ func (s *Store) GetSessionStart(ctx context.Context, learnerID string) (time.Tim
 	if !sessionStart.Valid {
 		return time.Now().UTC(), nil
 	}
-	for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05.999999999 -0700 MST"} {
-		if parsed, err := time.Parse(layout, sessionStart.String); err == nil {
-			return parsed, nil
-		}
-	}
-	return time.Time{}, fmt.Errorf("parse session start %q", sessionStart.String)
+	return sessionStart.Time, nil
 }
 
 // ─── Availability ─────────────────────────────────────────────────────────────
@@ -884,7 +999,7 @@ func (s *Store) GetSessionStart(ctx context.Context, learnerID string) (time.Tim
 func (s *Store) GetAvailability(ctx context.Context, learnerID string) (*models.Availability, error) {
 	a := &models.Availability{}
 	var dndInt int
-	err := s.db.QueryRowContext(ctx,
+	err := s.queryRow(ctx,
 		`SELECT learner_id, windows_json, avg_duration, sessions_week, do_not_disturb
 		 FROM availability WHERE learner_id = ?`,
 		learnerID,
@@ -906,7 +1021,7 @@ func (s *Store) GetAvailability(ctx context.Context, learnerID string) (*models.
 }
 
 func (s *Store) UpsertAvailability(ctx context.Context, a *models.Availability) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO availability (learner_id, windows_json, avg_duration, sessions_week, do_not_disturb)
 		 VALUES (?, ?, ?, ?, ?)
 		 ON CONFLICT(learner_id) DO UPDATE SET
@@ -925,7 +1040,7 @@ func (s *Store) UpsertAvailability(ctx context.Context, a *models.Availability) 
 // ─── Scheduled Alerts ─────────────────────────────────────────────────────────
 
 func (s *Store) CreateScheduledAlert(ctx context.Context, learnerID, alertType, concept string, scheduledAt time.Time) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO scheduled_alerts (learner_id, alert_type, concept, scheduled_at) VALUES (?, ?, ?, ?)`,
 		learnerID, alertType, concept, scheduledAt,
 	)
@@ -936,7 +1051,7 @@ func (s *Store) CreateScheduledAlert(ctx context.Context, learnerID, alertType, 
 }
 
 func (s *Store) GetUnsentAlerts(ctx context.Context, learnerID string) ([]*models.ScheduledAlert, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT id, learner_id, alert_type, concept, scheduled_at, sent, created_at
 		 FROM scheduled_alerts WHERE learner_id = ? AND sent = 0`,
 		learnerID,
@@ -963,7 +1078,7 @@ func (s *Store) GetUnsentAlerts(ctx context.Context, learnerID string) ([]*model
 }
 
 func (s *Store) MarkAlertSent(ctx context.Context, id int64) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE scheduled_alerts SET sent = 1 WHERE id = ?`, id)
+	_, err := s.exec(ctx, `UPDATE scheduled_alerts SET sent = 1 WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("mark alert sent: %w", err)
 	}
@@ -973,7 +1088,7 @@ func (s *Store) MarkAlertSent(ctx context.Context, id int64) error {
 func (s *Store) WasAlertSentToday(ctx context.Context, learnerID, alertType string) (bool, error) {
 	today := time.Now().UTC().Truncate(24 * time.Hour)
 	var count int
-	err := s.db.QueryRowContext(ctx,
+	err := s.queryRow(ctx,
 		`SELECT COUNT(*) FROM scheduled_alerts
 		 WHERE learner_id = ? AND alert_type = ? AND created_at >= ?`,
 		learnerID, alertType, today,
@@ -988,7 +1103,7 @@ func (s *Store) WasAlertSentToday(ctx context.Context, learnerID, alertType stri
 
 // GetDailyStreak returns how many consecutive days the learner has had interactions.
 func (s *Store) GetDailyStreak(ctx context.Context, learnerID string) (int, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT DISTINCT DATE(created_at) as d FROM interactions
 		 WHERE learner_id = ? ORDER BY d DESC`,
 		learnerID,
@@ -1033,7 +1148,7 @@ func (s *Store) GetDailyStreak(ctx context.Context, learnerID string) (int, erro
 func (s *Store) GetTodayInteractionCount(ctx context.Context, learnerID string) (int, error) {
 	today := time.Now().UTC().Truncate(24 * time.Hour)
 	var count int
-	err := s.db.QueryRowContext(ctx,
+	err := s.queryRow(ctx,
 		`SELECT COUNT(*) FROM interactions WHERE learner_id = ? AND created_at >= ?`,
 		learnerID, today,
 	).Scan(&count)
@@ -1047,7 +1162,7 @@ func (s *Store) GetTodayInteractionCount(ctx context.Context, learnerID string) 
 func (s *Store) GetTodaySuccessRate(ctx context.Context, learnerID string) (float64, int, error) {
 	today := time.Now().UTC().Truncate(24 * time.Hour)
 	var total, successes int
-	err := s.db.QueryRowContext(ctx,
+	err := s.queryRow(ctx,
 		`SELECT COUNT(*), COALESCE(SUM(success), 0) FROM interactions
 		 WHERE learner_id = ? AND created_at >= ?`,
 		learnerID, today,
@@ -1064,7 +1179,7 @@ func (s *Store) GetTodaySuccessRate(ctx context.Context, learnerID string) (floa
 // GetConceptsDueForReview returns concepts where next_review is in the past.
 func (s *Store) GetConceptsDueForReview(ctx context.Context, learnerID string) ([]string, error) {
 	now := time.Now().UTC()
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT concept FROM concept_states
 		 WHERE learner_id = ? AND next_review IS NOT NULL AND next_review <= ? AND card_state != 'new'
 		 ORDER BY next_review ASC`,
@@ -1102,7 +1217,7 @@ func (s *Store) GetConceptsDueForReview(ctx context.Context, learnerID string) (
 // ─── OAuth Persistence ──────────────────────────────────────────────────────
 
 func (s *Store) CreateAuthCode(ctx context.Context, code, learnerID, codeChallenge, clientID string, expiresAt time.Time) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO oauth_codes (code, learner_id, code_challenge, client_id, expires_at) VALUES (?, ?, ?, ?, ?)`,
 		code, learnerID, codeChallenge, clientID, expiresAt,
 	)
@@ -1150,7 +1265,7 @@ func (s *Store) CreateOAuthClient(ctx context.Context, clientID, clientName, red
 // CreateOAuthClientWithSecret persists a confidential client when secretHash != "".
 // secretHash should be a bcrypt digest of the issued secret; pass "" for public (PKCE) clients.
 func (s *Store) CreateOAuthClientWithSecret(ctx context.Context, clientID, clientName, redirectURIs, secretHash string) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO oauth_clients (client_id, client_name, redirect_uris, client_secret_hash) VALUES (?, ?, ?, ?)`,
 		clientID, clientName, redirectURIs, secretHash,
 	)
@@ -1166,7 +1281,7 @@ func (s *Store) CreateOAuthClientWithSecretCapped(ctx context.Context, clientID,
 	if maxClients <= 0 {
 		return s.CreateOAuthClientWithSecret(ctx, clientID, clientName, redirectURIs, secretHash)
 	}
-	result, err := s.db.ExecContext(ctx,
+	result, err := s.exec(ctx,
 		`INSERT INTO oauth_clients (client_id, client_name, redirect_uris, client_secret_hash)
 		 SELECT ?, ?, ?, ?
 		 WHERE (SELECT COUNT(*) FROM oauth_clients) < ?`,
@@ -1187,7 +1302,7 @@ func (s *Store) CreateOAuthClientWithSecretCapped(ctx context.Context, clientID,
 
 func (s *Store) CountOAuthClients(ctx context.Context) (int, error) {
 	var count int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM oauth_clients`).Scan(&count); err != nil {
+	if err := s.queryRow(ctx, `SELECT COUNT(*) FROM oauth_clients`).Scan(&count); err != nil {
 		return 0, fmt.Errorf("count oauth clients: %w", err)
 	}
 	return count, nil
@@ -1196,7 +1311,7 @@ func (s *Store) CountOAuthClients(ctx context.Context) (int, error) {
 func (s *Store) GetOAuthClient(ctx context.Context, clientID string) (*models.OAuthClient, error) {
 	c := &models.OAuthClient{}
 	var secretHash sql.NullString
-	err := s.db.QueryRowContext(ctx,
+	err := s.queryRow(ctx,
 		`SELECT client_id, client_name, redirect_uris, client_secret_hash FROM oauth_clients WHERE client_id = ?`,
 		clientID,
 	).Scan(&c.ClientID, &c.ClientName, &c.RedirectURIs, &secretHash)
@@ -1217,7 +1332,7 @@ func (s *Store) GetOAuthClient(ctx context.Context, clientID string) (*models.OA
 // re-prompts because the approval is scoped to redirect_uri, not client_id.
 func (s *Store) IsClientApproved(ctx context.Context, learnerID, clientID, redirectURI string) (bool, error) {
 	var one int
-	err := s.db.QueryRowContext(ctx,
+	err := s.queryRow(ctx,
 		`SELECT 1 FROM learner_approved_clients
 		 WHERE learner_id = ? AND client_id = ? AND redirect_uri = ?`,
 		learnerID, clientID, redirectURI,
@@ -1235,7 +1350,7 @@ func (s *Store) IsClientApproved(ctx context.Context, learnerID, clientID, redir
 // this exact redirect_uri. Idempotent: re-approving the same triple is a no-op
 // (ON CONFLICT DO NOTHING preserves the original approved_at timestamp). R001.
 func (s *Store) ApproveClient(ctx context.Context, learnerID, clientID, redirectURI string) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO learner_approved_clients (learner_id, client_id, redirect_uri)
 		 VALUES (?, ?, ?)
 		 ON CONFLICT(learner_id, client_id, redirect_uri) DO NOTHING`,
@@ -1248,7 +1363,7 @@ func (s *Store) ApproveClient(ctx context.Context, learnerID, clientID, redirect
 }
 
 func (s *Store) CleanupExpiredCodes(ctx context.Context) (int64, error) {
-	result, err := s.db.ExecContext(ctx, `DELETE FROM oauth_codes WHERE expires_at < ?`, time.Now().UTC())
+	result, err := s.exec(ctx, `DELETE FROM oauth_codes WHERE expires_at < ?`, time.Now().UTC())
 	if err != nil {
 		return 0, fmt.Errorf("cleanup expired codes: %w", err)
 	}
@@ -1256,7 +1371,7 @@ func (s *Store) CleanupExpiredCodes(ctx context.Context) (int64, error) {
 }
 
 func (s *Store) CleanupExpiredRefreshTokens(ctx context.Context) (int64, error) {
-	result, err := s.db.ExecContext(ctx, `DELETE FROM refresh_tokens WHERE expires_at < ?`, time.Now().UTC())
+	result, err := s.exec(ctx, `DELETE FROM refresh_tokens WHERE expires_at < ?`, time.Now().UTC())
 	if err != nil {
 		return 0, fmt.Errorf("cleanup expired refresh tokens: %w", err)
 	}
@@ -1272,7 +1387,7 @@ func (s *Store) CleanupExpiredRefreshTokens(ctx context.Context) (int64, error) 
 func (s *Store) GetActivityStreak(ctx context.Context, learnerID string) (int, error) {
 	// substr — modernc/sqlite stores time.Time as RFC3339 with nanoseconds, on
 	// which SQLite's date() returns NULL. substr reliably extracts YYYY-MM-DD.
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT DISTINCT substr(created_at, 1, 10) AS d
 		 FROM interactions
 		 WHERE learner_id = ?
@@ -1338,7 +1453,7 @@ const fragileThreshold = 0.30
 func (s *Store) GetRecentLearnerEvents(ctx context.Context, learnerID string, since time.Time) ([]models.RawLearnerEvent, error) {
 	var events []models.RawLearnerEvent
 
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT concept, p_mastery, updated_at
 		 FROM concept_states
 		 WHERE learner_id = ? AND updated_at >= ?

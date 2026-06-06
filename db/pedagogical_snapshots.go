@@ -17,16 +17,16 @@ import (
 const pedagogicalSnapshotCols = `id, interaction_id, learner_id, domain_id, concept, activity_type, before_json, observation_json, after_json, decision_json, interpretation_brief, created_at`
 
 func (s *Store) CreatePedagogicalSnapshot(ctx context.Context, snapshot *models.PedagogicalSnapshot) error {
-	return createPedagogicalSnapshotWithQ(ctx, s.db, snapshot)
+	return createPedagogicalSnapshotWithStore(ctx, s, snapshot)
 }
 
-func createPedagogicalSnapshotWithQ(ctx context.Context, q sqlExecutor, snapshot *models.PedagogicalSnapshot) error {
+func createPedagogicalSnapshotWithStore(ctx context.Context, s *Store, snapshot *models.PedagogicalSnapshot) error {
 	if snapshot.CreatedAt.IsZero() {
 		snapshot.CreatedAt = time.Now().UTC()
 	} else {
 		snapshot.CreatedAt = snapshot.CreatedAt.UTC()
 	}
-	result, err := q.ExecContext(ctx,
+	id, err := s.insertReturningID(ctx,
 		`INSERT INTO pedagogical_snapshots
 		    (interaction_id, learner_id, domain_id, concept, activity_type, before_json, observation_json, after_json, decision_json, interpretation_brief, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -36,10 +36,6 @@ func createPedagogicalSnapshotWithQ(ctx context.Context, q sqlExecutor, snapshot
 	)
 	if err != nil {
 		return fmt.Errorf("create pedagogical snapshot: %w", err)
-	}
-	id, err := result.LastInsertId()
-	if err != nil {
-		return fmt.Errorf("get pedagogical snapshot id: %w", err)
 	}
 	snapshot.ID = id
 	return nil
@@ -68,7 +64,7 @@ func (s *Store) GetPedagogicalSnapshots(ctx context.Context, learnerID, domainID
 	}
 	args = append(args, limit)
 
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT `+pedagogicalSnapshotCols+`
 		 FROM pedagogical_snapshots
 		 WHERE `+strings.Join(where, " AND ")+`

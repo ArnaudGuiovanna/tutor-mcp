@@ -20,7 +20,7 @@ func (s *Store) UpsertPendingConsolidation(ctx context.Context, learnerID, perio
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO pending_consolidations (learner_id, period_type, period_key, status, detected_at)
 		 VALUES (?, ?, ?, 'pending', ?)
 		 ON CONFLICT(learner_id, period_type, period_key) DO NOTHING`,
@@ -33,7 +33,7 @@ func (s *Store) UpsertPendingConsolidation(ctx context.Context, learnerID, perio
 }
 
 func (s *Store) GetPendingConsolidations(ctx context.Context, learnerID string) ([]*models.PendingConsolidation, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.query(ctx,
 		`SELECT id, learner_id, period_type, period_key, status, detected_at, delivered_at, completed_at
 		 FROM pending_consolidations
 		 WHERE learner_id = ? AND status = 'pending'
@@ -48,7 +48,7 @@ func (s *Store) GetPendingConsolidations(ctx context.Context, learnerID string) 
 }
 
 func (s *Store) GetConsolidation(ctx context.Context, learnerID, periodType, periodKey string) (*models.PendingConsolidation, error) {
-	row := s.db.QueryRowContext(ctx,
+	row := s.queryRow(ctx,
 		`SELECT id, learner_id, period_type, period_key, status, detected_at, delivered_at, completed_at
 		 FROM pending_consolidations
 		 WHERE learner_id = ? AND period_type = ? AND period_key = ?`,
@@ -75,7 +75,7 @@ func (s *Store) MarkConsolidationsDelivered(ctx context.Context, learnerID strin
 		placeholders = append(placeholders, "?")
 		args = append(args, id)
 	}
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`UPDATE pending_consolidations
 		 SET status = 'delivered', delivered_at = ?
 		 WHERE learner_id = ? AND status = 'pending' AND id IN (`+strings.Join(placeholders, ",")+`)`,
@@ -94,7 +94,7 @@ func (s *Store) MarkConsolidationCompleted(ctx context.Context, learnerID, perio
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.exec(ctx,
 		`INSERT INTO pending_consolidations (learner_id, period_type, period_key, status, detected_at, completed_at)
 		 VALUES (?, ?, ?, 'completed', ?, ?)
 		 ON CONFLICT(learner_id, period_type, period_key) DO UPDATE SET
@@ -109,7 +109,7 @@ func (s *Store) MarkConsolidationCompleted(ctx context.Context, learnerID, perio
 }
 
 func (s *Store) RequeueStaleDeliveredConsolidations(ctx context.Context, cutoff time.Time) (int64, error) {
-	res, err := s.db.ExecContext(ctx,
+	res, err := s.exec(ctx,
 		`UPDATE pending_consolidations
 		 SET status = 'pending', delivered_at = NULL
 		 WHERE status = 'delivered' AND delivered_at IS NOT NULL AND delivered_at < ?`,
