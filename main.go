@@ -154,6 +154,27 @@ func main() {
 	mcpBurst := envInt("MCP_RATE_LIMIT_BURST", 60)
 	mcpIPLimiter := auth.NewRateLimiter(mcpRatePerMinute/60, mcpBurst)
 	mcpLearnerLimiter := auth.NewRateLimiter(mcpRatePerMinute/60, mcpBurst)
+
+	// RATELIMIT_BACKEND=postgres (alias "db") opts every rate limiter and the
+	// per-account login-failure tracker into a shared, DB-backed store so a
+	// multi-instance fleet enforces one combined view of throttling/lockout
+	// instead of independent per-process counters. Default "memory" leaves the
+	// in-process behaviour byte-for-byte unchanged (single-node deployments).
+	switch os.Getenv("RATELIMIT_BACKEND") {
+	case "postgres", "db":
+		rlBackend := db.NewRateLimitBackend(store)
+		authLimiter.SetBackend(rlBackend)
+		registerLimiter.SetBackend(rlBackend)
+		mcpIPLimiter.SetBackend(rlBackend)
+		mcpLearnerLimiter.SetBackend(rlBackend)
+		oauthServer.SetLoginFailureBackend(db.NewLoginFailureBackend(store))
+		logger.Info("rate limit backend", "mode", "postgres (shared, fleet-wide)")
+	case "", "memory":
+		// In-process default; no shared state.
+	default:
+		logger.Warn("unknown RATELIMIT_BACKEND, using memory", "value", os.Getenv("RATELIMIT_BACKEND"))
+	}
+
 	defer authLimiter.Stop()
 	defer registerLimiter.Stop()
 	defer mcpIPLimiter.Stop()

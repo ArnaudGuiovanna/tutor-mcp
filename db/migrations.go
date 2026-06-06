@@ -261,6 +261,24 @@ var idempotentMigrations = []string{
     claimed_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (name, window_key)
 )`,
+	// Opt-in shared rate-limit state (RATELIMIT_BACKEND=postgres). A single
+	// fleet-wide token bucket per key replaces the independent per-process
+	// bucket so throttling does not weaken with instance count. Single-node
+	// (SQLite, default backend=memory) never touches this table.
+	`CREATE TABLE IF NOT EXISTS rate_limit_buckets (
+    bucket_key  TEXT PRIMARY KEY,
+    tokens      DOUBLE PRECISION NOT NULL,
+    updated_at  DATETIME NOT NULL
+)`,
+	// Opt-in shared login-failure log for fleet-wide per-account lockout
+	// (RATELIMIT_BACKEND=postgres). One row per failed attempt; counted within
+	// a sliding window. Single-node default never writes here.
+	`CREATE TABLE IF NOT EXISTS login_failures (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_key  TEXT NOT NULL,
+    attempted_at DATETIME NOT NULL
+)`,
+	`CREATE INDEX IF NOT EXISTS idx_login_failures_account_time ON login_failures(account_key, attempted_at)`,
 }
 
 // Migrate brings the database schema up to the version expected by this build.

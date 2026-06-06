@@ -246,6 +246,21 @@ CREATE TABLE IF NOT EXISTS scheduled_job_runs (
     PRIMARY KEY (name, window_key)
 );
 
+-- Opt-in shared rate-limit state (RATELIMIT_BACKEND=postgres): one fleet-wide
+-- token bucket per key so throttling does not weaken with instance count.
+CREATE TABLE IF NOT EXISTS rate_limit_buckets (
+    bucket_key  TEXT PRIMARY KEY,
+    tokens      DOUBLE PRECISION NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL
+);
+
+-- Opt-in shared login-failure log for fleet-wide per-account lockout.
+CREATE TABLE IF NOT EXISTS login_failures (
+    id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    account_key  TEXT NOT NULL,
+    attempted_at TIMESTAMPTZ NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version    TEXT PRIMARY KEY,
     checksum   TEXT NOT NULL,
@@ -253,6 +268,7 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_learners_email_lower ON learners(lower(email));
+CREATE INDEX IF NOT EXISTS idx_login_failures_account_time ON login_failures(account_key, attempted_at);
 CREATE INDEX IF NOT EXISTS idx_affect_states_learner ON affect_states(learner_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_calibration_records_learner ON calibration_records(learner_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_concept_states_learner ON concept_states(learner_id);

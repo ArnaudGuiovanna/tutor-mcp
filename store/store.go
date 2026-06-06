@@ -18,6 +18,27 @@ import (
 // when the per-deployment client cap is hit.
 var ErrOAuthClientLimitReached = errors.New("oauth client limit reached")
 
+// RateLimitBackend is the optional shared, fleet-wide store the auth
+// RateLimiter delegates token accounting to (opt-in via RATELIMIT_BACKEND).
+// Declared here in the neutral persistence-port package so package auth
+// (consumer) and package db (Postgres implementation) can both reference it
+// without an import cycle. nil backend = the in-memory per-process default.
+type RateLimitBackend interface {
+	// Allow atomically refills and consumes one token for key under a
+	// (rate tokens/sec, burst) token bucket, returning whether allowed.
+	Allow(ctx context.Context, key string, rate float64, burst int, now time.Time) (bool, error)
+}
+
+// LoginFailureBackend is the optional shared, fleet-wide store the auth
+// LoginFailureTracker delegates per-account lockout to (opt-in via
+// RATELIMIT_BACKEND). Declared in this neutral port package so auth and db can
+// both reference it without an import cycle. nil = in-memory default.
+type LoginFailureBackend interface {
+	Record(ctx context.Context, key string, now time.Time) (int, error) // returns failures in window
+	CountInWindow(ctx context.Context, key string, window time.Duration, now time.Time) (int, error)
+	Reset(ctx context.Context, key string) error
+}
+
 // ---------------------------------------------------------------------------
 // Sub-interfaces — segregated by domain concern
 // ---------------------------------------------------------------------------

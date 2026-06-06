@@ -5,6 +5,7 @@
 package auth
 
 import (
+	"context"
 	"log/slog"
 	"net"
 	"net/http"
@@ -13,7 +14,19 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	storeport "tutor-mcp/store"
 )
+
+// RateLimitBackend is an optional shared store the RateLimiter delegates to so a
+// multi-instance fleet enforces one combined token bucket per key instead of an
+// independent per-process bucket. Implemented in package db (Postgres-backed);
+// nil means the in-memory default.
+//
+// It is an alias for store.RateLimitBackend: the interface lives in the neutral
+// persistence-port package so package db can implement it without an import
+// cycle (auth and db both depend on store; neither depends on the other).
+type RateLimitBackend = storeport.RateLimitBackend
 
 type bucket struct {
 	tokens   float64
@@ -27,6 +40,7 @@ type RateLimiter struct {
 	rate    float64 // tokens per second
 	burst   int     // max tokens
 	stop    chan struct{}
+	backend RateLimitBackend // optional shared store; nil = in-memory only
 }
 
 // NewRateLimiter creates a rate limiter. rate is tokens/second, burst is max tokens.
@@ -42,8 +56,33 @@ func NewRateLimiter(rate float64, burst int) *RateLimiter {
 	return rl
 }
 
+// NewRateLimiterWithBackend is like NewRateLimiter but delegates token
+// accounting to a shared backend so a fleet enforces one bucket per key. A nil
+// backend is equivalent to NewRateLimiter (in-memory default).
+func NewRateLimiterWithBackend(rate float64, burst int, backend RateLimitBackend) *RateLimiter {
+	rl := NewRateLimiter(rate, burst)
+	rl.backend = backend
+	return rl
+}
+
+// SetBackend installs a shared backend after construction. Passing nil restores
+// the in-memory default.
+func (rl *RateLimiter) SetBackend(backend RateLimitBackend) { rl.backend = backend }
+
 // Allow consumes one token for the given key. Returns false if the bucket is empty.
 func (rl *RateLimiter) Allow(key string) bool {
+	if rl.backend != nil {
+		allowed, err := rl.backend.Allow(context.Background(), key, rl.rate, rl.burst, time.Now())
+		if err != nil {
+			// Fail OPEN: a shared-store outage must not lock the whole fleet
+			// out of its own endpoints. Log and allow; the per-process limiter
+			// is intentionally bypassed when a backend is configured.
+			slog.Warn("rate limit backend error, failing open", "err", err, "key", key)
+			return true
+		}
+		return allowed
+	}
+
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 

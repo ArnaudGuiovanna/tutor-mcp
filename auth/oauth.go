@@ -90,6 +90,13 @@ func NewOAuthServer(store oauthStore, baseURL string, logger *slog.Logger) *OAut
 	}
 }
 
+// SetLoginFailureBackend installs a shared, fleet-wide store for per-account
+// login-failure tracking. nil restores the in-memory default. Opt-in: existing
+// callers that never call this keep the unchanged in-process behaviour.
+func (s *OAuthServer) SetLoginFailureBackend(backend LoginFailureBackend) {
+	s.loginFailures.SetBackend(backend)
+}
+
 // RegisterRoutes registers all OAuth endpoints on the given mux.
 func (s *OAuthServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.HandleAuthServerMetadata)
