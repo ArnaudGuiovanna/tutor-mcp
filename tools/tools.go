@@ -39,50 +39,6 @@ func logAuthFailure(deps *Deps, tool string, err error) {
 	deps.Logger.Info(tool+": auth failed", "err", err)
 }
 
-// filterStatesByConcepts returns only the states whose concept is in the set.
-// An empty set means "no active domains" → returns nil so callers don't surface
-// orphan history (e.g. priority_concept stays empty when the learner has no
-// domain configured).
-func filterStatesByConcepts(states []*models.ConceptState, set map[string]bool) []*models.ConceptState {
-	if len(set) == 0 {
-		return nil
-	}
-	out := make([]*models.ConceptState, 0, len(states))
-	for _, cs := range states {
-		if set[cs.Concept] {
-			out = append(out, cs)
-		}
-	}
-	return out
-}
-
-// filterInteractionsByConcepts mirrors filterStatesByConcepts for interactions.
-func filterInteractionsByConcepts(interactions []*models.Interaction, set map[string]bool) []*models.Interaction {
-	if len(set) == 0 {
-		return nil
-	}
-	out := make([]*models.Interaction, 0, len(interactions))
-	for _, i := range interactions {
-		if set[i.Concept] {
-			out = append(out, i)
-		}
-	}
-	return out
-}
-
-func filterInteractionsByDomainID(interactions []*models.Interaction, domainID string) []*models.Interaction {
-	if domainID == "" {
-		return interactions
-	}
-	out := make([]*models.Interaction, 0, len(interactions))
-	for _, i := range interactions {
-		if i.DomainID == "" || i.DomainID == domainID {
-			out = append(out, i)
-		}
-	}
-	return out
-}
-
 // resolveDomain resolves a domain by ID or falls back to the learner's most recent domain.
 //
 // Archived domains are explicitly rejected when resolved by ID: see issue #94.
@@ -109,7 +65,17 @@ func resolveDomain(ctx context.Context, store storeport.Store, learnerID, domain
 }
 
 func jsonResult(v interface{}) (*mcp.CallToolResult, error) {
-	data, _ := json.Marshal(v)
+	data, err := json.Marshal(v)
+	if err != nil {
+		// Most handlers intentionally ignore this helper's Go error because MCP
+		// application failures are represented in CallToolResult. Never return
+		// a nil/empty result when an internal value (for example NaN) cannot be
+		// encoded.
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: "failed to encode tool response"}},
+			IsError: true,
+		}, nil
+	}
 	return &mcp.CallToolResult{
 		Content:           []mcp.Content{&mcp.TextContent{Text: string(data)}},
 		StructuredContent: v,

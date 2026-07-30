@@ -23,12 +23,26 @@ import (
 // Exact historical BKT snapshots are not persisted — this is good enough for a
 // learner-facing trajectory narrative.
 func (s *Store) ConceptMasteryDelta(ctx context.Context, learnerID string, domainConcepts []string, since time.Time, limit int) ([]models.ConceptDelta, error) {
+	return s.conceptMasteryDelta(ctx, learnerID, "", domainConcepts, since, limit, false)
+}
+
+func (s *Store) ConceptMasteryDeltaInDomain(ctx context.Context, learnerID, domainID string, domainConcepts []string, since time.Time, limit int) ([]models.ConceptDelta, error) {
+	return s.conceptMasteryDelta(ctx, learnerID, domainID, domainConcepts, since, limit, true)
+}
+
+func (s *Store) conceptMasteryDelta(ctx context.Context, learnerID, domainID string, domainConcepts []string, since time.Time, limit int, exactDomain bool) ([]models.ConceptDelta, error) {
 	if limit <= 0 {
 		limit = 3
 	}
 
 	// Current mastery per concept (BKT p_mastery).
-	states, err := s.GetConceptStatesByLearner(ctx, learnerID)
+	var states []*models.ConceptState
+	var err error
+	if exactDomain {
+		states, err = s.GetConceptStatesByDomain(ctx, learnerID, domainID)
+	} else {
+		states, err = s.GetConceptStatesByLearner(ctx, learnerID)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("mastery delta: get states: %w", err)
 	}
@@ -54,8 +68,13 @@ func (s *Store) ConceptMasteryDelta(ctx context.Context, learnerID string, domai
 	before := make(map[string]beforeCounts, len(relevant))
 	if len(relevant) > 0 {
 		placeholders := make([]string, 0, len(relevant))
-		args := make([]any, 0, len(relevant)+2)
+		args := make([]any, 0, len(relevant)+3)
 		args = append(args, learnerID)
+		domainClause := ""
+		if exactDomain {
+			domainClause = " AND domain_id = ?"
+			args = append(args, domainID)
+		}
 		for _, c := range relevant {
 			placeholders = append(placeholders, "?")
 			args = append(args, c)
@@ -64,7 +83,7 @@ func (s *Store) ConceptMasteryDelta(ctx context.Context, learnerID string, domai
 		rows, err := s.query(ctx,
 			`SELECT concept, COUNT(*), COALESCE(SUM(success), 0)
 			 FROM interactions
-			 WHERE learner_id = ? AND concept IN (`+strings.Join(placeholders, ",")+`)
+			 WHERE learner_id = ?`+domainClause+` AND concept IN (`+strings.Join(placeholders, ",")+`)
 			   AND created_at < ?
 			 GROUP BY concept`,
 			args...,
@@ -122,7 +141,21 @@ func (s *Store) ConceptMasteryDelta(ctx context.Context, learnerID string, domai
 // "Newly mastered" = current PMastery >= MasteryBKT() AND the most recent
 // interaction on that concept is after `since` (approximation).
 func (s *Store) MilestonesInWindow(ctx context.Context, learnerID string, domainConcepts []string, since time.Time) ([]string, error) {
-	states, err := s.GetConceptStatesByLearner(ctx, learnerID)
+	return s.milestonesInWindow(ctx, learnerID, "", domainConcepts, since, false)
+}
+
+func (s *Store) MilestonesInWindowInDomain(ctx context.Context, learnerID, domainID string, domainConcepts []string, since time.Time) ([]string, error) {
+	return s.milestonesInWindow(ctx, learnerID, domainID, domainConcepts, since, true)
+}
+
+func (s *Store) milestonesInWindow(ctx context.Context, learnerID, domainID string, domainConcepts []string, since time.Time, exactDomain bool) ([]string, error) {
+	var states []*models.ConceptState
+	var err error
+	if exactDomain {
+		states, err = s.GetConceptStatesByDomain(ctx, learnerID, domainID)
+	} else {
+		states, err = s.GetConceptStatesByLearner(ctx, learnerID)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("milestones: get states: %w", err)
 	}
@@ -151,8 +184,13 @@ func (s *Store) MilestonesInWindow(ctx context.Context, learnerID string, domain
 
 	// Concepts with at least one successful interaction since `since`.
 	placeholders := make([]string, 0, len(candidates))
-	args := make([]any, 0, len(candidates)+2)
+	args := make([]any, 0, len(candidates)+3)
 	args = append(args, learnerID)
+	domainClause := ""
+	if exactDomain {
+		domainClause = " AND domain_id = ?"
+		args = append(args, domainID)
+	}
 	for _, c := range candidates {
 		placeholders = append(placeholders, "?")
 		args = append(args, c)
@@ -160,7 +198,7 @@ func (s *Store) MilestonesInWindow(ctx context.Context, learnerID string, domain
 	args = append(args, since.UTC())
 	rows, err := s.query(ctx,
 		`SELECT DISTINCT concept FROM interactions
-		 WHERE learner_id = ? AND concept IN (`+strings.Join(placeholders, ",")+`)
+		 WHERE learner_id = ?`+domainClause+` AND concept IN (`+strings.Join(placeholders, ",")+`)
 		   AND success = 1 AND created_at >= ?`,
 		args...,
 	)
@@ -197,6 +235,19 @@ func (s *Store) CountInteractionsByConcept(ctx context.Context, learnerID, conce
 	return count, nil
 }
 
+func (s *Store) CountInteractionsByConceptInDomain(ctx context.Context, learnerID, domainID, concept string) (int, error) {
+	var count int
+	err := s.queryRow(ctx,
+		`SELECT COUNT(*) FROM interactions
+		 WHERE learner_id = ? AND domain_id = ? AND concept = ?`,
+		learnerID, domainID, concept,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count domain interactions by concept: %w", err)
+	}
+	return count, nil
+}
+
 // CountSessionsOnConcept approximates the number of distinct study sessions the
 // learner has had on a concept. Uses distinct calendar dates with at least one
 // interaction on that concept (rough proxy — good enough for Hidi-Renninger phase
@@ -211,6 +262,19 @@ func (s *Store) CountSessionsOnConcept(ctx context.Context, learnerID, concept s
 	).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count sessions on concept: %w", err)
+	}
+	return count, nil
+}
+
+func (s *Store) CountSessionsOnConceptInDomain(ctx context.Context, learnerID, domainID, concept string) (int, error) {
+	var count int
+	err := s.queryRow(ctx,
+		`SELECT COUNT(DISTINCT `+s.utcDateExpr("created_at")+`) FROM interactions
+		 WHERE learner_id = ? AND domain_id = ? AND concept = ?`,
+		learnerID, domainID, concept,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count domain sessions on concept: %w", err)
 	}
 	return count, nil
 }
@@ -233,11 +297,11 @@ func (s *Store) CountLearnerSessionStreak(ctx context.Context, learnerID string)
 	for rows.Next() {
 		var dateStr string
 		if err := rows.Scan(&dateStr); err != nil {
-			return streak, nil
+			return 0, fmt.Errorf("scan session streak: %w", err)
 		}
 		d, err := time.Parse("2006-01-02", dateStr)
 		if err != nil {
-			return streak, nil
+			return 0, fmt.Errorf("parse session streak date %q: %w", dateStr, err)
 		}
 		if streak == 0 {
 			diff := expected.Sub(d).Hours() / 24
@@ -254,6 +318,9 @@ func (s *Store) CountLearnerSessionStreak(ctx context.Context, learnerID string)
 		} else {
 			break
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate session streak: %w", err)
 	}
 	return streak, nil
 }
@@ -276,6 +343,23 @@ func (s *Store) SelfInitiatedRatio(ctx context.Context, learnerID, concept strin
 	return float64(selfInit) / float64(total), nil
 }
 
+func (s *Store) SelfInitiatedRatioInDomain(ctx context.Context, learnerID, domainID, concept string) (float64, error) {
+	var total, selfInit int
+	err := s.queryRow(ctx,
+		`SELECT COUNT(*), COALESCE(SUM(self_initiated), 0)
+		 FROM interactions
+		 WHERE learner_id = ? AND domain_id = ? AND concept = ?`,
+		learnerID, domainID, concept,
+	).Scan(&total, &selfInit)
+	if err != nil {
+		return 0, fmt.Errorf("domain self-initiated ratio: %w", err)
+	}
+	if total == 0 {
+		return 0, nil
+	}
+	return float64(selfInit) / float64(total), nil
+}
+
 // LastFailureOnConcept returns the most recent failed interaction on a concept,
 // or nil if none exists within `window`.
 func (s *Store) LastFailureOnConcept(ctx context.Context, learnerID, concept string, window time.Duration) (*models.Interaction, error) {
@@ -288,6 +372,29 @@ func (s *Store) LastFailureOnConcept(ctx context.Context, learnerID, concept str
 	)
 	if err != nil {
 		return nil, fmt.Errorf("last failure on concept: %w", err)
+	}
+	defer rows.Close()
+	items, err := scanInteractions(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(items) == 0 {
+		return nil, nil
+	}
+	return items[0], nil
+}
+
+func (s *Store) LastFailureOnConceptInDomain(ctx context.Context, learnerID, domainID, concept string, window time.Duration) (*models.Interaction, error) {
+	cutoff := time.Now().UTC().Add(-window)
+	rows, err := s.query(ctx,
+		`SELECT `+interactionCols+` FROM interactions
+		 WHERE learner_id = ? AND domain_id = ? AND concept = ?
+		   AND success = 0 AND created_at >= ?
+		 ORDER BY created_at DESC LIMIT 1`,
+		learnerID, domainID, concept, cutoff,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("last domain failure on concept: %w", err)
 	}
 	defer rows.Close()
 	items, err := scanInteractions(rows)

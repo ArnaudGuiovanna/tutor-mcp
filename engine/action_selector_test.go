@@ -7,6 +7,7 @@ package engine
 import (
 	"math"
 	"testing"
+	"time"
 
 	"tutor-mcp/algorithms"
 	"tutor-mcp/models"
@@ -22,8 +23,16 @@ func reviewedConceptState(concept string, mastery float64) *models.ConceptState 
 	cs.CardState = "review"
 	cs.Stability = 30 // generous: ensures retention >> 0.5 by default
 	cs.ElapsedDays = 1
+	lastReview := time.Now().UTC().Add(-24 * time.Hour)
+	cs.LastReview = &lastReview
 	cs.Theta = 0
 	return cs
+}
+
+func setActionCardAge(cs *models.ConceptState, days int) {
+	cs.ElapsedDays = days // historical value deliberately kept for fixture realism
+	lastReview := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour)
+	cs.LastReview = &lastReview
 }
 
 // ─── Cascade tests ─────────────────────────────────────────────────────────
@@ -51,7 +60,7 @@ func TestSelectAction_MisconceptionBeatsLowRetention(t *testing.T) {
 	// Misconception must win.
 	cs := reviewedConceptState("Channels", 0.5)
 	cs.Stability = 1.0
-	cs.ElapsedDays = 30 // pushes retention well below the recall-routing threshold
+	setActionCardAge(cs, 30) // pushes retention well below the recall-routing threshold
 	mc := &models.MisconceptionGroup{
 		Concept:           "Channels",
 		MisconceptionType: "deadlock_unaware",
@@ -66,10 +75,29 @@ func TestSelectAction_MisconceptionBeatsLowRetention(t *testing.T) {
 func TestSelectAction_RetentionLow_TriggersRecall(t *testing.T) {
 	cs := reviewedConceptState("Channels", 0.5)
 	cs.Stability = 1.0
-	cs.ElapsedDays = 30
+	setActionCardAge(cs, 30)
 	a := SelectAction("Channels", cs, nil, ActionHistory{})
 	if a.Type != models.ActivityRecall {
 		t.Fatalf("expected RECALL_EXERCISE, got %s", a.Type)
+	}
+}
+
+func TestSelectActionAt_IgnoresHistoricalElapsedDaysAfterRecentReview(t *testing.T) {
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	recentReview := now.Add(-2 * time.Hour)
+	cs := reviewedConceptState("Channels", 0.50)
+	cs.Stability = 1
+	cs.ElapsedDays = 90 // interval before the recent review, not current age
+	cs.LastReview = &recentReview
+
+	action := SelectActionAt("Channels", cs, nil, ActionHistory{}, now)
+	if action.Type != models.ActivityPractice {
+		t.Fatalf("recently reviewed card routed as %s, want PRACTICE (historical ElapsedDays must not force recall)", action.Type)
+	}
+
+	action = SelectActionAt("Channels", cs, nil, ActionHistory{}, now.Add(30*24*time.Hour))
+	if action.Type != models.ActivityRecall {
+		t.Fatalf("same card after 30 current days routed as %s, want RECALL_EXERCISE", action.Type)
 	}
 }
 
@@ -95,7 +123,7 @@ func TestSelectAction_RetentionRecallRoutingBoundary(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cs := reviewedConceptState("Channels", 0.50)
 			cs.Stability = stabilityForRetention(t, tc.retention)
-			cs.ElapsedDays = 1
+			setActionCardAge(cs, 1)
 
 			a := SelectAction("Channels", cs, nil, ActionHistory{})
 			if a.Type != tc.want {

@@ -7,6 +7,8 @@ import (
 	"math"
 	"strings"
 	"testing"
+
+	"tutor-mcp/models"
 )
 
 func TestValidateUnitInterval(t *testing.T) {
@@ -115,5 +117,17 @@ func TestValidateNonNegativeCount(t *testing.T) {
 	}
 	if err := validateNonNegativeCount("hints_requested", 51, 50); err == nil {
 		t.Fatal("51 should be rejected")
+	}
+}
+
+func TestRecordInteractionActivityWhitelistRejectsNonEvidenceActivities(t *testing.T) {
+	for _, activityType := range []models.ActivityType{
+		models.ActivityRest,
+		models.ActivitySetupDomain,
+		models.ActivityCloseSession,
+	} {
+		if err := validateEnum("activity_type", string(activityType), allowedActivityTypes); err == nil {
+			t.Fatalf("%s must not be accepted as learner evidence", activityType)
+		}
 	}
 }

@@ -19,7 +19,8 @@ func TestGetMisconceptions_NoAuth(t *testing.T) {
 }
 
 func TestGetMisconceptions_NoDataReturnsEmpty(t *testing.T) {
-	_, deps := setupToolsTest(t)
+	store, deps := setupToolsTest(t)
+	seedDomain(t, store, "L_owner", "loops")
 	res := callTool(t, deps, registerGetMisconceptions, "L_owner", "get_misconceptions", map[string]any{})
 	if res.IsError {
 		t.Fatalf("got %q", resultText(res))
@@ -46,6 +47,7 @@ func TestGetMisconceptions_DomainNotFound(t *testing.T) {
 
 func TestGetMisconceptions_FilterByConcept(t *testing.T) {
 	store, deps := setupToolsTest(t)
+	seedDomain(t, store, "L_owner", "loops")
 
 	// Seed an interaction with a misconception.
 	if err := store.CreateInteraction(context.Background(), &models.Interaction{

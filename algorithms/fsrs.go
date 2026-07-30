@@ -77,7 +77,40 @@ func Retrievability(elapsedDays int, stability float64) float64 {
 	if stability <= 0 {
 		return 0
 	}
+	// A review timestamp in the future (clock skew, bad import) must not
+	// produce a negative card age. Besides being meaningless, sufficiently
+	// negative values can make the power base non-positive and return NaN.
+	if elapsedDays < 0 {
+		elapsedDays = 0
+	}
 	return math.Pow(1+fsrsFactor*float64(elapsedDays)/stability, fsrsDecay)
+}
+
+// CurrentElapsedDays returns the whole number of days elapsed since the last
+// review at a decision boundary. ElapsedDays stored on FSRSCard is the interval
+// that preceded the previous review; it is historical data and must not be
+// reused as the card's current age.
+//
+// Missing/zero review timestamps and timestamps in the future both mean an age
+// of zero. Callers should separately exclude genuinely new cards when their
+// routing policy does not apply retention to them.
+func CurrentElapsedDays(now time.Time, lastReview *time.Time) int {
+	if lastReview == nil || lastReview.IsZero() || !now.After(*lastReview) {
+		return 0
+	}
+	elapsedDays := int(now.Sub(*lastReview).Hours() / 24)
+	if elapsedDays < 0 {
+		return 0
+	}
+	return elapsedDays
+}
+
+// CurrentRetrievability computes retention from the current age of the card,
+// derived from LastReview. This is the decision-time counterpart to
+// Retrievability, whose elapsedDays argument is intentionally still useful
+// inside the FSRS review update itself.
+func CurrentRetrievability(now time.Time, lastReview *time.Time, stability float64) float64 {
+	return Retrievability(CurrentElapsedDays(now, lastReview), stability)
 }
 
 // clampRating bounds a Rating to the valid [Again..Easy] range. Callers index
@@ -152,10 +185,11 @@ func NextInterval(stability, desiredRetention float64) int {
 }
 
 func ReviewCard(card FSRSCard, rating Rating, now time.Time) FSRSCard {
-	elapsedDays := 0
+	var lastReview *time.Time
 	if !card.LastReview.IsZero() {
-		elapsedDays = int(now.Sub(card.LastReview).Hours() / 24)
+		lastReview = &card.LastReview
 	}
+	elapsedDays := CurrentElapsedDays(now, lastReview)
 	r := Retrievability(elapsedDays, card.Stability)
 	newCard := card
 	newCard.ElapsedDays = elapsedDays

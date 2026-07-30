@@ -22,6 +22,7 @@ type AffectState struct {
 type CalibrationRecord struct {
 	PredictionID string
 	LearnerID    string
+	DomainID     string
 	ConceptID    string
 	Predicted    float64  // 0-1 normalized from 1-5 scale
 	Actual       *float64 // nil until exercise completed
@@ -55,6 +56,7 @@ type ConceptGap struct {
 type TransferRecord struct {
 	ID          int64
 	LearnerID   string
+	DomainID    string
 	ConceptID   string
 	ContextType string
 	Score       float64

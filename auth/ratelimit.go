@@ -56,15 +56,6 @@ func NewRateLimiter(rate float64, burst int) *RateLimiter {
 	return rl
 }
 
-// NewRateLimiterWithBackend is like NewRateLimiter but delegates token
-// accounting to a shared backend so a fleet enforces one bucket per key. A nil
-// backend is equivalent to NewRateLimiter (in-memory default).
-func NewRateLimiterWithBackend(rate float64, burst int, backend RateLimitBackend) *RateLimiter {
-	rl := NewRateLimiter(rate, burst)
-	rl.backend = backend
-	return rl
-}
-
 // SetBackend installs a shared backend after construction. Passing nil restores
 // the in-memory default.
 func (rl *RateLimiter) SetBackend(backend RateLimitBackend) { rl.backend = backend }

@@ -23,7 +23,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6.4.0
         with:
-          go-version: 1.25.x
+          go-version: 1.25.12
 
       - name: Vet
         run: go vet ./...
@@ -38,6 +38,40 @@ jobs:
           name: coverage
           path: c.out
           if-no-files-found: warn
+
+  postgres-test:
+    name: Test (PostgreSQL 17)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: tutor_test
+          POSTGRES_USER: tutor
+          POSTGRES_PASSWORD: tutor_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tutor -d tutor_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@v6.4.0
+        with:
+          go-version: 1.25.12
+
+      - name: Test database package on PostgreSQL
+        env:
+          TUTOR_TEST_PG_DSN: postgres://tutor:tutor_test@localhost:5432/tutor_test?sslmode=disable
+        run: go test -race -count=1 -timeout 10m ./db
 
   build:
     name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
@@ -64,7 +98,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6.4.0
         with:
-          go-version: 1.25.x
+          go-version: 1.25.12
 
       - name: Build
         env:
@@ -76,7 +110,6 @@ jobs:
     name: Govulncheck
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    continue-on-error: true
 
     steps:
       - name: Checkout
@@ -85,7 +118,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6.4.0
         with:
-          go-version: 1.25.x
+          go-version: 1.25.12
 
       - name: Run govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest && govulncheck ./...
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.3.0 && govulncheck ./...

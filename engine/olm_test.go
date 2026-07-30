@@ -76,7 +76,26 @@ func seedDomain(t *testing.T, raw *sql.DB, learnerID, name string, concepts []st
 // seedConceptState upserts a concept_state row for a concept.
 func seedConceptState(t *testing.T, store *db.Store, learnerID, concept string, mastery float64, cardState string) {
 	t.Helper()
-	cs := models.NewConceptState(learnerID, concept)
+	domains, err := store.GetDomainsByLearner(context.Background(), learnerID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	domainID := ""
+	for _, domain := range domains {
+		for _, candidate := range domain.Graph.Concepts {
+			if candidate == concept {
+				domainID = domain.ID
+				break
+			}
+		}
+		if domainID != "" {
+			break
+		}
+	}
+	if domainID == "" {
+		t.Fatalf("no seeded domain contains concept %q", concept)
+	}
+	cs := models.NewConceptStateInDomain(learnerID, domainID, concept)
 	cs.PMastery = mastery
 	cs.CardState = cardState
 	if cardState != "new" {
@@ -137,13 +156,13 @@ func TestBuildOLMSnapshot_MasteryBuckets(t *testing.T) {
 func TestBuildOLMSnapshot_FocusForgettingCritical(t *testing.T) {
 	store, raw := newOLMTestStore(t)
 	seedLearner(t, raw, "L1")
-	seedDomain(t, raw, "L1", "math",
+	domainID := seedDomain(t, raw, "L1", "math",
 		[]string{"a", "b"},
 		map[string][]string{"b": {"a"}},
 		false,
 	)
 	// 'a' is in deep forgetting (low retention).
-	cs := models.NewConceptState("L1", "a")
+	cs := models.NewConceptStateInDomain("L1", domainID, "a")
 	cs.PMastery = 0.40
 	cs.Stability = 1.0
 	cs.ElapsedDays = 30
@@ -336,6 +355,7 @@ func TestFormatOLMEmbed_FocusCriticalRedTitleAndColor(t *testing.T) {
 }
 
 func TestNodeClassify(t *testing.T) {
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
 	cases := []struct {
 		name string
 		cs   *models.ConceptState
@@ -343,18 +363,37 @@ func TestNodeClassify(t *testing.T) {
 	}{
 		{"nil_state", nil, NodeNotStarted},
 		{"new_card", &models.ConceptState{CardState: "new", PMastery: 0.0}, NodeNotStarted},
-		{"solid", &models.ConceptState{CardState: "review", PMastery: 0.85, Stability: 5.0, ElapsedDays: 1}, NodeSolid},
-		{"in_progress", &models.ConceptState{CardState: "review", PMastery: 0.50, Stability: 5.0, ElapsedDays: 1}, NodeInProgress},
-		{"fragile_low_mastery", &models.ConceptState{CardState: "review", PMastery: 0.20, Stability: 5.0, ElapsedDays: 1}, NodeFragile},
-		{"fragile_low_retention", &models.ConceptState{CardState: "review", PMastery: 0.50, Stability: 1.0, ElapsedDays: 30}, NodeFragile},
+		{"solid", &models.ConceptState{CardState: "review", PMastery: 0.85, Stability: 5.0, ElapsedDays: 99, LastReview: ptrTime(now.Add(-24 * time.Hour))}, NodeSolid},
+		{"in_progress", &models.ConceptState{CardState: "review", PMastery: 0.50, Stability: 5.0, ElapsedDays: 99, LastReview: ptrTime(now.Add(-24 * time.Hour))}, NodeInProgress},
+		{"fragile_low_mastery", &models.ConceptState{CardState: "review", PMastery: 0.20, Stability: 5.0, ElapsedDays: 0, LastReview: ptrTime(now.Add(-24 * time.Hour))}, NodeFragile},
+		{"fragile_low_retention", &models.ConceptState{CardState: "review", PMastery: 0.50, Stability: 1.0, ElapsedDays: 0, LastReview: ptrTime(now.Add(-30 * 24 * time.Hour))}, NodeFragile},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := NodeClassify(tc.cs)
+			got := NodeClassifyAt(tc.cs, now)
 			if got != tc.want {
 				t.Errorf("NodeClassify(%+v) = %q, want %q", tc.cs, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestNodeClassifyAt_IgnoresHistoricalElapsedDaysAfterRecentReview(t *testing.T) {
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	lastReview := now.Add(-time.Hour)
+	cs := &models.ConceptState{
+		CardState:   "review",
+		PMastery:    0.50,
+		Stability:   1,
+		ElapsedDays: 120,
+		LastReview:  &lastReview,
+	}
+
+	if got := NodeClassifyAt(cs, now); got != NodeInProgress {
+		t.Fatalf("NodeClassifyAt() = %q, want %q for recently reviewed card", got, NodeInProgress)
+	}
+	if got := NodeClassifyAt(cs, now.Add(30*24*time.Hour)); got != NodeFragile {
+		t.Fatalf("NodeClassifyAt() after 30 days = %q, want %q", got, NodeFragile)
 	}
 }
 

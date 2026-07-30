@@ -34,10 +34,26 @@ func registerGetMetacognitiveMirror(server *mcp.Server, deps *Deps) {
 		}
 
 		since := time.Now().UTC().Add(-7 * 24 * time.Hour)
-		interactions, _ := deps.Store.GetInteractionsSince(ctx, learnerID, since)
-		states, _ := deps.Store.GetConceptStatesByLearner(ctx, learnerID)
-		calibBias, _ := deps.Store.GetCalibrationBias(ctx, learnerID, 20)
-		affects, _ := deps.Store.GetRecentAffectStates(ctx, learnerID, 10)
+		interactions, err := deps.Store.GetInteractionsSince(ctx, learnerID, since)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to load interactions", err)
+			return r, nil, nil
+		}
+		states, err := deps.Store.GetConceptStatesByLearner(ctx, learnerID)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to load concept states", err)
+			return r, nil, nil
+		}
+		calibBias, err := deps.Store.GetCalibrationBias(ctx, learnerID, 20)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to load calibration", err)
+			return r, nil, nil
+		}
+		affects, err := deps.Store.GetRecentAffectStates(ctx, learnerID, 10)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to load affect history", err)
+			return r, nil, nil
+		}
 
 		// Domain filter (#95): if domain_id is supplied, restrict the
 		// concept-keyed inputs (interactions, states) to that domain's
@@ -51,12 +67,21 @@ func registerGetMetacognitiveMirror(server *mcp.Server, deps *Deps) {
 				r, _ := errorResult(err.Error())
 				return r, nil, nil
 			}
-			conceptSet := make(map[string]bool, len(domain.Graph.Concepts))
-			for _, c := range domain.Graph.Concepts {
-				conceptSet[c] = true
+			interactions, err = deps.Store.GetInteractionsSinceInDomain(ctx, learnerID, domain.ID, since)
+			if err != nil {
+				r, _ := safeErrorResult(deps.Logger, "failed to load domain interactions", err)
+				return r, nil, nil
 			}
-			interactions = filterInteractionsByConcepts(interactions, conceptSet)
-			states = filterStatesByConcepts(states, conceptSet)
+			states, err = deps.Store.GetConceptStatesByDomain(ctx, learnerID, domain.ID)
+			if err != nil {
+				r, _ := safeErrorResult(deps.Logger, "failed to load domain states", err)
+				return r, nil, nil
+			}
+			calibBias, err = deps.Store.GetCalibrationBiasInDomain(ctx, learnerID, domain.ID, 20)
+			if err != nil {
+				r, _ := safeErrorResult(deps.Logger, "failed to load domain calibration", err)
+				return r, nil, nil
+			}
 		}
 
 		var autonomyScores []float64

@@ -13,21 +13,25 @@ func ptrTime(t time.Time) *time.Time { return &t }
 
 func alertStateAtRetention(t *testing.T, concept string, retention float64) *models.ConceptState {
 	t.Helper()
+	lastReview := time.Now().UTC().Add(-24 * time.Hour)
 	return &models.ConceptState{
 		Concept:     concept,
 		Stability:   stabilityForRetention(t, retention),
 		ElapsedDays: 1,
+		LastReview:  &lastReview,
 		PMastery:    0.50,
 		CardState:   "review",
 	}
 }
 
 func alertNonForgettingState(concept string, mastery float64) *models.ConceptState {
+	lastReview := time.Now().UTC().Add(-24 * time.Hour)
 	return &models.ConceptState{
 		Concept:     concept,
 		PMastery:    mastery,
 		Stability:   30,
 		ElapsedDays: 1,
+		LastReview:  &lastReview,
 		CardState:   "review",
 	}
 }
@@ -134,7 +138,8 @@ func TestComputeAlertsMasteryReady(t *testing.T) {
 	// Stability=1.0, ElapsedDays=1 yields retention well above the named
 	// FORGETTING warning threshold, so FORGETTING/MASTERY_READY arbitration does
 	// not suppress MASTERY_READY here.
-	states := []*models.ConceptState{{Concept: "basics", PMastery: 0.90, Stability: 1.0, ElapsedDays: 1, CardState: "review"}}
+	lastReview := time.Now().UTC().Add(-24 * time.Hour)
+	states := []*models.ConceptState{{Concept: "basics", PMastery: 0.90, Stability: 1.0, ElapsedDays: 1, LastReview: &lastReview, CardState: "review"}}
 	alerts := ComputeAlerts(states, nil, time.Time{})
 	found := false
 	for _, a := range alerts {
@@ -212,11 +217,13 @@ func TestComputeAlertsMasteryForgettingArbitration(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			lastReview := time.Now().UTC().Add(-time.Duration(tc.elapsedDays) * 24 * time.Hour)
 			states := []*models.ConceptState{
 				{
 					Concept:     "arbitration_concept",
 					Stability:   tc.stability,
 					ElapsedDays: tc.elapsedDays,
+					LastReview:  &lastReview,
 					PMastery:    tc.pMastery,
 					CardState:   "review",
 				},

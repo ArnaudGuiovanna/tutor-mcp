@@ -66,24 +66,47 @@ func (s *Scheduler) dispatchMetacognitiveAlerts() {
 		if learner.WebhookURL == "" {
 			continue
 		}
-		avail, _ := s.store.GetAvailability(ctx, learner.ID)
+		avail, err := s.store.GetAvailability(ctx, learner.ID)
+		if err != nil {
+			s.logger.Error("scheduler: metacog availability", "err", err, "learner", learner.ID)
+			continue
+		}
 		if avail != nil && avail.DoNotDisturb {
 			continue
 		}
 
-		// Gather inputs. Errors on any one source are tolerated — the
-		// missing input simply skips its branch in
-		// ComputeMetacognitiveAlerts (no alert is better than panicking
-		// the cron tick on a single learner with corrupt rows).
-		states, _ := s.store.GetConceptStatesByLearner(ctx, learner.ID)
-		interactions, _ := s.store.GetRecentInteractionsByLearner(ctx, learner.ID, 20)
-		affects, _ := s.store.GetRecentAffectStates(ctx, learner.ID, 10)
+		// A partial input set can suppress a real alert. Skip this learner for
+		// the tick and log the failed source instead of producing a misleading
+		// "all clear" decision.
+		states, err := s.store.GetConceptStatesByLearner(ctx, learner.ID)
+		if err != nil {
+			s.logger.Error("scheduler: metacog states", "err", err, "learner", learner.ID)
+			continue
+		}
+		interactions, err := s.store.GetRecentInteractionsByLearner(ctx, learner.ID, 20)
+		if err != nil {
+			s.logger.Error("scheduler: metacog interactions", "err", err, "learner", learner.ID)
+			continue
+		}
+		affects, err := s.store.GetRecentAffectStates(ctx, learner.ID, 10)
+		if err != nil {
+			s.logger.Error("scheduler: metacog affects", "err", err, "learner", learner.ID)
+			continue
+		}
 		var autonomyScores []float64
 		for _, a := range affects {
 			autonomyScores = append(autonomyScores, a.AutonomyScore)
 		}
-		calibBias, _ := s.store.GetCalibrationBias(ctx, learner.ID, 20)
-		transfers, _ := s.store.GetTransferRecordsByLearner(ctx, learner.ID)
+		calibBias, err := s.store.GetCalibrationBias(ctx, learner.ID, 20)
+		if err != nil {
+			s.logger.Error("scheduler: metacog calibration", "err", err, "learner", learner.ID)
+			continue
+		}
+		transfers, err := s.store.GetTransferRecordsByLearner(ctx, learner.ID)
+		if err != nil {
+			s.logger.Error("scheduler: metacog transfers", "err", err, "learner", learner.ID)
+			continue
+		}
 
 		alerts := ComputeMetacognitiveAlerts(
 			autonomyScores,
@@ -93,13 +116,21 @@ func (s *Scheduler) dispatchMetacognitiveAlerts() {
 			WithTransferData(states, transfers),
 		)
 
-		domains, _ := s.store.GetDomainsByLearner(ctx, learner.ID, false)
+		domains, err := s.store.GetDomainsByLearner(ctx, learner.ID, false)
+		if err != nil {
+			s.logger.Error("scheduler: metacog domains", "err", err, "learner", learner.ID)
+			continue
+		}
 		candidates := BuildMetacognitiveNudgeCandidates(learner, domains, alerts)
 		for _, candidate := range candidates {
 			// One metacognitive push per tick is intentional: Discord should
 			// surface the highest-learning-value next action, not a bundle of
 			// weak observations.
-			alreadySent, _ := s.store.WasAlertSentToday(ctx, learner.ID, candidate.AlertTag)
+			alreadySent, err := s.store.WasAlertSentToday(ctx, learner.ID, candidate.AlertTag)
+			if err != nil {
+				s.logger.Error("scheduler: metacog dedup", "err", err, "learner", learner.ID, "kind", candidate.Kind)
+				continue
+			}
 			if alreadySent {
 				continue
 			}

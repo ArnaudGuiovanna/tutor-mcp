@@ -33,6 +33,7 @@ const (
 )
 
 type Alert struct {
+	DomainID           string       `json:"domain_id,omitempty"`
 	Type               AlertType    `json:"type"`
 	Concept            string       `json:"concept"`
 	Urgency            AlertUrgency `json:"urgency"`

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -44,6 +45,12 @@ type WriteRequest struct {
 }
 
 const sessionFilenameLayout = "2006-01-02T15-04-05Z"
+
+// writeLocks serialize read-modify-write operations on narrative-memory files
+// inside one server process. A fixed set of shards keeps the lock table
+// bounded while allowing unrelated learners/files to be written concurrently.
+// Multi-node deployments must still disable this node-local backend.
+var writeLocks [64]sync.Mutex
 
 func Enabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("TUTOR_MCP_MEMORY_ENABLED"))) {
@@ -103,6 +110,10 @@ func Write(req WriteRequest) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("memory: create parent: %w", err)
 	}
+
+	lock := memoryWriteLock(path)
+	lock.Lock()
+	defer lock.Unlock()
 
 	switch req.Operation {
 	case OpReplaceFile:
@@ -269,7 +280,17 @@ func learnerDir(learnerID string) (string, error) {
 }
 
 func safeSegment(s string) string {
-	return url.PathEscape(s)
+	escaped := url.PathEscape(s)
+	// PathEscape intentionally leaves "." and ".." untouched. They are valid
+	// labels but must never acquire filesystem traversal semantics.
+	switch escaped {
+	case ".":
+		return "%2E"
+	case "..":
+		return "%2E%2E"
+	default:
+		return escaped
+	}
 }
 
 func unsafeSegment(s string) string {
@@ -340,13 +361,38 @@ func atomicWrite(path, content string) error {
 		_ = tmp.Close()
 		return fmt.Errorf("memory: chmod temp: %w", err)
 	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("memory: sync temp: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("memory: close temp: %w", err)
 	}
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("memory: rename temp: %w", err)
 	}
+	parent, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("memory: open parent for sync: %w", err)
+	}
+	if err := parent.Sync(); err != nil {
+		_ = parent.Close()
+		return fmt.Errorf("memory: sync parent: %w", err)
+	}
+	if err := parent.Close(); err != nil {
+		return fmt.Errorf("memory: close parent: %w", err)
+	}
 	return nil
+}
+
+func memoryWriteLock(path string) *sync.Mutex {
+	// FNV-1a, inlined to avoid allocating a hash.Hash for every write.
+	var hash uint64 = 14695981039346656037
+	for i := 0; i < len(path); i++ {
+		hash ^= uint64(path[i])
+		hash *= 1099511628211
+	}
+	return &writeLocks[hash%uint64(len(writeLocks))]
 }
 
 func replaceMarkdownSection(current, sectionKey, content string) string {

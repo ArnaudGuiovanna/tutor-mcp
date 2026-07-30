@@ -2,11 +2,11 @@
 
 ## Supported versions
 
-Tutor MCP is in alpha. Only the most recent release tag (`v0.4.0`) and the `main` branch receive fixes. Older snapshots are not supported.
+Tutor MCP is in alpha. Only the most recent release tag (`v0.4.1`) and the `main` branch receive fixes. Older snapshots are not supported.
 
 | Version | Supported |
 |---|---|
-| latest `v0.4.0` | ✅ |
+| latest `v0.4.1` | ✅ |
 | older release tags | ❌ — please upgrade |
 | `main` (HEAD) | ✅ |
 

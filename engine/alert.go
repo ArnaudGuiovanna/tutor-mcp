@@ -37,11 +37,7 @@ func ComputeAlertsAt(states []*models.ConceptState, recentInteractions []*models
 		}
 
 		// FORGETTING: FSRS retention below the named alert warning threshold.
-		elapsed := cs.ElapsedDays
-		if cs.LastReview != nil {
-			elapsed = int(now.Sub(*cs.LastReview).Hours() / 24)
-		}
-		retention := algorithms.Retrievability(elapsed, cs.Stability)
+		retention := algorithms.CurrentRetrievability(now, cs.LastReview, cs.Stability)
 		if retention < algorithms.RetentionAlertWarningThreshold {
 			urgency := models.UrgencyWarning
 			if retention < algorithms.RetentionAlertCriticalThreshold {

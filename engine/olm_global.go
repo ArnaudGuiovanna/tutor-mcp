@@ -12,7 +12,6 @@ package engine
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"time"
 
 	storeport "tutor-mcp/store"
@@ -84,10 +83,7 @@ func BuildGlobalOLMSnapshot(ctx context.Context, store storeport.Store, learnerI
 	for _, d := range domains {
 		snap, err := BuildOLMSnapshot(ctx, store, learnerID, d.ID)
 		if err != nil {
-			// Skip a broken domain rather than fail the whole view, but log it so
-			// the failure is visible.
-			slog.Warn("global olm: skip domain", "domain", d.ID, "learner", learnerID, "err", err)
-			continue
+			return nil, fmt.Errorf("global olm: build domain %s: %w", d.ID, err)
 		}
 		g.Domains = append(g.Domains, DomainSummary{
 			DomainID:     d.ID,
@@ -107,39 +103,47 @@ func BuildGlobalOLMSnapshot(ctx context.Context, store storeport.Store, learnerI
 		})
 	}
 
-	g.Streak, _ = store.GetActivityStreak(ctx, learnerID)
+	g.Streak, err = store.GetActivityStreak(ctx, learnerID)
+	if err != nil {
+		return nil, fmt.Errorf("global olm: activity streak: %w", err)
+	}
 
 	// Calibration sparkline — last 30 samples. GetCalibrationBiasHistory returns
 	// DESC (newest-first); reverse-iterate so the resulting slice is oldest-first
 	// to match the autonomy/satisfaction sparklines. Each entry's Day is its own
 	// day-offset (i=0 newest → today; i=len-1 oldest → today - (len-1)).
-	if hist, err := store.GetCalibrationBiasHistory(ctx, learnerID, sparklineWindow); err == nil {
-		now := time.Now().UTC()
-		for i := len(hist) - 1; i >= 0; i-- {
-			day := now.AddDate(0, 0, -i).Format("2006-01-02")
-			g.CalibrationHistory = append(g.CalibrationHistory, TimePoint{Day: day, Value: hist[i]})
-		}
+	hist, err := store.GetCalibrationBiasHistory(ctx, learnerID, sparklineWindow)
+	if err != nil {
+		return nil, fmt.Errorf("global olm: calibration history: %w", err)
+	}
+	now := time.Now().UTC()
+	for i := len(hist) - 1; i >= 0; i-- {
+		day := now.AddDate(0, 0, -i).Format("2006-01-02")
+		g.CalibrationHistory = append(g.CalibrationHistory, TimePoint{Day: day, Value: hist[i]})
 	}
 
-	// Autonomy + satisfaction sparklines — best-effort UI enrichment, empty on err.
-	if affects, err := store.GetRecentAffectStates(ctx, learnerID, sparklineWindow); err == nil {
-		for i := len(affects) - 1; i >= 0; i-- {
-			af := affects[i]
-			day := af.CreatedAt.UTC().Format("2006-01-02")
-			g.AutonomyHistory = append(g.AutonomyHistory, TimePoint{Day: day, Value: af.AutonomyScore})
-			g.SatisfactionHistory = append(g.SatisfactionHistory, TimePoint{Day: day, Value: float64(af.Satisfaction)})
-		}
+	affects, err := store.GetRecentAffectStates(ctx, learnerID, sparklineWindow)
+	if err != nil {
+		return nil, fmt.Errorf("global olm: affect history: %w", err)
+	}
+	for i := len(affects) - 1; i >= 0; i-- {
+		af := affects[i]
+		day := af.CreatedAt.UTC().Format("2006-01-02")
+		g.AutonomyHistory = append(g.AutonomyHistory, TimePoint{Day: day, Value: af.AutonomyScore})
+		g.SatisfactionHistory = append(g.SatisfactionHistory, TimePoint{Day: day, Value: float64(af.Satisfaction)})
 	}
 
 	// Recent events — past 7 days. GetRecentLearnerEvents returns DESC
 	// (newest-first), preserved as the natural "newest at top" ordering.
 	since := time.Now().UTC().AddDate(0, 0, -recentEventDays)
-	if rawEvents, err := store.GetRecentLearnerEvents(ctx, learnerID, since); err == nil {
-		for _, re := range rawEvents {
-			g.RecentEvents = append(g.RecentEvents, LearnerEvent{
-				At: re.At, Kind: re.Kind, Message: re.Message, Concept: re.Concept,
-			})
-		}
+	rawEvents, err := store.GetRecentLearnerEvents(ctx, learnerID, since)
+	if err != nil {
+		return nil, fmt.Errorf("global olm: recent events: %w", err)
+	}
+	for _, re := range rawEvents {
+		g.RecentEvents = append(g.RecentEvents, LearnerEvent{
+			At: re.At, Kind: re.Kind, Message: re.Message, Concept: re.Concept,
+		})
 	}
 
 	return g, nil

@@ -35,10 +35,22 @@ const MisconceptionResolutionWindow = 3
 // GetMisconceptionGroups returns all misconception groups for a learner,
 // optionally filtered by concept. Groups are ordered by count descending.
 func (s *Store) GetMisconceptionGroups(ctx context.Context, learnerID string, conceptFilter map[string]bool) ([]models.MisconceptionGroup, error) {
+	return s.getMisconceptionGroups(ctx, learnerID, "", conceptFilter, false)
+}
+
+func (s *Store) GetMisconceptionGroupsInDomain(ctx context.Context, learnerID, domainID string, conceptFilter map[string]bool) ([]models.MisconceptionGroup, error) {
+	return s.getMisconceptionGroups(ctx, learnerID, domainID, conceptFilter, true)
+}
+
+func (s *Store) getMisconceptionGroups(ctx context.Context, learnerID, domainID string, conceptFilter map[string]bool, exactDomain bool) ([]models.MisconceptionGroup, error) {
 	query := `SELECT concept, misconception_type, COUNT(*) AS cnt, MIN(created_at), MAX(created_at)
 		 FROM interactions
 		 WHERE learner_id = ? AND misconception_type IS NOT NULL`
 	args := []any{learnerID}
+	if exactDomain {
+		query += ` AND domain_id = ?`
+		args = append(args, domainID)
+	}
 	if len(conceptFilter) > 0 {
 		placeholders := make([]string, 0, len(conceptFilter))
 		for concept := range conceptFilter {
@@ -84,11 +96,11 @@ func (s *Store) GetMisconceptionGroups(ctx context.Context, learnerID string, co
 	for _, g := range groups {
 		concepts = append(concepts, g.Concept)
 	}
-	details, err := s.lastMisconceptionDetails(ctx, learnerID, concepts)
+	details, err := s.lastMisconceptionDetails(ctx, learnerID, domainID, concepts, exactDomain)
 	if err != nil {
 		return nil, fmt.Errorf("get last misconception details: %w", err)
 	}
-	statuses, err := s.misconceptionStatuses(ctx, learnerID, concepts)
+	statuses, err := s.misconceptionStatuses(ctx, learnerID, domainID, concepts, exactDomain)
 	if err != nil {
 		return nil, fmt.Errorf("get misconception statuses: %w", err)
 	}
@@ -116,14 +128,19 @@ func miscKey(concept, misconceptionType string) string {
 // in a single query (set-based replacement for the per-group
 // getLastMisconceptionDetail). The window function picks the latest row
 // per partition; empty/NULL details map to "".
-func (s *Store) lastMisconceptionDetails(ctx context.Context, learnerID string, concepts []string) (map[string]string, error) {
+func (s *Store) lastMisconceptionDetails(ctx context.Context, learnerID, domainID string, concepts []string, exactDomain bool) (map[string]string, error) {
 	out := make(map[string]string)
 	if len(concepts) == 0 {
 		return out, nil
 	}
 	placeholders := make([]string, 0, len(concepts))
-	args := make([]any, 0, len(concepts)+1)
+	args := make([]any, 0, len(concepts)+2)
 	args = append(args, learnerID)
+	domainClause := ""
+	if exactDomain {
+		domainClause = " AND domain_id = ?"
+		args = append(args, domainID)
+	}
 	for _, c := range concepts {
 		placeholders = append(placeholders, "?")
 		args = append(args, c)
@@ -135,7 +152,7 @@ func (s *Store) lastMisconceptionDetails(ctx context.Context, learnerID string, 
 		           ROW_NUMBER() OVER (PARTITION BY concept, misconception_type
 		                              ORDER BY created_at DESC, id DESC) AS rn
 		    FROM interactions
-		    WHERE learner_id = ? AND misconception_type IS NOT NULL
+		    WHERE learner_id = ?`+domainClause+` AND misconception_type IS NOT NULL
 		      AND concept IN (`+strings.Join(placeholders, ",")+`)
 		 )
 		 WHERE rn = 1`,
@@ -162,14 +179,19 @@ func (s *Store) lastMisconceptionDetails(ctx context.Context, learnerID string, 
 // Single-query replacement for the per-group computeMisconceptionStatus;
 // the window function ranks interactions per concept and we keep the
 // top-N, then flag every misconception_type still present in that window.
-func (s *Store) misconceptionStatuses(ctx context.Context, learnerID string, concepts []string) (map[string]bool, error) {
+func (s *Store) misconceptionStatuses(ctx context.Context, learnerID, domainID string, concepts []string, exactDomain bool) (map[string]bool, error) {
 	out := make(map[string]bool)
 	if len(concepts) == 0 {
 		return out, nil
 	}
 	placeholders := make([]string, 0, len(concepts))
-	args := make([]any, 0, len(concepts)+2)
+	args := make([]any, 0, len(concepts)+3)
 	args = append(args, learnerID)
+	domainClause := ""
+	if exactDomain {
+		domainClause = " AND domain_id = ?"
+		args = append(args, domainID)
+	}
 	for _, c := range concepts {
 		placeholders = append(placeholders, "?")
 		args = append(args, c)
@@ -182,7 +204,7 @@ func (s *Store) misconceptionStatuses(ctx context.Context, learnerID string, con
 		           ROW_NUMBER() OVER (PARTITION BY concept
 		                              ORDER BY created_at DESC, id DESC) AS rn
 		    FROM interactions
-		    WHERE learner_id = ? AND concept IN (`+strings.Join(placeholders, ",")+`)
+		    WHERE learner_id = ?`+domainClause+` AND concept IN (`+strings.Join(placeholders, ",")+`)
 		 )
 		 WHERE rn <= ? AND misconception_type IS NOT NULL`,
 		args...,
@@ -204,11 +226,25 @@ func (s *Store) misconceptionStatuses(ctx context.Context, learnerID string, con
 // GetDistinctMisconceptionTypes returns all distinct misconception types
 // recorded for a learner on a given concept, in alphabetical order.
 func (s *Store) GetDistinctMisconceptionTypes(ctx context.Context, learnerID, concept string) ([]string, error) {
+	return s.getDistinctMisconceptionTypes(ctx, learnerID, "", concept, false)
+}
+
+func (s *Store) GetDistinctMisconceptionTypesInDomain(ctx context.Context, learnerID, domainID, concept string) ([]string, error) {
+	return s.getDistinctMisconceptionTypes(ctx, learnerID, domainID, concept, true)
+}
+
+func (s *Store) getDistinctMisconceptionTypes(ctx context.Context, learnerID, domainID, concept string, exactDomain bool) ([]string, error) {
+	query := `SELECT DISTINCT misconception_type FROM interactions
+		 WHERE learner_id = ? AND concept = ? AND misconception_type IS NOT NULL`
+	args := []any{learnerID, concept}
+	if exactDomain {
+		query += ` AND domain_id = ?`
+		args = append(args, domainID)
+	}
+	query += ` ORDER BY misconception_type`
 	rows, err := s.query(ctx,
-		`SELECT DISTINCT misconception_type FROM interactions
-		 WHERE learner_id = ? AND concept = ? AND misconception_type IS NOT NULL
-		 ORDER BY misconception_type`,
-		learnerID, concept,
+		query,
+		args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get distinct misconception types: %w", err)
@@ -239,6 +275,22 @@ func (s *Store) GetActiveMisconceptions(ctx context.Context, learnerID, concept 
 	for _, g := range groups {
 		if g.Status == "active" {
 			active = append(active, g)
+		}
+	}
+	return active, nil
+}
+
+func (s *Store) GetActiveMisconceptionsInDomain(ctx context.Context, learnerID, domainID, concept string) ([]models.MisconceptionGroup, error) {
+	filter := map[string]bool{concept: true}
+	groups, err := s.GetMisconceptionGroupsInDomain(ctx, learnerID, domainID, filter)
+	if err != nil {
+		return nil, fmt.Errorf("get active misconceptions in domain: %w", err)
+	}
+
+	var active []models.MisconceptionGroup
+	for _, group := range groups {
+		if group.Status == "active" {
+			active = append(active, group)
 		}
 	}
 	return active, nil

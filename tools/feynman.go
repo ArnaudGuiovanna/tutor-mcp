@@ -71,7 +71,7 @@ func registerFeynmanChallenge(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		cs, err := deps.Store.GetConceptState(ctx, learnerID, concept)
+		cs, err := deps.Store.GetConceptStateInDomain(ctx, learnerID, domain.ID, concept)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "concept not found", err)
 			return r, nil, nil

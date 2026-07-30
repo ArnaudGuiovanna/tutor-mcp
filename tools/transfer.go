@@ -87,7 +87,7 @@ func registerTransferChallenge(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		cs, err := deps.Store.GetConceptState(ctx, learnerID, concept)
+		cs, err := deps.Store.GetConceptStateInDomain(ctx, learnerID, domain.ID, concept)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "concept not found", err)
 			return r, nil, nil
@@ -103,7 +103,11 @@ func registerTransferChallenge(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		existingTransfers, _ := deps.Store.GetTransferScores(ctx, learnerID, concept)
+		existingTransfers, err := deps.Store.GetTransferScoresInDomain(ctx, learnerID, domain.ID, concept)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to load transfer history", err)
+			return r, nil, nil
+		}
 		transferProfile := engine.BuildTransferProfile(concept, existingTransfers)
 
 		contextType := params.ContextType
@@ -250,6 +254,7 @@ func registerRecordTransferResult(server *mcp.Server, deps *Deps) {
 
 		record := &models.TransferRecord{
 			LearnerID:   learnerID,
+			DomainID:    domain.ID,
 			ConceptID:   concept,
 			ContextType: params.ContextType,
 			Score:       params.Score,
@@ -261,7 +266,11 @@ func registerRecordTransferResult(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		updatedTransfers, _ := deps.Store.GetTransferScores(ctx, learnerID, concept)
+		updatedTransfers, err := deps.Store.GetTransferScoresInDomain(ctx, learnerID, domain.ID, concept)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to load updated transfer history", err)
+			return r, nil, nil
+		}
 		transferProfile := engine.BuildTransferProfile(concept, updatedTransfers)
 
 		r, _ := jsonResult(map[string]interface{}{

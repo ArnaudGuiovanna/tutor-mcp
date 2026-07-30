@@ -1,5 +1,10 @@
 # [7] ThresholdResolver — Design (Phase 1)
 
+> **Archive de conception — non normative.** Les références à
+> `engine/router.go` sont des traces du chemin de migration supprimé. Le
+> runtime supporté utilise le pipeline permanent de
+> `engine/orchestrator.go`.
+
 > Composant 1/7 du pipeline de régulation. Refacto pure + flag de
 > bascule sémantique. Aucune logique runtime nouvelle ; débloque la
 > cohérence de tous les composants suivants.

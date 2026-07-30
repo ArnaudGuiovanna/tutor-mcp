@@ -7,6 +7,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"tutor-mcp/algorithms"
@@ -53,13 +54,10 @@ func registerGetDashboardState(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		states, _ := deps.Store.GetConceptStatesByLearner(ctx, learnerID)
-		interactions, _ := deps.Store.GetRecentInteractionsByLearner(ctx, learnerID, engine.DefaultRecentInteractionsWindow)
-		sessionStart, _ := deps.Store.GetSessionStart(ctx, learnerID)
-
-		stateMap := make(map[string]*models.ConceptState)
-		for _, cs := range states {
-			stateMap[cs.Concept] = cs
+		sessionStart, err := deps.Store.GetSessionStart(ctx, learnerID)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to load session state", err)
+			return r, nil, nil
 		}
 
 		var domains []*models.Domain
@@ -93,8 +91,37 @@ func registerGetDashboardState(server *mcp.Server, deps *Deps) {
 		var domainDashboards []domainDashboard
 		totalMastered := 0
 		totalConcepts := 0
+		now := time.Now().UTC()
+		var alerts []models.Alert
+		var states []*models.ConceptState
+		var interactions []*models.Interaction
 
 		for _, domain := range domains {
+			domainStates, err := deps.Store.GetConceptStatesByDomain(ctx, learnerID, domain.ID)
+			if err != nil {
+				r, _ := safeErrorResult(deps.Logger, "failed to load domain concept states", err)
+				return r, nil, nil
+			}
+			stateMap := make(map[string]*models.ConceptState, len(domainStates))
+			for _, cs := range domainStates {
+				stateMap[cs.Concept] = cs
+			}
+
+			domainInteractions, err := deps.Store.GetRecentInteractionsByDomain(
+				ctx, learnerID, domain.ID, engine.DefaultRecentInteractionsWindow,
+			)
+			if err != nil {
+				r, _ := safeErrorResult(deps.Logger, "failed to load domain interactions", err)
+				return r, nil, nil
+			}
+			states = append(states, domainStates...)
+			interactions = append(interactions, domainInteractions...)
+			domainAlerts := engine.ComputeAlerts(domainStates, domainInteractions, sessionStart)
+			for i := range domainAlerts {
+				domainAlerts[i].DomainID = domain.ID
+			}
+			alerts = append(alerts, domainAlerts...)
+
 			mastery := make(map[string]float64)
 			for _, c := range domain.Graph.Concepts {
 				if cs, ok := stateMap[c]; ok {
@@ -123,11 +150,7 @@ func registerGetDashboardState(server *mcp.Server, deps *Deps) {
 
 				if cs != nil {
 					cp.CardState = cs.CardState
-					elapsed := cs.ElapsedDays
-					if cs.LastReview != nil {
-						elapsed = int(time.Since(*cs.LastReview).Hours() / 24)
-					}
-					cp.Retention = algorithms.Retrievability(elapsed, cs.Stability)
+					cp.Retention = algorithms.CurrentRetrievability(now, cs.LastReview, cs.Stability)
 				}
 
 				if status == "done" {
@@ -181,21 +204,12 @@ func registerGetDashboardState(server *mcp.Server, deps *Deps) {
 			totalConcepts += len(domain.Graph.Concepts)
 		}
 
-		// Restrict global alerts to concepts in domains shown — orphan
-		// states from deleted domains are intentionally preserved but
-		// must not surface as alerts on concepts the user no longer has.
-		shownConcepts := make(map[string]bool)
-		for _, d := range domains {
-			for _, c := range d.Graph.Concepts {
-				shownConcepts[c] = true
-			}
-		}
-		alertStates := filterStatesByConcepts(states, shownConcepts)
-		alertInteractions := filterInteractionsByConcepts(interactions, shownConcepts)
-		alerts := engine.ComputeAlerts(alertStates, alertInteractions, sessionStart)
 		if alerts == nil {
 			alerts = []models.Alert{}
 		}
+		sort.SliceStable(interactions, func(i, j int) bool {
+			return interactions[i].CreatedAt.After(interactions[j].CreatedAt)
+		})
 
 		signal := "stable"
 		if len(interactions) >= 3 {
@@ -223,8 +237,25 @@ func registerGetDashboardState(server *mcp.Server, deps *Deps) {
 		}
 
 		since := time.Now().UTC().Add(-30 * 24 * time.Hour)
-		allInteractions, _ := deps.Store.GetInteractionsSince(ctx, learnerID, since)
-		calibBias, _ := deps.Store.GetCalibrationBias(ctx, learnerID, 20)
+		var allInteractions []*models.Interaction
+		for _, domain := range domains {
+			domainInteractions, err := deps.Store.GetInteractionsSinceInDomain(ctx, learnerID, domain.ID, since)
+			if err != nil {
+				r, _ := safeErrorResult(deps.Logger, "failed to load dashboard interaction history", err)
+				return r, nil, nil
+			}
+			allInteractions = append(allInteractions, domainInteractions...)
+		}
+		var calibBias float64
+		if len(domains) == 1 {
+			calibBias, err = deps.Store.GetCalibrationBiasInDomain(ctx, learnerID, domains[0].ID, 20)
+		} else {
+			calibBias, err = deps.Store.GetCalibrationBias(ctx, learnerID, 20)
+		}
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to load dashboard calibration", err)
+			return r, nil, nil
+		}
 
 		autonomy := engine.ComputeAutonomyMetrics(engine.AutonomyInput{
 			Interactions:    allInteractions,
@@ -233,7 +264,11 @@ func registerGetDashboardState(server *mcp.Server, deps *Deps) {
 			SessionGap:      2 * time.Hour,
 		})
 
-		affects, _ := deps.Store.GetRecentAffectStates(ctx, learnerID, 10)
+		affects, err := deps.Store.GetRecentAffectStates(ctx, learnerID, 10)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to load dashboard affect history", err)
+			return r, nil, nil
+		}
 		var autonomyScores []float64
 		var affectLastN []interface{}
 		for _, a := range affects {

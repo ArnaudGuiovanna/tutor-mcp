@@ -33,38 +33,28 @@ func registerGetPendingAlerts(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		states, _ := deps.Store.GetConceptStatesByLearner(ctx, learnerID)
-		interactions, _ := deps.Store.GetRecentInteractionsByLearner(ctx, learnerID, engine.DefaultRecentInteractionsWindow)
-		sessionStart, _ := deps.Store.GetSessionStart(ctx, learnerID)
+		sessionStart, err := deps.Store.GetSessionStart(ctx, learnerID)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to load session state", err)
+			return r, nil, nil
+		}
 
-		// Resolve which domain(s) constrain this alert computation. The
-		// README contract for the Alert Engine is that orphan concept
-		// history (states/interactions on concepts no longer in any
-		// active domain — e.g. survivors of a deleted domain) must NEVER
-		// surface as alerts.
+		var domains []*models.Domain
 		if params.DomainID != "" {
-			// Single-domain branch: explicit domain_id given, scope to
-			// that domain's concepts (or refuse if the lookup fails or
-			// the domain doesn't belong to this learner).
 			domain, domainErr := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
 			if domainErr != nil || domain == nil {
 				deps.Logger.Error("get_pending_alerts: domain not found", "err", domainErr, "learner", learnerID, "domain_id", params.DomainID)
 				r, _ := errorResult("domain not found")
 				return r, nil, nil
 			}
-			domainConcepts := make(map[string]bool, len(domain.Graph.Concepts))
-			for _, c := range domain.Graph.Concepts {
-				domainConcepts[c] = true
-			}
-			states = filterStatesByConcepts(states, domainConcepts)
-			interactions = filterInteractionsByConcepts(interactions, domainConcepts)
+			domains = []*models.Domain{domain}
 		} else {
-			// No domain_id given: compute alerts over the union of
-			// concepts across all non-archived domains. If the learner
-			// has zero active domains, return a clean empty payload with
-			// needs_domain_setup so the LLM can self-correct.
-			activeDomains, _ := deps.Store.GetDomainsByLearner(ctx, learnerID, false)
-			if len(activeDomains) == 0 {
+			domains, err = deps.Store.GetDomainsByLearner(ctx, learnerID, false)
+			if err != nil {
+				r, _ := safeErrorResult(deps.Logger, "failed to load active domains", err)
+				return r, nil, nil
+			}
+			if len(domains) == 0 {
 				r, _ := jsonResult(map[string]interface{}{
 					"alerts":             []models.Alert{},
 					"has_critical":       false,
@@ -72,32 +62,58 @@ func registerGetPendingAlerts(server *mcp.Server, deps *Deps) {
 				})
 				return r, nil, nil
 			}
-			activeConcepts := make(map[string]bool)
-			for _, d := range activeDomains {
-				for _, c := range d.Graph.Concepts {
-					activeConcepts[c] = true
-				}
-			}
-			states = filterStatesByConcepts(states, activeConcepts)
-			interactions = filterInteractionsByConcepts(interactions, activeConcepts)
 		}
 
-		alerts := engine.ComputeAlerts(states, interactions, sessionStart)
+		// Compute each domain independently so identical concept labels never
+		// combine retention, plateau, or misconception evidence.
+		var alerts []models.Alert
+		var states []*models.ConceptState
+		var interactions []*models.Interaction
+		for _, domain := range domains {
+			domainStates, err := deps.Store.GetConceptStatesByDomain(ctx, learnerID, domain.ID)
+			if err != nil {
+				r, _ := safeErrorResult(deps.Logger, "failed to load concept states", err)
+				return r, nil, nil
+			}
+			domainInteractions, err := deps.Store.GetRecentInteractionsByDomain(
+				ctx, learnerID, domain.ID, engine.DefaultRecentInteractionsWindow,
+			)
+			if err != nil {
+				r, _ := safeErrorResult(deps.Logger, "failed to load interactions", err)
+				return r, nil, nil
+			}
+			domainAlerts := engine.ComputeAlerts(domainStates, domainInteractions, sessionStart)
+			for i := range domainAlerts {
+				domainAlerts[i].DomainID = domain.ID
+			}
+			alerts = append(alerts, domainAlerts...)
+			states = append(states, domainStates...)
+			interactions = append(interactions, domainInteractions...)
+		}
 
 		// Metacognitive alerts (DEPENDENCY_INCREASING, CALIBRATION_DIVERGING,
 		// AFFECT_NEGATIVE, TRANSFER_BLOCKED) are cross-domain learner-level
-		// signals. They are computed alongside the activity-level alerts
-		// above and merged before returning. Errors fetching any single
-		// input are tolerated — the missing input simply skips its branch
-		// inside ComputeMetacognitiveAlerts (defensive: a corrupt affect
-		// row shouldn't block the whole alert payload).
-		affects, _ := deps.Store.GetRecentAffectStates(ctx, learnerID, 10)
+		// signals. The tool promises the complete pending-alert view, so a
+		// failed source read must not masquerade as "no alert".
+		affects, err := deps.Store.GetRecentAffectStates(ctx, learnerID, 10)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to load affect alerts", err)
+			return r, nil, nil
+		}
 		var autonomyScores []float64
 		for _, a := range affects {
 			autonomyScores = append(autonomyScores, a.AutonomyScore)
 		}
-		calibBias, _ := deps.Store.GetCalibrationBias(ctx, learnerID, 20)
-		transfers, _ := deps.Store.GetTransferRecordsByLearner(ctx, learnerID)
+		calibBias, err := deps.Store.GetCalibrationBias(ctx, learnerID, 20)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to load calibration alerts", err)
+			return r, nil, nil
+		}
+		transfers, err := deps.Store.GetTransferRecordsByLearner(ctx, learnerID)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to load transfer alerts", err)
+			return r, nil, nil
+		}
 		metaAlerts := engine.ComputeMetacognitiveAlerts(
 			autonomyScores,
 			calibBias,

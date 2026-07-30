@@ -76,6 +76,11 @@ func TestValidateRegistrationRedirectURIs(t *testing.T) {
 		{"http public rejected", []string{"http://example.com/cb"}, true},
 		{"localhost http accepted", []string{"http://localhost:8080/cb"}, false},
 		{"127.0.0.1 http accepted", []string{"http://127.0.0.1:8080/cb"}, false},
+		{"IPv6 loopback http accepted", []string{"http://[::1]:8080/cb"}, false},
+		{"localhost javascript rejected", []string{"javascript://localhost/cb"}, true},
+		{"empty host rejected", []string{"https:///cb"}, true},
+		{"fragment rejected", []string{"https://app.example/cb#fragment"}, true},
+		{"userinfo rejected", []string{"https://user@app.example/cb"}, true},
 		{"private 10/8 rejected", []string{"https://10.0.0.1/cb"}, true},
 		{"private 192.168 rejected", []string{"https://192.168.1.1/cb"}, true},
 		{"private 172.16 rejected", []string{"https://172.16.5.5/cb"}, true},
@@ -93,6 +98,30 @@ func TestValidateRegistrationRedirectURIs(t *testing.T) {
 			}
 			if !tc.wantErr && err != nil {
 				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateAuthorizationParams(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		responseType string
+		scope        string
+		wantErr      bool
+	}{
+		{name: "supported", responseType: "code", scope: "learner"},
+		{name: "scope omitted", responseType: "code"},
+		{name: "response type missing", scope: "learner", wantErr: true},
+		{name: "implicit rejected", responseType: "token", scope: "learner", wantErr: true},
+		{name: "unknown scope rejected", responseType: "code", scope: "admin", wantErr: true},
+		{name: "multiple scopes rejected", responseType: "code", scope: "learner admin", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateAuthorizationParams(tc.responseType, tc.scope)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validateAuthorizationParams(%q, %q) error = %v, wantErr=%v",
+					tc.responseType, tc.scope, err, tc.wantErr)
 			}
 		})
 	}
@@ -307,6 +336,7 @@ func TestAuthorizePost_CSRFMatch_InvalidCreds(t *testing.T) {
 	form.Set("mode", "login")
 	form.Set("client_id", "cid")
 	form.Set("redirect_uri", "https://good.example/cb")
+	form.Set("response_type", "code")
 	form.Set("code_challenge", "abc")
 	form.Set("code_challenge_method", "S256")
 	form.Set("email", "u@example.com")

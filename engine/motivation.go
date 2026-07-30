@@ -298,16 +298,20 @@ func (m *MotivationEngine) Build(ctx context.Context, learnerID string, domain *
 
 	// Concept-scoped signals (only if we have a concept target)
 	if concept != "" {
-		cs, _ := m.store.GetConceptState(ctx, learnerID, concept)
+		domainID := ""
+		if domain != nil {
+			domainID = domain.ID
+		}
+		cs, _ := m.store.GetConceptStateInDomain(ctx, learnerID, domainID, concept)
 		in.ConceptState = cs
 
-		if fail, _ := m.store.LastFailureOnConcept(ctx, learnerID, concept, 24*time.Hour); fail != nil {
+		if fail, _ := m.store.LastFailureOnConceptInDomain(ctx, learnerID, domainID, concept, 24*time.Hour); fail != nil {
 			in.LastFailure = fail
 		}
-		if sessions, err := m.store.CountSessionsOnConcept(ctx, learnerID, concept); err == nil {
+		if sessions, err := m.store.CountSessionsOnConceptInDomain(ctx, learnerID, domainID, concept); err == nil {
 			in.SessionsOnConcept = sessions
 		}
-		if ratio, err := m.store.SelfInitiatedRatio(ctx, learnerID, concept); err == nil {
+		if ratio, err := m.store.SelfInitiatedRatioInDomain(ctx, learnerID, domainID, concept); err == nil {
 			in.SelfInitiatedRatio = ratio
 		}
 	}

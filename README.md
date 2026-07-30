@@ -6,17 +6,17 @@
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
   <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-1.25+-00ADD8.svg?logo=go&logoColor=white" alt="Go 1.25+" /></a>
   <a href="https://modelcontextprotocol.io/"><img src="https://img.shields.io/badge/MCP-server-7c3aed.svg" alt="MCP server" /></a>
-  <a href="https://github.com/ArnaudGuiovanna/tutor-mcp/releases"><img src="https://img.shields.io/badge/release-v0.4.0-orange.svg" alt="Release v0.4.0" /></a>
+  <a href="https://github.com/ArnaudGuiovanna/tutor-mcp/releases"><img src="https://img.shields.io/badge/release-v0.4.1-orange.svg" alt="Release v0.4.1" /></a>
   <a href="https://github.com/ArnaudGuiovanna/tutor-mcp/issues"><img src="https://img.shields.io/badge/status-alpha-yellow.svg" alt="Status: alpha" /></a>
 </p>
 
 # Tutor MCP — Adaptive learning runtime for LLMs
 
-> Turn any LLM into an **intelligent tutor**. Tutor MCP is an open-source [MCP](https://modelcontextprotocol.io/) server that gives an AI assistant durable learner state, cognitive-science scheduling, session memory, misconceptions, metacognition, and auditable pedagogical decisions. No item bank — the LLM generates content, Tutor MCP remembers and decides.
+> Give any MCP-capable LLM the state and tools to act as an **adaptive tutor**. Tutor MCP is an open-source [MCP](https://modelcontextprotocol.io/) server that adds durable learner state, review scheduling, session memory, misconceptions, metacognition, and auditable pedagogical decisions. No item bank — the LLM generates content, Tutor MCP remembers and recommends.
 
 Tell the LLM what you want to learn — *Spanish for travel*, *Go for backend*, *medieval history* — and the runtime orchestrates the journey: what to study next, when to review, when you've mastered a concept, when you need a nudge. The next conversation starts from what the learner has mastered, forgotten, misunderstood, felt, and explicitly committed to do next.
 
-**Status — alpha v0.4.0.** The full regulation pipeline (phase FSM + concept/action selectors + gate + threshold resolver) ships default-on; the fade controller is opt-in. Suitable for individual use, small groups, and classroom-scale (≤200 active learners). Single-tenant; runs single-node on SQLite + in-process scheduler by default, and now scales horizontally on an opt-in PostgreSQL backend (`DB_DRIVER=postgres`) with a distributed scheduler and shared rate-limit store for stateless multi-node deployments.
+**Status — alpha v0.4.1.** The robust MVP target is a single-tenant, single-node deployment using SQLite and the in-process scheduler. The regulation pipeline (phase FSM + concept/action selectors + gate + threshold resolver) ships default-on; the fade controller is opt-in. PostgreSQL, distributed leases, and shared rate limits are available for testing, but multi-node operation remains **experimental**: narrative memory is local and job leases do not provide crash-safe exactly-once delivery.
 
 ## Compatible clients
 
@@ -32,6 +32,8 @@ Tell the LLM what you want to learn — *Spanish for travel*, *Go for backend*, 
 
 Claude (web + Desktop + Code), ChatGPT (Developer Mode), Le Chat, Gemini Enterprise / CLI. See the [client setup guide](#setup) below.
 
+The protocol-level target is any MCP client that supports remote Streamable HTTP plus the OAuth dynamic-registration/PKCE flow used here. Pedagogical continuity also depends on the host LLM following the supplied prompt and consistently calling `get_next_activity` and `record_interaction`; the server cannot force a client to make those calls.
+
 ## Continuity model
 
 The missing layer is not content. It is continuity.
@@ -40,7 +42,7 @@ LLMs can explain. Tutor MCP remembers and decides. The runtime owns the durable 
 
 | Layer | Stored as | What it gives the tutor |
 |---|---|---|
-| **Algorithmic state** | SQLite domains, concept states, interactions, affect, calibration, transfer, intentions | Domains, prerequisites, phase, mastery, retention, ability, review timing, transfer readiness, active misconceptions |
+| **Algorithmic state** | SQLite (recommended) or PostgreSQL (experimental) domains, concept states, interactions, affect, calibration, transfer, intentions | Domains, prerequisites, phase, mastery, retention, ability, review timing, transfer readiness, active misconceptions |
 | **Episodic memory** | Markdown `sessions/*.md` with YAML frontmatter | Affect, concepts touched, salient exchanges, mental-model observations, implementation intentions |
 | **Narrative state** | Markdown `MEMORY.md`, `MEMORY_pending.md`, `concepts/*.md`, `archives/*.md` | Stable learner facts, pending observations, concept notes, medium-term trajectory, contradictions to verify |
 | **Operator view** | Pedagogical snapshots + decision replay | Why an activity was selected, why a concept was held back, whether evidence was missing or noisy |
@@ -72,7 +74,7 @@ The pillars of an Intelligent Tutoring System map cleanly:
 | **Pedagogical model** (scheduling, regulation, alerts) | Tutor MCP runtime — FSRS, evidence gates, orchestrator |
 | **Interface + content** | The LLM — Claude / ChatGPT / Le Chat / Gemini |
 
-The cognitive science is rigid and measurable; the LLM is infinitely flexible. Together they ship an ITS that works on day one for any topic, without an editorial team.
+These models are deterministic and auditable routing heuristics, not a claim of psychometric or clinical validation. Their observations still depend on the LLM calling the tools and scoring the learner faithfully. This separation makes Tutor MCP useful on a new topic without requiring a pre-authored item bank, while keeping the limits of that generality explicit.
 
 ## Quick start
 
@@ -115,7 +117,7 @@ Add `https://your.domain/mcp` as a custom MCP connector. OAuth 2.1 + PKCE with d
 
 ## MCP tools (35)
 
-All tools accept an optional `domain_id` for multi-domain learners; without it, the most recently active non-archived domain is used.
+Domain-scoped learning tools accept an optional `domain_id`; where documented, omitting it selects the most recently active non-archived domain. Learner-global and lifecycle tools intentionally have different contracts—use each tool's schema as the source of truth.
 
 ### Core learning loop (7)
 
@@ -206,20 +208,20 @@ Environment variables read at boot:
 
 | Variable | Default | Effect |
 |---|---|---|
-| `JWT_SECRET` | — *(required)* | HS256 secret. Must be valid base64 (plain strings rejected at boot). Use `openssl rand -base64 32` — 32+ decoded bytes recommended for HS256. **Must be identical on every instance** in a multi-node deployment. |
+| `JWT_SECRET` | — *(required)* | HS256 secret. Must be valid base64 (plain strings rejected at boot). Use `openssl rand -base64 32` — 32+ decoded bytes recommended for HS256. |
 | `PORT` | `3000` | HTTP listen port |
-| `DB_DRIVER` | `sqlite` | `sqlite` (default, embedded, no external service) or `postgres` (horizontal multi-node). |
+| `DB_DRIVER` | `sqlite` | `sqlite` (recommended MVP profile, embedded) or `postgres` (experimental). |
 | `DB_PATH` | `./data/runtime.db` | SQLite path (ignored when `DB_DRIVER=postgres`) |
 | `DATABASE_URL` | — | Postgres DSN, **required** when `DB_DRIVER=postgres` (e.g. `postgres://user:pass@host:5432/db?sslmode=require`). |
 | `DB_MAX_CONNS` | `10` | Postgres connection-pool size per instance (ignored on SQLite). Keep `DB_MAX_CONNS × instances < Postgres max_connections`. |
-| `SCHEDULER_MODE` | `inprocess` | `inprocess` (single-node cron) or `distributed` (per-run DB lease for exactly-once across a fleet). |
-| `RATELIMIT_BACKEND` | `memory` | `memory` (per-instance, default) or `postgres`/`db` (shared, fleet-wide rate-limit + login-failure stores — required for coherent throttling across multiple instances). |
-| `BASE_URL` | `http://localhost:$PORT` | Public origin (no trailing slash). Triggers HSTS when `https://`. |
+| `SCHEDULER_MODE` | `inprocess` | `inprocess` (recommended) or experimental `distributed` (one lease winner per run slot; not crash-safe exactly-once). Distributed mode requires PostgreSQL, PostgreSQL rate limits, and local narrative memory disabled. Unknown values fail at boot. |
+| `RATELIMIT_BACKEND` | `memory` | `memory` (per-instance, default) or `postgres`/`db` (shared rate-limit + login-failure store). The PostgreSQL backend requires `DB_DRIVER=postgres`; unknown values fail at boot. |
+| `BASE_URL` | `http://localhost:$PORT` | Public HTTP(S) origin. A trailing `/` is normalized; paths, credentials, query strings, fragments, and non-HTTP schemes fail at boot. Triggers HSTS when `https://`. |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `TRUSTED_PROXY_CIDRS` | — | Comma-separated CIDRs of trusted reverse-proxies. **Required behind a public proxy** — without it every IP-rate-limit collapses under the proxy's loopback bucket. |
 | `MCP_RATE_LIMIT_PER_MIN` | `60` | Per-IP and per-learner cap on `/mcp` |
 | `MCP_RATE_LIMIT_BURST` | `60` | Burst allowance |
-| `TUTOR_MCP_MEMORY_ENABLED` | `on` | Markdown learner memory; set `off` for pre-memory contract |
+| `TUTOR_MCP_MEMORY_ENABLED` | `on` | Node-local Markdown learner memory. Experimental distributed mode requires `off` until a shared memory backend exists. |
 | `TUTOR_MCP_MEMORY_ROOT` | `~/.tutor-mcp/` | Memory FS root |
 | `REGULATION_THRESHOLD` | `on` | `off` reverts to legacy split thresholds (BKT 0.85 / KST 0.70 / Mid 0.80) |
 | `REGULATION_GOAL` | `on` | `off` hides `set_goal_relevance` / `get_goal_relevance` and drops the goal-aware prompt section |
@@ -246,7 +248,7 @@ The regulation engine is layered: **pure** decision components (`phase_fsm.go`, 
 
 ## Capacity & sizing
 
-Intentionally **single-tenant, single-node** — self-hosted for yourself, a small group, or a modest organisation. SQLite + in-process scheduler; no cluster, no broker, no external dependencies.
+The supported MVP profile is intentionally **single-tenant, single-node**: SQLite + in-process scheduler, with no broker or external database required.
 
 | Profile | Active / day | Registered | Use case |
 |---|---|---|---|
@@ -255,13 +257,13 @@ Intentionally **single-tenant, single-node** — self-hosted for yourself, a sma
 | **Classroom** | 10–50 | up to 150 | Facilitated sessions |
 | **Small org** | 50–200 | up to 600 | Sustained load |
 
-**Hard ceiling ~200 concurrent active learners** on the default single-node SQLite profile — beyond, the scheduler tick and SQLite's serialised writes become the limit. To scale horizontally, opt into the built-in Postgres path: set `DB_DRIVER=postgres` + `DATABASE_URL`, `SCHEDULER_MODE=distributed`, and `RATELIMIT_BACKEND=postgres`, then run N stateless instances behind a load balancer with a shared `JWT_SECRET`. The next ceiling is then LLM throughput / cost and Postgres `max_connections`.
+Treat ~200 active learners as a planning ceiling for the default SQLite profile, not a service-level guarantee; measure against your workload. PostgreSQL can be exercised for conformance and multi-node experiments, but it is not yet the production scaling recommendation. See the explicit limitations and fail-fast configuration in [OPERATIONS.md](./OPERATIONS.md).
 
 **Idle footprint**: ~30 MB RSS, ~15 MB binary, ~10 MB initial DB (+50 KB/active learner/month). Tested on Raspberry Pi 4 and €5/mo VPS for personal use.
 
 ## Tech stack
 
-Go 1.25 · [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk) · [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) (pure-Go, no CGO, default) · [jackc/pgx](https://github.com/jackc/pgx) (Postgres, pure-Go, opt-in) · [robfig/cron](https://github.com/robfig/cron) · [golang-jwt/jwt](https://github.com/golang-jwt/jwt) · bcrypt.
+Go 1.25.12+ · [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk) · [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) (pure-Go, no CGO, default) · [jackc/pgx](https://github.com/jackc/pgx) (Postgres, pure-Go, experimental) · [robfig/cron](https://github.com/robfig/cron) · [golang-jwt/jwt](https://github.com/golang-jwt/jwt) · bcrypt.
 
 ## Pedagogical reliability
 

@@ -7,6 +7,7 @@ package db
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -251,16 +252,17 @@ func (s *Store) inTx(ctx context.Context, opts *sql.TxOptions, fn func(txs *Stor
 	return tx.Commit()
 }
 
-// GetConceptStateForUpdate is identical to GetConceptState under SQLite (the
-// serializable tx already holds the writer lock via BEGIN IMMEDIATE). A future
-// PostgresStore overrides this with SELECT ... FOR UPDATE.
 // GetConceptStateForUpdate reads the concept state with a row lock so a
 // concurrent read-modify-write on the same (learner, concept) serializes.
 // On Postgres it emits SELECT ... FOR UPDATE (must run inside WithTx). On
 // SQLite the lock is implicit: WithTx opens BEGIN IMMEDIATE, which already
 // holds the single writer lock for the whole transaction.
 func (s *Store) GetConceptStateForUpdate(ctx context.Context, learnerID, concept string) (*models.ConceptState, error) {
-	return s.getConceptState(ctx, learnerID, concept, true)
+	return s.getConceptState(ctx, learnerID, "", concept, true, false)
+}
+
+func (s *Store) GetConceptStateForUpdateInDomain(ctx context.Context, learnerID, domainID, concept string) (*models.ConceptState, error) {
+	return s.getConceptState(ctx, learnerID, domainID, concept, true, true)
 }
 
 // GetOrCreateConceptStateForUpdate returns the row-locked concept state for
@@ -276,23 +278,46 @@ func (s *Store) GetConceptStateForUpdate(ctx context.Context, learnerID, concept
 // FOR UPDATE serializes the read-modify-write. SQLite is already safe via
 // BEGIN IMMEDIATE; the extra insert is a cheap no-op once the row exists.
 func (s *Store) GetOrCreateConceptStateForUpdate(ctx context.Context, learnerID, concept string) (*models.ConceptState, error) {
-	cs, err := s.getConceptState(ctx, learnerID, concept, true)
+	cs, err := s.getConceptState(ctx, learnerID, "", concept, true, false)
 	if err == nil {
 		return cs, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
-	if err := s.InsertConceptStateIfNotExists(ctx, models.NewConceptState(learnerID, concept)); err != nil {
+	newState := models.NewConceptState(learnerID, concept)
+	if err := s.InsertConceptStateIfNotExists(ctx, newState); err != nil {
 		return nil, fmt.Errorf("bootstrap concept state: %w", err)
 	}
-	return s.getConceptState(ctx, learnerID, concept, true)
+	if newState.DomainID != "" {
+		return s.getConceptState(ctx, learnerID, newState.DomainID, concept, true, true)
+	}
+	return s.getConceptState(ctx, learnerID, "", concept, true, true)
 }
 
-func generateID() string {
+// GetOrCreateConceptStateForUpdateInDomain is the production first-touch path.
+// The materialize-then-lock sequence serializes concurrent updates on the
+// composite (learner, domain, concept) identity under PostgreSQL.
+func (s *Store) GetOrCreateConceptStateForUpdateInDomain(ctx context.Context, learnerID, domainID, concept string) (*models.ConceptState, error) {
+	cs, err := s.getConceptState(ctx, learnerID, domainID, concept, true, true)
+	if err == nil {
+		return cs, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	if err := s.InsertConceptStateIfNotExists(ctx, models.NewConceptStateInDomain(learnerID, domainID, concept)); err != nil {
+		return nil, fmt.Errorf("bootstrap domain concept state: %w", err)
+	}
+	return s.getConceptState(ctx, learnerID, domainID, concept, true, true)
+}
+
+func generateID() (string, error) {
 	b := make([]byte, 16)
-	rand.Read(b)
-	return base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(b)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate id: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 func nullString(s string) any {
@@ -324,11 +349,14 @@ func boolToInt(b bool) int {
 
 func (s *Store) CreateLearner(ctx context.Context, email, passwordHash, objective, webhookURL string) (*models.Learner, error) {
 	if webhookURL != "" && !webhookurl.IsSafeWebhookURL(webhookURL) {
-		return nil, fmt.Errorf("invalid webhook_url: must be https://discord.com/...")
+		return nil, fmt.Errorf("invalid webhook_url: must use an allowed Discord HTTPS endpoint")
 	}
-	id := generateID()
+	id, err := generateID()
+	if err != nil {
+		return nil, err
+	}
 	now := time.Now().UTC()
-	_, err := s.exec(ctx,
+	_, err = s.exec(ctx,
 		`INSERT INTO learners (id, email, password_hash, objective, webhook_url, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		id, email, passwordHash, objective, webhookURL, now,
@@ -440,44 +468,65 @@ func (s *Store) UpdateLearnerProfile(ctx context.Context, learnerID, profileJSON
 
 // ─── Refresh Tokens ───────────────────────────────────────────────────────────
 
+const refreshTokenHashPrefix = "sha256:"
+
+func newRefreshToken(learnerID, clientID string) (*models.RefreshToken, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return nil, fmt.Errorf("generate token: %w", err)
+	}
+	now := time.Now().UTC()
+	return &models.RefreshToken{
+		Token:     base64.RawURLEncoding.EncodeToString(b),
+		LearnerID: learnerID,
+		ClientID:  clientID,
+		ExpiresAt: now.Add(30 * 24 * time.Hour),
+		CreatedAt: now,
+	}, nil
+}
+
+// refreshTokenHash is the database credential. The prefix distinguishes new
+// hashed rows from legacy plaintext rows and, critically, prevents a leaked
+// digest from being accepted through the legacy compatibility path.
+func refreshTokenHash(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return refreshTokenHashPrefix + base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+const refreshTokenLookupPredicate = `(token = ? OR (token = ? AND token NOT LIKE 'sha256:%'))`
+
+func (s *Store) insertRefreshToken(ctx context.Context, rt *models.RefreshToken) error {
+	_, err := s.exec(ctx,
+		`INSERT INTO refresh_tokens (token, learner_id, client_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?)`,
+		refreshTokenHash(rt.Token), rt.LearnerID, nullString(rt.ClientID), rt.ExpiresAt, rt.CreatedAt,
+	)
+	return err
+}
+
 // CreateRefreshToken issues a refresh token bound to (learnerID, clientID).
 // clientID may be empty for legacy callers — issue #30 part 2 introduces the
 // binding so a stolen token cannot be redeemed by a different (e.g. self-
 // registered confidential) client. Pre-existing rows have NULL client_id and
 // the refresh-grant handler treats NULL as "any client" for backward compat.
 func (s *Store) CreateRefreshToken(ctx context.Context, learnerID, clientID string) (*models.RefreshToken, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return nil, fmt.Errorf("generate token: %w", err)
-	}
-	token := base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(b)
-	now := time.Now().UTC()
-	expiresAt := now.Add(30 * 24 * time.Hour)
-
-	_, err := s.exec(ctx,
-		`INSERT INTO refresh_tokens (token, learner_id, client_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?)`,
-		token, learnerID, nullString(clientID), expiresAt, now,
-	)
+	rt, err := newRefreshToken(learnerID, clientID)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.insertRefreshToken(ctx, rt); err != nil {
 		return nil, fmt.Errorf("create refresh token: %w", err)
 	}
-	return &models.RefreshToken{
-		Token:     token,
-		LearnerID: learnerID,
-		ClientID:  clientID,
-		ExpiresAt: expiresAt,
-		CreatedAt: now,
-	}, nil
+	return rt, nil
 }
 
 func (s *Store) GetRefreshToken(ctx context.Context, token string) (*models.RefreshToken, error) {
-	rt := &models.RefreshToken{}
+	rt := &models.RefreshToken{Token: token}
 	var clientID sql.NullString
 	err := s.queryRow(ctx,
-		`SELECT token, learner_id, client_id, expires_at, created_at
-		 FROM refresh_tokens WHERE token = ? AND expires_at > ?`,
-		token, time.Now().UTC(),
-	).Scan(&rt.Token, &rt.LearnerID, &clientID, &rt.ExpiresAt, &rt.CreatedAt)
+		`SELECT learner_id, client_id, expires_at, created_at
+		 FROM refresh_tokens WHERE `+refreshTokenLookupPredicate+` AND expires_at > ?`,
+		refreshTokenHash(token), token, time.Now().UTC(),
+	).Scan(&rt.LearnerID, &clientID, &rt.ExpiresAt, &rt.CreatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("get refresh token: %w", err)
 	}
@@ -488,11 +537,53 @@ func (s *Store) GetRefreshToken(ctx context.Context, token string) (*models.Refr
 }
 
 func (s *Store) DeleteRefreshToken(ctx context.Context, token string) error {
-	_, err := s.exec(ctx, `DELETE FROM refresh_tokens WHERE token = ?`, token)
+	_, err := s.exec(ctx,
+		`DELETE FROM refresh_tokens WHERE `+refreshTokenLookupPredicate,
+		refreshTokenHash(token), token,
+	)
 	if err != nil {
 		return fmt.Errorf("delete refresh token: %w", err)
 	}
 	return nil
+}
+
+// RotateRefreshToken consumes token and creates its successor in one
+// transaction. DELETE ... RETURNING is the concurrency boundary: under
+// PostgreSQL two simultaneous reuses serialize on the row and exactly one can
+// receive it; under SQLite BEGIN IMMEDIATE provides the same single-winner
+// behavior. If successor insertion fails, rollback restores the old token.
+func (s *Store) RotateRefreshToken(ctx context.Context, token, clientID string) (*models.RefreshToken, error) {
+	successor, err := newRefreshToken("", clientID)
+	if err != nil {
+		return nil, err
+	}
+
+	err = s.inTx(ctx, nil, func(txs *Store) error {
+		var storedClientID sql.NullString
+		err := txs.queryRow(ctx,
+			`DELETE FROM refresh_tokens
+			 WHERE `+refreshTokenLookupPredicate+`
+			   AND expires_at > ?
+			   AND (client_id IS NULL OR client_id = '' OR client_id = ?)
+			 RETURNING learner_id, client_id`,
+			refreshTokenHash(token), token, time.Now().UTC(), clientID,
+		).Scan(&successor.LearnerID, &storedClientID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return store.ErrInvalidRefreshToken
+		}
+		if err != nil {
+			return fmt.Errorf("consume refresh token: %w", err)
+		}
+
+		if err := txs.insertRefreshToken(ctx, successor); err != nil {
+			return fmt.Errorf("create rotated refresh token: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("rotate refresh token: %w", err)
+	}
+	return successor, nil
 }
 
 // ─── Domains ──────────────────────────────────────────────────────────────────
@@ -504,7 +595,10 @@ func (s *Store) CreateDomain(ctx context.Context, learnerID, name, personalGoal 
 // CreateDomainWithValueFramings creates a domain and optionally persists a JSON-encoded
 // set of value framings (4 axes: financial, employment, intellectual, innovation).
 func (s *Store) CreateDomainWithValueFramings(ctx context.Context, learnerID, name, personalGoal string, graph models.KnowledgeSpace, valueFramingsJSON string) (*models.Domain, error) {
-	id := generateID()
+	id, err := generateID()
+	if err != nil {
+		return nil, err
+	}
 	now := time.Now().UTC()
 
 	graphJSON, err := json.Marshal(graph)
@@ -780,15 +874,18 @@ func (s *Store) DeleteDomain(ctx context.Context, domainID, learnerID string) er
 }
 
 func (s *Store) InsertConceptStateIfNotExists(ctx context.Context, cs *models.ConceptState) error {
+	if err := s.inferConceptStateDomain(ctx, cs); err != nil {
+		return err
+	}
 	cs.UpdatedAt = time.Now().UTC()
 	_, err := s.exec(ctx,
 		`INSERT INTO concept_states
-		    (learner_id, concept, stability, difficulty, elapsed_days, scheduled_days,
+		    (learner_id, domain_id, concept, stability, difficulty, elapsed_days, scheduled_days,
 		     reps, lapses, card_state, last_review, next_review, p_mastery, p_learn, p_forget,
 		     p_slip, p_guess, theta, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT (learner_id, concept) DO NOTHING`,
-		cs.LearnerID, cs.Concept, cs.Stability, cs.Difficulty, cs.ElapsedDays, cs.ScheduledDays,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT (learner_id, domain_id, concept) DO NOTHING`,
+		cs.LearnerID, cs.DomainID, cs.Concept, cs.Stability, cs.Difficulty, cs.ElapsedDays, cs.ScheduledDays,
 		cs.Reps, cs.Lapses, cs.CardState, cs.LastReview, cs.NextReview,
 		cs.PMastery, cs.PLearn, cs.PForget, cs.PSlip, cs.PGuess,
 		cs.Theta, cs.UpdatedAt,
@@ -802,20 +899,35 @@ func (s *Store) InsertConceptStateIfNotExists(ctx context.Context, cs *models.Co
 // ─── Concept States ───────────────────────────────────────────────────────────
 
 func (s *Store) GetConceptState(ctx context.Context, learnerID, concept string) (*models.ConceptState, error) {
-	return s.getConceptState(ctx, learnerID, concept, false)
+	return s.getConceptState(ctx, learnerID, "", concept, false, false)
 }
-func (s *Store) getConceptState(ctx context.Context, learnerID, concept string, forUpdate bool) (*models.ConceptState, error) {
+
+func (s *Store) GetConceptStateInDomain(ctx context.Context, learnerID, domainID, concept string) (*models.ConceptState, error) {
+	return s.getConceptState(ctx, learnerID, domainID, concept, false, true)
+}
+
+func (s *Store) getConceptState(ctx context.Context, learnerID, domainID, concept string, forUpdate, exactDomain bool) (*models.ConceptState, error) {
 	cs := &models.ConceptState{}
 	var lastReview, nextReview sql.NullTime
-	query := `SELECT id, learner_id, concept, stability, difficulty, elapsed_days, scheduled_days,
+	query := `SELECT id, learner_id, domain_id, concept, stability, difficulty, elapsed_days, scheduled_days,
 		        reps, lapses, card_state, last_review, next_review, p_mastery, p_learn, p_forget,
 		        p_slip, p_guess, theta, updated_at
 		 FROM concept_states WHERE learner_id = ? AND concept = ?`
+	args := []any{learnerID, concept}
+	if exactDomain {
+		query += ` AND domain_id = ?`
+		args = append(args, domainID)
+	} else {
+		// Compatibility path for callers that have not selected a domain:
+		// prefer a legacy unscoped row, then return a deterministic scoped
+		// row. Learning decisions must use GetConceptStateInDomain.
+		query += ` ORDER BY CASE WHEN domain_id = '' THEN 0 ELSE 1 END, domain_id LIMIT 1`
+	}
 	if forUpdate && s.dialect == DialectPostgres {
 		query += ` FOR UPDATE`
 	}
-	err := s.queryRow(ctx, query, learnerID, concept).Scan(
-		&cs.ID, &cs.LearnerID, &cs.Concept, &cs.Stability, &cs.Difficulty,
+	err := s.queryRow(ctx, query, args...).Scan(
+		&cs.ID, &cs.LearnerID, &cs.DomainID, &cs.Concept, &cs.Stability, &cs.Difficulty,
 		&cs.ElapsedDays, &cs.ScheduledDays, &cs.Reps, &cs.Lapses, &cs.CardState,
 		&lastReview, &nextReview,
 		&cs.PMastery, &cs.PLearn, &cs.PForget, &cs.PSlip, &cs.PGuess,
@@ -834,14 +946,17 @@ func (s *Store) getConceptState(ctx context.Context, learnerID, concept string, 
 }
 
 func (s *Store) UpsertConceptState(ctx context.Context, cs *models.ConceptState) error {
+	if err := s.inferConceptStateDomain(ctx, cs); err != nil {
+		return err
+	}
 	cs.UpdatedAt = time.Now().UTC()
 	_, err := s.exec(ctx,
 		`INSERT INTO concept_states
-		    (learner_id, concept, stability, difficulty, elapsed_days, scheduled_days,
+		    (learner_id, domain_id, concept, stability, difficulty, elapsed_days, scheduled_days,
 		     reps, lapses, card_state, last_review, next_review, p_mastery, p_learn, p_forget,
 		     p_slip, p_guess, theta, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(learner_id, concept) DO UPDATE SET
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(learner_id, domain_id, concept) DO UPDATE SET
 		    stability      = excluded.stability,
 		    difficulty     = excluded.difficulty,
 		    elapsed_days   = excluded.elapsed_days,
@@ -858,7 +973,7 @@ func (s *Store) UpsertConceptState(ctx context.Context, cs *models.ConceptState)
 		    p_guess        = excluded.p_guess,
 		    theta          = excluded.theta,
 		    updated_at     = excluded.updated_at`,
-		cs.LearnerID, cs.Concept, cs.Stability, cs.Difficulty, cs.ElapsedDays, cs.ScheduledDays,
+		cs.LearnerID, cs.DomainID, cs.Concept, cs.Stability, cs.Difficulty, cs.ElapsedDays, cs.ScheduledDays,
 		cs.Reps, cs.Lapses, cs.CardState, cs.LastReview, cs.NextReview,
 		cs.PMastery, cs.PLearn, cs.PForget, cs.PSlip, cs.PGuess,
 		cs.Theta, cs.UpdatedAt,
@@ -869,13 +984,71 @@ func (s *Store) UpsertConceptState(ctx context.Context, cs *models.ConceptState)
 	return nil
 }
 
+// inferConceptStateDomain keeps the Go persistence API backward compatible
+// without reviving cross-domain collisions. A missing DomainID is filled only
+// when exactly one active domain owned by the learner contains the concept. If
+// the label is ambiguous, the write is rejected and the caller must choose.
+func (s *Store) inferConceptStateDomain(ctx context.Context, cs *models.ConceptState) error {
+	if cs == nil {
+		return fmt.Errorf("concept state is required")
+	}
+	if cs.DomainID != "" || cs.Concept == "" {
+		return nil
+	}
+	domainID, err := s.inferUniqueConceptDomain(ctx, cs.LearnerID, cs.Concept)
+	if err != nil {
+		return err
+	}
+	cs.DomainID = domainID
+	return nil
+}
+
+func (s *Store) inferUniqueConceptDomain(ctx context.Context, learnerID, concept string) (string, error) {
+	domains, err := s.GetDomainsByLearner(ctx, learnerID, false)
+	if err != nil {
+		return "", fmt.Errorf("infer concept domain: %w", err)
+	}
+	match := ""
+	for _, domain := range domains {
+		found := false
+		for _, candidate := range domain.Graph.Concepts {
+			if candidate == concept {
+				found = true
+				break
+			}
+		}
+		if !found {
+			continue
+		}
+		if match != "" && match != domain.ID {
+			return "", fmt.Errorf("domain_id is required: concept %q exists in multiple domains", concept)
+		}
+		match = domain.ID
+	}
+	return match, nil
+}
+
 func (s *Store) GetConceptStatesByLearner(ctx context.Context, learnerID string) ([]*models.ConceptState, error) {
-	rows, err := s.query(ctx,
-		`SELECT id, learner_id, concept, stability, difficulty, elapsed_days, scheduled_days,
+	return s.getConceptStates(ctx, learnerID, "")
+}
+
+func (s *Store) GetConceptStatesByDomain(ctx context.Context, learnerID, domainID string) ([]*models.ConceptState, error) {
+	return s.getConceptStates(ctx, learnerID, domainID)
+}
+
+func (s *Store) getConceptStates(ctx context.Context, learnerID, domainID string) ([]*models.ConceptState, error) {
+	query := `SELECT id, learner_id, domain_id, concept, stability, difficulty, elapsed_days, scheduled_days,
 		        reps, lapses, card_state, last_review, next_review, p_mastery, p_learn, p_forget,
 		        p_slip, p_guess, theta, updated_at
-		 FROM concept_states WHERE learner_id = ?`,
-		learnerID,
+		 FROM concept_states WHERE learner_id = ?`
+	args := []any{learnerID}
+	if domainID != "" {
+		query += ` AND domain_id = ?`
+		args = append(args, domainID)
+	}
+	rows, err := s.query(ctx,
+		query,
+		args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get concept states by learner: %w", err)
@@ -887,7 +1060,7 @@ func (s *Store) GetConceptStatesByLearner(ctx context.Context, learnerID string)
 		cs := &models.ConceptState{}
 		var lastReview, nextReview sql.NullTime
 		if err := rows.Scan(
-			&cs.ID, &cs.LearnerID, &cs.Concept, &cs.Stability, &cs.Difficulty,
+			&cs.ID, &cs.LearnerID, &cs.DomainID, &cs.Concept, &cs.Stability, &cs.Difficulty,
 			&cs.ElapsedDays, &cs.ScheduledDays, &cs.Reps, &cs.Lapses, &cs.CardState,
 			&lastReview, &nextReview,
 			&cs.PMastery, &cs.PLearn, &cs.PForget, &cs.PSlip, &cs.PGuess,
@@ -915,6 +1088,16 @@ func (s *Store) CreateInteraction(ctx context.Context, i *models.Interaction) er
 }
 
 func createInteractionWithStore(ctx context.Context, s *Store, i *models.Interaction) error {
+	if i == nil {
+		return fmt.Errorf("interaction is required")
+	}
+	if i.DomainID == "" {
+		domainID, err := s.inferUniqueConceptDomain(ctx, i.LearnerID, i.Concept)
+		if err != nil {
+			return err
+		}
+		i.DomainID = domainID
+	}
 	i.CreatedAt = time.Now().UTC()
 	id, err := s.insertReturningID(ctx,
 		`INSERT INTO interactions (learner_id, concept, activity_type, success, response_time, confidence, error_type, notes, hints_requested, self_initiated, calibration_id, is_proactive_review, misconception_type, misconception_detail, domain_id, bkt_slip, bkt_guess, rubric_json, rubric_score_json, created_at)
@@ -936,10 +1119,25 @@ func createInteractionWithStore(ctx context.Context, s *Store, i *models.Interac
 }
 
 func (s *Store) GetRecentInteractions(ctx context.Context, learnerID, concept string, limit int) ([]*models.Interaction, error) {
+	return s.getRecentInteractions(ctx, learnerID, "", concept, limit, false)
+}
+
+func (s *Store) GetRecentInteractionsInDomain(ctx context.Context, learnerID, domainID, concept string, limit int) ([]*models.Interaction, error) {
+	return s.getRecentInteractions(ctx, learnerID, domainID, concept, limit, true)
+}
+
+func (s *Store) getRecentInteractions(ctx context.Context, learnerID, domainID, concept string, limit int, exactDomain bool) ([]*models.Interaction, error) {
+	query := `SELECT ` + interactionCols + ` FROM interactions WHERE learner_id = ? AND concept = ?`
+	args := []any{learnerID, concept}
+	if exactDomain {
+		query += ` AND domain_id = ?`
+		args = append(args, domainID)
+	}
+	query += ` ORDER BY created_at DESC LIMIT ?`
+	args = append(args, limit)
 	rows, err := s.query(ctx,
-		`SELECT `+interactionCols+` FROM interactions WHERE learner_id = ? AND concept = ?
-		 ORDER BY created_at DESC LIMIT ?`,
-		learnerID, concept, limit,
+		query,
+		args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get recent interactions: %w", err)
@@ -961,6 +1159,20 @@ func (s *Store) GetRecentInteractionsByLearner(ctx context.Context, learnerID st
 	return scanInteractions(rows)
 }
 
+func (s *Store) GetRecentInteractionsByDomain(ctx context.Context, learnerID, domainID string, limit int) ([]*models.Interaction, error) {
+	rows, err := s.query(ctx,
+		`SELECT `+interactionCols+` FROM interactions
+		 WHERE learner_id = ? AND domain_id = ?
+		 ORDER BY created_at DESC LIMIT ?`,
+		learnerID, domainID, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get recent interactions by domain: %w", err)
+	}
+	defer rows.Close()
+	return scanInteractions(rows)
+}
+
 func (s *Store) GetSessionInteractions(ctx context.Context, learnerID string) ([]*models.Interaction, error) {
 	cutoff := time.Now().UTC().Add(-2 * time.Hour)
 	rows, err := s.query(ctx,
@@ -970,6 +1182,21 @@ func (s *Store) GetSessionInteractions(ctx context.Context, learnerID string) ([
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get session interactions: %w", err)
+	}
+	defer rows.Close()
+	return scanInteractions(rows)
+}
+
+func (s *Store) GetSessionInteractionsInDomain(ctx context.Context, learnerID, domainID string) ([]*models.Interaction, error) {
+	cutoff := time.Now().UTC().Add(-2 * time.Hour)
+	rows, err := s.query(ctx,
+		`SELECT `+interactionCols+` FROM interactions
+		 WHERE learner_id = ? AND domain_id = ? AND created_at > ?
+		 ORDER BY created_at DESC`,
+		learnerID, domainID, cutoff,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get domain session interactions: %w", err)
 	}
 	defer rows.Close()
 	return scanInteractions(rows)
@@ -1040,6 +1267,20 @@ func (s *Store) GetInteractionsSince(ctx context.Context, learnerID string, sinc
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get interactions since: %w", err)
+	}
+	defer rows.Close()
+	return scanInteractions(rows)
+}
+
+func (s *Store) GetInteractionsSinceInDomain(ctx context.Context, learnerID, domainID string, since time.Time) ([]*models.Interaction, error) {
+	rows, err := s.query(ctx,
+		`SELECT `+interactionCols+` FROM interactions
+		 WHERE learner_id = ? AND domain_id = ? AND created_at >= ?
+		 ORDER BY created_at ASC`,
+		learnerID, domainID, since,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get domain interactions since: %w", err)
 	}
 	defer rows.Close()
 	return scanInteractions(rows)
@@ -1185,11 +1426,11 @@ func (s *Store) GetDailyStreak(ctx context.Context, learnerID string) (int, erro
 	for rows.Next() {
 		var dateStr string
 		if err := rows.Scan(&dateStr); err != nil {
-			return streak, nil
+			return 0, fmt.Errorf("scan daily streak: %w", err)
 		}
 		d, err := time.Parse("2006-01-02", dateStr)
 		if err != nil {
-			return streak, nil
+			return 0, fmt.Errorf("parse daily streak date %q: %w", dateStr, err)
 		}
 		// Allow today or yesterday to start the streak
 		if streak == 0 {
@@ -1207,6 +1448,9 @@ func (s *Store) GetDailyStreak(ctx context.Context, learnerID string) (int, erro
 		} else {
 			break
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate daily streak: %w", err)
 	}
 	return streak, nil
 }
@@ -1245,12 +1489,26 @@ func (s *Store) GetTodaySuccessRate(ctx context.Context, learnerID string) (floa
 
 // GetConceptsDueForReview returns concepts where next_review is in the past.
 func (s *Store) GetConceptsDueForReview(ctx context.Context, learnerID string) ([]string, error) {
+	return s.getConceptsDueForReview(ctx, learnerID, "")
+}
+
+func (s *Store) GetConceptsDueForReviewByDomain(ctx context.Context, learnerID, domainID string) ([]string, error) {
+	return s.getConceptsDueForReview(ctx, learnerID, domainID)
+}
+
+func (s *Store) getConceptsDueForReview(ctx context.Context, learnerID, domainID string) ([]string, error) {
 	now := time.Now().UTC()
+	query := `SELECT concept FROM concept_states
+		 WHERE learner_id = ? AND next_review IS NOT NULL AND next_review <= ? AND card_state != 'new'`
+	args := []any{learnerID, now}
+	if domainID != "" {
+		query += ` AND domain_id = ?`
+		args = append(args, domainID)
+	}
+	query += ` ORDER BY next_review ASC`
 	rows, err := s.query(ctx,
-		`SELECT concept FROM concept_states
-		 WHERE learner_id = ? AND next_review IS NOT NULL AND next_review <= ? AND card_state != 'new'
-		 ORDER BY next_review ASC`,
-		learnerID, now,
+		query,
+		args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get concepts due for review: %w", err)
@@ -1261,9 +1519,18 @@ func (s *Store) GetConceptsDueForReview(ctx context.Context, learnerID string) (
 	for rows.Next() {
 		var c string
 		if err := rows.Scan(&c); err != nil {
-			return concepts, nil
+			return nil, fmt.Errorf("scan concept due for review: %w", err)
 		}
 		concepts = append(concepts, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate concepts due for review: %w", err)
+	}
+
+	if domainID != "" {
+		// Ownership/archive validation is done by the caller when resolving
+		// the domain; an exact domain query cannot collide on a shared label.
+		return concepts, nil
 	}
 
 	// Filter out concepts whose domain is archived or deleted.
@@ -1294,29 +1561,23 @@ func (s *Store) CreateAuthCode(ctx context.Context, code, learnerID, codeChallen
 	return nil
 }
 
-// ConsumeAuthCode retrieves and deletes an auth code in one operation.
+// ConsumeAuthCode retrieves and deletes an auth code in one SQL statement.
+// DELETE ... RETURNING is the single-use boundary: concurrent exchanges cannot
+// both observe the code under PostgreSQL READ COMMITTED (or SQLite).
 // Binds the code to the requesting client_id: returns invalid_grant if mismatch.
 func (s *Store) ConsumeAuthCode(ctx context.Context, code, clientID string) (*models.AuthCode, error) {
 	ac := &models.AuthCode{}
-	err := s.inTx(ctx, nil, func(txs *Store) error {
-		err := txs.queryRow(ctx,
-			`SELECT code, learner_id, code_challenge, client_id, expires_at FROM oauth_codes WHERE code = ? AND client_id = ?`,
-			code, clientID,
-		).Scan(&ac.Code, &ac.LearnerID, &ac.CodeChallenge, &ac.ClientID, &ac.ExpiresAt)
-		if err == sql.ErrNoRows {
-			return fmt.Errorf("invalid_grant")
-		}
-		if err != nil {
-			return fmt.Errorf("consume auth code: %w", err)
-		}
-
-		if _, err := txs.exec(ctx, `DELETE FROM oauth_codes WHERE code = ?`, code); err != nil {
-			return fmt.Errorf("delete auth code: %w", err)
-		}
-		return nil
-	})
+	err := s.queryRow(ctx,
+		`DELETE FROM oauth_codes
+		 WHERE code = ? AND client_id = ? AND expires_at > ?
+		 RETURNING code, learner_id, code_challenge, client_id, expires_at`,
+		code, clientID, time.Now().UTC(),
+	).Scan(&ac.Code, &ac.LearnerID, &ac.CodeChallenge, &ac.ClientID, &ac.ExpiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("invalid_grant")
+	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("consume auth code: %w", err)
 	}
 	return ac, nil
 }

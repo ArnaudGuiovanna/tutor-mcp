@@ -85,9 +85,10 @@ func (s *Store) GetAffectBySession(ctx context.Context, learnerID, sessionID str
 func (s *Store) CreateCalibrationPrediction(ctx context.Context, r *models.CalibrationRecord) error {
 	r.CreatedAt = time.Now().UTC()
 	_, err := s.exec(ctx,
-		`INSERT INTO calibration_records (prediction_id, learner_id, concept_id, predicted, created_at)
-		 VALUES (?, ?, ?, ?, ?)`,
-		r.PredictionID, r.LearnerID, r.ConceptID, r.Predicted, r.CreatedAt,
+		`INSERT INTO calibration_records
+		    (prediction_id, learner_id, domain_id, concept_id, predicted, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		r.PredictionID, r.LearnerID, r.DomainID, r.ConceptID, r.Predicted, r.CreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("create calibration prediction: %w", err)
@@ -123,10 +124,10 @@ func (s *Store) GetCalibrationRecord(ctx context.Context, predictionID, learnerI
 	r := &models.CalibrationRecord{}
 	var actual, delta sql.NullFloat64
 	err := s.queryRow(ctx,
-		`SELECT prediction_id, learner_id, concept_id, predicted, actual, delta, created_at
+		`SELECT prediction_id, learner_id, domain_id, concept_id, predicted, actual, delta, created_at
 		 FROM calibration_records WHERE prediction_id = ? AND learner_id = ?`,
 		predictionID, learnerID,
-	).Scan(&r.PredictionID, &r.LearnerID, &r.ConceptID, &r.Predicted, &actual, &delta, &r.CreatedAt)
+	).Scan(&r.PredictionID, &r.LearnerID, &r.DomainID, &r.ConceptID, &r.Predicted, &actual, &delta, &r.CreatedAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("calibration record not found: %s", predictionID)
@@ -143,27 +144,54 @@ func (s *Store) GetCalibrationRecord(ctx context.Context, predictionID, learnerI
 }
 
 func (s *Store) GetCalibrationBias(ctx context.Context, learnerID string, limit int) (float64, error) {
+	return s.getCalibrationBias(ctx, learnerID, "", limit, false)
+}
+
+func (s *Store) GetCalibrationBiasInDomain(ctx context.Context, learnerID, domainID string, limit int) (float64, error) {
+	return s.getCalibrationBias(ctx, learnerID, domainID, limit, true)
+}
+
+func (s *Store) getCalibrationBias(ctx context.Context, learnerID, domainID string, limit int, exactDomain bool) (float64, error) {
 	var bias sql.NullFloat64
-	err := s.queryRow(ctx,
-		`SELECT AVG(delta) FROM (
+	query := `SELECT AVG(delta) FROM (
 		    SELECT delta FROM calibration_records
-		    WHERE learner_id = ? AND delta IS NOT NULL
-		    ORDER BY created_at DESC LIMIT ?
-		)`, learnerID, limit,
-	).Scan(&bias)
-	if err != nil || !bias.Valid {
+		    WHERE learner_id = ? AND delta IS NOT NULL`
+	args := []any{learnerID}
+	if exactDomain {
+		query += ` AND domain_id = ?`
+		args = append(args, domainID)
+	}
+	query += ` ORDER BY created_at DESC LIMIT ?
+		)`
+	args = append(args, limit)
+	if err := s.queryRow(ctx, query, args...).Scan(&bias); err != nil {
+		return 0, fmt.Errorf("get calibration bias: %w", err)
+	}
+	if !bias.Valid {
 		return 0, nil
 	}
 	return bias.Float64, nil
 }
 
 func (s *Store) GetCalibrationBiasHistory(ctx context.Context, learnerID string, limit int) ([]float64, error) {
-	rows, err := s.query(ctx,
-		`SELECT delta FROM calibration_records
-		 WHERE learner_id = ? AND delta IS NOT NULL
-		 ORDER BY created_at DESC LIMIT ?`,
-		learnerID, limit,
-	)
+	return s.getCalibrationBiasHistory(ctx, learnerID, "", limit, false)
+}
+
+func (s *Store) GetCalibrationBiasHistoryInDomain(ctx context.Context, learnerID, domainID string, limit int) ([]float64, error) {
+	return s.getCalibrationBiasHistory(ctx, learnerID, domainID, limit, true)
+}
+
+func (s *Store) getCalibrationBiasHistory(ctx context.Context, learnerID, domainID string, limit int, exactDomain bool) ([]float64, error) {
+	query := `SELECT delta FROM calibration_records
+		 WHERE learner_id = ? AND delta IS NOT NULL`
+	args := []any{learnerID}
+	if exactDomain {
+		query += ` AND domain_id = ?`
+		args = append(args, domainID)
+	}
+	query += ` ORDER BY created_at DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("get calibration bias history: %w", err)
 	}
@@ -172,11 +200,11 @@ func (s *Store) GetCalibrationBiasHistory(ctx context.Context, learnerID string,
 	for rows.Next() {
 		var d float64
 		if err := rows.Scan(&d); err != nil {
-			return deltas, nil
+			return nil, fmt.Errorf("scan calibration bias history: %w", err)
 		}
 		deltas = append(deltas, d)
 	}
-	return deltas, nil
+	return deltas, rows.Err()
 }
 
 // ─── Transfer Records ───────────────────────────────────────────────────────
@@ -184,9 +212,10 @@ func (s *Store) GetCalibrationBiasHistory(ctx context.Context, learnerID string,
 func (s *Store) CreateTransferRecord(ctx context.Context, r *models.TransferRecord) error {
 	r.CreatedAt = time.Now().UTC()
 	_, err := s.exec(ctx,
-		`INSERT INTO transfer_records (learner_id, concept_id, context_type, score, session_id, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		r.LearnerID, r.ConceptID, r.ContextType, r.Score, r.SessionID, r.CreatedAt,
+		`INSERT INTO transfer_records
+		    (learner_id, domain_id, concept_id, context_type, score, session_id, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		r.LearnerID, r.DomainID, r.ConceptID, r.ContextType, r.Score, r.SessionID, r.CreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("create transfer record: %w", err)
@@ -195,11 +224,25 @@ func (s *Store) CreateTransferRecord(ctx context.Context, r *models.TransferReco
 }
 
 func (s *Store) GetTransferScores(ctx context.Context, learnerID, conceptID string) ([]*models.TransferRecord, error) {
+	return s.getTransferScores(ctx, learnerID, "", conceptID, false)
+}
+
+func (s *Store) GetTransferScoresInDomain(ctx context.Context, learnerID, domainID, conceptID string) ([]*models.TransferRecord, error) {
+	return s.getTransferScores(ctx, learnerID, domainID, conceptID, true)
+}
+
+func (s *Store) getTransferScores(ctx context.Context, learnerID, domainID, conceptID string, exactDomain bool) ([]*models.TransferRecord, error) {
+	query := `SELECT id, learner_id, domain_id, concept_id, context_type, score, session_id, created_at
+		 FROM transfer_records WHERE learner_id = ? AND concept_id = ?`
+	args := []any{learnerID, conceptID}
+	if exactDomain {
+		query += ` AND domain_id = ?`
+		args = append(args, domainID)
+	}
+	query += ` ORDER BY created_at DESC`
 	rows, err := s.query(ctx,
-		`SELECT id, learner_id, concept_id, context_type, score, session_id, created_at
-		 FROM transfer_records WHERE learner_id = ? AND concept_id = ?
-		 ORDER BY created_at DESC`,
-		learnerID, conceptID,
+		query,
+		args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get transfer scores: %w", err)
@@ -208,7 +251,7 @@ func (s *Store) GetTransferScores(ctx context.Context, learnerID, conceptID stri
 	var records []*models.TransferRecord
 	for rows.Next() {
 		r := &models.TransferRecord{}
-		if err := rows.Scan(&r.ID, &r.LearnerID, &r.ConceptID, &r.ContextType, &r.Score, &r.SessionID, &r.CreatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.LearnerID, &r.DomainID, &r.ConceptID, &r.ContextType, &r.Score, &r.SessionID, &r.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan transfer record: %w", err)
 		}
 		records = append(records, r)
@@ -221,11 +264,25 @@ func (s *Store) GetTransferScores(ctx context.Context, learnerID, conceptID stri
 // detect TRANSFER_BLOCKED (mastered concepts whose context-transfer scores
 // remain below 0.50 on 2+ contexts). Newest-first.
 func (s *Store) GetTransferRecordsByLearner(ctx context.Context, learnerID string) ([]*models.TransferRecord, error) {
+	return s.getTransferRecords(ctx, learnerID, "")
+}
+
+func (s *Store) GetTransferRecordsByDomain(ctx context.Context, learnerID, domainID string) ([]*models.TransferRecord, error) {
+	return s.getTransferRecords(ctx, learnerID, domainID)
+}
+
+func (s *Store) getTransferRecords(ctx context.Context, learnerID, domainID string) ([]*models.TransferRecord, error) {
+	query := `SELECT id, learner_id, domain_id, concept_id, context_type, score, session_id, created_at
+		 FROM transfer_records WHERE learner_id = ?`
+	args := []any{learnerID}
+	if domainID != "" {
+		query += ` AND domain_id = ?`
+		args = append(args, domainID)
+	}
+	query += ` ORDER BY created_at DESC`
 	rows, err := s.query(ctx,
-		`SELECT id, learner_id, concept_id, context_type, score, session_id, created_at
-		 FROM transfer_records WHERE learner_id = ?
-		 ORDER BY created_at DESC`,
-		learnerID,
+		query,
+		args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get transfer records by learner: %w", err)
@@ -234,7 +291,7 @@ func (s *Store) GetTransferRecordsByLearner(ctx context.Context, learnerID strin
 	var records []*models.TransferRecord
 	for rows.Next() {
 		r := &models.TransferRecord{}
-		if err := rows.Scan(&r.ID, &r.LearnerID, &r.ConceptID, &r.ContextType, &r.Score, &r.SessionID, &r.CreatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.LearnerID, &r.DomainID, &r.ConceptID, &r.ContextType, &r.Score, &r.SessionID, &r.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan transfer record: %w", err)
 		}
 		records = append(records, r)
@@ -248,7 +305,10 @@ func (s *Store) GetHintStatsForMastered(ctx context.Context, learnerID string, t
 	err = s.queryRow(ctx,
 		`SELECT COALESCE(SUM(i.hints_requested), 0), COUNT(*)
 		 FROM interactions i
-		 JOIN concept_states cs ON i.learner_id = cs.learner_id AND i.concept = cs.concept
+		 JOIN concept_states cs
+		   ON i.learner_id = cs.learner_id
+		  AND COALESCE(i.domain_id, '') = cs.domain_id
+		  AND i.concept = cs.concept
 		 WHERE i.learner_id = ? AND cs.p_mastery >= ?`,
 		learnerID, threshold,
 	).Scan(&hints, &total)

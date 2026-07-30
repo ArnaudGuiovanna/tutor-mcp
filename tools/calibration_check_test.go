@@ -33,6 +33,7 @@ func TestCalibrationCheck_MissingConcept(t *testing.T) {
 
 func TestCalibrationCheck_HappyPath(t *testing.T) {
 	store, deps := setupToolsTest(t)
+	seedDomain(t, store, "L_owner", "calc")
 
 	res := callTool(t, deps, registerCalibrationCheck, "L_owner", "calibration_check", map[string]any{
 		"concept":           "calc",
@@ -64,6 +65,7 @@ func TestCalibrationCheck_HappyPath(t *testing.T) {
 
 func TestCalibrationCheck_AcceptsLegacyConceptID(t *testing.T) {
 	store, deps := setupToolsTest(t)
+	seedDomain(t, store, "L_owner", "legacy_calc")
 
 	res := callTool(t, deps, registerCalibrationCheck, "L_owner", "calibration_check", map[string]any{
 		"concept_id":        "legacy_calc",
@@ -138,8 +140,14 @@ func TestRecordCalibrationResult_NotFound(t *testing.T) {
 }
 
 func TestGeneratePredictionID_FormatAndUnique(t *testing.T) {
-	a := generatePredictionID()
-	b := generatePredictionID()
+	a, err := generatePredictionID()
+	if err != nil {
+		t.Fatalf("generate first prediction ID: %v", err)
+	}
+	b, err := generatePredictionID()
+	if err != nil {
+		t.Fatalf("generate second prediction ID: %v", err)
+	}
 	if !strings.HasPrefix(a, "cal_") || !strings.HasPrefix(b, "cal_") {
 		t.Fatalf("expected cal_ prefix, got %q %q", a, b)
 	}

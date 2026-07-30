@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -157,6 +158,16 @@ func (s *OAuthServer) validateRedirectURI(ctx context.Context, clientID, redirec
 	return fmt.Errorf("redirect_uri not registered")
 }
 
+func validateAuthorizationParams(responseType, scope string) error {
+	if responseType != "code" {
+		return fmt.Errorf("unsupported response_type")
+	}
+	if scope != "" && scope != "learner" {
+		return fmt.Errorf("unsupported scope")
+	}
+	return nil
+}
+
 func (s *OAuthServer) HandleAuthorizeGet(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	q := r.URL.Query()
@@ -165,6 +176,11 @@ func (s *OAuthServer) HandleAuthorizeGet(w http.ResponseWriter, r *http.Request)
 
 	if err := s.validateRedirectURI(ctx, clientID, redirectURI); err != nil {
 		s.logger.Debug("authorize GET: redirect_uri rejected", "err", err, "client_id", clientID)
+		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
+		return
+	}
+	if err := validateAuthorizationParams(q.Get("response_type"), q.Get("scope")); err != nil {
+		s.logger.Debug("authorize GET: parameters rejected", "err", err, "client_id", clientID)
 		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
 		return
 	}
@@ -260,6 +276,11 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
 		return
 	}
+	if err := validateAuthorizationParams(r.FormValue("response_type"), r.FormValue("scope")); err != nil {
+		s.logger.Debug("authorize POST: parameters rejected", "err", err, "client_id", clientID)
+		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
+		return
+	}
 	client, err := s.store.GetOAuthClient(ctx, clientID)
 	if err != nil {
 		s.logger.Debug("authorize POST: client lookup failed", "err", err, "client_id", clientID)
@@ -321,9 +342,17 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 			return
 		}
 
-		// Check if email already taken
-		if existing, _ := s.store.GetLearnerByEmail(ctx, email); existing != nil {
+		// Check if email already exists. A database failure is not equivalent
+		// to an available address; continuing could create a duplicate account
+		// or expose backend-dependent behavior.
+		existing, lookupErr := s.store.GetLearnerByEmail(ctx, email)
+		if lookupErr == nil && existing != nil {
 			renderAuthPage(w, data, "An account with this email already exists.", "register")
+			return
+		}
+		if lookupErr != nil && !errors.Is(lookupErr, sql.ErrNoRows) {
+			s.logger.Error("registration learner lookup failed", "err", lookupErr)
+			renderAuthPage(w, data, "Internal error. Please try again.", "register")
 			return
 		}
 		// R001: registration always prompts for approval (the learner is
@@ -380,7 +409,12 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 		// trust-on-first-use guarantee against a malicious dynamic-client
 		// registration. The approval is scoped to redirect_uri so a phishing
 		// client cannot reuse a previously-granted consent at a different URL.
-		approved, _ := s.store.IsClientApproved(ctx, existing.ID, clientID, redirectURI)
+		approved, err := s.store.IsClientApproved(ctx, existing.ID, clientID, redirectURI)
+		if err != nil {
+			s.logger.Error("client approval lookup failed", "err", err, "learner", existing.ID, "client", clientID)
+			renderAuthPage(w, data, "Internal error. Please try again.", "login")
+			return
+		}
 		if !approved && r.FormValue("approve_client") != "yes" {
 			renderAuthPage(w, data, "Please confirm that you recognize and approve this OAuth client before continuing.", "login")
 			return
@@ -600,13 +634,6 @@ func (s *OAuthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Delete old refresh token (rotation).
-	if err := s.store.DeleteRefreshToken(ctx, refreshToken); err != nil {
-		s.logger.Error("delete refresh token failed", "err", err)
-		writeTokenError(w, "server_error", http.StatusInternalServerError)
-		return
-	}
-
 	accessToken, err := GenerateJWT(s.baseURL, rt.LearnerID)
 	if err != nil {
 		s.logger.Error("generate jwt failed", "err", err)
@@ -614,9 +641,17 @@ func (s *OAuthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	newRT, err := s.store.CreateRefreshToken(ctx, rt.LearnerID, clientID)
+	// Rotation is one DB transaction. The store rechecks validity and client
+	// binding while atomically consuming the row, so concurrent reuse has one
+	// winner and one invalid_grant instead of minting sibling descendants.
+	newRT, err := s.store.RotateRefreshToken(ctx, refreshToken, clientID)
 	if err != nil {
-		s.logger.Error("create refresh token failed", "err", err)
+		if errors.Is(err, storeport.ErrInvalidRefreshToken) {
+			s.logger.Warn("refresh token rejected (expired, mismatched, or already rotated)", "client_id", clientID)
+			writeTokenError(w, "invalid_grant", http.StatusBadRequest)
+			return
+		}
+		s.logger.Error("rotate refresh token failed", "err", err)
 		writeTokenError(w, "server_error", http.StatusInternalServerError)
 		return
 	}
@@ -657,17 +692,30 @@ func validateRegistrationRedirectURIs(uris []string) error {
 		if err != nil {
 			return fmt.Errorf("invalid redirect_uri: %w", err)
 		}
-		host := u.Hostname()
-		if host == "localhost" || host == "127.0.0.1" {
+		if !u.IsAbs() || u.Opaque != "" || u.Host == "" || u.Hostname() == "" {
+			return fmt.Errorf("redirect_uri must be an absolute hierarchical URI with a host")
+		}
+		if u.Fragment != "" {
+			return fmt.Errorf("redirect_uri must not contain a fragment")
+		}
+		if u.User != nil {
+			return fmt.Errorf("redirect_uri must not contain userinfo")
+		}
+
+		host := strings.ToLower(u.Hostname())
+		ip := net.ParseIP(host)
+		loopback := host == "localhost" || (ip != nil && ip.IsLoopback())
+		if loopback {
+			if u.Scheme != "http" && u.Scheme != "https" {
+				return fmt.Errorf("loopback redirect_uri must use http or https (got %q)", u.Scheme)
+			}
 			continue
 		}
 		if u.Scheme != "https" {
 			return fmt.Errorf("redirect_uri must use https (got %q)", u.Scheme)
 		}
-		if ip := net.ParseIP(host); ip != nil {
-			if isPrivateIP(ip) {
-				return fmt.Errorf("redirect_uri points to private IP range")
-			}
+		if ip != nil && isPrivateIP(ip) {
+			return fmt.Errorf("redirect_uri points to private IP range")
 		}
 	}
 	return nil
@@ -743,8 +791,19 @@ func (s *OAuthServer) HandleRegister(w http.ResponseWriter, r *http.Request) {
 
 	// RFC 7591: confidential clients announce a secret-based auth method.
 	authMethod := "none"
-	if m, ok := req["token_endpoint_auth_method"].(string); ok && m != "" {
-		authMethod = m
+	if rawMethod, exists := req["token_endpoint_auth_method"]; exists {
+		method, ok := rawMethod.(string)
+		if !ok || method == "" {
+			writeRegistrationError(w, "invalid_client_metadata", "token_endpoint_auth_method must be a supported string")
+			return
+		}
+		authMethod = method
+	}
+	switch authMethod {
+	case "none", "client_secret_basic", "client_secret_post":
+	default:
+		writeRegistrationError(w, "invalid_client_metadata", "unsupported token_endpoint_auth_method")
+		return
 	}
 	confidential := authMethod == "client_secret_basic" || authMethod == "client_secret_post"
 
@@ -752,12 +811,18 @@ func (s *OAuthServer) HandleRegister(w http.ResponseWriter, r *http.Request) {
 
 	var uris []string
 	if raw, ok := req["redirect_uris"]; ok {
-		if arr, ok := raw.([]interface{}); ok {
-			for _, v := range arr {
-				if s, ok := v.(string); ok {
-					uris = append(uris, s)
-				}
+		arr, ok := raw.([]interface{})
+		if !ok {
+			writeRegistrationError(w, "invalid_redirect_uri", "redirect_uris must be an array of strings")
+			return
+		}
+		for _, v := range arr {
+			uri, ok := v.(string)
+			if !ok || uri == "" {
+				writeRegistrationError(w, "invalid_redirect_uri", "redirect_uris must contain only non-empty strings")
+				return
 			}
+			uris = append(uris, uri)
 		}
 	}
 	s.logger.Info("registration redirect_uris", "uris", uris)

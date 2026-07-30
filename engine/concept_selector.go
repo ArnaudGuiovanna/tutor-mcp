@@ -27,6 +27,7 @@ import (
 	"log/slog"
 	"math"
 	"sort"
+	"time"
 
 	"tutor-mcp/algorithms"
 	"tutor-mcp/models"
@@ -76,11 +77,25 @@ func SelectConcept(
 	graph models.KnowledgeSpace,
 	goalRelevance map[string]float64,
 ) (Selection, error) {
+	return SelectConceptAt(phase, states, graph, goalRelevance, time.Now().UTC())
+}
+
+// SelectConceptAt is the clock-injected decision boundary used by the runtime.
+// In MAINTENANCE it derives card age from now - LastReview; ElapsedDays is the
+// historical interval that preceded the last FSRS review and is never used as
+// the current age.
+func SelectConceptAt(
+	phase models.Phase,
+	states []*models.ConceptState,
+	graph models.KnowledgeSpace,
+	goalRelevance map[string]float64,
+	now time.Time,
+) (Selection, error) {
 	switch phase {
 	case models.PhaseInstruction:
 		return selectInstruction(states, graph, goalRelevance), nil
 	case models.PhaseMaintenance:
-		return selectMaintenance(states, graph, goalRelevance), nil
+		return selectMaintenance(states, graph, goalRelevance, now), nil
 	case models.PhaseDiagnostic:
 		return selectDiagnostic(states, graph), nil
 	default:
@@ -246,6 +261,7 @@ func selectMaintenance(
 	states []*models.ConceptState,
 	graph models.KnowledgeSpace,
 	goalRelevance map[string]float64,
+	now time.Time,
 ) Selection {
 	bktThreshold := algorithms.MasteryBKT()
 
@@ -312,7 +328,7 @@ func selectMaintenance(
 		if cs.CardState == "new" {
 			urgency = 0
 		} else {
-			retention := algorithms.Retrievability(cs.ElapsedDays, cs.Stability)
+			retention := algorithms.CurrentRetrievability(now, cs.LastReview, cs.Stability)
 			urgency = 1 - retention
 		}
 		score := urgency * rel
@@ -409,15 +425,14 @@ func selectDiagnostic(states []*models.ConceptState, graph models.KnowledgeSpace
 	}
 }
 
-// SelectReviewConcept is the second concept-selector: a review-intent variant
-// that ranks already-seen concepts by decayed retention (plus misconception and
-// sub-mastery boosts) to pick what to revisit. Distinct from SelectConcept,
-// which routes *new* learning by phase. Extracted from the orchestrator (#9).
-func SelectReviewConcept(
+// SelectReviewConceptAt ranks already-seen concepts by current decayed
+// retention (plus misconception and sub-mastery boosts) for review intent.
+func SelectReviewConceptAt(
 	allowed []string,
 	states map[string]*models.ConceptState,
 	interactions []*models.Interaction,
 	activeMisc map[string]bool,
+	now time.Time,
 ) Selection {
 	interactionCounts := make(map[string]int)
 	for _, interaction := range interactions {
@@ -434,7 +449,7 @@ func SelectReviewConcept(
 		if !reviewableConcept(cs, interactionCounts[concept]) {
 			continue
 		}
-		retention := reviewRetention(cs)
+		retention := reviewRetentionAt(cs, now)
 		score := 1 - retention
 		if activeMisc[concept] {
 			score += 2
@@ -469,20 +484,20 @@ func reviewableConcept(cs *models.ConceptState, interactionCount int) bool {
 	return cs.Reps > 0 || cs.CardState != "new"
 }
 
-func reviewRetention(cs *models.ConceptState) float64 {
+func reviewRetentionAt(cs *models.ConceptState, now time.Time) float64 {
 	if cs == nil || cs.CardState == "new" {
 		return 0.70
 	}
-	return algorithms.Retrievability(cs.ElapsedDays, cs.Stability)
+	return algorithms.CurrentRetrievability(now, cs.LastReview, cs.Stability)
 }
 
-func constrainReviewAction(action Action, cs *models.ConceptState) Action {
+func constrainReviewAction(action Action, cs *models.ConceptState, now time.Time) Action {
 	switch action.Type {
 	case models.ActivityRecall, models.ActivityPractice, models.ActivityDebugMisconception:
 		action.Rationale = "review intent constraint : " + action.Rationale
 		return action
 	}
-	if reviewRetention(cs) < algorithms.RetentionRecallRoutingThreshold {
+	if reviewRetentionAt(cs, now) < algorithms.RetentionRecallRoutingThreshold {
 		return Action{
 			Type:             models.ActivityRecall,
 			DifficultyTarget: 0.60,

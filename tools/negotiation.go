@@ -6,6 +6,8 @@ package tools
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -115,7 +117,11 @@ func registerLearningNegotiation(server *mcp.Server, deps *Deps) {
 			}
 		}
 
-		states, _ := deps.Store.GetConceptStatesByLearner(ctx, learnerID)
+		states, err := deps.Store.GetConceptStatesByDomain(ctx, learnerID, domain.ID)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to load negotiation state", err)
+			return r, nil, nil
+		}
 
 		domainConcepts := make(map[string]bool)
 		for _, c := range domain.Graph.Concepts {
@@ -169,11 +175,14 @@ func registerLearningNegotiation(server *mcp.Server, deps *Deps) {
 
 			systemConcept := systemActivity.Concept
 			if concept != "" && systemConcept != "" && systemConcept != concept {
-				systemCS, _ := deps.Store.GetConceptState(ctx, learnerID, systemConcept)
+				systemCS, err := deps.Store.GetConceptStateInDomain(ctx, learnerID, domain.ID, systemConcept)
+				if err != nil && !errors.Is(err, sql.ErrNoRows) {
+					r, _ := safeErrorResult(deps.Logger, "failed to load system concept state", err)
+					return r, nil, nil
+				}
 				if systemCS != nil && systemCS.LastReview != nil {
-					elapsed := int(now.Sub(*systemCS.LastReview).Hours() / 24)
-					currentRet := algorithms.Retrievability(elapsed, systemCS.Stability)
-					futureRet := algorithms.Retrievability(elapsed+1, systemCS.Stability)
+					currentRet := algorithms.CurrentRetrievability(now, systemCS.LastReview, systemCS.Stability)
+					futureRet := algorithms.CurrentRetrievability(now.Add(24*time.Hour), systemCS.LastReview, systemCS.Stability)
 					tradeoffs = append(tradeoffs, tradeoff{
 						Factor:      "retention",
 						SystemPlan:  fmt.Sprintf("reviewing %s keeps retention at %.0f%%", systemConcept, currentRet*100),
@@ -233,7 +242,11 @@ func registerLearningNegotiation(server *mcp.Server, deps *Deps) {
 				})
 			}
 			if concept != "" {
-				learnerCS, _ := deps.Store.GetConceptState(ctx, learnerID, concept)
+				learnerCS, err := deps.Store.GetConceptStateInDomain(ctx, learnerID, domain.ID, concept)
+				if err != nil && !errors.Is(err, sql.ErrNoRows) {
+					r, _ := safeErrorResult(deps.Logger, "failed to load proposed concept state", err)
+					return r, nil, nil
+				}
 				if proposal.ActivityType == models.ActivityMasteryChallenge ||
 					proposal.ActivityType == models.ActivityFeynmanPrompt ||
 					proposal.ActivityType == models.ActivityTransferProbe {

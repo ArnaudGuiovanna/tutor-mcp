@@ -88,7 +88,7 @@ func TestBuild_CompetenceValueRotatesAxis(t *testing.T) {
 
 	// Concept state with low mastery so milestone won't fire.
 	if err := store.UpsertConceptState(context.Background(), &models.ConceptState{
-		LearnerID: learnerID, Concept: "Goroutines", PMastery: 0.2, CardState: "learning",
+		LearnerID: learnerID, DomainID: domain.ID, Concept: "Goroutines", PMastery: 0.2, CardState: "learning",
 	}); err != nil {
 		t.Fatalf("upsert concept state: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestBuild_WithDomainAndConcept(t *testing.T) {
 		t.Fatalf("create domain: %v", err)
 	}
 	if err := store.UpsertConceptState(context.Background(), &models.ConceptState{
-		LearnerID: learnerID, Concept: "Channels", PMastery: 0.3, CardState: "learning",
+		LearnerID: learnerID, DomainID: domain.ID, Concept: "Channels", PMastery: 0.3, CardState: "learning",
 	}); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
@@ -136,9 +136,9 @@ func TestBuild_WithDomainAndConcept(t *testing.T) {
 	now := time.Now().UTC()
 	for i := 0; i < 4; i++ {
 		if _, err := rawDB.Exec(
-			`INSERT INTO interactions (learner_id, concept, activity_type, success, response_time, confidence, notes, self_initiated, created_at)
-			 VALUES (?, ?, 'RECALL_EXERCISE', 1, 60, 0.5, '', 1, ?)`,
-			learnerID, "Channels", now.AddDate(0, 0, -i*2),
+			`INSERT INTO interactions (learner_id, domain_id, concept, activity_type, success, response_time, confidence, notes, self_initiated, created_at)
+			 VALUES (?, ?, ?, 'RECALL_EXERCISE', 1, 60, 0.5, '', 1, ?)`,
+			learnerID, domain.ID, "Channels", now.AddDate(0, 0, -i*2),
 		); err != nil {
 			t.Fatalf("insert interaction: %v", err)
 		}

@@ -240,6 +240,173 @@ func buildMigrations() []migration {
 		Version: "0010_index_learners_email_lower",
 		Body:    `CREATE UNIQUE INDEX IF NOT EXISTS idx_learners_email_lower ON learners(lower(email))`,
 	})
+	// Concept labels are only identities inside a domain. Rebuild the SQLite
+	// table because its historical UNIQUE(learner_id, concept) constraint
+	// cannot be dropped in place. Existing progress is copied to every active
+	// domain graph that contains the label; states with no matching domain are
+	// retained under the legacy empty domain for operator visibility.
+	out = append(out, migration{
+		Version: "0011_scope_concept_states_by_domain",
+		Body: `CREATE TABLE concept_states_domain_scoped (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    learner_id     TEXT NOT NULL REFERENCES learners(id),
+    domain_id      TEXT NOT NULL DEFAULT '',
+    concept        TEXT NOT NULL,
+    stability      REAL DEFAULT 1.0,
+    difficulty     REAL DEFAULT 0.3,
+    elapsed_days   INTEGER DEFAULT 0,
+    scheduled_days INTEGER DEFAULT 1,
+    reps           INTEGER DEFAULT 0,
+    lapses         INTEGER DEFAULT 0,
+    card_state     TEXT DEFAULT 'new',
+    last_review    DATETIME,
+    next_review    DATETIME,
+    p_mastery      REAL DEFAULT 0.1,
+    p_learn        REAL DEFAULT 0.15,
+    p_forget       REAL DEFAULT 0.05,
+    p_slip         REAL DEFAULT 0.1,
+    p_guess        REAL DEFAULT 0.2,
+    theta          REAL DEFAULT 0.0,
+    updated_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(learner_id, domain_id, concept)
+);
+INSERT INTO concept_states_domain_scoped
+    (learner_id, domain_id, concept, stability, difficulty, elapsed_days,
+     scheduled_days, reps, lapses, card_state, last_review, next_review,
+     p_mastery, p_learn, p_forget, p_slip, p_guess, theta, updated_at)
+SELECT cs.learner_id, d.id, cs.concept, cs.stability, cs.difficulty,
+       cs.elapsed_days, cs.scheduled_days, cs.reps, cs.lapses, cs.card_state,
+       cs.last_review, cs.next_review, cs.p_mastery, cs.p_learn, cs.p_forget,
+       cs.p_slip, cs.p_guess, cs.theta, cs.updated_at
+FROM concept_states cs
+JOIN domains d ON d.learner_id = cs.learner_id
+WHERE EXISTS (
+    SELECT 1
+    FROM json_each(
+        CASE WHEN json_valid(d.graph_json) THEN d.graph_json
+             ELSE '{"concepts":[]}' END,
+        '$.concepts'
+    ) AS concept_json
+    WHERE concept_json.value = cs.concept
+);
+INSERT INTO concept_states_domain_scoped
+    (learner_id, domain_id, concept, stability, difficulty, elapsed_days,
+     scheduled_days, reps, lapses, card_state, last_review, next_review,
+     p_mastery, p_learn, p_forget, p_slip, p_guess, theta, updated_at)
+SELECT cs.learner_id, '', cs.concept, cs.stability, cs.difficulty,
+       cs.elapsed_days, cs.scheduled_days, cs.reps, cs.lapses, cs.card_state,
+       cs.last_review, cs.next_review, cs.p_mastery, cs.p_learn, cs.p_forget,
+       cs.p_slip, cs.p_guess, cs.theta, cs.updated_at
+FROM concept_states cs
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM domains d,
+         json_each(
+             CASE WHEN json_valid(d.graph_json) THEN d.graph_json
+                  ELSE '{"concepts":[]}' END,
+             '$.concepts'
+         ) AS concept_json
+    WHERE d.learner_id = cs.learner_id
+      AND concept_json.value = cs.concept
+);
+DROP TABLE concept_states;
+ALTER TABLE concept_states_domain_scoped RENAME TO concept_states;
+CREATE INDEX idx_concept_states_learner
+    ON concept_states(learner_id, domain_id);
+CREATE INDEX idx_concept_states_review
+    ON concept_states(learner_id, domain_id, next_review)`,
+	})
+	out = append(out, migration{
+		Version: "0012_scope_metacognitive_records_by_domain",
+		Body: `ALTER TABLE calibration_records
+    ADD COLUMN domain_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE transfer_records
+    ADD COLUMN domain_id TEXT NOT NULL DEFAULT '';
+DROP INDEX IF EXISTS idx_transfer_records_learner_concept;
+CREATE INDEX idx_transfer_records_learner_concept
+    ON transfer_records(learner_id, domain_id, concept_id, created_at);
+DROP INDEX IF EXISTS idx_calibration_records_learner;
+CREATE INDEX idx_calibration_records_learner
+    ON calibration_records(learner_id, domain_id, created_at)`,
+	})
+	// Preserve legacy evidence when its domain can be inferred without
+	// ambiguity. Shared concept labels deliberately remain unassigned: guessing
+	// would recreate the cross-domain contamination these migrations remove.
+	out = append(out, migration{
+		Version: "0013_backfill_unique_domain_identity",
+		Body: `UPDATE interactions
+SET domain_id = (
+    SELECT MIN(d.id)
+    FROM domains d,
+         json_each(
+             CASE WHEN json_valid(d.graph_json) THEN d.graph_json
+                  ELSE '{"concepts":[]}' END,
+             '$.concepts'
+         ) AS concept_json
+    WHERE d.learner_id = interactions.learner_id
+      AND concept_json.value = interactions.concept
+)
+WHERE COALESCE(domain_id, '') = ''
+  AND 1 = (
+      SELECT COUNT(DISTINCT d.id)
+      FROM domains d,
+           json_each(
+               CASE WHEN json_valid(d.graph_json) THEN d.graph_json
+                    ELSE '{"concepts":[]}' END,
+               '$.concepts'
+           ) AS concept_json
+      WHERE d.learner_id = interactions.learner_id
+        AND concept_json.value = interactions.concept
+  );
+UPDATE calibration_records
+SET domain_id = (
+    SELECT MIN(d.id)
+    FROM domains d,
+         json_each(
+             CASE WHEN json_valid(d.graph_json) THEN d.graph_json
+                  ELSE '{"concepts":[]}' END,
+             '$.concepts'
+         ) AS concept_json
+    WHERE d.learner_id = calibration_records.learner_id
+      AND concept_json.value = calibration_records.concept_id
+)
+WHERE domain_id = ''
+  AND 1 = (
+      SELECT COUNT(DISTINCT d.id)
+      FROM domains d,
+           json_each(
+               CASE WHEN json_valid(d.graph_json) THEN d.graph_json
+                    ELSE '{"concepts":[]}' END,
+               '$.concepts'
+           ) AS concept_json
+      WHERE d.learner_id = calibration_records.learner_id
+        AND concept_json.value = calibration_records.concept_id
+  );
+UPDATE transfer_records
+SET domain_id = (
+    SELECT MIN(d.id)
+    FROM domains d,
+         json_each(
+             CASE WHEN json_valid(d.graph_json) THEN d.graph_json
+                  ELSE '{"concepts":[]}' END,
+             '$.concepts'
+         ) AS concept_json
+    WHERE d.learner_id = transfer_records.learner_id
+      AND concept_json.value = transfer_records.concept_id
+)
+WHERE domain_id = ''
+  AND 1 = (
+      SELECT COUNT(DISTINCT d.id)
+      FROM domains d,
+           json_each(
+               CASE WHEN json_valid(d.graph_json) THEN d.graph_json
+                    ELSE '{"concepts":[]}' END,
+               '$.concepts'
+           ) AS concept_json
+      WHERE d.learner_id = transfer_records.learner_id
+        AND concept_json.value = transfer_records.concept_id
+  )`,
+	})
 	return out
 }
 

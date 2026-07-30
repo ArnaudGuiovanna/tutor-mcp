@@ -41,7 +41,8 @@ type MasteryUncertainty struct {
 // pure calculation to wall-clock time, storage, or a specific caller.
 //
 // Zero-valued fields keep the defaults. Set Now when stale evidence should be
-// evaluated against a deterministic reference time.
+// evaluated; without an explicit decision clock the stale-evidence signal is
+// omitted rather than misusing FSRS ElapsedDays as a current age.
 type MasteryEvidenceProfile struct {
 	Now                          time.Time
 	MinObservations              int
@@ -180,14 +181,10 @@ func relevantMasteryInteractions(cs *models.ConceptState, interactions []*models
 
 func isMasteryEvidenceStale(cs *models.ConceptState, interactions []*models.Interaction, profile MasteryEvidenceProfile) bool {
 	latest := latestMasteryEvidenceAt(cs, interactions)
-	if !profile.Now.IsZero() && !latest.IsZero() {
-		return profile.Now.Sub(latest) > profile.StaleAfter
-	}
-	if cs == nil {
+	if profile.Now.IsZero() || latest.IsZero() || latest.After(profile.Now) {
 		return false
 	}
-	staleDays := int(profile.StaleAfter.Hours() / 24)
-	return staleDays > 0 && cs.ElapsedDays > staleDays
+	return profile.Now.Sub(latest) > profile.StaleAfter
 }
 
 func latestMasteryEvidenceAt(cs *models.ConceptState, interactions []*models.Interaction) time.Time {

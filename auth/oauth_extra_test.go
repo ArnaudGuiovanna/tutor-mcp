@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -480,6 +481,64 @@ func TestHandleToken_RefreshToken_Success(t *testing.T) {
 	}
 }
 
+func TestHandleToken_RefreshTokenConcurrentReuseSingleSuccess(t *testing.T) {
+	setTestSecret(t)
+	s, store := newTestServer(t)
+	seedClient(t, store, "cid-pub", "https://app.example/cb")
+	learner := seedLearner(t, store, "u-rt-race@e.com", "pw")
+	rt, err := store.CreateRefreshToken(context.Background(), learner, "cid-pub")
+	if err != nil {
+		t.Fatalf("seed rt: %v", err)
+	}
+
+	const contenders = 8
+	start := make(chan struct{})
+	type result struct {
+		status int
+		body   string
+	}
+	results := make(chan result, contenders)
+	var wg sync.WaitGroup
+	for range contenders {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			form := url.Values{}
+			form.Set("grant_type", "refresh_token")
+			form.Set("refresh_token", rt.Token)
+			form.Set("client_id", "cid-pub")
+			req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			rec := httptest.NewRecorder()
+			s.HandleToken(rec, req)
+			results <- result{status: rec.Code, body: rec.Body.String()}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	successes := 0
+	rejections := 0
+	for result := range results {
+		switch result.status {
+		case http.StatusOK:
+			successes++
+		case http.StatusBadRequest:
+			rejections++
+			if !strings.Contains(result.body, "invalid_grant") {
+				t.Fatalf("loser body = %q, want invalid_grant", result.body)
+			}
+		default:
+			t.Fatalf("unexpected concurrent refresh status %d: %q", result.status, result.body)
+		}
+	}
+	if successes != 1 || rejections != contenders-1 {
+		t.Fatalf("concurrent refresh results: successes=%d rejections=%d", successes, rejections)
+	}
+}
+
 func TestHandleToken_RefreshToken_ConfidentialClientUnknown(t *testing.T) {
 	setTestSecret(t)
 	s, store := newTestServer(t)
@@ -623,6 +682,23 @@ func TestHandleRegister_ConfidentialClientPost(t *testing.T) {
 	}
 }
 
+func TestHandleRegister_RejectsUnknownTokenEndpointAuthMethod(t *testing.T) {
+	s, _ := newTestServer(t)
+	body := `{"client_name":"Bad","redirect_uris":["https://app.example/cb"],"token_endpoint_auth_method":"private_key_jwt"}`
+	req := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	s.HandleRegister(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%q", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "invalid_client_metadata") {
+		t.Fatalf("body = %q, want invalid_client_metadata", rec.Body.String())
+	}
+}
+
 func TestHandleRegister_BadJSON(t *testing.T) {
 	s, _ := newTestServer(t)
 	req := httptest.NewRequest("POST", "/register", strings.NewReader("not-json"))
@@ -727,8 +803,8 @@ func TestHandleRegister_RedirectURIsArrayMixedTypes(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	s.HandleRegister(rec, req)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want 201; body=%q", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%q", rec.Code, rec.Body.String())
 	}
 }
 
@@ -915,6 +991,7 @@ func TestAuthorizePost_LoginRequiresClientApproval(t *testing.T) {
 	form.Set("mode", "login")
 	form.Set("client_id", "cid")
 	form.Set("redirect_uri", "https://attacker.example/cb")
+	form.Set("response_type", "code")
 	form.Set("code_challenge", "ch")
 	form.Set("code_challenge_method", "S256")
 	form.Set("email", "victim@example.com")
@@ -998,6 +1075,7 @@ func TestAuthorizePost_LoginSuccess_NoState_OmitsStateParam(t *testing.T) {
 	form.Set("mode", "login")
 	form.Set("client_id", "cid")
 	form.Set("redirect_uri", "https://good.example/cb")
+	form.Set("response_type", "code")
 	form.Set("code_challenge", "ch")
 	form.Set("code_challenge_method", "S256")
 	form.Set("email", "okns@e.com")
@@ -1074,6 +1152,7 @@ func TestAuthorizePost_MissingEmail_RendersForm(t *testing.T) {
 	form.Set("mode", "login")
 	form.Set("client_id", "cid")
 	form.Set("redirect_uri", "https://good.example/cb")
+	form.Set("response_type", "code")
 	form.Set("code_challenge", "ch")
 	form.Set("code_challenge_method", "S256")
 
@@ -1100,6 +1179,7 @@ func TestAuthorizePost_RegisterPasswordMismatch(t *testing.T) {
 	form.Set("mode", "register")
 	form.Set("client_id", "cid")
 	form.Set("redirect_uri", "https://good.example/cb")
+	form.Set("response_type", "code")
 	form.Set("code_challenge", "ch")
 	form.Set("code_challenge_method", "S256")
 	form.Set("email", "x@e.com")
@@ -1129,6 +1209,7 @@ func TestAuthorizePost_RegisterPasswordTooShort(t *testing.T) {
 	form.Set("mode", "register")
 	form.Set("client_id", "cid")
 	form.Set("redirect_uri", "https://good.example/cb")
+	form.Set("response_type", "code")
 	form.Set("code_challenge", "ch")
 	form.Set("code_challenge_method", "S256")
 	form.Set("email", "x@e.com")
@@ -1159,6 +1240,7 @@ func TestAuthorizePost_RegisterDuplicateEmail(t *testing.T) {
 	form.Set("mode", "register")
 	form.Set("client_id", "cid")
 	form.Set("redirect_uri", "https://good.example/cb")
+	form.Set("response_type", "code")
 	form.Set("code_challenge", "ch")
 	form.Set("code_challenge_method", "S256")
 	form.Set("email", "dup@e.com")
@@ -1188,6 +1270,7 @@ func TestAuthorizePost_LoginUnknownEmail(t *testing.T) {
 	form.Set("mode", "login")
 	form.Set("client_id", "cid")
 	form.Set("redirect_uri", "https://good.example/cb")
+	form.Set("response_type", "code")
 	form.Set("code_challenge", "ch")
 	form.Set("code_challenge_method", "S256")
 	form.Set("email", "ghost@e.com")
@@ -1342,6 +1425,7 @@ func loginRequest(t *testing.T, clientID, redirectURI, email, password string, a
 	form.Set("mode", "login")
 	form.Set("client_id", clientID)
 	form.Set("redirect_uri", redirectURI)
+	form.Set("response_type", "code")
 	form.Set("code_challenge", "ch")
 	form.Set("code_challenge_method", "S256")
 	form.Set("email", email)
@@ -1428,6 +1512,7 @@ func TestAuthorizePost_LoginEmailIsCaseInsensitive(t *testing.T) {
 	form.Set("mode", "login")
 	form.Set("client_id", "cid")
 	form.Set("redirect_uri", "https://good.example/cb")
+	form.Set("response_type", "code")
 	form.Set("code_challenge", "ch")
 	form.Set("code_challenge_method", "S256")
 	form.Set("email", "Bob@x.com") // uppercase first letter
@@ -1463,6 +1548,7 @@ func TestAuthorizePost_LoginFailureBucketSharedAcrossEmailCases(t *testing.T) {
 		form.Set("mode", "login")
 		form.Set("client_id", "cid")
 		form.Set("redirect_uri", "https://good.example/cb")
+		form.Set("response_type", "code")
 		form.Set("code_challenge", "ch")
 		form.Set("code_challenge_method", "S256")
 		form.Set("email", email)
@@ -1512,6 +1598,7 @@ func TestAuthorizePost_RegisterRejectsCaseDuplicate(t *testing.T) {
 	form.Set("mode", "register")
 	form.Set("client_id", "cid")
 	form.Set("redirect_uri", "https://good.example/cb")
+	form.Set("response_type", "code")
 	form.Set("code_challenge", "ch")
 	form.Set("code_challenge_method", "S256")
 	form.Set("email", "Alice@x.com") // case-variant of an existing learner

@@ -4,7 +4,10 @@
 package memory
 
 import (
+	"fmt"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -126,6 +129,29 @@ func TestConceptSlugMayContainSlash(t *testing.T) {
 	}
 }
 
+func TestLearnerIDCannotTraverseMemoryRoot(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("TUTOR_MCP_MEMORY_ROOT", root)
+	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
+
+	if err := Write(WriteRequest{
+		LearnerID: "..",
+		Scope:     ScopeMemoryPending,
+		Operation: OpAppend,
+		Content:   "contained",
+	}); err != nil {
+		t.Fatalf("write traversal-shaped learner ID: %v", err)
+	}
+	path, err := PathForRead("..", ScopeMemoryPending, "")
+	if err != nil {
+		t.Fatalf("resolve path: %v", err)
+	}
+	wantPrefix := filepath.Join(root, "learners") + string(filepath.Separator)
+	if !strings.HasPrefix(path, wantPrefix) {
+		t.Fatalf("memory path escaped learner root: %q, want prefix %q", path, wantPrefix)
+	}
+}
+
 func TestEnabledDefaultsOnAndCanBeDisabled(t *testing.T) {
 	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "")
 	if !Enabled() {
@@ -135,6 +161,48 @@ func TestEnabledDefaultsOnAndCanBeDisabled(t *testing.T) {
 		t.Setenv("TUTOR_MCP_MEMORY_ENABLED", value)
 		if Enabled() {
 			t.Fatalf("memory should be disabled for %q", value)
+		}
+	}
+}
+
+func TestConcurrentAppendDoesNotLoseNarrativeMemory(t *testing.T) {
+	t.Setenv("TUTOR_MCP_MEMORY_ROOT", t.TempDir())
+	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
+
+	const writers = 64
+	start := make(chan struct{})
+	errs := make(chan error, writers)
+	var wg sync.WaitGroup
+	for i := range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- Write(WriteRequest{
+				LearnerID: "L1",
+				Scope:     ScopeMemoryPending,
+				Operation: OpAppend,
+				Content:   fmt.Sprintf("observation-%02d", i),
+			})
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent append: %v", err)
+		}
+	}
+
+	got, err := Read("L1", ScopeMemoryPending, "")
+	if err != nil {
+		t.Fatalf("read appended memory: %v", err)
+	}
+	for i := range writers {
+		needle := fmt.Sprintf("observation-%02d", i)
+		if strings.Count(got, needle) != 1 {
+			t.Fatalf("%q count = %d, want 1; memory:\n%s", needle, strings.Count(got, needle), got)
 		}
 	}
 }

@@ -81,8 +81,15 @@ func registerRecordAffect(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
+		var degradedComponents []string
+		markDegraded := func(component string, err error) {
+			degradedComponents = append(degradedComponents, component)
+			deps.Logger.Warn("record_affect: optional component degraded",
+				"component", component, "err", err, "learner", learnerID, "session", params.SessionID)
+		}
 		saved, err := deps.Store.GetAffectBySession(ctx, learnerID, params.SessionID)
 		if err != nil {
+			markDegraded("stored_affect_readback", err)
 			saved = affect
 		}
 
@@ -100,8 +107,10 @@ func registerRecordAffect(server *mcp.Server, deps *Deps) {
 		// End-of-session: compute calibration_bias_delta
 		if params.Satisfaction > 0 && params.PerceivedDifficulty > 0 {
 			perceivedAbility := float64(params.PerceivedDifficulty) / 4.0
-			sessionInteractions, _ := deps.Store.GetSessionInteractions(ctx, learnerID)
-			if len(sessionInteractions) > 0 {
+			sessionInteractions, sessionErr := deps.Store.GetSessionInteractions(ctx, learnerID)
+			if sessionErr != nil {
+				markDegraded("calibration_delta", sessionErr)
+			} else if len(sessionInteractions) > 0 {
 				successes := 0
 				for _, i := range sessionInteractions {
 					if i.Success {
@@ -115,19 +124,32 @@ func registerRecordAffect(server *mcp.Server, deps *Deps) {
 
 			// Compute and persist autonomy score
 			since := time.Now().UTC().Add(-30 * 24 * time.Hour)
-			allInteractions, _ := deps.Store.GetInteractionsSince(ctx, learnerID, since)
-			allStates, _ := deps.Store.GetConceptStatesByLearner(ctx, learnerID)
-			calibBias, _ := deps.Store.GetCalibrationBias(ctx, learnerID, 20)
-
-			autonomy := engine.ComputeAutonomyMetrics(engine.AutonomyInput{
-				Interactions:    allInteractions,
-				ConceptStates:   allStates,
-				CalibrationBias: calibBias,
-				SessionGap:      2 * time.Hour,
-			})
-
-			_ = deps.Store.UpdateAffectAutonomyScore(ctx, learnerID, params.SessionID, autonomy.Score)
-			result["autonomy_score"] = autonomy.Score
+			allInteractions, interactionsErr := deps.Store.GetInteractionsSince(ctx, learnerID, since)
+			allStates, statesErr := deps.Store.GetConceptStatesByLearner(ctx, learnerID)
+			calibBias, calibrationErr := deps.Store.GetCalibrationBias(ctx, learnerID, 20)
+			switch {
+			case interactionsErr != nil:
+				markDegraded("autonomy_score", interactionsErr)
+			case statesErr != nil:
+				markDegraded("autonomy_score", statesErr)
+			case calibrationErr != nil:
+				markDegraded("autonomy_score", calibrationErr)
+			default:
+				autonomy := engine.ComputeAutonomyMetrics(engine.AutonomyInput{
+					Interactions:    allInteractions,
+					ConceptStates:   allStates,
+					CalibrationBias: calibBias,
+					SessionGap:      2 * time.Hour,
+				})
+				if err := deps.Store.UpdateAffectAutonomyScore(ctx, learnerID, params.SessionID, autonomy.Score); err != nil {
+					markDegraded("autonomy_score_persistence", err)
+				} else {
+					result["autonomy_score"] = autonomy.Score
+				}
+			}
+		}
+		if len(degradedComponents) > 0 {
+			result["degraded_components"] = degradedComponents
 		}
 
 		r, _ := jsonResult(result)

@@ -35,13 +35,20 @@ func registerGetAvailabilityModel(server *mcp.Server, deps *Deps) {
 
 		// Parse windows JSON
 		var windows []models.TimeWindow
-		_ = json.Unmarshal([]byte(avail.WindowsJSON), &windows)
+		if err := json.Unmarshal([]byte(avail.WindowsJSON), &windows); err != nil {
+			r, _ := safeErrorResult(deps.Logger, "stored availability is invalid", err)
+			return r, nil, nil
+		}
 		if windows == nil {
 			windows = []models.TimeWindow{}
 		}
 
 		// Get last active
-		learner, _ := deps.Store.GetLearnerByID(ctx, learnerID)
+		learner, err := deps.Store.GetLearnerByID(ctx, learnerID)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to load learner activity", err)
+			return r, nil, nil
+		}
 		lastActive := ""
 		if learner != nil && !learner.LastActive.IsZero() {
 			lastActive = learner.LastActive.Format("2006-01-02T15:04:05Z")

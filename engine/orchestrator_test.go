@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -60,7 +59,7 @@ func seedOrchDomain(t *testing.T, store *db.Store, concepts []string, prereqs ma
 		t.Fatal(err)
 	}
 	for _, c := range concepts {
-		cs := models.NewConceptState("L1", c)
+		cs := models.NewConceptStateInDomain("L1", domain.ID, c)
 		if err := store.InsertConceptStateIfNotExists(context.Background(), cs); err != nil {
 			t.Fatal(err)
 		}
@@ -93,6 +92,8 @@ func setMastery(t *testing.T, store *db.Store, concept string, p float64) {
 	cs.CardState = "review"
 	cs.Stability = 30
 	cs.ElapsedDays = 1
+	lastReview := time.Now().UTC().Add(-24 * time.Hour)
+	cs.LastReview = &lastReview
 	if err := store.UpsertConceptState(context.Background(), cs); err != nil {
 		t.Fatal(err)
 	}
@@ -124,9 +125,41 @@ func setReviewState(t *testing.T, store *db.Store, concept string, p, stability 
 	cs.CardState = "review"
 	cs.Stability = stability
 	cs.ElapsedDays = elapsedDays
+	lastReview := time.Now().UTC().Add(-time.Duration(elapsedDays) * 24 * time.Hour)
+	cs.LastReview = &lastReview
 	cs.Reps = 3
 	if err := store.UpsertConceptState(context.Background(), cs); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestBuildObservablesUsesCurrentFSRSAge(t *testing.T) {
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	lastReview := now.Add(-2 * time.Hour)
+	cs := &models.ConceptState{
+		Concept:     "A",
+		PMastery:    0.95,
+		CardState:   "review",
+		Stability:   1,
+		ElapsedDays: 90,
+		LastReview:  &lastReview,
+	}
+	domain := &models.Domain{Graph: models.KnowledgeSpace{Concepts: []string{"A"}}}
+	fixtures := &pipelineFixtures{
+		StatesList:      []*models.ConceptState{cs},
+		StatesByConcept: map[string]*models.ConceptState{"A": cs},
+		GoalRelevance:   map[string]float64{"A": 1},
+	}
+	cfg := NewDefaultPhaseConfig()
+
+	got := buildObservables(domain, fixtures, cfg, now)
+	if got.GoalRelevantBelowRetention {
+		t.Fatal("recent review was treated as 90 days old from historical ElapsedDays")
+	}
+
+	got = buildObservables(domain, fixtures, cfg, now.Add(30*24*time.Hour))
+	if !got.GoalRelevantBelowRetention {
+		t.Fatal("30 days of current age should trigger the retention observable")
 	}
 }
 
@@ -204,7 +237,7 @@ func TestOrchestrate_Diagnostic_NMaxReached_TransitionsToInstruction(t *testing.
 	// Inject 8 interactions to reach NDiagnosticMax
 	now := time.Now().UTC()
 	for i := range 8 {
-		_, _ = recordSyntheticInteraction(t, store, "A", true, now.Add(time.Duration(i)*time.Second))
+		_, _ = recordSyntheticInteraction(t, store, domainID, "A", true, now.Add(time.Duration(i)*time.Second))
 	}
 	// Force phase_changed_at far in the past so all 8 count.
 	if err := store.UpdateDomainPhase(context.Background(), domainID, models.PhaseDiagnostic, 0.469, now.Add(-1*time.Hour)); err != nil {
@@ -281,6 +314,8 @@ func TestOrchestrate_Maintenance_RetentionLow_TransitionsToInstruction(t *testin
 	cs.CardState = "review"
 	cs.Stability = 1
 	cs.ElapsedDays = 30 // retention << 0.5
+	lastReview := time.Now().UTC().Add(-30 * 24 * time.Hour)
+	cs.LastReview = &lastReview
 	if err := store.UpsertConceptState(context.Background(), cs); err != nil {
 		t.Fatal(err)
 	}
@@ -492,7 +527,7 @@ func TestOrchestrateWithPhase_NoFringeFallback_ReturnedPhaseMatchesPersisted(t *
 // orchestrator's CountInteractionsSince and GetActionHistoryForConcept
 // see something. Mimics what record_interaction would do, minus BKT/
 // FSRS updates (those are tested separately in their own modules).
-func recordSyntheticInteraction(t *testing.T, store *db.Store, concept string, success bool, when time.Time) (int, error) {
+func recordSyntheticInteraction(t *testing.T, store *db.Store, domainID, concept string, success bool, when time.Time) (int, error) {
 	t.Helper()
 	successInt := 0
 	if success {
@@ -500,9 +535,9 @@ func recordSyntheticInteraction(t *testing.T, store *db.Store, concept string, s
 	}
 	conn := storeRawDB(store)
 	_, err := conn.Exec(
-		`INSERT INTO interactions (learner_id, concept, activity_type, success, response_time, confidence, error_type, notes, hints_requested, self_initiated, calibration_id, is_proactive_review, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, '', '', 0, 0, '', 0, ?)`,
-		"L1", concept, "PRACTICE", successInt, 1000, 0.7, when,
+		`INSERT INTO interactions (learner_id, domain_id, concept, activity_type, success, response_time, confidence, error_type, notes, hints_requested, self_initiated, calibration_id, is_proactive_review, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, '', '', 0, 0, '', 0, ?)`,
+		"L1", domainID, concept, "PRACTICE", successInt, 1000, 0.7, when,
 	)
 	return 0, err
 }
@@ -510,11 +545,3 @@ func recordSyntheticInteraction(t *testing.T, store *db.Store, concept string, s
 // storeRawDB returns the underlying *sql.DB from the Store. Used by
 // tests that need to insert with explicit timestamps.
 func storeRawDB(store *db.Store) *sql.DB { return store.RawDB() }
-
-// jsonOf is a tiny helper for diagnostic output in tests.
-func jsonOf(v any) string {
-	b, _ := json.Marshal(v)
-	return string(b)
-}
-
-var _ = jsonOf // keep handy for debug

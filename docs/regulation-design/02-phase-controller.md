@@ -1,5 +1,11 @@
 # [2] PhaseController — Design (Phase 1)
 
+> **Archive de conception — non normative.** Les passages sur
+> `REGULATION_PHASE`, `engine.Route` et `engine/router.go` documentent une
+> migration désormais terminée. Le pipeline supporté est toujours actif dans
+> `engine/orchestrator.go`; le code, les schémas MCP, `README.md` et
+> `OPERATIONS.md` font foi.
+
 > Voir aussi `docs/regulation-design/00-pipeline-vs-legacy.md` pour le mapping des 7 priorités du router legacy vers le pipeline orchestrateur (audit #15).
 
 > Composant 6/7 du pipeline de régulation. **L'orchestrateur** : porte

@@ -55,6 +55,12 @@ const (
 //   - retention(elapsed, stability) < 0.50   → Fragile
 //   - otherwise                              → InProgress
 func NodeClassify(cs *models.ConceptState) NodeState {
+	return NodeClassifyAt(cs, time.Now().UTC())
+}
+
+// NodeClassifyAt is the clock-injected OLM classification. Retention is based
+// on the current age derived from LastReview, never on historical ElapsedDays.
+func NodeClassifyAt(cs *models.ConceptState, now time.Time) NodeState {
 	if cs == nil || cs.CardState == "new" {
 		return NodeNotStarted
 	}
@@ -64,7 +70,7 @@ func NodeClassify(cs *models.ConceptState) NodeState {
 	if cs.PMastery < nodeFragileMasteryThreshold {
 		return NodeFragile
 	}
-	if algorithms.Retrievability(cs.ElapsedDays, cs.Stability) < 0.50 {
+	if algorithms.CurrentRetrievability(now, cs.LastReview, cs.Stability) < 0.50 {
 		return NodeFragile
 	}
 	return NodeInProgress
@@ -123,6 +129,12 @@ type OLMSnapshot struct {
 // Returns an error if no active domain exists or the requested domain is
 // archived.
 func BuildOLMSnapshot(ctx context.Context, store storeport.Store, learnerID, domainID string) (*OLMSnapshot, error) {
+	return BuildOLMSnapshotAt(ctx, store, learnerID, domainID, time.Now().UTC())
+}
+
+// BuildOLMSnapshotAt is the clock-injected OLM builder used where a caller
+// already owns a decision timestamp (orchestrator/scheduler/tests).
+func BuildOLMSnapshotAt(ctx context.Context, store storeport.Store, learnerID, domainID string, now time.Time) (*OLMSnapshot, error) {
 	domain, err := resolveActiveDomain(ctx, store, learnerID, domainID)
 	if err != nil {
 		return nil, err
@@ -134,7 +146,7 @@ func BuildOLMSnapshot(ctx context.Context, store storeport.Store, learnerID, dom
 		PersonalGoal: domain.PersonalGoal,
 	}
 
-	allStates, err := store.GetConceptStatesByLearner(ctx, learnerID)
+	allStates, err := store.GetConceptStatesByDomain(ctx, learnerID, domain.ID)
 	if err != nil {
 		return nil, fmt.Errorf("olm: get states: %w", err)
 	}
@@ -145,7 +157,7 @@ func BuildOLMSnapshot(ctx context.Context, store storeport.Store, learnerID, dom
 
 	for _, c := range domain.Graph.Concepts {
 		cs := statesByConcept[c] // nil if missing — NodeClassify handles that
-		switch NodeClassify(cs) {
+		switch NodeClassifyAt(cs, now) {
 		case NodeNotStarted:
 			snap.NotStarted++
 		case NodeFragile:
@@ -170,14 +182,17 @@ func BuildOLMSnapshot(ctx context.Context, store storeport.Store, learnerID, dom
 			domainStates = append(domainStates, cs)
 		}
 	}
-	recent, _ := store.GetRecentInteractionsByLearner(ctx, learnerID, DefaultRecentInteractionsWindow)
+	recent, err := store.GetRecentInteractionsByDomain(ctx, learnerID, domain.ID, DefaultRecentInteractionsWindow)
+	if err != nil {
+		return nil, fmt.Errorf("olm: get interactions: %w", err)
+	}
 	var domainInteractions []*models.Interaction
 	for _, in := range recent {
 		if domainConceptSet[in.Concept] {
 			domainInteractions = append(domainInteractions, in)
 		}
 	}
-	alerts := ComputeAlerts(domainStates, domainInteractions, time.Time{})
+	alerts := ComputeAlertsAt(domainStates, domainInteractions, time.Time{}, now)
 
 	if focus := pickFocus(alerts); focus != nil {
 		snap.FocusConcept = focus.Concept
@@ -203,13 +218,19 @@ func BuildOLMSnapshot(ctx context.Context, store storeport.Store, learnerID, dom
 
 	// Metacognitive signals — only set if a clear trend exists across the
 	// last 3 affects (or if calibration bias exceeds the actionable threshold).
-	affects, _ := store.GetRecentAffectStates(ctx, learnerID, 3)
+	affects, err := store.GetRecentAffectStates(ctx, learnerID, 3)
+	if err != nil {
+		return nil, fmt.Errorf("olm: get affect history: %w", err)
+	}
 	if len(affects) >= 3 {
 		snap.AutonomyTrend = trendDirection(affects[0].AutonomyScore-affects[2].AutonomyScore, 0.10)
 		// Satisfaction is a 1..4 Likert; require a ≥2-step move before calling it a trend.
 		snap.AffectTrend = trendDirection(float64(affects[0].Satisfaction-affects[2].Satisfaction), 1.5)
 	}
-	bias, _ := store.GetCalibrationBias(ctx, learnerID, 20)
+	bias, err := store.GetCalibrationBiasInDomain(ctx, learnerID, domain.ID, 20)
+	if err != nil {
+		return nil, fmt.Errorf("olm: get calibration bias: %w", err)
+	}
 	snap.CalibrationBias = bias
 
 	// KST progress: fraction of active concepts that are Solid.

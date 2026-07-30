@@ -5,18 +5,15 @@
 package tools
 
 // Issue #97: end-to-end coherence regression suite — scenarios 5 through 9.
-// Scenarios 1–4 from the issue are intentionally NOT covered here: they
-// assert behaviours currently broken on staging that are being fixed in
-// open PRs (#98 archived-domain leak, #100 negotiation hallucination
-// guard, #102 maintenance-domain filter). Adding them now would fail
-// CI until those PRs land. They will be added in follow-up PRs once the
-// fixes merge so this file can grow into the full coherence suite.
+// The former scenario 1–4 blockers have landed and are guarded by focused
+// suites: manage_domain_test.go (archived/deleted domains),
+// negotiation_test.go (proposal validation), activity_test.go (phase
+// transitions), and interaction_e2e_test.go (multi-domain isolation).
 //
 // Each test is self-contained, follows the same shape as
 // TestEndToEnd_TenSuccessesMoveMastery (interaction_e2e_test.go) and
 // uses only the existing helpers in testhelper_test.go. The goal is to
-// lock in the *current correct* behaviour as a regression guard, not to
-// re-litigate design decisions.
+// lock in the current behaviour as a regression guard.
 
 import (
 	"context"

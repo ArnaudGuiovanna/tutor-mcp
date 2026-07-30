@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 // Package store is the persistence port. engine/tools/auth depend on these
-// interfaces; db.Store (and a future PostgresStore) implement them.
+// interfaces; db.Store implements them for both SQLite and PostgreSQL.
 // See docs/scaling/SCALING-SPEC-v2.md §2.
 package store
 
@@ -17,6 +17,12 @@ import (
 // ErrOAuthClientLimitReached is returned by CreateOAuthClientWithSecretCapped
 // when the per-deployment client cap is hit.
 var ErrOAuthClientLimitReached = errors.New("oauth client limit reached")
+
+// ErrInvalidRefreshToken deliberately covers unknown, expired, client-mismatched,
+// and already-rotated refresh tokens. OAuth callers must not reveal which case
+// occurred, but can distinguish the expected invalid_grant path from a storage
+// failure.
+var ErrInvalidRefreshToken = errors.New("invalid refresh token")
 
 // RateLimitBackend is the optional shared, fleet-wide store the auth
 // RateLimiter delegates token accounting to (opt-in via RATELIMIT_BACKEND).
@@ -58,6 +64,7 @@ type AuthStore interface {
 	CreateRefreshToken(ctx context.Context, learnerID, clientID string) (*models.RefreshToken, error)
 	GetRefreshToken(ctx context.Context, token string) (*models.RefreshToken, error)
 	DeleteRefreshToken(ctx context.Context, token string) error
+	RotateRefreshToken(ctx context.Context, token, clientID string) (*models.RefreshToken, error)
 	CreateAuthCode(ctx context.Context, code, learnerID, codeChallenge, clientID string, expiresAt time.Time) error
 	ConsumeAuthCode(ctx context.Context, code, clientID string) (*models.AuthCode, error)
 	CreateOAuthClient(ctx context.Context, clientID, clientName, redirectURIs string) error
@@ -91,35 +98,49 @@ type DomainStore interface {
 	GetDomainGoalRelevance(ctx context.Context, domainID string) (*models.GoalRelevance, error)
 }
 
-// ConceptStateStore manages per-learner per-concept BKT state.
+// ConceptStateStore manages cognitive state. Production learning paths use the
+// domain-scoped methods: concept labels are not globally unique for a learner.
+// The unscoped methods remain for legacy data and aggregate/operator views.
 type ConceptStateStore interface {
 	InsertConceptStateIfNotExists(ctx context.Context, cs *models.ConceptState) error
 	GetConceptState(ctx context.Context, learnerID, concept string) (*models.ConceptState, error)
+	GetConceptStateInDomain(ctx context.Context, learnerID, domainID, concept string) (*models.ConceptState, error)
 	// GetConceptStateForUpdate is identical to GetConceptState under SQLite and
-	// acquires a row-level lock under PostgreSQL. Implemented next task.
+	// acquires a row-level lock under PostgreSQL.
 	GetConceptStateForUpdate(ctx context.Context, learnerID, concept string) (*models.ConceptState, error)
+	GetConceptStateForUpdateInDomain(ctx context.Context, learnerID, domainID, concept string) (*models.ConceptState, error)
 	// GetOrCreateConceptStateForUpdate returns the row-locked concept state,
 	// materializing a default row first when none exists. The materialize-then-
 	// lock order is required for first-touch concurrency safety on Postgres
 	// (a bare SELECT ... FOR UPDATE locks nothing when the row is absent).
 	// Must run inside WithTx.
 	GetOrCreateConceptStateForUpdate(ctx context.Context, learnerID, concept string) (*models.ConceptState, error)
+	GetOrCreateConceptStateForUpdateInDomain(ctx context.Context, learnerID, domainID, concept string) (*models.ConceptState, error)
 	UpsertConceptState(ctx context.Context, cs *models.ConceptState) error
 	GetConceptStatesByLearner(ctx context.Context, learnerID string) ([]*models.ConceptState, error)
+	GetConceptStatesByDomain(ctx context.Context, learnerID, domainID string) ([]*models.ConceptState, error)
 	GetConceptsDueForReview(ctx context.Context, learnerID string) ([]string, error)
+	GetConceptsDueForReviewByDomain(ctx context.Context, learnerID, domainID string) ([]string, error)
 }
 
 // InteractionStore records and queries learner interaction history.
 type InteractionStore interface {
 	CreateInteraction(ctx context.Context, i *models.Interaction) error
 	GetRecentInteractions(ctx context.Context, learnerID, concept string, limit int) ([]*models.Interaction, error)
+	GetRecentInteractionsInDomain(ctx context.Context, learnerID, domainID, concept string, limit int) ([]*models.Interaction, error)
 	GetRecentInteractionsByLearner(ctx context.Context, learnerID string, limit int) ([]*models.Interaction, error)
+	GetRecentInteractionsByDomain(ctx context.Context, learnerID, domainID string, limit int) ([]*models.Interaction, error)
 	GetSessionInteractions(ctx context.Context, learnerID string) ([]*models.Interaction, error)
+	GetSessionInteractionsInDomain(ctx context.Context, learnerID, domainID string) ([]*models.Interaction, error)
 	GetInteractionsSince(ctx context.Context, learnerID string, since time.Time) ([]*models.Interaction, error)
+	GetInteractionsSinceInDomain(ctx context.Context, learnerID, domainID string, since time.Time) ([]*models.Interaction, error)
 	GetSessionStart(ctx context.Context, learnerID string) (time.Time, error)
 	GetActionHistoryForConcept(ctx context.Context, learnerID, concept string, recentLimit int) (models.ActionHistoryCounts, error)
+	GetActionHistoryForConceptInDomain(ctx context.Context, learnerID, domainID, concept string, recentLimit int) (models.ActionHistoryCounts, error)
 	CountInteractionsSince(ctx context.Context, learnerID string, since time.Time, domainConcepts []string) (int, error)
+	CountInteractionsSinceInDomain(ctx context.Context, learnerID, domainID string, since time.Time) (int, error)
 	GetRecentConceptsByDomain(ctx context.Context, learnerID string, domainConcepts []string, limit int) ([]string, error)
+	GetRecentConceptsInDomain(ctx context.Context, learnerID, domainID string, limit int) ([]string, error)
 }
 
 // ActivityStatsStore provides aggregate activity and motivation statistics.
@@ -130,12 +151,18 @@ type ActivityStatsStore interface {
 	GetActivityStreak(ctx context.Context, learnerID string) (int, error)
 	GetRecentLearnerEvents(ctx context.Context, learnerID string, since time.Time) ([]models.RawLearnerEvent, error)
 	ConceptMasteryDelta(ctx context.Context, learnerID string, domainConcepts []string, since time.Time, limit int) ([]models.ConceptDelta, error)
+	ConceptMasteryDeltaInDomain(ctx context.Context, learnerID, domainID string, domainConcepts []string, since time.Time, limit int) ([]models.ConceptDelta, error)
 	MilestonesInWindow(ctx context.Context, learnerID string, domainConcepts []string, since time.Time) ([]string, error)
+	MilestonesInWindowInDomain(ctx context.Context, learnerID, domainID string, domainConcepts []string, since time.Time) ([]string, error)
 	CountInteractionsByConcept(ctx context.Context, learnerID, concept string) (int, error)
+	CountInteractionsByConceptInDomain(ctx context.Context, learnerID, domainID, concept string) (int, error)
 	CountSessionsOnConcept(ctx context.Context, learnerID, concept string) (int, error)
+	CountSessionsOnConceptInDomain(ctx context.Context, learnerID, domainID, concept string) (int, error)
 	CountLearnerSessionStreak(ctx context.Context, learnerID string) (int, error)
 	SelfInitiatedRatio(ctx context.Context, learnerID, concept string) (float64, error)
+	SelfInitiatedRatioInDomain(ctx context.Context, learnerID, domainID, concept string) (float64, error)
 	LastFailureOnConcept(ctx context.Context, learnerID, concept string, window time.Duration) (*models.Interaction, error)
+	LastFailureOnConceptInDomain(ctx context.Context, learnerID, domainID, concept string, window time.Duration) (*models.Interaction, error)
 }
 
 // MetacognitionStore manages affect, calibration, and transfer records.
@@ -147,10 +174,14 @@ type MetacognitionStore interface {
 	CompleteCalibrationRecord(ctx context.Context, predictionID, learnerID string, actual, delta float64) error
 	GetCalibrationRecord(ctx context.Context, predictionID, learnerID string) (*models.CalibrationRecord, error)
 	GetCalibrationBias(ctx context.Context, learnerID string, limit int) (float64, error)
+	GetCalibrationBiasInDomain(ctx context.Context, learnerID, domainID string, limit int) (float64, error)
 	GetCalibrationBiasHistory(ctx context.Context, learnerID string, limit int) ([]float64, error)
+	GetCalibrationBiasHistoryInDomain(ctx context.Context, learnerID, domainID string, limit int) ([]float64, error)
 	CreateTransferRecord(ctx context.Context, r *models.TransferRecord) error
 	GetTransferScores(ctx context.Context, learnerID, conceptID string) ([]*models.TransferRecord, error)
+	GetTransferScoresInDomain(ctx context.Context, learnerID, domainID, conceptID string) ([]*models.TransferRecord, error)
 	GetTransferRecordsByLearner(ctx context.Context, learnerID string) ([]*models.TransferRecord, error)
+	GetTransferRecordsByDomain(ctx context.Context, learnerID, domainID string) ([]*models.TransferRecord, error)
 	GetHintStatsForMastered(ctx context.Context, learnerID string, threshold float64) (hints int, total int, err error)
 	UpdateAffectAutonomyScore(ctx context.Context, learnerID, sessionID string, score float64) error
 	CountProactiveReviews(ctx context.Context, learnerID string, since time.Time) (proactive int, total int, err error)
@@ -159,10 +190,15 @@ type MetacognitionStore interface {
 // MisconceptionStore queries and aggregates learner misconception data.
 type MisconceptionStore interface {
 	GetMisconceptionGroups(ctx context.Context, learnerID string, conceptFilter map[string]bool) ([]models.MisconceptionGroup, error)
+	GetMisconceptionGroupsInDomain(ctx context.Context, learnerID, domainID string, conceptFilter map[string]bool) ([]models.MisconceptionGroup, error)
 	GetDistinctMisconceptionTypes(ctx context.Context, learnerID, concept string) ([]string, error)
+	GetDistinctMisconceptionTypesInDomain(ctx context.Context, learnerID, domainID, concept string) ([]string, error)
 	GetActiveMisconceptions(ctx context.Context, learnerID, concept string) ([]models.MisconceptionGroup, error)
+	GetActiveMisconceptionsInDomain(ctx context.Context, learnerID, domainID, concept string) ([]models.MisconceptionGroup, error)
 	GetActiveMisconceptionsBatch(ctx context.Context, learnerID string, concepts []string) (map[string]bool, error)
+	GetActiveMisconceptionsBatchInDomain(ctx context.Context, learnerID, domainID string, concepts []string) (map[string]bool, error)
 	GetFirstActiveMisconception(ctx context.Context, learnerID, concept string) (*models.MisconceptionGroup, error)
+	GetFirstActiveMisconceptionInDomain(ctx context.Context, learnerID, domainID, concept string) (*models.MisconceptionGroup, error)
 }
 
 // IntentionStore manages implementation intentions and learning-negotiation overrides.

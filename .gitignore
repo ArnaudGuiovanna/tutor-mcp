@@ -22,6 +22,7 @@ learning-runtime
 docs/superpowers/
 docs/audit-report.md
 docs/audit-scope.md
+/AUDIT_CODEBASE_*.md
 codebase-review.html
 codebase-review*.html
 

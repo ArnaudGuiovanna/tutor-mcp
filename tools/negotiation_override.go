@@ -384,7 +384,7 @@ func validateConsumedLearningNegotiationOverride(ctx context.Context, store stor
 		return ""
 	}
 
-	states, err := store.GetConceptStatesByLearner(ctx, learnerID)
+	states, err := store.GetConceptStatesByDomain(ctx, learnerID, domain.ID)
 	if err != nil {
 		return "could not validate concept prerequisites"
 	}

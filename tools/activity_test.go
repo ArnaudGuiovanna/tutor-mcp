@@ -276,6 +276,8 @@ func TestGetNextActivity_OLMInconsistencyActivatesReasoningRequest(t *testing.T)
 	cs.CardState = "review"
 	cs.ElapsedDays = 200
 	cs.Stability = 1
+	lastReview := time.Now().UTC().Add(-200 * 24 * time.Hour)
+	cs.LastReview = &lastReview
 	_ = store.InsertConceptStateIfNotExists(context.Background(), cs)
 	_ = store.UpsertConceptState(context.Background(), cs)
 

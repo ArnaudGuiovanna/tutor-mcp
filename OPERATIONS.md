@@ -4,19 +4,21 @@ Practical recipes for running the server. Companion to the README, which describ
 
 ## Database backend
 
-By default the server stores everything (interactions, OLM, BKT/FSRS/IRT state, refresh tokens, calibration history) in a single SQLite file at `${DB_PATH:-./data/runtime.db}` — the recommended profile for single-node deployments (see *Database backup* below).
+The supported MVP profile stores the relational state (interactions, OLM, BKT/FSRS/IRT state, refresh tokens, calibration history) in a single SQLite file at `${DB_PATH:-./data/runtime.db}` and runs one server process. Narrative memory is stored separately under `${TUTOR_MCP_MEMORY_ROOT:-~/.tutor-mcp}`. Back up both locations if narrative memory is enabled.
 
-For horizontal scaling it can instead run on **PostgreSQL**: set `DB_DRIVER=postgres` and `DATABASE_URL=postgres://user:pass@host:5432/db?sslmode=require`. The schema migrates automatically on boot (advisory-lock serialized, so concurrent cold-starting instances are safe), and is checksum-guarded — a changed `schema_pg.sql` against an already-migrated database fails fast rather than silently diverging. Tune the pool with `DB_MAX_CONNS` (default 10), keeping `DB_MAX_CONNS × instances < Postgres max_connections`.
+An **experimental PostgreSQL** backend is available with `DB_DRIVER=postgres` and `DATABASE_URL=postgres://user:pass@host:5432/db?sslmode=require`. It is exercised in CI for backend conformance. The original consolidated schema is frozen behind its checksum; ordered, immutable incremental migrations upgrade existing databases under the same advisory lock. Edit neither an applied migration nor `schema_pg.sql`: checksum drift intentionally stops startup for operator intervention. Tune the pool with `DB_MAX_CONNS` (default 10).
 
-### Multi-node (stateless) deployment
+### Experimental multi-node profile
 
-Run N instances behind a load balancer, all pointed at the same Postgres, with:
+Multi-node operation is not part of the robust MVP support target. For controlled testing, every instance must use:
 
 - `JWT_SECRET` **identical** on every instance (tokens are verified anywhere).
-- `SCHEDULER_MODE=distributed` — each scheduled run is leased in the DB so a job/nudge fires exactly once across the fleet, not once per instance.
-- `RATELIMIT_BACKEND=postgres` — rate-limit and login-failure counters live in the shared DB, so throttling and brute-force lockout stay coherent across instances (otherwise each instance counts only its own traffic).
+- `DB_DRIVER=postgres` and the same `DATABASE_URL`.
+- `SCHEDULER_MODE=distributed` — each scheduled run slot has at most one lease winner across the fleet.
+- `RATELIMIT_BACKEND=postgres` — rate-limit and login-failure counters live in the shared database.
+- `TUTOR_MCP_MEMORY_ENABLED=off` — Markdown memory is node-local and would otherwise diverge.
 
-With those set, instances hold no per-learner state between requests; the next ceiling is LLM throughput/cost and Postgres `max_connections` (front with PgBouncer if you run many instances).
+Startup rejects incomplete or unknown distributed settings. This makes configuration errors visible; it does not make the profile production-ready. The scheduler lease has no running/done state, expiry, heartbeat, or crash recovery, and webhook delivery is not exactly-once. Do not describe these instances as stateless while any node-local feature is enabled.
 
 ## Database backup
 
@@ -198,20 +200,17 @@ journalctl --user -u tutor-mcp --since "1 hour ago" \
 - **No `interaction recorded` logs while exercises are happening** — the LLM is generating activities but not closing the loop with `record_interaction`. Cohérence-of-rule-3 problem in the system prompt.
 - **Repeated `phase fallback (NoFringe)` for the same domain** — the candidate pool is empty. Likely cause: missing `goal_relevance` on a domain where the strict contract is enforced (partial vector). Run `set_goal_relevance` to repair.
 
-## Operational constraints (single-node / in-memory state)
+## Operational constraints
 
-This server is designed to run as a **single process on a single host**. Several pieces of state live only in process memory, with no shared store behind them:
+The recommended profile is a **single process on a single host**:
 
-- **Rate limiter** (`auth/ratelimit.go`) — per-client token buckets are held in memory.
-- **Login-failure tracker** (`auth/login_failures.go`) — the brute-force lockout counters are held in memory.
-- **Scheduler** (background jobs in `engine/`) — runs in-process, single-node.
+- With `RATELIMIT_BACKEND=memory`, token buckets and login-failure counters reset on restart.
+- With `SCHEDULER_MODE=inprocess`, a second process would run the same scheduled jobs.
+- With narrative memory enabled (the default), Markdown files are local to one host and concurrent read-modify-write operations are not coordinated across processes.
 
-Two consequences follow, and both are deliberate trade-offs for this deployment shape:
+PostgreSQL-backed rate limits and scheduler leases address only the first two points. They do not provide a shared narrative-memory backend, crash-safe job recovery, or an exactly-once webhook outbox. Until those gaps are closed and load/failure tests exist, treat multi-node as experimental and use single-node SQLite for the robust MVP.
 
-- **A restart clears throttle and lockout state.** Every process restart or crash-loop resets the rate-limiter buckets and the login-failure counters to zero. An account locked out by repeated bad passwords becomes reachable again the moment the server is restarted (e.g. after a binary deploy, see *Pre-migration safety* above). Avoid restart-storming the service if a lockout is actively protecting you.
-- **State is not shared across instances.** Each process keeps its own buckets and counters. **Do not run multiple instances behind a load balancer expecting shared throttle or lockout state** — doing so multiplies the effective rate limit by the instance count and lets brute-force attempts spread across instances, weakening both protections. The in-process scheduler has the same constraint: running two instances would double-fire scheduled jobs.
-
-If you ever need to scale beyond one node, the throttle/lockout state must move to a shared store (e.g. Redis) and the scheduler must gain leader election first. Until then, treat single-node as a hard requirement.
+For the single-node profile, avoid restart storms while a login lockout is actively protecting an account and include `${TUTOR_MCP_MEMORY_ROOT:-~/.tutor-mcp}` in the off-host backup plan.
 
 ## Service control quick reference
 

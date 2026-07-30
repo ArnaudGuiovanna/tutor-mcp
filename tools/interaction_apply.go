@@ -69,6 +69,13 @@ func applyInteraction(
 	input interactionInput,
 	now time.Time,
 ) (*models.ConceptState, map[string]any, error) {
+	if !isCognitiveEvidenceActivity(input.ActivityType) {
+		return nil, nil, fmt.Errorf(
+			"applyInteraction: activity_type %q is not learner evidence and cannot update BKT/FSRS/IRT",
+			input.ActivityType,
+		)
+	}
+
 	// R008 / security-todo F-5.1: group the read-modify-write cycle
 	// (concept_states + interaction + pedagogical_snapshot) under a
 	// serializable transaction. Without this, concurrent record_interaction
@@ -84,7 +91,7 @@ func applyInteraction(
 		// first-touch interactions on a brand-new (learner, concept) serialize
 		// on Postgres instead of both bootstrapping and one overwriting the
 		// other (lost update). On SQLite the materialize is a cheap no-op.
-		cs, err := s.GetOrCreateConceptStateForUpdate(ctx, learnerID, input.Concept)
+		cs, err := s.GetOrCreateConceptStateForUpdateInDomain(ctx, learnerID, input.DomainID, input.Concept)
 		if err != nil {
 			return fmt.Errorf("load concept state: %w", err)
 		}
@@ -125,12 +132,11 @@ func applyInteraction(
 			PSlip:    priorPSlip,
 			PGuess:   priorPGuess,
 		}
-		recentForBKT, err := s.GetRecentInteractions(ctx, learnerID, input.Concept, 20)
+		recentForBKT, err := s.GetRecentInteractionsInDomain(ctx, learnerID, input.DomainID, input.Concept, 20)
 		if err != nil {
 			deps.Logger.Warn("applyInteraction: individualized BKT profile unavailable", "err", err, "learner", learnerID, "concept", input.Concept)
 			recentForBKT = nil
 		}
-		recentForBKT = filterInteractionsByDomainID(recentForBKT, input.DomainID)
 		bktProfile := buildIndividualBKTProfile(recentForBKT, priorStability)
 		bktResult := algorithms.BKTUpdateIndividualized(bktState, bktProfile, input.Success, input.ErrorType)
 		bktState = bktResult.State
@@ -259,6 +265,22 @@ func applyInteraction(
 	}
 
 	return resultCS, resultMeta, nil
+}
+
+func isCognitiveEvidenceActivity(activityType string) bool {
+	switch models.ActivityType(activityType) {
+	case models.ActivityRecall,
+		models.ActivityNewConcept,
+		models.ActivityMasteryChallenge,
+		models.ActivityDebuggingCase,
+		models.ActivityPractice,
+		models.ActivityDebugMisconception,
+		models.ActivityFeynmanPrompt,
+		models.ActivityTransferProbe:
+		return true
+	default:
+		return false
+	}
 }
 
 func structuredObservation(input interactionInput) map[string]any {

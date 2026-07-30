@@ -20,6 +20,7 @@ type Learner struct {
 type ConceptState struct {
 	ID            int64
 	LearnerID     string
+	DomainID      string
 	Concept       string
 	Stability     float64
 	Difficulty    float64
@@ -40,8 +41,17 @@ type ConceptState struct {
 }
 
 func NewConceptState(learnerID, concept string) *ConceptState {
+	return NewConceptStateInDomain(learnerID, "", concept)
+}
+
+// NewConceptStateInDomain creates a cognitive state whose identity is scoped
+// to one learning domain. Concept labels are intentionally only unique inside
+// a domain; using DomainID here prevents common labels such as "functions" or
+// "probability" from sharing BKT/FSRS/IRT state across unrelated subjects.
+func NewConceptStateInDomain(learnerID, domainID, concept string) *ConceptState {
 	return &ConceptState{
 		LearnerID:  learnerID,
+		DomainID:   domainID,
 		Concept:    concept,
 		Stability:  1.0,
 		Difficulty: 0.3,

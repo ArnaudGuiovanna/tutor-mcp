@@ -61,12 +61,31 @@ func registerCalibrationCheck(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
+		domain, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
+		if err != nil || domain == nil {
+			if params.DomainID != "" {
+				r, _ := errorResult("domain not found")
+				return r, nil, nil
+			}
+			r, payload := noActiveDomainResult()
+			return r, payload, nil
+		}
+		if err := validateConceptInDomain(domain, concept); err != nil {
+			r, _ := errorResult(err.Error())
+			return r, nil, nil
+		}
+
 		predicted := (params.PredictedMastery - 1.0) / 4.0
 
-		predictionID := generatePredictionID()
+		predictionID, err := generatePredictionID()
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to create calibration identifier", err)
+			return r, nil, nil
+		}
 		record := &models.CalibrationRecord{
 			PredictionID: predictionID,
 			LearnerID:    learnerID,
+			DomainID:     domain.ID,
 			ConceptID:    concept,
 			Predicted:    predicted,
 		}
@@ -83,6 +102,7 @@ func registerCalibrationCheck(server *mcp.Server, deps *Deps) {
 
 		r, _ := jsonResult(map[string]interface{}{
 			"prediction_id": predictionID,
+			"domain_id":     domain.ID,
 			"prompt_text":   promptText,
 		})
 		return r, nil, nil
@@ -136,18 +156,25 @@ func registerRecordCalibrationResult(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		bias, _ := deps.Store.GetCalibrationBias(ctx, learnerID, 20)
+		bias, err := deps.Store.GetCalibrationBiasInDomain(ctx, learnerID, record.DomainID, 20)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to read updated calibration bias", err)
+			return r, nil, nil
+		}
 
 		r, _ := jsonResult(map[string]interface{}{
 			"delta":                    delta,
+			"domain_id":                record.DomainID,
 			"calibration_bias_updated": bias,
 		})
 		return r, nil, nil
 	})
 }
 
-func generatePredictionID() string {
+func generatePredictionID() (string, error) {
 	b := make([]byte, 16)
-	rand.Read(b)
-	return "cal_" + base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(b)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate prediction id: %w", err)
+	}
+	return "cal_" + base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(b), nil
 }

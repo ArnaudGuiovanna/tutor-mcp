@@ -30,6 +30,44 @@ func TestRetrievability(t *testing.T) {
 	}
 }
 
+func TestCurrentElapsedDaysUsesLastReviewNotHistoricalElapsed(t *testing.T) {
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	lastReview := now.Add(-72 * time.Hour)
+
+	if got := CurrentElapsedDays(now, &lastReview); got != 3 {
+		t.Fatalf("CurrentElapsedDays() = %d, want 3", got)
+	}
+	if got := CurrentRetrievability(now, &lastReview, 2); !approxEqual(got, Retrievability(3, 2), 1e-12) {
+		t.Fatalf("CurrentRetrievability() = %f, want retention at age 3 days", got)
+	}
+}
+
+func TestCurrentElapsedDaysClampsMissingAndFutureReview(t *testing.T) {
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	future := now.Add(48 * time.Hour)
+
+	for name, lastReview := range map[string]*time.Time{
+		"missing": nil,
+		"future":  &future,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := CurrentElapsedDays(now, lastReview); got != 0 {
+				t.Fatalf("CurrentElapsedDays() = %d, want 0", got)
+			}
+			if got := CurrentRetrievability(now, lastReview, 2); got != 1 {
+				t.Fatalf("CurrentRetrievability() = %f, want 1", got)
+			}
+		})
+	}
+}
+
+func TestRetrievabilityClampsNegativeElapsedDays(t *testing.T) {
+	got := Retrievability(-30, 1)
+	if got != 1 || math.IsNaN(got) || math.IsInf(got, 0) {
+		t.Fatalf("Retrievability(-30, 1) = %f, want finite 1", got)
+	}
+}
+
 func TestInitialStability(t *testing.T) {
 	if s := InitialStability(Again); !approxEqual(s, defaultWeights[0], 0.001) {
 		t.Errorf("InitialStability(Again) = %f, want %f", s, defaultWeights[0])

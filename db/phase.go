@@ -53,14 +53,27 @@ func (s *Store) UpdateDomainPhase(ctx context.Context, domainID string, phase mo
 // recent interactions, see misconceptions.go). Returns empty map on
 // no matches; never nil.
 func (s *Store) GetActiveMisconceptionsBatch(ctx context.Context, learnerID string, concepts []string) (map[string]bool, error) {
+	return s.getActiveMisconceptionsBatch(ctx, learnerID, "", concepts, false)
+}
+
+func (s *Store) GetActiveMisconceptionsBatchInDomain(ctx context.Context, learnerID, domainID string, concepts []string) (map[string]bool, error) {
+	return s.getActiveMisconceptionsBatch(ctx, learnerID, domainID, concepts, true)
+}
+
+func (s *Store) getActiveMisconceptionsBatch(ctx context.Context, learnerID, domainID string, concepts []string, exactDomain bool) (map[string]bool, error) {
 	out := make(map[string]bool, len(concepts))
 	if len(concepts) == 0 {
 		return out, nil
 	}
 
 	placeholders := make([]string, 0, len(concepts))
-	args := make([]any, 0, len(concepts)+2)
+	args := make([]any, 0, len(concepts)+3)
 	args = append(args, learnerID)
+	domainClause := ""
+	if exactDomain {
+		domainClause = " AND domain_id = ?"
+		args = append(args, domainID)
+	}
 	for _, c := range concepts {
 		placeholders = append(placeholders, "?")
 		args = append(args, c)
@@ -73,7 +86,7 @@ func (s *Store) GetActiveMisconceptionsBatch(ctx context.Context, learnerID stri
 		    SELECT concept, misconception_type,
 		           ROW_NUMBER() OVER (PARTITION BY concept ORDER BY created_at DESC, id DESC) AS rn
 		    FROM interactions
-		    WHERE learner_id = ? AND concept IN (`+strings.Join(placeholders, ",")+`)
+		    WHERE learner_id = ?`+domainClause+` AND concept IN (`+strings.Join(placeholders, ",")+`)
 		 )
 		 WHERE rn <= ? AND misconception_type IS NOT NULL`,
 		args...,
@@ -100,6 +113,18 @@ func (s *Store) GetActiveMisconceptionsBatch(ctx context.Context, learnerID stri
 // SelectAction (which expects a single misconception, not a list).
 func (s *Store) GetFirstActiveMisconception(ctx context.Context, learnerID, concept string) (*models.MisconceptionGroup, error) {
 	groups, err := s.GetActiveMisconceptions(ctx, learnerID, concept)
+	if err != nil {
+		return nil, err
+	}
+	if len(groups) == 0 {
+		return nil, nil
+	}
+	first := groups[0]
+	return &first, nil
+}
+
+func (s *Store) GetFirstActiveMisconceptionInDomain(ctx context.Context, learnerID, domainID, concept string) (*models.MisconceptionGroup, error) {
+	groups, err := s.GetActiveMisconceptionsInDomain(ctx, learnerID, domainID, concept)
 	if err != nil {
 		return nil, err
 	}
@@ -160,6 +185,41 @@ func (s *Store) GetRecentConceptsByDomain(ctx context.Context, learnerID string,
 	return out, rows.Err()
 }
 
+// GetRecentConceptsInDomain uses the persisted interaction domain identity
+// instead of inferring membership from a label. This is the production
+// anti-repetition query; the legacy method above remains for old callers.
+func (s *Store) GetRecentConceptsInDomain(ctx context.Context, learnerID, domainID string, limit int) ([]string, error) {
+	if domainID == "" || limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.query(ctx,
+		`SELECT concept FROM interactions
+		 WHERE learner_id = ? AND domain_id = ?
+		 ORDER BY created_at DESC
+		 LIMIT ?`,
+		learnerID, domainID, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("recent domain concepts query: %w", err)
+	}
+	defer rows.Close()
+
+	seen := map[string]bool{}
+	var out []string
+	for rows.Next() {
+		var concept string
+		if err := rows.Scan(&concept); err != nil {
+			return nil, fmt.Errorf("scan domain concept: %w", err)
+		}
+		if seen[concept] {
+			continue
+		}
+		seen[concept] = true
+		out = append(out, concept)
+	}
+	return out, rows.Err()
+}
+
 // CountInteractionsSince returns the count of interactions for a
 // learner whose created_at is >= since. Used by [2] to count
 // diagnostic items lazily (interactions since phase_changed_at).
@@ -206,6 +266,19 @@ func (s *Store) CountInteractionsSince(ctx context.Context, learnerID string, si
 	return n, rows.Err()
 }
 
+func (s *Store) CountInteractionsSinceInDomain(ctx context.Context, learnerID, domainID string, since time.Time) (int, error) {
+	var count int
+	err := s.queryRow(ctx,
+		`SELECT COUNT(*) FROM interactions
+		 WHERE learner_id = ? AND domain_id = ? AND created_at >= ?`,
+		learnerID, domainID, since,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count domain interactions: %w", err)
+	}
+	return count, nil
+}
+
 // GetActionHistoryForConcept returns the rotation/streak counts for a
 // concept. The InteractionsAboveBKT field counts consecutive
 // successful interactions on the concept (strict success streak from
@@ -213,15 +286,29 @@ func (s *Store) CountInteractionsSince(ctx context.Context, learnerID string, si
 // mastery" since we don't snapshot historical PMastery values. The
 // proxy is sound when used after a successful BKT update push.
 func (s *Store) GetActionHistoryForConcept(ctx context.Context, learnerID, concept string, recentLimit int) (models.ActionHistoryCounts, error) {
+	return s.getActionHistoryForConcept(ctx, learnerID, "", concept, recentLimit, false)
+}
+
+func (s *Store) GetActionHistoryForConceptInDomain(ctx context.Context, learnerID, domainID, concept string, recentLimit int) (models.ActionHistoryCounts, error) {
+	return s.getActionHistoryForConcept(ctx, learnerID, domainID, concept, recentLimit, true)
+}
+
+func (s *Store) getActionHistoryForConcept(ctx context.Context, learnerID, domainID, concept string, recentLimit int, exactDomain bool) (models.ActionHistoryCounts, error) {
 	if recentLimit <= 0 {
 		recentLimit = 50
 	}
+	query := `SELECT activity_type, success FROM interactions
+		 WHERE learner_id = ? AND concept = ?`
+	args := []any{learnerID, concept}
+	if exactDomain {
+		query += ` AND domain_id = ?`
+		args = append(args, domainID)
+	}
+	query += ` ORDER BY created_at DESC LIMIT ?`
+	args = append(args, recentLimit)
 	rows, err := s.query(ctx,
-		`SELECT activity_type, success FROM interactions
-		 WHERE learner_id = ? AND concept = ?
-		 ORDER BY created_at DESC
-		 LIMIT ?`,
-		learnerID, concept, recentLimit,
+		query,
+		args...,
 	)
 	if err != nil {
 		return models.ActionHistoryCounts{}, fmt.Errorf("action history: %w", err)

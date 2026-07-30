@@ -1,5 +1,11 @@
 # GOAP — Phase 0 · Reconnaissance
 
+> **Archive historique — non normative.** Cette reconnaissance décrit le
+> routeur qui existait au moment de l'étude. `engine/router.go` et
+> `engine.Route` ont depuis été supprimés ; le runtime supporté utilise le
+> pipeline permanent de `engine/orchestrator.go`. Le code, les schémas des
+> outils MCP, `README.md` et `OPERATIONS.md` font foi.
+
 > Read-only audit of the existing routing layer in `tutor-mcp`, performed
 > before any GOAP design or implementation work. Scope: map what exists,
 > identify boundaries, surface frictions with the GOAP-réactif idea.

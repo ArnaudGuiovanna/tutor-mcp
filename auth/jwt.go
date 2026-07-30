@@ -7,7 +7,6 @@ package auth
 import (
 	"encoding/base64"
 	"fmt"
-	"log"
 	"os"
 	"time"
 
@@ -19,7 +18,7 @@ var jwtSecret []byte
 func LoadJWTSecret() error {
 	secret := os.Getenv("JWT_SECRET")
 	if secret == "" {
-		log.Fatal("JWT_SECRET env var required")
+		return fmt.Errorf("JWT_SECRET env var required")
 	}
 	decoded, err := base64.StdEncoding.DecodeString(secret)
 	if err != nil {

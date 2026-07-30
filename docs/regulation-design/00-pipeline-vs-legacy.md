@@ -1,5 +1,11 @@
 # Pipeline vs Legacy Router — Migration Mapping
 
+> **Historical design record — non-normative.** This document compares the
+> current pipeline with a transitional router and feature flag that have since
+> been removed. References to `engine/router.go`, `engine.Route`, and
+> `REGULATION_PHASE` describe past migration state. The supported runtime is
+> the always-on pipeline in `engine/orchestrator.go`.
+
 > Audit doc requested by issue #15. For each of the 7 priorities encoded
 > in the legacy `engine.Route` cascade (`engine/router.go`), this file
 > traces *where* the equivalent behaviour lives in the orchestrator

@@ -92,6 +92,13 @@ func TestLoadJWTSecret_PlainStringErrorMentionsOpenssl(t *testing.T) {
 	}
 }
 
+func TestLoadJWTSecret_MissingReturnsError(t *testing.T) {
+	t.Setenv("JWT_SECRET", "")
+	if err := LoadJWTSecret(); err == nil || !strings.Contains(err.Error(), "required") {
+		t.Fatalf("missing JWT_SECRET error = %v, want actionable required error", err)
+	}
+}
+
 func TestLoadJWTSecret_RejectsShortDecodedSecret(t *testing.T) {
 	// A 16-byte decoded secret is too weak for HS256 and must be rejected,
 	// even though it is valid base64 — see finding #6.

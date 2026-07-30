@@ -86,6 +86,7 @@ func learnerInteract(t *testing.T, store *db.Store, concept string, success bool
 		cs.Stability = 30
 		cs.ElapsedDays = 1
 	}
+	cs.LastReview = &when
 	if err := store.UpsertConceptState(context.Background(), cs); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
@@ -94,9 +95,9 @@ func learnerInteract(t *testing.T, store *db.Store, concept string, success bool
 		successInt = 1
 	}
 	_, err = store.RawDB().Exec(
-		`INSERT INTO interactions (learner_id, concept, activity_type, success, response_time, confidence, error_type, notes, hints_requested, self_initiated, calibration_id, is_proactive_review, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, '', '', 0, 0, '', 0, ?)`,
-		"L1", concept, "PRACTICE", successInt, 1000, 0.7, when,
+		`INSERT INTO interactions (learner_id, domain_id, concept, activity_type, success, response_time, confidence, error_type, notes, hints_requested, self_initiated, calibration_id, is_proactive_review, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, '', '', 0, 0, '', 0, ?)`,
+		"L1", cs.DomainID, concept, "PRACTICE", successInt, 1000, 0.7, when,
 	)
 	if err != nil {
 		t.Fatalf("insert interaction: %v", err)
@@ -153,6 +154,11 @@ func runE2ESimulation(
 		// Call Orchestrate.
 		input := defaultInput(domainID)
 		input.Now = now
+		// Each loop iteration models a distinct tutoring session. Keeping the
+		// first interaction as one shared session start would make the injected
+		// clock correctly trigger OVERLOAD after 45 minutes and mask the phase
+		// transitions this harness is intended to exercise.
+		input.SessionStart = now
 		input.Config = cfg
 		activity, err := Orchestrate(context.Background(), store, input)
 		if err != nil {
@@ -189,7 +195,7 @@ func runE2ESimulation(
 			StatesList:      states,
 			StatesByConcept: sm,
 			GoalRelevance:   goalRelevance,
-		}, cfg)
+		}, cfg, now)
 
 		// Run learner on the chosen concept (if any).
 		correct := false

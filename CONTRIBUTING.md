@@ -36,7 +36,7 @@ Open an issue using the **Feature request** template. Describe the user-facing p
    go vet ./...
    go test ./...
    ```
-   All three must pass. There is no CI in this repo.
+   All three must pass. GitHub Actions repeats vet, race-enabled tests, cross-platform builds, a real PostgreSQL DB suite, and a blocking vulnerability scan.
 5. **Open the PR against `staging`** (not `main`). Fill in the PR template.
 6. **Be responsive to review**. Small revisions usually land within a few days.
 
@@ -52,6 +52,10 @@ Open an issue using the **Feature request** template. Describe the user-facing p
 
 - New behavior requires a regression test that fails on `staging` without the fix and passes with it. PR descriptions should state this explicitly.
 - Use the existing in-memory SQLite helpers (`setupToolsTest`, `setupCalibTest`, …) rather than inventing new ones.
+- For storage changes, run the DB suite on PostgreSQL as well when available:
+  ```bash
+  TUTOR_TEST_PG_DSN='postgres://tutor:dev@localhost:5432/tutor_test?sslmode=disable' go test -race -count=1 ./db
+  ```
 - Avoid mocks where a real in-memory store works.
 
 ### Documentation
@@ -70,7 +74,8 @@ Open an issue using the **Feature request** template. Describe the user-facing p
 
 ## What's out of scope
 
-- Switching the storage layer (the project is intentionally SQLite + single-node)
+- Replacing the supported SQLite single-node MVP profile without an explicit migration and operations design
+- Presenting the experimental PostgreSQL/multi-node profile as production-ready before shared memory, crash recovery, and an outbox delivery design exist
 - Adding a non-chat surface (iframe, web UI, mobile app)
 - Vendoring the LLM (the runtime never embeds a model — the LLM stays the LLM)
 - New algorithms without a published reference (BKT/FSRS/IRT/PFA/KST follow specific papers — additions need the same rigor)

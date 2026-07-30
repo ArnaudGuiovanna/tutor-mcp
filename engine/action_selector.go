@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"math"
 	"sync/atomic"
+	"time"
 
 	"tutor-mcp/algorithms"
 	"tutor-mcp/models"
@@ -126,6 +127,13 @@ func NaNFallbackCount() int64 {
 // vs unified profile (REGULATION_THRESHOLD) is honoured — no literal
 // 0.85 in this file (drift test of [7] guards that).
 func SelectAction(concept string, cs *models.ConceptState, mc *models.MisconceptionGroup, history ActionHistory) Action {
+	return SelectActionAt(concept, cs, mc, history, time.Now().UTC())
+}
+
+// SelectActionAt is the clock-injected action decision used by the runtime.
+// Retention is derived from the card's current age (now - LastReview), not
+// from FSRS ElapsedDays, which records the interval before the last review.
+func SelectActionAt(concept string, cs *models.ConceptState, mc *models.MisconceptionGroup, history ActionHistory, now time.Time) Action {
 	// (1) NaN / nil guard — OQ-5.6 = B. Logged at ERROR (not WARN) to
 	// surface corruption explicitly; counter incremented for sampling.
 	if cs == nil {
@@ -162,7 +170,7 @@ func SelectAction(concept string, cs *models.ConceptState, mc *models.Misconcept
 	// so Retrievability is uninformative (cf. engine/alert.go which
 	// excludes new cards from FORGETTING).
 	if cs.CardState != "new" {
-		retention := algorithms.Retrievability(cs.ElapsedDays, cs.Stability)
+		retention := algorithms.CurrentRetrievability(now, cs.LastReview, cs.Stability)
 		if retention < algorithms.RetentionRecallRoutingThreshold {
 			return Action{
 				Type:             models.ActivityRecall,

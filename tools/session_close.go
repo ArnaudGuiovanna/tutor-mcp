@@ -76,9 +76,12 @@ func registerRecordSessionClose(server *mcp.Server, deps *Deps) {
 			}
 			var scheduled time.Time
 			if params.ImplementationIntention.ScheduledFor != "" {
-				if parsed, perr := time.Parse(time.RFC3339, params.ImplementationIntention.ScheduledFor); perr == nil {
-					scheduled = parsed
+				parsed, parseErr := time.Parse(time.RFC3339, params.ImplementationIntention.ScheduledFor)
+				if parseErr != nil {
+					r, _ := errorResult("implementation_intention.scheduled_for must be RFC3339")
+					return r, nil, nil
 				}
+				scheduled = parsed
 			}
 			if _, err := deps.Store.InsertImplementationIntention(ctx,
 				learnerID, domain.ID,
@@ -86,11 +89,16 @@ func registerRecordSessionClose(server *mcp.Server, deps *Deps) {
 				params.ImplementationIntention.Action,
 				scheduled,
 			); err != nil {
-				deps.Logger.Error("record_session_close: insert intention failed", "err", err, "learner", learnerID)
+				r, _ := safeErrorResult(deps.Logger, "failed to record implementation intention", err)
+				return r, nil, nil
 			}
 		}
 
-		recap := buildRecapBrief(ctx, deps, learnerID, domain)
+		recap, err := buildRecapBrief(ctx, deps, learnerID, domain)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to build session recap", err)
+			return r, nil, nil
+		}
 		payload := map[string]any{"recap_brief": recap}
 		if memory.Enabled() {
 			payload["summary_request"] = map[string]any{
@@ -108,13 +116,16 @@ func registerRecordSessionClose(server *mcp.Server, deps *Deps) {
 }
 
 // buildRecapBrief produces session-close signals for Claude.
-func buildRecapBrief(ctx context.Context, deps *Deps, learnerID string, domain *models.Domain) *models.RecapBrief {
+func buildRecapBrief(ctx context.Context, deps *Deps, learnerID string, domain *models.Domain) (*models.RecapBrief, error) {
 	domainSet := make(map[string]bool, len(domain.Graph.Concepts))
 	for _, c := range domain.Graph.Concepts {
 		domainSet[c] = true
 	}
 
-	sessionInteractions, _ := deps.Store.GetSessionInteractions(ctx, learnerID)
+	sessionInteractions, err := deps.Store.GetSessionInteractionsInDomain(ctx, learnerID, domain.ID)
+	if err != nil {
+		return nil, fmt.Errorf("load session interactions: %w", err)
+	}
 
 	practicedSet := map[string]bool{}
 	winsSet := map[string]bool{}
@@ -143,7 +154,10 @@ func buildRecapBrief(ctx context.Context, deps *Deps, learnerID string, domain *
 	}
 
 	// Next scheduled review — earliest next_review across domain states.
-	states, _ := deps.Store.GetConceptStatesByLearner(ctx, learnerID)
+	states, err := deps.Store.GetConceptStatesByDomain(ctx, learnerID, domain.ID)
+	if err != nil {
+		return nil, fmt.Errorf("load domain states: %w", err)
+	}
 	var next string
 	var earliest time.Time
 	for _, cs := range states {
@@ -157,7 +171,10 @@ func buildRecapBrief(ctx context.Context, deps *Deps, learnerID string, domain *
 	}
 
 	// Prompt for implementation intention if none recorded in last 7 days for any domain.
-	has, _ := deps.Store.HasRecentImplementationIntention(ctx, learnerID, "", time.Now().UTC().Add(-7*24*time.Hour))
+	has, err := deps.Store.HasRecentImplementationIntention(ctx, learnerID, "", time.Now().UTC().Add(-7*24*time.Hour))
+	if err != nil {
+		return nil, fmt.Errorf("load recent implementation intentions: %w", err)
+	}
 	promptIntent := !has
 
 	instruction := "Close the session in 2-3 sentences. Mention a tangible win or a good attempt. " +
@@ -176,7 +193,7 @@ func buildRecapBrief(ctx context.Context, deps *Deps, learnerID string, domain *
 		NextScheduledReview:           next,
 		PromptForImplementationIntent: promptIntent,
 		Instruction:                   instruction,
-	}
+	}, nil
 }
 
 func mapKeys(m map[string]bool) []string {

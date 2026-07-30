@@ -32,7 +32,7 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 			"When to call: this is the main tool of the learning cycle; it already includes alert-aware routing, metacognitive_mirror, tutor_mode and motivation_brief. " +
 			"When NOT to call: if another tool just returned needs_domain_setup=true (call init_domain first); do not call get_pending_alerts or get_metacognitive_mirror in the same turn unless the learner explicitly asks for those raw views. " +
 			"Precondition: a domain must exist; otherwise needs_domain_setup=true is returned with a setup_domain activity. " +
-			"Returns: {needs_domain_setup, domain_id, domain_name, intent, intent_status, activity, pedagogical_contract, consolidation_request, goal_relevance_status, session_concepts_done, metacognitive_mirror, tutor_mode, active_misconceptions, known_misconception_types, motivation_brief, mastery_evidence, mastery_uncertainty, transfer_profile, rasch_elo_calibration}.",
+			"Returns: {needs_domain_setup, domain_id, domain_name, intent, intent_status, activity, pedagogical_contract, consolidation_request, goal_relevance_status, session_concepts_done, metacognitive_mirror, tutor_mode, active_misconceptions, known_misconception_types, motivation_brief, mastery_evidence, mastery_uncertainty, transfer_profile, rasch_elo_calibration, degraded_components?}.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params GetNextActivityParams) (*mcp.CallToolResult, any, error) {
 		totalStart := time.Now()
 		learnerID, err := getLearnerID(ctx)
@@ -86,12 +86,31 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 		}
 
 		prefetchStart := time.Now()
-		states, _ := deps.Store.GetConceptStatesByLearner(ctx, learnerID)
-		interactions, _ := deps.Store.GetRecentInteractionsByLearner(ctx, learnerID, engine.DefaultRecentInteractionsWindow)
-		sessionStart, _ := deps.Store.GetSessionStart(ctx, learnerID)
+		now := time.Now().UTC()
+		states, err := deps.Store.GetConceptStatesByDomain(ctx, learnerID, domain.ID)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to load concept states", err)
+			return r, nil, nil
+		}
+		interactions, err := deps.Store.GetRecentInteractionsByDomain(
+			ctx, learnerID, domain.ID, engine.DefaultRecentInteractionsWindow,
+		)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to load recent interactions", err)
+			return r, nil, nil
+		}
+		sessionStart, err := deps.Store.GetSessionStart(ctx, learnerID)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to load session state", err)
+			return r, nil, nil
+		}
 
 		// Get session interactions to track what was already practiced
-		sessionInteractions, _ := deps.Store.GetSessionInteractions(ctx, learnerID)
+		sessionInteractions, err := deps.Store.GetSessionInteractionsInDomain(ctx, learnerID, domain.ID)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to load session interactions", err)
+			return r, nil, nil
+		}
 
 		// Filter states to only those in the current domain
 		domainConcepts := make(map[string]bool)
@@ -114,7 +133,7 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 		}
 
 		// Compute alerts (only for domain concepts)
-		alerts := engine.ComputeAlerts(domainStates, domainInteractions, sessionStart)
+		alerts := engine.ComputeAlertsAt(domainStates, domainInteractions, sessionStart, now)
 
 		// Build set of concepts already practiced in this session
 		sessionConcepts := make(map[string]int)
@@ -125,6 +144,12 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 		}
 		prefetchMs := time.Since(prefetchStart).Milliseconds()
 		extra := map[string]any{}
+		var degradedComponents []string
+		markDegraded := func(component string, err error) {
+			degradedComponents = append(degradedComponents, component)
+			deps.Logger.Warn("get_next_activity: optional component degraded",
+				"component", component, "err", err, "learner", learnerID, "domain", domain.ID)
+		}
 
 		// Route to next activity through the regulation pipeline, or through
 		// the explicit review override when the learner asks to revise.
@@ -134,7 +159,6 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 		var orchErr error
 		intentStatus := "auto"
 		route := "orchestrator"
-		now := time.Now().UTC()
 		input := engine.OrchestratorInput{
 			LearnerID:    learnerID,
 			DomainID:     domain.ID,
@@ -161,8 +185,13 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 		pushSince := now.Add(-7 * 24 * time.Hour)
-		activeWebhookNudge, _ := deps.Store.GetLatestOpenWebhookPush(ctx, learnerID, domain.ID, pushSince)
-		_ = deps.Store.MarkWebhookPushSessionOpened(ctx, learnerID, now, pushSince)
+		activeWebhookNudge, err := deps.Store.GetLatestOpenWebhookPush(ctx, learnerID, domain.ID, pushSince)
+		if err != nil {
+			markDegraded("active_webhook_nudge", err)
+		}
+		if err := deps.Store.MarkWebhookPushSessionOpened(ctx, learnerID, now, pushSince); err != nil {
+			markDegraded("webhook_session_tracking", err)
+		}
 		if activeWebhookNudge != nil {
 			extra["active_webhook_nudge"] = activeWebhookNudge
 			if activeWebhookNudge.OpenLoop != "" || activeWebhookNudge.NextAction != "" {
@@ -175,7 +204,7 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 		}
 		overrideResult := LearningNegotiationOverrideConsumeResult{Status: LearningNegotiationOverrideConsumeNone}
 		if overrideActivity, consumed, err := ConsumeLearningNegotiationOverride(ctx, deps.Store, learnerID, domain, activity, alerts, now); err != nil {
-			deps.Logger.Warn("get_next_activity: learning negotiation override consume failed", "err", err, "learner", learnerID, "domain", domain.ID)
+			markDegraded("learning_negotiation_override", err)
 		} else {
 			overrideResult = consumed
 			if consumed.Status == LearningNegotiationOverrideConsumeConsumed {
@@ -186,21 +215,10 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 
 		// Pipeline decision audit — one line per get_next_activity call.
 		// Phase comes straight from the orchestrator (any FSM transition
-		// or NoFringe fallback already applied).
-		//
-		// Divergence note (perf #91): the logged phase reflects the
-		// orchestrator's in-memory currentPhase at the moment the
-		// activity was returned. On the rare path where
-		// store.UpdateDomainPhase fails inside the orchestrator (logged
-		// at ERROR there — see engine/orchestrator.go around the
-		// "failed to persist phase transition" / "failed to persist
-		// NoFringe fallback transition" branches), the persisted DB
-		// phase may lag this logged value by one transition. That's an
-		// accepted trade-off for an audit log: the goal here is to
-		// record the *phase decision* tied to the activity that was
-		// actually returned, not the storage outcome. Storage failures
-		// are surfaced via their own ERROR log line in the orchestrator
-		// and don't block the live activity.
+		// or NoFringe fallback already applied and persisted). The
+		// orchestrator now fails the tool call if a transition cannot be
+		// stored, so this audit line cannot describe a phase that diverges
+		// from the database.
 		loggedPhase := "INSTRUCTION" // orchestrator's NULL fallback
 		if orchPhase != "" {
 			loggedPhase = string(orchPhase)
@@ -221,9 +239,21 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 		// Metacognitive mirror
 		mirrorStart := time.Now()
 		since := time.Now().UTC().Add(-7 * 24 * time.Hour)
-		allInteractions, _ := deps.Store.GetInteractionsSince(ctx, learnerID, since)
-		calibBias, _ := deps.Store.GetCalibrationBias(ctx, learnerID, 20)
-		affects, _ := deps.Store.GetRecentAffectStates(ctx, learnerID, 10)
+		allInteractions, err := deps.Store.GetInteractionsSinceInDomain(ctx, learnerID, domain.ID, since)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to load metacognitive interactions", err)
+			return r, nil, nil
+		}
+		calibBias, err := deps.Store.GetCalibrationBiasInDomain(ctx, learnerID, domain.ID, 20)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to load calibration state", err)
+			return r, nil, nil
+		}
+		affects, err := deps.Store.GetRecentAffectStates(ctx, learnerID, 10)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to load affect state", err)
+			return r, nil, nil
+		}
 
 		var autonomyScores []float64
 		for _, a := range affects {
@@ -289,7 +319,9 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 		activeMisconceptionCount := 0
 
 		if activity.Concept != "" {
-			if active, err := deps.Store.GetActiveMisconceptions(ctx, learnerID, activity.Concept); err == nil && len(active) > 0 {
+			if active, err := deps.Store.GetActiveMisconceptionsInDomain(ctx, learnerID, domain.ID, activity.Concept); err != nil {
+				markDegraded("active_misconceptions", err)
+			} else if len(active) > 0 {
 				activeMisconceptions = active
 				activeMisconceptionCount = len(active)
 
@@ -308,7 +340,9 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 				activity.PromptForLLM += misconceptionPrompt
 			}
 
-			if types, err := deps.Store.GetDistinctMisconceptionTypes(ctx, learnerID, activity.Concept); err == nil && len(types) > 0 {
+			if types, err := deps.Store.GetDistinctMisconceptionTypesInDomain(ctx, learnerID, domain.ID, activity.Concept); err != nil {
+				markDegraded("known_misconception_types", err)
+			} else if len(types) > 0 {
 				knownMisconceptionTypes = types
 			}
 		}
@@ -325,10 +359,13 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 			}
 		}
 		motivationEngine := engine.NewMotivationEngine(deps.Store)
-		motivationBrief, _ := motivationEngine.Build(
+		motivationBrief, motivationErr := motivationEngine.Build(
 			ctx, learnerID, domain, activity.Concept, activity.Type,
 			plateauActive, len(sessionConcepts),
 		)
+		if motivationErr != nil {
+			markDegraded("motivation_brief", motivationErr)
+		}
 		motivationMs := time.Since(motivationStart).Milliseconds()
 
 		// [6] FadeController — post-decision module gated on
@@ -370,11 +407,10 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 					break
 				}
 			}
-			conceptInteractions, err := deps.Store.GetRecentInteractions(ctx, learnerID, activity.Concept, 50)
+			conceptInteractions, err := deps.Store.GetRecentInteractionsInDomain(ctx, learnerID, domain.ID, activity.Concept, 50)
 			if err != nil {
-				deps.Logger.Warn("get_next_activity: mastery diagnostics fetch failed", "err", err, "learner", learnerID, "concept", activity.Concept)
+				markDegraded("mastery_diagnostics", err)
 			} else {
-				conceptInteractions = filterInteractionsByDomainID(conceptInteractions, domain.ID)
 				now := time.Now().UTC()
 				profile := engine.BuildEvidenceProfile(learnerID, activity.Concept, conceptInteractions, now)
 				evidenceQuality = engine.MasteryEvidenceQuality(profile)
@@ -389,8 +425,8 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 				raschState := algorithms.NewRaschEloState(selectedState.Theta, algorithms.FSRSDifficultyToIRT(selectedState.Difficulty))
 				raschEloCalibration = raschEloStateSnapshot(raschState)
 			}
-			if transferRecords, err := deps.Store.GetTransferScores(ctx, learnerID, activity.Concept); err != nil {
-				deps.Logger.Warn("get_next_activity: transfer diagnostics fetch failed", "err", err, "learner", learnerID, "concept", activity.Concept)
+			if transferRecords, err := deps.Store.GetTransferScoresInDomain(ctx, learnerID, domain.ID, activity.Concept); err != nil {
+				markDegraded("transfer_diagnostics", err)
 			} else {
 				typedTransferProfile = engine.BuildTransferProfile(activity.Concept, transferRecords)
 				transferProfile = typedTransferProfile
@@ -405,7 +441,9 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 		}); decision.Adjusted {
 			activity = decision.Activity
 			extra["evidence_adjustment"] = decision.Rationale
-			if active, err := deps.Store.GetActiveMisconceptions(ctx, learnerID, activity.Concept); err == nil && len(active) > 0 {
+			if active, err := deps.Store.GetActiveMisconceptionsInDomain(ctx, learnerID, domain.ID, activity.Concept); err != nil {
+				markDegraded("adjusted_activity_misconceptions", err)
+			} else if len(active) > 0 {
 				activeMisconceptions = active
 				activeMisconceptionCount = len(active)
 				misconceptionPrompt := fmt.Sprintf("\nWARNING: the learner has %d active misconception(s): ", len(active))
@@ -423,8 +461,11 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 			}
 		}
 		diagnosticsMs := time.Since(diagnosticsStart).Milliseconds()
+		if len(degradedComponents) > 0 {
+			extra["degraded_components"] = degradedComponents
+		}
 		goalRelevanceStatus := buildGoalRelevanceStatus(domain)
-		episodicContext, olmSnapshot := loadEpisodicContextForActivity(ctx, deps, learnerID, domain, domainStates, activity.Concept, alerts)
+		episodicContext, olmSnapshot := loadEpisodicContextForActivity(ctx, deps, learnerID, domain, domainStates, activity.Concept, alerts, now)
 		contract := buildPedagogicalContract(activity, intent, evidenceQuality, uncertainty, typedTransferProfile, goalRelevanceStatus, extra["fade_params"], episodicContext, activeMisconceptionCount, olmSnapshot)
 
 		out := map[string]any{
@@ -529,12 +570,13 @@ func loadEpisodicContextForActivity(
 	domainStates []*models.ConceptState,
 	focusConcept string,
 	alerts []models.Alert,
+	now time.Time,
 ) (*memory.EpisodicContext, *engine.OLMSnapshot) {
 	if !memory.Enabled() {
 		return nil, nil
 	}
 	var olmSnapshot *engine.OLMSnapshot
-	if snap, err := engine.BuildOLMSnapshot(ctx, deps.Store, learnerID, domain.ID); err == nil {
+	if snap, err := engine.BuildOLMSnapshotAt(ctx, deps.Store, learnerID, domain.ID, now); err == nil {
 		olmSnapshot = snap
 	} else if deps.Logger != nil {
 		deps.Logger.Warn("get_next_activity: OLM snapshot for memory context failed", "err", err, "learner", learnerID, "domain", domain.ID)

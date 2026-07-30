@@ -12,6 +12,7 @@ import (
 
 	"tutor-mcp/engine"
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -302,35 +303,42 @@ func registerInitDomain(server *mcp.Server, deps *Deps) {
 			}
 		}
 
-		domain, err := deps.Store.CreateDomainWithValueFramings(ctx, learnerID, params.Name, params.PersonalGoal, graph, valueFramingsJSON)
+		var domain *models.Domain
+		err = deps.Store.WithTx(ctx, func(tx storeport.Store) error {
+			var createErr error
+			domain, createErr = tx.CreateDomainWithValueFramings(
+				ctx, learnerID, params.Name, params.PersonalGoal, graph, valueFramingsJSON,
+			)
+			if createErr != nil {
+				return fmt.Errorf("create domain: %w", createErr)
+			}
+
+			for _, concept := range params.Concepts {
+				cs := models.NewConceptStateInDomain(learnerID, domain.ID, concept)
+				if err := tx.InsertConceptStateIfNotExists(ctx, cs); err != nil {
+					return fmt.Errorf("initialize concept %q: %w", concept, err)
+				}
+			}
+
+			// Initial phase is part of the same atomic unit: callers never
+			// observe a half-created graph or a NULL fallback phase.
+			states, err := tx.GetConceptStatesByDomain(ctx, learnerID, domain.ID)
+			if err != nil {
+				return fmt.Errorf("load initialized concept states: %w", err)
+			}
+			stateMap := make(map[string]*models.ConceptState, len(states))
+			for _, cs := range states {
+				stateMap[cs.Concept] = cs
+			}
+			entryEntropy := engine.MeanBinaryEntropyOverGraph(domain.Graph, stateMap)
+			if err := tx.UpdateDomainPhase(ctx, domain.ID, models.PhaseDiagnostic, entryEntropy, time.Now().UTC()); err != nil {
+				return fmt.Errorf("initialize domain phase: %w", err)
+			}
+			return nil
+		})
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to create domain", err)
 			return r, nil, nil
-		}
-
-		// Initialize ConceptState for each concept — INSERT OR IGNORE preserves existing progress
-		for _, concept := range params.Concepts {
-			cs := models.NewConceptState(learnerID, concept)
-			if err := deps.Store.InsertConceptStateIfNotExists(ctx, cs); err != nil {
-				r, _ := safeErrorResult(deps.Logger, fmt.Sprintf("failed to initialize concept %s", concept), err)
-				return r, nil, nil
-			}
-		}
-
-		// [2] PhaseController — initialises the domain in DIAGNOSTIC.
-		// The concept_states were just created at PMastery=0.1 —
-		// the entry entropy is now computable.
-		states, _ := deps.Store.GetConceptStatesByLearner(ctx, learnerID)
-		stateMap := map[string]*models.ConceptState{}
-		for _, cs := range states {
-			stateMap[cs.Concept] = cs
-		}
-		entryEntropy := engine.MeanBinaryEntropyOverGraph(domain.Graph, stateMap)
-		if err := deps.Store.UpdateDomainPhase(ctx, domain.ID, models.PhaseDiagnostic, entryEntropy, time.Now().UTC()); err != nil {
-			deps.Logger.Error("init_domain: failed to set initial phase",
-				"err", err, "domain", domain.ID)
-			// Non-fatal: domain stays in phase NULL → INSTRUCTION
-			// fallback. Regulation continues to work.
 		}
 
 		response := map[string]interface{}{
@@ -435,19 +443,23 @@ func registerAddConcepts(server *mcp.Server, deps *Deps) {
 		}
 		domain.Graph = candidateGraph
 
-		// Persist updated graph
-		if err := deps.Store.UpdateDomainGraph(ctx, domain.ID, domain.Graph); err != nil {
-			r, _ := safeErrorResult(deps.Logger, "failed to update domain graph", err)
-			return r, nil, nil
-		}
-
-		// Initialize concept states for new concepts only (INSERT OR IGNORE)
-		for _, concept := range params.Concepts {
-			cs := models.NewConceptState(learnerID, concept)
-			if err := deps.Store.InsertConceptStateIfNotExists(ctx, cs); err != nil {
-				r, _ := safeErrorResult(deps.Logger, fmt.Sprintf("failed to initialize concept %s", concept), err)
-				return r, nil, nil
+		// Graph and cognitive-state creation are one atomic unit. A failed
+		// concept insert cannot leave a graph that references a missing state.
+		err = deps.Store.WithTx(ctx, func(tx storeport.Store) error {
+			if err := tx.UpdateDomainGraph(ctx, domain.ID, domain.Graph); err != nil {
+				return fmt.Errorf("update domain graph: %w", err)
 			}
+			for _, concept := range params.Concepts {
+				cs := models.NewConceptStateInDomain(learnerID, domain.ID, concept)
+				if err := tx.InsertConceptStateIfNotExists(ctx, cs); err != nil {
+					return fmt.Errorf("initialize concept %q: %w", concept, err)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to add concepts", err)
+			return r, nil, nil
 		}
 
 		response := map[string]interface{}{

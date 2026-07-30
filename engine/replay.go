@@ -96,22 +96,6 @@ type DecisionReplayConfig struct {
 
 type DecisionReplayOption func(*DecisionReplayConfig)
 
-func WithSuspiciousMasteryJump(threshold float64) DecisionReplayOption {
-	return func(c *DecisionReplayConfig) {
-		if isReplayUnitInterval(threshold) && threshold > 0 {
-			c.SuspiciousMasteryJump = threshold
-		}
-	}
-}
-
-func WithReplayMasteryThreshold(threshold float64) DecisionReplayOption {
-	return func(c *DecisionReplayConfig) {
-		if isReplayUnitInterval(threshold) {
-			c.MasteryThreshold = threshold
-		}
-	}
-}
-
 // BuildDecisionReplaySummary computes a pure offline replay summary. It never
 // fails on malformed snapshot JSON; malformed or non-object JSON is recorded in
 // SnapshotJSONIssues and the affected metric is skipped.

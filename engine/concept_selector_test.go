@@ -8,6 +8,7 @@ import (
 	"errors"
 	"math"
 	"testing"
+	"time"
 
 	"tutor-mcp/models"
 )
@@ -21,7 +22,15 @@ func reviewedCS(concept string, mastery float64) *models.ConceptState {
 	cs.CardState = "review"
 	cs.Stability = 30
 	cs.ElapsedDays = 1
+	lastReview := time.Now().UTC().Add(-24 * time.Hour)
+	cs.LastReview = &lastReview
 	return cs
+}
+
+func setConceptCardAge(cs *models.ConceptState, days int) {
+	cs.ElapsedDays = days
+	lastReview := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour)
+	cs.LastReview = &lastReview
 }
 
 func graphLinear(concepts ...string) models.KnowledgeSpace {
@@ -282,10 +291,10 @@ func TestSelectConcept_Instruction_NormalFringe_4Candidates(t *testing.T) {
 func TestSelectConcept_Maintenance_PicksLowestRetention(t *testing.T) {
 	csA := reviewedCS("A", 0.95)
 	csA.Stability = 30
-	csA.ElapsedDays = 1 // high retention
+	setConceptCardAge(csA, 1) // high retention
 	csB := reviewedCS("B", 0.95)
 	csB.Stability = 1
-	csB.ElapsedDays = 30 // low retention
+	setConceptCardAge(csB, 30) // low retention
 	gr := map[string]float64{"A": 1.0, "B": 1.0}
 	sel, _ := SelectConcept(models.PhaseMaintenance, []*models.ConceptState{csA, csB},
 		models.KnowledgeSpace{}, gr)
@@ -294,13 +303,43 @@ func TestSelectConcept_Maintenance_PicksLowestRetention(t *testing.T) {
 	}
 }
 
+func TestSelectConceptAt_MaintenanceUsesCurrentAgeNotHistoricalElapsedDays(t *testing.T) {
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	recentReview := now.Add(-2 * time.Hour)
+	oldReview := now.Add(-30 * 24 * time.Hour)
+
+	recent := reviewedCS("recent", 0.95)
+	recent.Stability = 1
+	recent.ElapsedDays = 90
+	recent.LastReview = &recentReview
+
+	stale := reviewedCS("stale", 0.95)
+	stale.Stability = 1
+	stale.ElapsedDays = 1
+	stale.LastReview = &oldReview
+
+	sel, err := SelectConceptAt(
+		models.PhaseMaintenance,
+		[]*models.ConceptState{recent, stale},
+		graphFlat("recent", "stale"),
+		map[string]float64{"recent": 1, "stale": 1},
+		now,
+	)
+	if err != nil {
+		t.Fatalf("SelectConceptAt: %v", err)
+	}
+	if sel.Concept != "stale" {
+		t.Fatalf("selected %q, want stale; historical ElapsedDays must not invert FSRS urgency", sel.Concept)
+	}
+}
+
 func TestSelectConcept_Maintenance_GoalRelevanceWeights(t *testing.T) {
 	csA := reviewedCS("A", 0.95)
 	csA.Stability = 1
-	csA.ElapsedDays = 30 // high urgency
+	setConceptCardAge(csA, 30) // high urgency
 	csB := reviewedCS("B", 0.95)
 	csB.Stability = 1
-	csB.ElapsedDays = 30 // same urgency
+	setConceptCardAge(csB, 30) // same urgency
 	// Higher relevance on B should tip.
 	gr := map[string]float64{"A": 0.1, "B": 0.9}
 	sel, _ := SelectConcept(models.PhaseMaintenance, []*models.ConceptState{csA, csB},
@@ -323,7 +362,7 @@ func TestSelectConcept_Maintenance_NewCardSkippedAsZeroUrgency(t *testing.T) {
 	csA.CardState = "new" // urgency=0
 	csB := reviewedCS("B", 0.95)
 	csB.Stability = 5
-	csB.ElapsedDays = 5 // urgency > 0
+	setConceptCardAge(csB, 5) // urgency > 0
 	gr := map[string]float64{"A": 1.0, "B": 1.0}
 	sel, _ := SelectConcept(models.PhaseMaintenance, []*models.ConceptState{csA, csB},
 		models.KnowledgeSpace{}, gr)
@@ -335,13 +374,13 @@ func TestSelectConcept_Maintenance_NewCardSkippedAsZeroUrgency(t *testing.T) {
 func TestSelectConcept_Maintenance_TieBreakAlphabetical(t *testing.T) {
 	csB := reviewedCS("beta", 0.95)
 	csB.Stability = 1
-	csB.ElapsedDays = 30
+	setConceptCardAge(csB, 30)
 	csA := reviewedCS("alpha", 0.95)
 	csA.Stability = 1
-	csA.ElapsedDays = 30
+	setConceptCardAge(csA, 30)
 	csC := reviewedCS("gamma", 0.95)
 	csC.Stability = 1
-	csC.ElapsedDays = 30
+	setConceptCardAge(csC, 30)
 	gr := map[string]float64{"alpha": 0.5, "beta": 0.5, "gamma": 0.5}
 	sel, _ := SelectConcept(models.PhaseMaintenance,
 		[]*models.ConceptState{csB, csA, csC}, models.KnowledgeSpace{}, gr)
@@ -365,10 +404,10 @@ func TestSelectConcept_Maintenance_FiltersByActiveDomainGraph(t *testing.T) {
 	// filter it would win over "a" (Stability=30, ElapsedDays=1).
 	csA := reviewedCS("a", 0.95)
 	csA.Stability = 30
-	csA.ElapsedDays = 1
+	setConceptCardAge(csA, 1)
 	csX := reviewedCS("x", 0.95)
 	csX.Stability = 1
-	csX.ElapsedDays = 30
+	setConceptCardAge(csX, 30)
 
 	activeGraph := graphFlat("a")
 
@@ -396,10 +435,10 @@ func TestSelectConcept_Maintenance_AllMasteredFromOtherDomain_NoFringe(t *testin
 	// DIAGNOSTIC case above.
 	csY := reviewedCS("y", 0.95)
 	csY.Stability = 1
-	csY.ElapsedDays = 30
+	setConceptCardAge(csY, 30)
 	csZ := reviewedCS("z", 0.95)
 	csZ.Stability = 1
-	csZ.ElapsedDays = 30
+	setConceptCardAge(csZ, 30)
 
 	activeGraph := graphFlat("a")
 

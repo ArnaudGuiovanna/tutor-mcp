@@ -1,47 +1,60 @@
-# Tutor MCP v0.4.0
+# Tutor MCP v0.4.1
 
-Tutor MCP v0.4.0 adds an **opt-in PostgreSQL backend** and **stateless
-multi-node operation**, so the runtime can scale horizontally beyond the
-single-node SQLite ceiling. SQLite stays the default — existing single-node
-deployments are unchanged and require no configuration.
+Tutor MCP v0.4.1 hardens the supported SQLite single-node profile into a
+robust MVP candidate. It fixes cross-domain learner-state collisions, stale
+retention decisions, OAuth replay races, fragile MCP streaming, concurrent
+narrative-memory writes, and several silent partial-failure paths.
 
 ## Highlights
 
-- **PostgreSQL backend (opt-in).** Set `DB_DRIVER=postgres` + `DATABASE_URL` to
-  run on Postgres via the pure-Go pgx driver (no CGO). The persistence layer was
-  inverted behind a `store.Store` port and a single conformance suite is
-  replayed against both backends, so behaviour stays equivalent. Dialect-aware
-  schema, `?`→`$N` rebind, RETURNING/ON CONFLICT, and `DB_MAX_CONNS` pool tuning.
-- **Stateless multi-node.** Run N instances behind a load balancer against a
-  shared Postgres:
-  - `SCHEDULER_MODE=distributed` — each scheduled run is leased in the DB, so a
-    job/nudge fires exactly once across the fleet.
-  - `RATELIMIT_BACKEND=postgres` — shared rate-limit and login-failure stores
-    for coherent fleet-wide throttling and brute-force lockout.
-  - `JWT_SECRET` shared across instances; concurrent cold-start migrations are
-    serialized with a Postgres advisory lock.
-- **Row-level write concurrency on Postgres.** The `record_interaction` hot path
-  uses `SELECT … FOR UPDATE` and the webhook queue uses `SKIP LOCKED` — the same
-  lost-update protection Postgres-side that `BEGIN IMMEDIATE` gives on SQLite.
+- **Domain-safe pedagogy.** Cognitive state, interactions, misconceptions,
+  calibration, and transfer evidence are scoped by learner and domain. Common
+  labels such as “functions” no longer share progress across unrelated topics.
+- **Correct evidence and retention.** FSRS uses the current age since
+  `LastReview`, and non-evidence activities cannot mutate BKT/FSRS/IRT state.
+- **OAuth and transport hardening.** Authorization codes are consumed
+  atomically, refresh tokens rotate transactionally and are stored hashed, and
+  Streamable HTTP/SSE keeps its streaming capabilities past ordinary HTTP
+  write deadlines.
+- **Durable single-node operation.** Narrative-memory updates are serialized
+  per learner path and synced around atomic rename. Invalid deployment modes
+  now fail at startup instead of silently degrading.
+- **Protocol-level acceptance coverage.** The official MCP Go client connects
+  to the authenticated production handler, fetches the tutor prompt, discovers
+  tools, and persists a full pedagogical evidence loop.
 
 ## Fixes
 
-- First-touch lost update on `concept_states` under concurrency on Postgres
-  (new `GetOrCreateConceptStateForUpdate` materializes the row before locking).
-- nil-pointer panic when a self-transacting method runs inside a `WithTx`
-  callback (new `inTx` composes onto the current transaction).
-- Postgres migration anti-drift guard: `MigratePostgres` records the schema
-  checksum and refuses to boot if `schema_pg.sql` drifted (SQLite parity).
-
-All three are covered by regression tests, green on real PostgreSQL and SQLite.
+- Ordered, checksummed SQLite and PostgreSQL migrations add domain identity and
+  conservatively backfill only unambiguous legacy evidence.
+- Domain creation and concept extension are atomic.
+- Required storage failures are returned explicitly; optional failed
+  enrichments are exposed as `degraded_components`.
+- The obsolete legacy activity router and unreachable helpers are removed.
+- CI runs PostgreSQL 17, the exact Go 1.25.12 toolchain, and a blocking pinned
+  vulnerability scan.
 
 ## Upgrading
 
-- **No action required for SQLite users** — `DB_DRIVER` defaults to `sqlite` and
-  behaviour is unchanged.
-- To adopt Postgres, see the multi-node runbook in
+- Back up the SQLite database and narrative-memory directory before upgrading.
+  Forward migrations run automatically at startup.
+- Existing plaintext refresh tokens remain usable until their next rotation or
+  expiry; newly issued tokens are stored hashed.
+- No configuration change is required for the supported SQLite single-node
+  profile.
+- PostgreSQL remains available for conformance and controlled experiments; see
   [`OPERATIONS.md`](OPERATIONS.md) and the configuration table in
   [`README.md`](README.md).
+
+## Boundaries
+
+- Multi-node operation remains experimental: narrative memory is local and
+  scheduler leases do not provide crash-safe exactly-once delivery.
+- Tutor MCP supplies deterministic state and routing; the connected LLM still
+  needs to load `tutor_mcp` and close the
+  `get_next_activity` → `record_interaction` loop.
+- The pedagogical models are auditable heuristics, not a claim of psychometric
+  or clinical validation.
 
 ## Operational Notes
 
@@ -57,7 +70,9 @@ curl -fsSL https://tutor-mcp.dev/install.sh | sh
 ## Validation
 
 - `go build ./...`
-- `go test ./...` (SQLite default and against a real PostgreSQL 17 via
-  `TUTOR_TEST_PG_DSN`)
+- `go test -count=1 ./...`
+- `go test -race -count=1 ./...`
+- PostgreSQL 17 DB suite with the race detector
+- `go vet`, `staticcheck`, `deadcode`, and `govulncheck`
 
 Full changelog: [`CHANGELOG.md`](CHANGELOG.md).

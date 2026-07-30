@@ -28,7 +28,8 @@ func TestCheckMastery_MissingConcept(t *testing.T) {
 }
 
 func TestCheckMastery_NotFound(t *testing.T) {
-	_, deps := setupToolsTest(t)
+	store, deps := setupToolsTest(t)
+	seedDomain(t, store, "L_owner", "ghost")
 	res := callTool(t, deps, registerCheckMastery, "L_owner", "check_mastery", map[string]any{"concept": "ghost"})
 	if !res.IsError || !strings.Contains(resultText(res), "concept state not found") {
 		t.Fatalf("got %q", resultText(res))
@@ -37,6 +38,7 @@ func TestCheckMastery_NotFound(t *testing.T) {
 
 func TestCheckMastery_NotReady(t *testing.T) {
 	store, deps := setupToolsTest(t)
+	seedDomain(t, store, "L_owner", "calc")
 	cs := models.NewConceptState("L_owner", "calc")
 	cs.PMastery = 0.4
 	if err := store.InsertConceptStateIfNotExists(context.Background(), cs); err != nil {
@@ -61,6 +63,7 @@ func TestCheckMastery_NotReady(t *testing.T) {
 
 func TestCheckMastery_Ready(t *testing.T) {
 	store, deps := setupToolsTest(t)
+	seedDomain(t, store, "L_owner", "calc")
 	cs := models.NewConceptState("L_owner", "calc")
 	cs.PMastery = 0.95
 	if err := store.InsertConceptStateIfNotExists(context.Background(), cs); err != nil {
@@ -103,6 +106,7 @@ func TestCheckMastery_Ready(t *testing.T) {
 
 func TestCheckMastery_AcceptsLegacyConceptID(t *testing.T) {
 	store, deps := setupToolsTest(t)
+	seedDomain(t, store, "L_owner", "legacy_calc")
 	cs := models.NewConceptState("L_owner", "legacy_calc")
 	cs.PMastery = 0.4
 	if err := store.InsertConceptStateIfNotExists(context.Background(), cs); err != nil {
@@ -124,6 +128,7 @@ func TestCheckMastery_AcceptsLegacyConceptID(t *testing.T) {
 
 func TestCheckMastery_HighBKTWeakEvidenceNotReady(t *testing.T) {
 	store, deps := setupToolsTest(t)
+	seedDomain(t, store, "L_owner", "calc")
 	cs := models.NewConceptState("L_owner", "calc")
 	cs.PMastery = 0.95
 	if err := store.UpsertConceptState(context.Background(), cs); err != nil {

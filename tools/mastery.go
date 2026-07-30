@@ -47,22 +47,23 @@ func registerCheckMastery(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		domainID := params.DomainID
-		if domainID != "" {
-			domain, err := resolveDomain(ctx, deps.Store, learnerID, domainID)
-			if err != nil || domain == nil {
+		domain, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
+		if err != nil || domain == nil {
+			if params.DomainID != "" {
 				deps.Logger.Error("check_mastery: domain not found", "err", err, "learner", learnerID, "domain_id", params.DomainID)
 				r, _ := errorResult("domain not found")
 				return r, nil, nil
 			}
-			if err := validateConceptInDomain(domain, concept); err != nil {
-				r, _ := errorResult(err.Error())
-				return r, nil, nil
-			}
-			domainID = domain.ID
+			r, payload := noActiveDomainResult()
+			return r, payload, nil
 		}
+		if err := validateConceptInDomain(domain, concept); err != nil {
+			r, _ := errorResult(err.Error())
+			return r, nil, nil
+		}
+		domainID := domain.ID
 
-		cs, err := deps.Store.GetConceptState(ctx, learnerID, concept)
+		cs, err := deps.Store.GetConceptStateInDomain(ctx, learnerID, domainID, concept)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "concept state not found", err)
 			return r, nil, nil
@@ -70,17 +71,16 @@ func registerCheckMastery(server *mcp.Server, deps *Deps) {
 
 		bktState := algorithms.BKTState{PMastery: cs.PMastery}
 		bktMastered := algorithms.BKTIsMastered(bktState)
-		recent, err := deps.Store.GetRecentInteractions(ctx, learnerID, concept, 50)
+		recent, err := deps.Store.GetRecentInteractionsInDomain(ctx, learnerID, domainID, concept, 50)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to compute mastery evidence", err)
 			return r, nil, nil
 		}
-		recent = filterInteractionsByDomainID(recent, domainID)
 		now := time.Now().UTC()
 		evidenceProfile := engine.BuildEvidenceProfile(learnerID, concept, recent, now)
 		evidenceQuality := engine.MasteryEvidenceQuality(evidenceProfile)
 		uncertainty := engine.ComputeMasteryUncertainty(cs, recent, engine.MasteryEvidenceProfile{Now: now})
-		transferRecords, err := deps.Store.GetTransferScores(ctx, learnerID, concept)
+		transferRecords, err := deps.Store.GetTransferScoresInDomain(ctx, learnerID, domainID, concept)
 		if err != nil {
 			deps.Logger.Warn("check_mastery: transfer profile fetch failed", "err", err, "learner", learnerID, "concept", concept)
 			transferRecords = nil

@@ -1,5 +1,10 @@
 # [5] ActionSelector — Design (Phase 1)
 
+> **Archive de conception — non normative.** Les références au routeur
+> `engine/router.go` décrivent l'ancien chemin de migration, aujourd'hui
+> supprimé. Le runtime supporté compose ce sélecteur depuis
+> `engine/orchestrator.go`.
+
 > Composant 3/7 du pipeline de régulation. Reçoit un `concept_id` déjà
 > choisi par `[4] ConceptSelector` dans l'orchestrateur courant et
 > décide *quoi* faire dessus : type d'activité +

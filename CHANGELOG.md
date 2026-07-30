@@ -6,6 +6,60 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-07-30
+
+### Security
+
+- Require Go 1.25.12 and `golang.org/x/text` 0.39.0, make `govulncheck`
+  blocking in CI, and pin the scanner to v1.3.0.
+- Consume authorization codes atomically, rotate refresh tokens in one
+  transaction, store new refresh tokens as SHA-256 digests, and reject
+  malformed OAuth response types, scopes, redirect URIs, and registration
+  metadata.
+- Scope cognitive state, interactions, misconceptions, calibration, and
+  transfer evidence by learner and domain so identical concept labels in
+  unrelated subjects cannot share or leak progress.
+- Reject non-evidence activity types before `record_interaction` mutates
+  BKT/FSRS/IRT state.
+
+### Changed
+
+- Add a real PostgreSQL 17 CI job for the DB suite.
+- Add ordered, checksummed PostgreSQL upgrades after the frozen consolidated
+  schema, including domain-scoping and legacy-evidence backfills.
+- Fail startup on invalid public origins, unknown scheduler/rate-limit modes,
+  PostgreSQL rate limits paired with SQLite, or incomplete distributed-mode
+  prerequisites. SQLite now creates the configured `DB_PATH` parent rather
+  than a hard-coded `./data` directory.
+- Define SQLite single-node as the supported MVP profile and PostgreSQL
+  multi-node as experimental pending shared narrative memory, crash-safe
+  scheduler/outbox semantics, and failure/load validation.
+
+### Fixed
+
+- Compute FSRS retention from the current time and `LastReview` throughout the
+  decision pipeline instead of reusing a stale persisted age.
+- Make domain creation/concept extension atomic and add conservative legacy
+  evidence backfills that leave ambiguous shared concept labels unassigned.
+- Preserve streaming capabilities through HTTP middleware and clear the write
+  deadline only for MCP responses, so long-lived SSE connections survive the
+  ordinary endpoint timeout.
+- Serialize concurrent narrative-memory updates per learner path and make
+  writes durable with file and parent-directory syncs around atomic rename.
+- Surface required storage failures and explicitly report optional degraded
+  enrichments instead of silently returning partial pedagogical state.
+- Remove the obsolete legacy activity router and unreachable helpers; archive
+  its design documents as non-normative history.
+
+### Tests
+
+- Add a black-box official MCP client test over authenticated Streamable HTTP
+  covering initialization, prompt/tool discovery, and a persisted
+  `init_domain` → `get_next_activity` → `record_interaction` loop.
+- Add shared-label domain-isolation, OAuth concurrency, FSRS time-progression,
+  narrative-memory concurrency, startup configuration, and PostgreSQL
+  migration regression coverage.
+
 ## [0.4.0] — 2026-06-06
 
 ### Added
@@ -18,11 +72,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   suite replayed against both backends so behaviour stays equivalent. Includes
   a dialect-aware schema (`schema_pg.sql`), `?`→`$N` rebind, RETURNING/ON
   CONFLICT handling, and `DB_MAX_CONNS` pool tuning.
-- **Stateless multi-node operation.** `SCHEDULER_MODE=distributed` leases each
-  scheduled run in the DB (`ClaimJobRun`) so jobs/nudges fire exactly once
-  across a fleet; `RATELIMIT_BACKEND=postgres` (alias `db`) moves rate-limit and
-  login-failure counters into a shared store for coherent fleet-wide throttling.
-  Concurrent cold-start migrations are serialized with a Postgres advisory lock.
+- **Experimental multi-node building blocks.** `SCHEDULER_MODE=distributed`
+  leases each scheduled run slot in the DB (`ClaimJobRun`) so at most one fleet
+  instance wins it; `RATELIMIT_BACKEND=postgres` (alias `db`) moves rate-limit
+  and login-failure counters into a shared store. This release did not provide
+  shared narrative memory or crash-safe exactly-once delivery. Concurrent
+  cold-start migrations are serialized with a Postgres advisory lock.
 - **Row-level write concurrency on Postgres.** The `record_interaction` hot path
   uses `SELECT … FOR UPDATE` and the webhook queue uses `SKIP LOCKED`, giving
   the same lost-update protection on Postgres that `BEGIN IMMEDIATE` provides on
@@ -285,8 +340,9 @@ Three algorithmic refinements deferred for a later release:
   deployment behind a reverse proxy. Tailscale Funnel users can ignore the
   startup warning — the funnel terminates TLS locally and the rate-limiter
   collapses to a single global bucket by design.
-- No CI is configured at the repo level. `go build ./... && go test ./...` is
-  the smoke test; contributors are expected to run it before opening a PR.
+- GitHub Actions runs the SQLite suite, PostgreSQL DB suite, cross-platform
+  builds, vet, and a blocking vulnerability scan. Contributors should still run
+  `go build ./... && go test ./...` before opening a PR.
 
 #### Compatibility
 
@@ -294,6 +350,8 @@ Three algorithmic refinements deferred for a later release:
 - Go 1.25+ required.
 - SQLite >= 3.35 (DROP COLUMN support).
 
+[Unreleased]: https://github.com/ArnaudGuiovanna/tutor-mcp/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/v0.4.1
 [0.4.0]: https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/v0.4.0
 [0.3.1]: https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/v0.3.1
 [0.3.0-alpha.1]: https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/v0.3.0-alpha.1

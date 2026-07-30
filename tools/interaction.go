@@ -19,7 +19,7 @@ import (
 
 type RecordInteractionParams struct {
 	Concept                 string  `json:"concept" jsonschema:"the concept being practiced"`
-	ActivityType            string  `json:"activity_type" jsonschema:"activity type - MUST be one of the canonical values: RECALL_EXERCISE, NEW_CONCEPT, MASTERY_CHALLENGE, DEBUGGING_CASE, REST, SETUP_DOMAIN, PRACTICE, DEBUG_MISCONCEPTION, FEYNMAN_PROMPT, TRANSFER_PROBE, CLOSE_SESSION"`
+	ActivityType            string  `json:"activity_type" jsonschema:"evidence-bearing activity type - MUST be one of: RECALL_EXERCISE, NEW_CONCEPT, MASTERY_CHALLENGE, DEBUGGING_CASE, PRACTICE, DEBUG_MISCONCEPTION, FEYNMAN_PROMPT, TRANSFER_PROBE"`
 	Success                 bool    `json:"success" jsonschema:"whether the exercise was completed successfully"`
 	ResponseTimeSeconds     float64 `json:"response_time_seconds" jsonschema:"response time in seconds"`
 	Confidence              float64 `json:"confidence" jsonschema:"estimated confidence as a 0..1 float"`
@@ -40,7 +40,7 @@ type RecordInteractionParams struct {
 func registerRecordInteraction(server *mcp.Server, deps *Deps) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "record_interaction",
-		Description: "Record the result of an exercise and update the learner's cognitive state. Supports error_type to adjust the BKT model according to the error type, optional rubric_json/rubric_score_json for structured grading evidence, and optional semantic_observation_json for richer qualitative observations.",
+		Description: "Record the result of an evidence-bearing exercise and update the learner's cognitive state. REST, SETUP_DOMAIN and CLOSE_SESSION are not learner evidence and must not be recorded with this tool. Supports error_type to adjust the BKT model according to the error type, optional rubric_json/rubric_score_json for structured grading evidence, and optional semantic_observation_json for richer qualitative observations. If a non-cognitive follow-up fails after the atomic update, degraded_components identifies it.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params RecordInteractionParams) (*mcp.CallToolResult, any, error) {
 		learnerID, err := getLearnerID(ctx)
 		if err != nil {
@@ -186,10 +186,16 @@ func registerRecordInteraction(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		// Update last active
-		_ = deps.Store.UpdateLastActive(ctx, learnerID)
+		var degradedComponents []string
+		if err := deps.Store.UpdateLastActive(ctx, learnerID); err != nil {
+			degradedComponents = append(degradedComponents, "last_active")
+			deps.Logger.Warn("record_interaction: update last active failed", "err", err, "learner", learnerID)
+		}
 		pushNow := time.Now().UTC()
-		_ = deps.Store.MarkWebhookPushConceptAddressed(ctx, learnerID, domain.ID, params.Concept, pushNow, pushNow.Add(-7*24*time.Hour))
+		if err := deps.Store.MarkWebhookPushConceptAddressed(ctx, learnerID, domain.ID, params.Concept, pushNow, pushNow.Add(-7*24*time.Hour)); err != nil {
+			degradedComponents = append(degradedComponents, "webhook_open_loop")
+			deps.Logger.Warn("record_interaction: close webhook open loop failed", "err", err, "learner", learnerID, "domain", domain.ID)
+		}
 
 		deps.Logger.Info("interaction recorded",
 			"learner", learnerID,
@@ -212,7 +218,11 @@ func registerRecordInteraction(server *mcp.Server, deps *Deps) {
 		}
 
 		// Compute cognitive signals from session patterns
-		sessionInteractions, _ := deps.Store.GetSessionInteractions(ctx, learnerID)
+		sessionInteractions, err := deps.Store.GetSessionInteractions(ctx, learnerID)
+		if err != nil {
+			degradedComponents = append(degradedComponents, "cognitive_signals")
+			deps.Logger.Warn("record_interaction: session signal read failed", "err", err, "learner", learnerID)
+		}
 		fatigueSignal, frustrationSignal := computeCognitiveSignals(sessionInteractions)
 
 		nextReviewHours := float64(cs.ScheduledDays) * 24.0
@@ -227,6 +237,9 @@ func registerRecordInteraction(server *mcp.Server, deps *Deps) {
 		}
 		if len(observation) > 0 {
 			payload["observation"] = observation
+		}
+		if len(degradedComponents) > 0 {
+			payload["degraded_components"] = degradedComponents
 		}
 		r, _ := jsonResult(payload)
 		return r, nil, nil

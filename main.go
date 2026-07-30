@@ -46,18 +46,14 @@ func main() {
 	if port == "" {
 		port = "3000"
 	}
-	dbPath := os.Getenv("DB_PATH")
-	if dbPath == "" {
-		dbPath = "./data/runtime.db"
+	cfg, err := loadStartupConfig(port)
+	if err != nil {
+		logger.Error("invalid startup configuration", "err", err)
+		os.Exit(1)
 	}
-	dbDriver := os.Getenv("DB_DRIVER")
-	if dbDriver == "" {
-		dbDriver = "sqlite"
-	}
-	baseURL := os.Getenv("BASE_URL")
-	if baseURL == "" {
-		baseURL = fmt.Sprintf("http://localhost:%s", port)
-	}
+	dbPath := cfg.DBPath
+	dbDriver := cfg.DBDriver
+	baseURL := cfg.BaseURL
 
 	// Init JWT
 	if err := auth.LoadJWTSecret(); err != nil {
@@ -88,7 +84,10 @@ func main() {
 		store = db.NewStoreWithDialect(database, db.DialectPostgres)
 		logger.Info("database ready", "driver", "postgres")
 	case "sqlite":
-		os.MkdirAll("data", 0755)
+		if err := ensureSQLiteParent(dbPath); err != nil {
+			logger.Error("failed to prepare sqlite directory", "err", err)
+			os.Exit(1)
+		}
 		database, err := db.OpenDB(dbPath)
 		if err != nil {
 			logger.Error("failed to open database", "err", err)
@@ -160,8 +159,8 @@ func main() {
 	// multi-instance fleet enforces one combined view of throttling/lockout
 	// instead of independent per-process counters. Default "memory" leaves the
 	// in-process behaviour byte-for-byte unchanged (single-node deployments).
-	switch os.Getenv("RATELIMIT_BACKEND") {
-	case "postgres", "db":
+	switch cfg.RateLimitBackend {
+	case "postgres":
 		rlBackend := db.NewRateLimitBackend(store)
 		authLimiter.SetBackend(rlBackend)
 		registerLimiter.SetBackend(rlBackend)
@@ -171,8 +170,6 @@ func main() {
 		logger.Info("rate limit backend", "mode", "postgres (shared, fleet-wide)")
 	case "", "memory":
 		// In-process default; no shared state.
-	default:
-		logger.Warn("unknown RATELIMIT_BACKEND, using memory", "value", os.Getenv("RATELIMIT_BACKEND"))
 	}
 
 	defer authLimiter.Stop()
@@ -195,13 +192,17 @@ func main() {
 			auth.LearnerRateLimitMiddleware(mcpLearnerLimiter, mcpHandler),
 		),
 	)
-	mux.Handle("/mcp", mcpProtectedHandler)
+	// The server keeps a bounded WriteTimeout for ordinary HTTP endpoints, but
+	// streamable MCP responses (notably SSE GETs) must outlive it. Clear only
+	// this response's deadline through ResponseController; requestLogger's
+	// writer exposes Unwrap so the controller can reach net/http's writer.
+	mux.Handle("/mcp", withoutWriteTimeout(mcpProtectedHandler))
 
-	// Start scheduler. SCHEDULER_MODE=distributed enables fleet-wide
-	// exactly-once job execution via DB leases; default "inprocess" keeps
-	// the single-node behaviour where every cron tick runs locally.
+	// Start scheduler. SCHEDULER_MODE=distributed uses a DB lease so at most
+	// one fleet instance wins each run slot; it is not crash-safe exactly-once
+	// delivery. The default "inprocess" mode runs every cron tick locally.
 	scheduler := engine.NewScheduler(store, logger)
-	if os.Getenv("SCHEDULER_MODE") == "distributed" {
+	if cfg.SchedulerMode == "distributed" {
 		scheduler = engine.NewDistributedScheduler(store, logger)
 		logger.Info("scheduler mode", "mode", "distributed")
 	}
@@ -273,12 +274,54 @@ func mcpVersion() string {
 
 type statusRecorder struct {
 	http.ResponseWriter
-	status int
+	status      int
+	wroteHeader bool
 }
 
 func (r *statusRecorder) WriteHeader(code int) {
+	if r.wroteHeader {
+		return
+	}
+	r.wroteHeader = true
 	r.status = code
 	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Write(p []byte) (int, error) {
+	if !r.wroteHeader {
+		r.WriteHeader(http.StatusOK)
+	}
+	return r.ResponseWriter.Write(p)
+}
+
+// Unwrap lets http.ResponseController discover optional capabilities on the
+// real net/http writer, including per-response deadlines.
+func (r *statusRecorder) Unwrap() http.ResponseWriter {
+	return r.ResponseWriter
+}
+
+// Flush preserves http.Flusher for the MCP SDK, which checks the interface
+// directly before emitting SSE events.
+func (r *statusRecorder) Flush() {
+	_ = r.FlushError()
+}
+
+func (r *statusRecorder) FlushError() error {
+	if !r.wroteHeader {
+		r.WriteHeader(http.StatusOK)
+	}
+	return http.NewResponseController(r.ResponseWriter).Flush()
+}
+
+// withoutWriteTimeout is scoped to /mcp. Read/header/idle timeouts and the
+// global write timeout remain defensive defaults for every non-stream route.
+func withoutWriteTimeout(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// net/http installs Server.WriteTimeout before entering the handler.
+		// A zero deadline disables it for this long-lived stream only.
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
+		next.ServeHTTP(w, r)
+	})
 }
 
 func requestLogger(logger *slog.Logger, next http.Handler) http.Handler {

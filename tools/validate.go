@@ -4,9 +4,7 @@
 package tools
 
 import (
-	"encoding/json"
 	"fmt"
-	"io"
 	"math"
 	"strings"
 
@@ -155,39 +153,6 @@ func validateString(field, value string, max int) error {
 	return nil
 }
 
-// validateStructuredJSON rejects oversized, malformed, or scalar JSON. It is
-// used for JSON-bearing tool inputs that need to stay bounded and
-// machine-readable before they are persisted or echoed back to callers.
-func validateStructuredJSON(field, value string, max int) (any, error) {
-	if err := validateString(field, value, max); err != nil {
-		return nil, err
-	}
-	if value == "" {
-		return nil, nil
-	}
-
-	dec := json.NewDecoder(strings.NewReader(value))
-	dec.UseNumber()
-	var parsed any
-	if err := dec.Decode(&parsed); err != nil {
-		return nil, fmt.Errorf("%s must be valid JSON: %v", field, err)
-	}
-	var extra any
-	if err := dec.Decode(&extra); err != io.EOF {
-		if err != nil {
-			return nil, fmt.Errorf("%s must be valid JSON: %v", field, err)
-		}
-		return nil, fmt.Errorf("%s must contain a single JSON value", field)
-	}
-
-	switch parsed.(type) {
-	case map[string]any, []any:
-		return parsed, nil
-	default:
-		return nil, fmt.Errorf("%s must be a JSON object or array", field)
-	}
-}
-
 // validateEnum rejects values that are not in the allowed set. The error
 // names the field, the offending value, and the full accepted vocabulary
 // so the calling LLM can self-correct without a round-trip to the docs.
@@ -205,21 +170,19 @@ func validateEnum(field, value string, allowed []string) error {
 	return fmt.Errorf("%s must be one of: %s (got %q)", field, strings.Join(allowed, ", "), value)
 }
 
-// allowedActivityTypes is the canonical set persisted in interactions.activity_type
-// and consumed by engine/* (motivation, metacognition, action_selector). Sourced
-// from models.ActivityType constants — keep in sync if a new ActivityType is added.
+// allowedActivityTypes is the evidence-bearing subset accepted by
+// record_interaction. REST, SETUP_DOMAIN and CLOSE_SESSION are orchestration
+// events, not learner responses; accepting them here would incorrectly advance
+// BKT, FSRS and IRT.
 var allowedActivityTypes = []string{
 	string(models.ActivityRecall),           // RECALL_EXERCISE
 	string(models.ActivityNewConcept),       // NEW_CONCEPT
 	string(models.ActivityMasteryChallenge), // MASTERY_CHALLENGE
 	string(models.ActivityDebuggingCase),    // DEBUGGING_CASE
-	string(models.ActivityRest),             // REST
-	string(models.ActivitySetupDomain),      // SETUP_DOMAIN
 	string(models.ActivityPractice),         // PRACTICE
 	string(models.ActivityDebugMisconception),
 	string(models.ActivityFeynmanPrompt), // FEYNMAN_PROMPT
 	string(models.ActivityTransferProbe), // TRANSFER_PROBE
-	string(models.ActivityCloseSession),  // CLOSE_SESSION
 }
 
 // allowedErrorTypes is the vocabulary the BKT heuristic

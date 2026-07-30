@@ -14,7 +14,7 @@ import (
 )
 
 type GetMisconceptionsParams struct {
-	DomainID string `json:"domain_id,omitempty" jsonschema:"domain ID (optional; all domains if absent)"`
+	DomainID string `json:"domain_id,omitempty" jsonschema:"domain ID (optional; active domain if absent)"`
 	Concept  string `json:"concept,omitempty" jsonschema:"filter by concept (optional)"`
 }
 
@@ -30,19 +30,20 @@ func registerGetMisconceptions(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		// Build concept filter from domain if provided
-		var conceptFilter map[string]bool
-		if params.DomainID != "" {
-			domain, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
-			if err != nil {
+		domain, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
+		if err != nil || domain == nil {
+			if params.DomainID != "" {
 				deps.Logger.Error("get_misconceptions: domain resolution failed", "err", err, "domain", params.DomainID)
 				r, _ := errorResult(fmt.Sprintf("domain not found: %s", params.DomainID))
 				return r, nil, nil
 			}
-			conceptFilter = make(map[string]bool)
-			for _, concept := range domain.Graph.Concepts {
-				conceptFilter[concept] = true
-			}
+			r, payload := noActiveDomainResult()
+			return r, payload, nil
+		}
+
+		conceptFilter := make(map[string]bool)
+		for _, concept := range domain.Graph.Concepts {
+			conceptFilter[concept] = true
 		}
 
 		// Narrow filter to specific concept if provided
@@ -56,7 +57,7 @@ func registerGetMisconceptions(server *mcp.Server, deps *Deps) {
 		}
 
 		// Get misconception groups
-		groups, err := deps.Store.GetMisconceptionGroups(ctx, learnerID, conceptFilter)
+		groups, err := deps.Store.GetMisconceptionGroupsInDomain(ctx, learnerID, domain.ID, conceptFilter)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to fetch misconceptions", err)
 			return r, nil, nil
@@ -67,7 +68,10 @@ func registerGetMisconceptions(server *mcp.Server, deps *Deps) {
 			groups = []models.MisconceptionGroup{}
 		}
 
-		r, _ := jsonResult(map[string]any{"misconceptions": groups})
+		r, _ := jsonResult(map[string]any{
+			"domain_id":      domain.ID,
+			"misconceptions": groups,
+		})
 		return r, nil, nil
 	})
 }

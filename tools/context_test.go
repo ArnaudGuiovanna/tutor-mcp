@@ -44,6 +44,8 @@ func TestGetLearnerContext_WithDomain(t *testing.T) {
 	cs.CardState = "review"
 	cs.Stability = 1.0
 	cs.ElapsedDays = 14
+	lastReview := time.Now().UTC().Add(-14 * 24 * time.Hour)
+	cs.LastReview = &lastReview
 	_ = store.InsertConceptStateIfNotExists(context.Background(), cs)
 	_ = store.UpsertConceptState(context.Background(), cs)
 
@@ -121,6 +123,8 @@ func TestGetLearnerContext_PriorityConceptDomainIDUsesSourceDomain(t *testing.T)
 	priorityState.CardState = "review"
 	priorityState.Stability = 1.0
 	priorityState.ElapsedDays = 14
+	priorityLastReview := time.Now().UTC().Add(-14 * 24 * time.Hour)
+	priorityState.LastReview = &priorityLastReview
 	if err := store.UpsertConceptState(context.Background(), priorityState); err != nil {
 		t.Fatalf("upsert priority state: %v", err)
 	}
@@ -129,6 +133,8 @@ func TestGetLearnerContext_PriorityConceptDomainIDUsesSourceDomain(t *testing.T)
 	defaultState.CardState = "review"
 	defaultState.Stability = 100.0
 	defaultState.ElapsedDays = 1
+	defaultLastReview := time.Now().UTC().Add(-24 * time.Hour)
+	defaultState.LastReview = &defaultLastReview
 	if err := store.UpsertConceptState(context.Background(), defaultState); err != nil {
 		t.Fatalf("upsert default state: %v", err)
 	}
@@ -180,7 +186,10 @@ func TestBuildProgressNarrative_ReturnsNilWhenNoData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := buildProgressNarrative(context.Background(), deps, "L_owner", learner, d)
+	got, err := buildProgressNarrative(context.Background(), deps, "L_owner", learner, d)
+	if err != nil {
+		t.Fatalf("build progress narrative: %v", err)
+	}
 	if got != nil {
 		t.Fatalf("expected nil narrative when no signals, got %+v", got)
 	}

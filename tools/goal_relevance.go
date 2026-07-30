@@ -128,13 +128,15 @@ func registerSetGoalRelevance(server *mcp.Server, deps *Deps) {
 		// add_concepts ran between read and write, uncovered may include
 		// the freshly added concepts — that is the correct stale-after-set
 		// signal.
-		fresh, _ := deps.Store.GetDomainByID(ctx, domain.ID)
+		fresh, err := deps.Store.GetDomainByID(ctx, domain.ID)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to reload updated domain", err)
+			return r, nil, nil
+		}
 		var uncovered []string
 		var staleAfterSet bool
-		if fresh != nil {
-			uncovered = fresh.UncoveredConcepts()
-			staleAfterSet = fresh.GraphVersion > merged.ForGraphVersion
-		}
+		uncovered = fresh.UncoveredConcepts()
+		staleAfterSet = fresh.GraphVersion > merged.ForGraphVersion
 
 		deps.Logger.Info("goal_relevance updated",
 			"learner", learnerID,

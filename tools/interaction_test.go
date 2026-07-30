@@ -74,7 +74,7 @@ func setupFileBackedToolsTest(t *testing.T) (*db.Store, *Deps) {
 // flake rate from manual repetition on shared in-memory SQLite).
 func TestRecordInteraction_NoLostUpdateUnderConcurrency(t *testing.T) {
 	store, deps := setupFileBackedToolsTest(t)
-	makeOwnerDomain(t, store, "L_owner", "math") // concepts: ["a","b"]
+	domain := makeOwnerDomain(t, store, "L_owner", "math") // concepts: ["a","b"]
 
 	const N = 50
 	var wg sync.WaitGroup
@@ -92,6 +92,7 @@ func TestRecordInteraction_NoLostUpdateUnderConcurrency(t *testing.T) {
 				Success:             true,
 				ResponseTimeSeconds: 5.0,
 				Confidence:          0.8,
+				DomainID:            domain.ID,
 			}
 			if _, _, err := applyInteraction(context.Background(), deps, "L_owner", input, now); err != nil {
 				errs <- err
@@ -121,7 +122,7 @@ func TestRecordInteraction_NoLostUpdateUnderConcurrency(t *testing.T) {
 	}
 
 	// Concept state must reflect every update (lost-update detector).
-	cs, err := store.GetConceptState(context.Background(), "L_owner", "a")
+	cs, err := store.GetConceptStateInDomain(context.Background(), "L_owner", domain.ID, "a")
 	if err != nil {
 		t.Fatalf("GetConceptState: %v", err)
 	}
@@ -1003,7 +1004,7 @@ func TestComputeCognitiveSignals(t *testing.T) {
 // once at the end.
 func TestApplyInteraction_IRTReadsPreFSRSDifficulty(t *testing.T) {
 	store, deps := setupToolsTest(t)
-	makeOwnerDomain(t, store, "L_owner", "math")
+	domain := makeOwnerDomain(t, store, "L_owner", "math")
 
 	// Seed a concept state in the Review FSRS state with a non-default
 	// Difficulty and Reps. Difficulty=9.0 sits at the high end of the
@@ -1016,6 +1017,7 @@ func TestApplyInteraction_IRTReadsPreFSRSDifficulty(t *testing.T) {
 	last := now.Add(-48 * time.Hour)
 	seed := &models.ConceptState{
 		LearnerID:     "L_owner",
+		DomainID:      domain.ID,
 		Concept:       "a",
 		Stability:     5.0,
 		Difficulty:    9.0,
@@ -1077,6 +1079,7 @@ func TestApplyInteraction_IRTReadsPreFSRSDifficulty(t *testing.T) {
 		Success:             false, // → FSRS rating Again
 		ResponseTimeSeconds: 10,
 		Confidence:          0.4,
+		DomainID:            domain.ID,
 	}, now)
 	if err != nil {
 		t.Fatalf("applyInteraction: %v", err)
