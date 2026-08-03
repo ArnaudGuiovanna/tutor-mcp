@@ -49,6 +49,11 @@ func registerGetMetacognitiveMirror(server *mcp.Server, deps *Deps) {
 			r, _ := safeErrorResult(deps.Logger, "failed to load calibration", err)
 			return r, nil, nil
 		}
+		calibHistory, err := deps.Store.GetCalibrationBiasHistory(ctx, learnerID, 20)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to load calibration evidence", err)
+			return r, nil, nil
+		}
 		affects, err := deps.Store.GetRecentAffectStates(ctx, learnerID, 10)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to load affect history", err)
@@ -82,6 +87,11 @@ func registerGetMetacognitiveMirror(server *mcp.Server, deps *Deps) {
 				r, _ := safeErrorResult(deps.Logger, "failed to load domain calibration", err)
 				return r, nil, nil
 			}
+			calibHistory, err = deps.Store.GetCalibrationBiasHistoryInDomain(ctx, learnerID, domain.ID, 20)
+			if err != nil {
+				r, _ := safeErrorResult(deps.Logger, "failed to load domain calibration evidence", err)
+				return r, nil, nil
+			}
 		}
 
 		var autonomyScores []float64
@@ -92,11 +102,12 @@ func registerGetMetacognitiveMirror(server *mcp.Server, deps *Deps) {
 		sessionCount := len(engine.GroupIntoSessionsExported(interactions, 2*time.Hour))
 
 		mirror := engine.DetectMirrorPattern(engine.MirrorInput{
-			Interactions:    interactions,
-			ConceptStates:   states,
-			AutonomyScores:  autonomyScores,
-			CalibrationBias: calibBias,
-			SessionCount:    sessionCount,
+			Interactions:       interactions,
+			ConceptStates:      states,
+			AutonomyScores:     autonomyScores,
+			CalibrationBias:    calibBias,
+			CalibrationSamples: len(calibHistory),
+			SessionCount:       sessionCount,
 		})
 
 		if mirror == nil {

@@ -455,13 +455,19 @@ func (s *Store) GetActiveLearners(ctx context.Context) ([]*models.Learner, error
 	return learners, rows.Err()
 }
 
-func (s *Store) UpdateLearnerProfile(ctx context.Context, learnerID, profileJSON string) error {
-	_, err := s.exec(ctx,
-		`UPDATE learners SET profile_json = ? WHERE id = ?`,
-		profileJSON, learnerID,
-	)
+func (s *Store) UpdateLearnerProfile(ctx context.Context, learnerID, profileJSON string, objective *string) error {
+	query := `UPDATE learners SET profile_json = ? WHERE id = ?`
+	args := []any{profileJSON, learnerID}
+	if objective != nil {
+		query = `UPDATE learners SET profile_json = ?, objective = ? WHERE id = ?`
+		args = []any{profileJSON, *objective, learnerID}
+	}
+	result, err := s.exec(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("update learner profile: %w", err)
+	}
+	if rows, rowsErr := result.RowsAffected(); rowsErr == nil && rows == 0 {
+		return sql.ErrNoRows
 	}
 	return nil
 }
@@ -470,46 +476,59 @@ func (s *Store) UpdateLearnerProfile(ctx context.Context, learnerID, profileJSON
 
 const refreshTokenHashPrefix = "sha256:"
 
-func newRefreshToken(learnerID, clientID string) (*models.RefreshToken, error) {
+func newRefreshToken(learnerID, clientID, familyID string) (*models.RefreshToken, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return nil, fmt.Errorf("generate token: %w", err)
+	}
+	if familyID == "" {
+		var err error
+		familyID, err = generateID()
+		if err != nil {
+			return nil, fmt.Errorf("generate refresh token family: %w", err)
+		}
 	}
 	now := time.Now().UTC()
 	return &models.RefreshToken{
 		Token:     base64.RawURLEncoding.EncodeToString(b),
 		LearnerID: learnerID,
 		ClientID:  clientID,
+		FamilyID:  familyID,
 		ExpiresAt: now.Add(30 * 24 * time.Hour),
 		CreatedAt: now,
 	}, nil
 }
 
-// refreshTokenHash is the database credential. The prefix distinguishes new
-// hashed rows from legacy plaintext rows and, critically, prevents a leaked
-// digest from being accepted through the legacy compatibility path.
+// refreshTokenHash is the only database credential accepted for redemption.
+// Pre-hash plaintext rows are revoked by migration and never participate in
+// the active lookup path.
 func refreshTokenHash(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return refreshTokenHashPrefix + base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
-const refreshTokenLookupPredicate = `(token = ? OR (token = ? AND token NOT LIKE 'sha256:%'))`
+const refreshTokenInspectionPredicate = `(token = ? OR (token = ? AND token NOT LIKE 'sha256:%'))`
 
 func (s *Store) insertRefreshToken(ctx context.Context, rt *models.RefreshToken) error {
 	_, err := s.exec(ctx,
-		`INSERT INTO refresh_tokens (token, learner_id, client_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?)`,
-		refreshTokenHash(rt.Token), rt.LearnerID, nullString(rt.ClientID), rt.ExpiresAt, rt.CreatedAt,
+		`INSERT INTO refresh_tokens
+		    (token, learner_id, client_id, family_id, expires_at, created_at, used_at, revoked_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		refreshTokenHash(rt.Token), rt.LearnerID, nullString(rt.ClientID), rt.FamilyID,
+		rt.ExpiresAt, rt.CreatedAt, rt.UsedAt, rt.RevokedAt,
 	)
 	return err
 }
 
 // CreateRefreshToken issues a refresh token bound to (learnerID, clientID).
-// clientID may be empty for legacy callers — issue #30 part 2 introduces the
-// binding so a stolen token cannot be redeemed by a different (e.g. self-
-// registered confidential) client. Pre-existing rows have NULL client_id and
-// the refresh-grant handler treats NULL as "any client" for backward compat.
+// Unbound refresh tokens are never issued: allowing a NULL client to be
+// adopted during rotation lets any newly registered client redeem a stolen
+// pre-upgrade credential.
 func (s *Store) CreateRefreshToken(ctx context.Context, learnerID, clientID string) (*models.RefreshToken, error) {
-	rt, err := newRefreshToken(learnerID, clientID)
+	if strings.TrimSpace(clientID) == "" {
+		return nil, fmt.Errorf("create refresh token: client_id is required")
+	}
+	rt, err := newRefreshToken(learnerID, clientID, "")
 	if err != nil {
 		return nil, err
 	}
@@ -522,24 +541,35 @@ func (s *Store) CreateRefreshToken(ctx context.Context, learnerID, clientID stri
 func (s *Store) GetRefreshToken(ctx context.Context, token string) (*models.RefreshToken, error) {
 	rt := &models.RefreshToken{Token: token}
 	var clientID sql.NullString
+	var usedAt, revokedAt sql.NullTime
 	err := s.queryRow(ctx,
-		`SELECT learner_id, client_id, expires_at, created_at
-		 FROM refresh_tokens WHERE `+refreshTokenLookupPredicate+` AND expires_at > ?`,
-		refreshTokenHash(token), token, time.Now().UTC(),
-	).Scan(&rt.LearnerID, &clientID, &rt.ExpiresAt, &rt.CreatedAt)
+		`SELECT learner_id, client_id, family_id, expires_at, created_at, used_at, revoked_at
+		 FROM refresh_tokens
+		 WHERE token = ?
+		   AND expires_at > ? AND used_at IS NULL AND revoked_at IS NULL`,
+		refreshTokenHash(token), time.Now().UTC(),
+	).Scan(&rt.LearnerID, &clientID, &rt.FamilyID, &rt.ExpiresAt, &rt.CreatedAt, &usedAt, &revokedAt)
 	if err != nil {
 		return nil, fmt.Errorf("get refresh token: %w", err)
 	}
 	if clientID.Valid {
 		rt.ClientID = clientID.String
 	}
+	if usedAt.Valid {
+		ts := usedAt.Time
+		rt.UsedAt = &ts
+	}
+	if revokedAt.Valid {
+		ts := revokedAt.Time
+		rt.RevokedAt = &ts
+	}
 	return rt, nil
 }
 
 func (s *Store) DeleteRefreshToken(ctx context.Context, token string) error {
 	_, err := s.exec(ctx,
-		`DELETE FROM refresh_tokens WHERE `+refreshTokenLookupPredicate,
-		refreshTokenHash(token), token,
+		`DELETE FROM refresh_tokens WHERE token = ?`,
+		refreshTokenHash(token),
 	)
 	if err != nil {
 		return fmt.Errorf("delete refresh token: %w", err)
@@ -548,28 +578,100 @@ func (s *Store) DeleteRefreshToken(ctx context.Context, token string) error {
 }
 
 // RotateRefreshToken consumes token and creates its successor in one
-// transaction. DELETE ... RETURNING is the concurrency boundary: under
-// PostgreSQL two simultaneous reuses serialize on the row and exactly one can
-// receive it; under SQLite BEGIN IMMEDIATE provides the same single-winner
-// behavior. If successor insertion fails, rollback restores the old token.
+// transaction. Consumed rows are retained so a later replay can identify the
+// token family and revoke every descendant. UPDATE ... RETURNING is the
+// concurrency boundary: under PostgreSQL two simultaneous uses serialize on
+// the row; under SQLite BEGIN IMMEDIATE provides the same ordering. If
+// successor insertion fails, rollback restores the old token to active state.
 func (s *Store) RotateRefreshToken(ctx context.Context, token, clientID string) (*models.RefreshToken, error) {
-	successor, err := newRefreshToken("", clientID)
+	if strings.TrimSpace(clientID) == "" {
+		return nil, fmt.Errorf("rotate refresh token: %w", store.ErrInvalidRefreshToken)
+	}
+	successor, err := newRefreshToken("", clientID, "")
 	if err != nil {
 		return nil, err
 	}
 
+	now := time.Now().UTC()
+	reuseDetected := false
+	legacyRejected := false
 	err = s.inTx(ctx, nil, func(txs *Store) error {
 		var storedClientID sql.NullString
 		err := txs.queryRow(ctx,
-			`DELETE FROM refresh_tokens
-			 WHERE `+refreshTokenLookupPredicate+`
+			`UPDATE refresh_tokens
+			 SET used_at = ?,
+			     family_id = CASE WHEN family_id = '' THEN ? ELSE family_id END
+			 WHERE token = ?
 			   AND expires_at > ?
-			   AND (client_id IS NULL OR client_id = '' OR client_id = ?)
-			 RETURNING learner_id, client_id`,
-			refreshTokenHash(token), token, time.Now().UTC(), clientID,
-		).Scan(&successor.LearnerID, &storedClientID)
+			   AND used_at IS NULL
+			   AND revoked_at IS NULL
+			   AND client_id = ?
+			 RETURNING learner_id, client_id, family_id`,
+			now, successor.FamilyID, refreshTokenHash(token), now, clientID,
+		).Scan(&successor.LearnerID, &storedClientID, &successor.FamilyID)
 		if errors.Is(err, sql.ErrNoRows) {
-			return store.ErrInvalidRefreshToken
+			var familyID string
+			var existingClientID sql.NullString
+			var usedAt, revokedAt sql.NullTime
+			lookupErr := txs.queryRow(ctx,
+				`SELECT family_id, client_id, used_at, revoked_at
+				 FROM refresh_tokens WHERE `+refreshTokenInspectionPredicate,
+				refreshTokenHash(token), token,
+			).Scan(&familyID, &existingClientID, &usedAt, &revokedAt)
+			if errors.Is(lookupErr, sql.ErrNoRows) {
+				return store.ErrInvalidRefreshToken
+			}
+			if lookupErr != nil {
+				return fmt.Errorf("inspect rejected refresh token: %w", lookupErr)
+			}
+			if !existingClientID.Valid || existingClientID.String == "" {
+				// Pre-binding tokens cannot prove which OAuth client originally
+				// received them. Revoke rather than assigning attacker-selected
+				// ownership on first use.
+				if familyID != "" {
+					if _, revokeErr := txs.exec(ctx,
+						`UPDATE refresh_tokens SET revoked_at = COALESCE(revoked_at, ?) WHERE family_id = ?`,
+						now, familyID,
+					); revokeErr != nil {
+						return fmt.Errorf("revoke unbound refresh token family: %w", revokeErr)
+					}
+				} else if _, revokeErr := txs.exec(ctx,
+					`UPDATE refresh_tokens SET revoked_at = COALESCE(revoked_at, ?) WHERE `+refreshTokenInspectionPredicate,
+					now, refreshTokenHash(token), token,
+				); revokeErr != nil {
+					return fmt.Errorf("revoke unbound refresh token: %w", revokeErr)
+				}
+				legacyRejected = true
+				return nil
+			}
+			if existingClientID.Valid && existingClientID.String != "" && existingClientID.String != clientID {
+				return store.ErrInvalidRefreshToken
+			}
+			if !usedAt.Valid && !revokedAt.Valid {
+				// Expired-but-never-used tokens and other inactive states are not
+				// evidence of a rotated-token replay.
+				return store.ErrInvalidRefreshToken
+			}
+
+			if familyID != "" {
+				if _, revokeErr := txs.exec(ctx,
+					`UPDATE refresh_tokens
+					 SET revoked_at = COALESCE(revoked_at, ?)
+					 WHERE family_id = ?`,
+					now, familyID,
+				); revokeErr != nil {
+					return fmt.Errorf("revoke refresh token family: %w", revokeErr)
+				}
+			} else if _, revokeErr := txs.exec(ctx,
+				`UPDATE refresh_tokens
+				 SET revoked_at = COALESCE(revoked_at, ?)
+				 WHERE `+refreshTokenInspectionPredicate,
+				now, refreshTokenHash(token), token,
+			); revokeErr != nil {
+				return fmt.Errorf("revoke legacy refresh token: %w", revokeErr)
+			}
+			reuseDetected = true
+			return nil
 		}
 		if err != nil {
 			return fmt.Errorf("consume refresh token: %w", err)
@@ -582,6 +684,12 @@ func (s *Store) RotateRefreshToken(ctx context.Context, token, clientID string) 
 	})
 	if err != nil {
 		return nil, fmt.Errorf("rotate refresh token: %w", err)
+	}
+	if reuseDetected {
+		return nil, fmt.Errorf("rotate refresh token: %w", store.ErrRefreshTokenReuse)
+	}
+	if legacyRejected {
+		return nil, fmt.Errorf("rotate refresh token: %w", store.ErrInvalidRefreshToken)
 	}
 	return successor, nil
 }
@@ -606,15 +714,7 @@ func (s *Store) CreateDomainWithValueFramings(ctx context.Context, learnerID, na
 		return nil, fmt.Errorf("marshal graph: %w", err)
 	}
 
-	_, err = s.exec(ctx,
-		`INSERT INTO domains (id, learner_id, name, personal_goal, graph_json, value_framings_json, graph_version, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
-		id, learnerID, name, personalGoal, string(graphJSON), valueFramingsJSON, now,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create domain: %w", err)
-	}
-	return &models.Domain{
+	domain := &models.Domain{
 		ID:                id,
 		LearnerID:         learnerID,
 		Name:              name,
@@ -623,10 +723,31 @@ func (s *Store) CreateDomainWithValueFramings(ctx context.Context, learnerID, na
 		ValueFramingsJSON: valueFramingsJSON,
 		GraphVersion:      1,
 		CreatedAt:         now,
-	}, nil
+	}
+	err = s.inTx(ctx, nil, func(txs *Store) error {
+		if _, err := txs.exec(ctx,
+			`INSERT INTO domains (id, learner_id, name, personal_goal, graph_json, value_framings_json, graph_version, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
+			id, learnerID, name, personalGoal, string(graphJSON), valueFramingsJSON, now,
+		); err != nil {
+			return fmt.Errorf("create domain: %w", err)
+		}
+		baseline, err := buildCurriculumBaseline(domain, models.CurriculumOperationCreate, learnerID, now)
+		if err != nil {
+			return err
+		}
+		if _, err := txs.insertCurriculumSnapshot(ctx, learnerID, baseline, false); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return domain, nil
 }
 
-const domainCols = `id, learner_id, name, personal_goal, graph_json, value_framings_json, last_value_axis, archived, priority_rank, graph_version, goal_relevance_json, goal_relevance_version, phase, phase_changed_at, phase_entry_entropy, created_at`
+const domainCols = `id, learner_id, name, personal_goal, graph_json, value_framings_json, last_value_axis, archived, high_stakes, priority_rank, graph_version, goal_relevance_json, goal_relevance_version, phase, phase_changed_at, phase_entry_entropy, created_at, deleted_at`
 
 // scanDomainFields is the shared row decoder for both *sql.Row and *sql.Rows
 // callers — Scan has the same signature on both so we factor through a small
@@ -641,20 +762,22 @@ func scanDomainFields(s domainScanner) (*models.Domain, error) {
 	var graphJSON, goalRelevanceJSON string
 	var valueFramings, lastAxis, phase sql.NullString
 	var phaseChangedAt sql.NullTime
+	var deletedAt sql.NullTime
 	var phaseEntryEntropy sql.NullFloat64
 	var priorityRank sql.NullInt64
-	var archived int
+	var archived, highStakes int
 	err := s.Scan(
 		&d.ID, &d.LearnerID, &d.Name, &d.PersonalGoal, &graphJSON,
-		&valueFramings, &lastAxis, &archived,
+		&valueFramings, &lastAxis, &archived, &highStakes,
 		&priorityRank, &d.GraphVersion, &goalRelevanceJSON, &d.GoalRelevanceVersion,
 		&phase, &phaseChangedAt, &phaseEntryEntropy,
-		&d.CreatedAt,
+		&d.CreatedAt, &deletedAt,
 	)
 	if err != nil {
 		return nil, err
 	}
 	d.Archived = archived != 0
+	d.HighStakes = highStakes != 0
 	if priorityRank.Valid {
 		rank := int(priorityRank.Int64)
 		d.PriorityRank = &rank
@@ -675,6 +798,10 @@ func scanDomainFields(s domainScanner) (*models.Domain, error) {
 	if phaseEntryEntropy.Valid {
 		d.PhaseEntryEntropy = phaseEntryEntropy.Float64
 	}
+	if deletedAt.Valid {
+		t := deletedAt.Time
+		d.DeletedAt = &t
+	}
 	if err := json.Unmarshal([]byte(graphJSON), &d.Graph); err != nil {
 		return nil, fmt.Errorf("unmarshal graph: %w", err)
 	}
@@ -691,7 +818,7 @@ func scanDomainRows(rows *sql.Rows) (*models.Domain, error) {
 
 func (s *Store) GetDomainByLearner(ctx context.Context, learnerID string) (*models.Domain, error) {
 	row := s.queryRow(ctx,
-		`SELECT `+domainCols+` FROM domains WHERE learner_id = ? AND archived = 0
+		`SELECT `+domainCols+` FROM domains WHERE learner_id = ? AND archived = 0 AND deleted_at IS NULL
 		 ORDER BY CASE WHEN priority_rank IS NULL THEN 1 ELSE 0 END, priority_rank ASC, created_at DESC LIMIT 1`,
 		learnerID,
 	)
@@ -703,7 +830,7 @@ func (s *Store) GetDomainByLearner(ctx context.Context, learnerID string) (*mode
 }
 
 func (s *Store) GetDomainByID(ctx context.Context, id string) (*models.Domain, error) {
-	row := s.queryRow(ctx, `SELECT `+domainCols+` FROM domains WHERE id = ?`, id)
+	row := s.queryRow(ctx, `SELECT `+domainCols+` FROM domains WHERE id = ? AND deleted_at IS NULL`, id)
 	d, err := scanDomainRow(row)
 	if err != nil {
 		return nil, fmt.Errorf("get domain by id: %w", err)
@@ -712,7 +839,7 @@ func (s *Store) GetDomainByID(ctx context.Context, id string) (*models.Domain, e
 }
 
 func (s *Store) GetDomainsByLearner(ctx context.Context, learnerID string, includeArchived bool) ([]*models.Domain, error) {
-	query := `SELECT ` + domainCols + ` FROM domains WHERE learner_id = ?`
+	query := `SELECT ` + domainCols + ` FROM domains WHERE learner_id = ? AND deleted_at IS NULL`
 	if !includeArchived {
 		query += ` AND archived = 0`
 	}
@@ -752,6 +879,28 @@ func (s *Store) SetDomainPriority(ctx context.Context, domainID, learnerID strin
 	return nil
 }
 
+// MarkDomainHighStakes is intentionally one-way on the public persistence
+// port. Downgrading safety classification requires an operator-controlled
+// process that is outside the learner-facing MCP trust boundary.
+func (s *Store) MarkDomainHighStakes(ctx context.Context, domainID, learnerID string) error {
+	result, err := s.exec(ctx,
+		`UPDATE domains SET high_stakes = 1
+		 WHERE id = ? AND learner_id = ? AND archived = 0 AND deleted_at IS NULL`,
+		domainID, learnerID,
+	)
+	if err != nil {
+		return fmt.Errorf("mark domain high stakes: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("mark domain high stakes rows affected: %w", err)
+	}
+	if rows != 1 {
+		return fmt.Errorf("domain not found")
+	}
+	return nil
+}
+
 // UpdateDomainValueFramings stores the JSON-encoded value framings for a domain.
 func (s *Store) UpdateDomainValueFramings(ctx context.Context, domainID, valueFramingsJSON string) error {
 	_, err := s.exec(ctx,
@@ -777,42 +926,47 @@ func (s *Store) UpdateDomainLastValueAxis(ctx context.Context, domainID, axis st
 }
 
 func (s *Store) UpdateDomainGraph(ctx context.Context, domainID string, graph models.KnowledgeSpace) error {
-	graphJSON, err := json.Marshal(graph)
+	domain, err := s.GetDomainByID(ctx, domainID)
 	if err != nil {
-		return fmt.Errorf("marshal graph: %w", err)
+		return fmt.Errorf("update domain graph: %w", err)
 	}
-	// Bumping graph_version makes any prior goal_relevance vector stale
-	// per OQ-1.1 / IsGoalRelevanceStale(). Existing entries remain valid;
-	// only the new concepts will appear in UncoveredConcepts() until a
-	// new set_goal_relevance call covers them.
-	_, err = s.exec(ctx,
-		`UPDATE domains SET graph_json = ?, graph_version = graph_version + 1 WHERE id = ?`,
-		string(graphJSON), domainID,
-	)
+	current, err := s.EnsureCurriculumBaseline(ctx, domain.LearnerID, domainID)
 	if err != nil {
+		return fmt.Errorf("update domain graph baseline: %w", err)
+	}
+	next, err := reconcileLegacyGraph(current, graph, domain.LearnerID)
+	if err != nil {
+		return fmt.Errorf("update domain graph revision: %w", err)
+	}
+	if err := s.CompareAndSwapCurriculum(ctx, domain.LearnerID, domainID, current.Version, next); err != nil {
 		return fmt.Errorf("update domain graph: %w", err)
 	}
 	return nil
 }
 
 func (s *Store) ArchiveDomain(ctx context.Context, domainID, learnerID string) error {
-	result, err := s.exec(ctx,
-		`UPDATE domains SET archived = 1 WHERE id = ? AND learner_id = ?`,
-		domainID, learnerID,
-	)
-	if err != nil {
-		return fmt.Errorf("archive domain: %w", err)
-	}
-	n, _ := result.RowsAffected()
-	if n == 0 {
-		return fmt.Errorf("domain not found")
-	}
-	return nil
+	return s.inTx(ctx, nil, func(txs *Store) error {
+		result, err := txs.exec(ctx,
+			`UPDATE domains SET archived = 1 WHERE id = ? AND learner_id = ? AND deleted_at IS NULL`,
+			domainID, learnerID,
+		)
+		if err != nil {
+			return fmt.Errorf("archive domain: %w", err)
+		}
+		n, _ := result.RowsAffected()
+		if n == 0 {
+			return fmt.Errorf("domain not found")
+		}
+		if err := txs.expireWebhookMessagesForDomain(ctx, learnerID, domainID); err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 func (s *Store) UnarchiveDomain(ctx context.Context, domainID, learnerID string) error {
 	result, err := s.exec(ctx,
-		`UPDATE domains SET archived = 0 WHERE id = ? AND learner_id = ?`,
+		`UPDATE domains SET archived = 0 WHERE id = ? AND learner_id = ? AND deleted_at IS NULL`,
 		domainID, learnerID,
 	)
 	if err != nil {
@@ -827,8 +981,8 @@ func (s *Store) UnarchiveDomain(ctx context.Context, domainID, learnerID string)
 
 // ActiveDomainConceptSet returns the set of concepts that belong to at least
 // one non-archived domain owned by the learner. Used by readers to filter out
-// orphan concept_states / interactions left behind by delete_domain (which
-// intentionally preserves history but removes the domain row).
+// concept_states / interactions attached to a delete_domain tombstone (which
+// intentionally preserves both the domain identity and its history).
 func (s *Store) ActiveDomainConceptSet(ctx context.Context, learnerID string) (map[string]bool, error) {
 	domains, err := s.GetDomainsByLearner(ctx, learnerID, false)
 	if err != nil {
@@ -845,32 +999,58 @@ func (s *Store) ActiveDomainConceptSet(ctx context.Context, learnerID string) (m
 
 func (s *Store) DeleteDomain(ctx context.Context, domainID, learnerID string) error {
 	return s.inTx(ctx, nil, func(txs *Store) error {
+		// Upgraded installations can still contain a legacy domain that has
+		// never been read through the curriculum API. Materialize its immutable
+		// baseline before hiding the domain; after the tombstone runtime domain
+		// readers intentionally cannot reconstruct it.
+		if _, err := txs.EnsureCurriculumBaseline(ctx, learnerID, domainID); err != nil {
+			return fmt.Errorf("preserve curriculum before tombstone: %w", err)
+		}
+		now := time.Now().UTC()
 		result, err := txs.exec(ctx,
-			`DELETE FROM domains WHERE id = ? AND learner_id = ?`,
-			domainID, learnerID,
+			`UPDATE domains SET archived = 1, deleted_at = ?
+			 WHERE id = ? AND learner_id = ? AND deleted_at IS NULL`,
+			now, domainID, learnerID,
 		)
 		if err != nil {
-			return fmt.Errorf("delete domain: %w", err)
+			return fmt.Errorf("tombstone domain: %w", err)
 		}
 		n, _ := result.RowsAffected()
 		if n == 0 {
 			return fmt.Errorf("domain not found")
 		}
 
+		// Intentions, terminal delivery records and all learning evidence remain
+		// attached to the tombstoned domain. Pending intentions are resolved as
+		// cancelled rather than deleted so they stop routing but keep their audit.
 		if _, err := txs.exec(ctx,
-			`DELETE FROM implementation_intentions WHERE learner_id = ? AND domain_id = ?`,
-			learnerID, domainID,
+			`UPDATE implementation_intentions
+			 SET status = ?, honored = 0, resolved_at = ?, updated_at = ?
+			 WHERE learner_id = ? AND domain_id = ? AND status = ?`,
+			models.IntentionStatusCancelled, now, now, learnerID, domainID, models.IntentionStatusPending,
 		); err != nil {
-			return fmt.Errorf("delete domain implementation intentions: %w", err)
+			return fmt.Errorf("cancel deleted domain intentions: %w", err)
 		}
-		if _, err := txs.exec(ctx,
-			`DELETE FROM webhook_message_queue WHERE learner_id = ? AND kind = ?`,
-			learnerID, "olm:"+domainID,
-		); err != nil {
-			return fmt.Errorf("delete domain webhook queue: %w", err)
+
+		if err := txs.expireWebhookMessagesForDomain(ctx, learnerID, domainID); err != nil {
+			return err
 		}
 		return nil
 	})
+}
+
+func (s *Store) expireWebhookMessagesForDomain(ctx context.Context, learnerID, domainID string) error {
+	if _, err := s.exec(ctx,
+		`UPDATE webhook_message_queue
+		 SET status = 'expired', claimed_at = NULL, next_attempt_at = NULL,
+		     last_error = 'domain_inactive', dead_lettered_at = NULL
+		 WHERE learner_id = ? AND domain_id = ?
+		   AND status IN ('pending', 'processing')`,
+		learnerID, domainID,
+	); err != nil {
+		return fmt.Errorf("expire inactive domain webhook queue: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) InsertConceptStateIfNotExists(ctx context.Context, cs *models.ConceptState) error {
@@ -1081,7 +1261,7 @@ func (s *Store) getConceptStates(ctx context.Context, learnerID, domainID string
 
 // ─── Interactions ─────────────────────────────────────────────────────────────
 
-const interactionCols = `id, learner_id, concept, activity_type, success, response_time, confidence, error_type, notes, hints_requested, self_initiated, calibration_id, is_proactive_review, misconception_type, misconception_detail, domain_id, bkt_slip, bkt_guess, rubric_json, rubric_score_json, created_at`
+const interactionCols = `id, learner_id, session_id, assessment_attempt_id, concept, activity_type, success, response_time, confidence, error_type, notes, hints_requested, self_initiated, calibration_id, is_proactive_review, misconception_type, misconception_detail, domain_id, bkt_slip, bkt_guess, rubric_json, rubric_score_json, created_at`
 
 func (s *Store) CreateInteraction(ctx context.Context, i *models.Interaction) error {
 	return createInteractionWithStore(ctx, s, i)
@@ -1098,11 +1278,23 @@ func createInteractionWithStore(ctx context.Context, s *Store, i *models.Interac
 		}
 		i.DomainID = domainID
 	}
-	i.CreatedAt = time.Now().UTC()
+	if i.CreatedAt.IsZero() {
+		i.CreatedAt = time.Now().UTC()
+	} else {
+		// Preserve the authoritative event time supplied by internal replay,
+		// assessment and migration paths. Learner-facing tools never accept this
+		// field directly; they pass the server clock through applyInteraction.
+		i.CreatedAt = i.CreatedAt.UTC()
+	}
+	if i.SessionID != "" {
+		if _, err := s.TouchLearningSession(ctx, i.LearnerID, i.SessionID, i.CreatedAt); err != nil {
+			return fmt.Errorf("validate interaction session: %w", err)
+		}
+	}
 	id, err := s.insertReturningID(ctx,
-		`INSERT INTO interactions (learner_id, concept, activity_type, success, response_time, confidence, error_type, notes, hints_requested, self_initiated, calibration_id, is_proactive_review, misconception_type, misconception_detail, domain_id, bkt_slip, bkt_guess, rubric_json, rubric_score_json, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		i.LearnerID, i.Concept, i.ActivityType, boolToInt(i.Success),
+		`INSERT INTO interactions (learner_id, session_id, assessment_attempt_id, concept, activity_type, success, response_time, confidence, error_type, notes, hints_requested, self_initiated, calibration_id, is_proactive_review, misconception_type, misconception_detail, domain_id, bkt_slip, bkt_guess, rubric_json, rubric_score_json, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		i.LearnerID, nullString(i.SessionID), nullString(i.AssessmentAttemptID), i.Concept, i.ActivityType, boolToInt(i.Success),
 		i.ResponseTime, i.Confidence, i.ErrorType, i.Notes,
 		i.HintsRequested, boolToInt(i.SelfInitiated), i.CalibrationID, boolToInt(i.IsProactiveReview),
 		nullString(i.MisconceptionType), nullString(i.MisconceptionDetail),
@@ -1174,9 +1366,22 @@ func (s *Store) GetRecentInteractionsByDomain(ctx context.Context, learnerID, do
 }
 
 func (s *Store) GetSessionInteractions(ctx context.Context, learnerID string) ([]*models.Interaction, error) {
+	var sessionID string
+	err := s.queryRow(ctx,
+		`SELECT id FROM learning_sessions WHERE learner_id = ? AND status = ? LIMIT 1`,
+		learnerID, models.LearningSessionStatusOpen,
+	).Scan(&sessionID)
+	if err == nil {
+		return s.GetInteractionsBySession(ctx, learnerID, sessionID)
+	}
+	if err != sql.ErrNoRows {
+		return nil, fmt.Errorf("get active learning session: %w", err)
+	}
+	// Compatibility path: only pre-session rows participate in the legacy
+	// two-hour window. Explicitly closed sessions never leak into a new one.
 	cutoff := time.Now().UTC().Add(-2 * time.Hour)
 	rows, err := s.query(ctx,
-		`SELECT `+interactionCols+` FROM interactions WHERE learner_id = ? AND created_at > ?
+		`SELECT `+interactionCols+` FROM interactions WHERE learner_id = ? AND session_id IS NULL AND created_at > ?
 		 ORDER BY created_at DESC`,
 		learnerID, cutoff,
 	)
@@ -1188,10 +1393,21 @@ func (s *Store) GetSessionInteractions(ctx context.Context, learnerID string) ([
 }
 
 func (s *Store) GetSessionInteractionsInDomain(ctx context.Context, learnerID, domainID string) ([]*models.Interaction, error) {
+	var sessionID string
+	err := s.queryRow(ctx,
+		`SELECT id FROM learning_sessions WHERE learner_id = ? AND status = ? LIMIT 1`,
+		learnerID, models.LearningSessionStatusOpen,
+	).Scan(&sessionID)
+	if err == nil {
+		return s.GetInteractionsBySessionInDomain(ctx, learnerID, sessionID, domainID)
+	}
+	if err != sql.ErrNoRows {
+		return nil, fmt.Errorf("get active learning session: %w", err)
+	}
 	cutoff := time.Now().UTC().Add(-2 * time.Hour)
 	rows, err := s.query(ctx,
 		`SELECT `+interactionCols+` FROM interactions
-		 WHERE learner_id = ? AND domain_id = ? AND created_at > ?
+		 WHERE learner_id = ? AND domain_id = ? AND session_id IS NULL AND created_at > ?
 		 ORDER BY created_at DESC`,
 		learnerID, domainID, cutoff,
 	)
@@ -1202,16 +1418,44 @@ func (s *Store) GetSessionInteractionsInDomain(ctx context.Context, learnerID, d
 	return scanInteractions(rows)
 }
 
+func (s *Store) GetInteractionsBySession(ctx context.Context, learnerID, sessionID string) ([]*models.Interaction, error) {
+	rows, err := s.query(ctx,
+		`SELECT `+interactionCols+` FROM interactions
+		 WHERE learner_id = ? AND session_id = ? ORDER BY created_at DESC`,
+		learnerID, sessionID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get interactions by session: %w", err)
+	}
+	defer rows.Close()
+	return scanInteractions(rows)
+}
+
+func (s *Store) GetInteractionsBySessionInDomain(ctx context.Context, learnerID, sessionID, domainID string) ([]*models.Interaction, error) {
+	rows, err := s.query(ctx,
+		`SELECT `+interactionCols+` FROM interactions
+		 WHERE learner_id = ? AND session_id = ? AND domain_id = ? ORDER BY created_at DESC`,
+		learnerID, sessionID, domainID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get domain interactions by session: %w", err)
+	}
+	defer rows.Close()
+	return scanInteractions(rows)
+}
+
 func scanInteractions(rows *sql.Rows) ([]*models.Interaction, error) {
 	var interactions []*models.Interaction
 	for rows.Next() {
 		i := &models.Interaction{}
 		var successInt, selfInitInt, proactiveInt int
-		var errorType, notes, calibrationID, misconceptionType, misconceptionDetail, domainID, rubricJSON, rubricScoreJSON sql.NullString
+		var responseTime sql.NullInt64
+		var confidence sql.NullFloat64
+		var sessionID, assessmentAttemptID, errorType, notes, calibrationID, misconceptionType, misconceptionDetail, domainID, rubricJSON, rubricScoreJSON sql.NullString
 		var bktSlip, bktGuess sql.NullFloat64
 		if err := rows.Scan(
-			&i.ID, &i.LearnerID, &i.Concept, &i.ActivityType,
-			&successInt, &i.ResponseTime, &i.Confidence, &errorType, &notes,
+			&i.ID, &i.LearnerID, &sessionID, &assessmentAttemptID, &i.Concept, &i.ActivityType,
+			&successInt, &responseTime, &confidence, &errorType, &notes,
 			&i.HintsRequested, &selfInitInt, &calibrationID, &proactiveInt,
 			&misconceptionType, &misconceptionDetail, &domainID,
 			&bktSlip, &bktGuess,
@@ -1219,6 +1463,18 @@ func scanInteractions(rows *sql.Rows) ([]*models.Interaction, error) {
 			&i.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan interaction row: %w", err)
+		}
+		if responseTime.Valid {
+			i.ResponseTime = int(responseTime.Int64)
+		}
+		if sessionID.Valid {
+			i.SessionID = sessionID.String
+		}
+		if assessmentAttemptID.Valid {
+			i.AssessmentAttemptID = assessmentAttemptID.String
+		}
+		if confidence.Valid {
+			i.Confidence = confidence.Float64
 		}
 		i.Success = successInt != 0
 		i.SelfInitiated = selfInitInt != 0
@@ -1287,10 +1543,21 @@ func (s *Store) GetInteractionsSinceInDomain(ctx context.Context, learnerID, dom
 }
 
 func (s *Store) GetSessionStart(ctx context.Context, learnerID string) (time.Time, error) {
+	var startedAt time.Time
+	err := s.queryRow(ctx,
+		`SELECT started_at FROM learning_sessions WHERE learner_id = ? AND status = ? LIMIT 1`,
+		learnerID, models.LearningSessionStatusOpen,
+	).Scan(&startedAt)
+	if err == nil {
+		return startedAt, nil
+	}
+	if err != sql.ErrNoRows {
+		return time.Time{}, fmt.Errorf("get active learning session start: %w", err)
+	}
 	cutoff := time.Now().UTC().Add(-2 * time.Hour)
 	var sessionStart flexTime
-	err := s.queryRow(ctx,
-		`SELECT MIN(created_at) FROM interactions WHERE learner_id = ? AND created_at > ?`,
+	err = s.queryRow(ctx,
+		`SELECT MIN(created_at) FROM interactions WHERE learner_id = ? AND session_id IS NULL AND created_at > ?`,
 		learnerID, cutoff,
 	).Scan(&sessionStart)
 	if err != nil {
@@ -1306,41 +1573,141 @@ func (s *Store) GetSessionStart(ctx context.Context, learnerID string) (time.Tim
 
 func (s *Store) GetAvailability(ctx context.Context, learnerID string) (*models.Availability, error) {
 	a := &models.Availability{}
-	var dndInt int
+	var dndInt, consentInt int
+	var updatedAt sql.NullTime
 	err := s.queryRow(ctx,
-		`SELECT learner_id, windows_json, avg_duration, sessions_week, do_not_disturb
+		`SELECT learner_id, timezone, windows_json, avg_duration, sessions_week,
+		        do_not_disturb, notification_consent, notification_frequency,
+		        max_notifications_per_day, accessibility_json, version, updated_at
 		 FROM availability WHERE learner_id = ?`,
 		learnerID,
-	).Scan(&a.LearnerID, &a.WindowsJSON, &a.AvgDuration, &a.SessionsWeek, &dndInt)
+	).Scan(
+		&a.LearnerID, &a.Timezone, &a.WindowsJSON, &a.AvgDuration, &a.SessionsWeek,
+		&dndInt, &consentInt, &a.NotificationFrequency,
+		&a.MaxNotificationsPerDay, &a.AccessibilityJSON, &a.Version, &updatedAt,
+	)
 	if err == sql.ErrNoRows {
-		return &models.Availability{
-			LearnerID:    learnerID,
-			WindowsJSON:  "[]",
-			AvgDuration:  30,
-			SessionsWeek: 3,
-			DoNotDisturb: false,
-		}, nil
+		return models.DefaultAvailability(learnerID), nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get availability: %w", err)
 	}
 	a.DoNotDisturb = dndInt != 0
+	a.NotificationConsent = consentInt != 0
+	if updatedAt.Valid {
+		a.UpdatedAt = updatedAt.Time
+	}
+	if err := a.NormalizeAndValidate(); err != nil {
+		return nil, fmt.Errorf("get availability: invalid stored policy: %w", err)
+	}
 	return a, nil
 }
 
 func (s *Store) UpsertAvailability(ctx context.Context, a *models.Availability) error {
+	if err := a.NormalizeAndValidate(); err != nil {
+		return fmt.Errorf("upsert availability: %w", err)
+	}
+	if err := s.requireLearner(ctx, a.LearnerID); err != nil {
+		return fmt.Errorf("upsert availability: %w", err)
+	}
+	now := time.Now().UTC()
 	_, err := s.exec(ctx,
-		`INSERT INTO availability (learner_id, windows_json, avg_duration, sessions_week, do_not_disturb)
-		 VALUES (?, ?, ?, ?, ?)
+		`INSERT INTO availability
+		    (learner_id, timezone, windows_json, avg_duration, sessions_week,
+		     do_not_disturb, notification_consent, notification_frequency,
+		     max_notifications_per_day, accessibility_json, version, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
 		 ON CONFLICT(learner_id) DO UPDATE SET
-		    windows_json   = excluded.windows_json,
-		    avg_duration   = excluded.avg_duration,
-		    sessions_week  = excluded.sessions_week,
-		    do_not_disturb = excluded.do_not_disturb`,
-		a.LearnerID, a.WindowsJSON, a.AvgDuration, a.SessionsWeek, boolToInt(a.DoNotDisturb),
+		    timezone                 = excluded.timezone,
+		    windows_json             = excluded.windows_json,
+		    avg_duration             = excluded.avg_duration,
+		    sessions_week            = excluded.sessions_week,
+		    do_not_disturb           = excluded.do_not_disturb,
+		    notification_consent     = excluded.notification_consent,
+		    notification_frequency   = excluded.notification_frequency,
+		    max_notifications_per_day = excluded.max_notifications_per_day,
+		    accessibility_json       = excluded.accessibility_json,
+		    version                  = availability.version + 1,
+		    updated_at               = excluded.updated_at`,
+		a.LearnerID, a.Timezone, a.WindowsJSON, a.AvgDuration, a.SessionsWeek,
+		boolToInt(a.DoNotDisturb), boolToInt(a.NotificationConsent), a.NotificationFrequency,
+		a.MaxNotificationsPerDay, a.AccessibilityJSON, now,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert availability: %w", err)
+	}
+	return nil
+}
+
+// UpdateAvailability is the optimistic-concurrency path exposed to MCP
+// clients. Version zero means "create only"; existing rows require the exact
+// version returned by get_availability_model.
+func (s *Store) UpdateAvailability(ctx context.Context, a *models.Availability, expectedVersion int) (*models.Availability, error) {
+	if expectedVersion < 0 {
+		return nil, fmt.Errorf("update availability: expected_version must be non-negative")
+	}
+	if err := a.NormalizeAndValidate(); err != nil {
+		return nil, fmt.Errorf("update availability: %w", err)
+	}
+	if err := s.requireLearner(ctx, a.LearnerID); err != nil {
+		return nil, fmt.Errorf("update availability: %w", err)
+	}
+	now := time.Now().UTC()
+	var updated *models.Availability
+	err := s.inTx(ctx, txOptionsForDialect(s.dialect), func(txs *Store) error {
+		var result sql.Result
+		var err error
+		if expectedVersion == 0 {
+			result, err = txs.exec(ctx,
+				`INSERT INTO availability
+				    (learner_id, timezone, windows_json, avg_duration, sessions_week,
+				     do_not_disturb, notification_consent, notification_frequency,
+				     max_notifications_per_day, accessibility_json, version, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+				 ON CONFLICT(learner_id) DO NOTHING`,
+				a.LearnerID, a.Timezone, a.WindowsJSON, a.AvgDuration, a.SessionsWeek,
+				boolToInt(a.DoNotDisturb), boolToInt(a.NotificationConsent), a.NotificationFrequency,
+				a.MaxNotificationsPerDay, a.AccessibilityJSON, now,
+			)
+		} else {
+			result, err = txs.exec(ctx,
+				`UPDATE availability
+				 SET timezone = ?, windows_json = ?, avg_duration = ?, sessions_week = ?,
+				     do_not_disturb = ?, notification_consent = ?, notification_frequency = ?,
+				     max_notifications_per_day = ?, accessibility_json = ?,
+				     version = version + 1, updated_at = ?
+				 WHERE learner_id = ? AND version = ?`,
+				a.Timezone, a.WindowsJSON, a.AvgDuration, a.SessionsWeek,
+				boolToInt(a.DoNotDisturb), boolToInt(a.NotificationConsent), a.NotificationFrequency,
+				a.MaxNotificationsPerDay, a.AccessibilityJSON, now, a.LearnerID, expectedVersion,
+			)
+		}
+		if err != nil {
+			return fmt.Errorf("persist availability: %w", err)
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("availability update rows affected: %w", err)
+		}
+		if rows != 1 {
+			return store.ErrAvailabilityVersionConflict
+		}
+		updated, err = txs.GetAvailability(ctx, a.LearnerID)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+func (s *Store) requireLearner(ctx context.Context, learnerID string) error {
+	var count int
+	if err := s.queryRow(ctx, `SELECT COUNT(*) FROM learners WHERE id = ?`, learnerID).Scan(&count); err != nil {
+		return fmt.Errorf("validate learner: %w", err)
+	}
+	if count != 1 {
+		return fmt.Errorf("learner not found")
 	}
 	return nil
 }
@@ -1358,48 +1725,21 @@ func (s *Store) CreateScheduledAlert(ctx context.Context, learnerID, alertType, 
 	return nil
 }
 
-func (s *Store) GetUnsentAlerts(ctx context.Context, learnerID string) ([]*models.ScheduledAlert, error) {
-	rows, err := s.query(ctx,
-		`SELECT id, learner_id, alert_type, concept, scheduled_at, sent, created_at
-		 FROM scheduled_alerts WHERE learner_id = ? AND sent = 0`,
-		learnerID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("get unsent alerts: %w", err)
-	}
-	defer rows.Close()
-
-	var alerts []*models.ScheduledAlert
-	for rows.Next() {
-		sa := &models.ScheduledAlert{}
-		var sentInt int
-		if err := rows.Scan(
-			&sa.ID, &sa.LearnerID, &sa.AlertType, &sa.Concept,
-			&sa.ScheduledAt, &sentInt, &sa.CreatedAt,
-		); err != nil {
-			return nil, fmt.Errorf("scan alert row: %w", err)
-		}
-		sa.Sent = sentInt != 0
-		alerts = append(alerts, sa)
-	}
-	return alerts, rows.Err()
-}
-
-func (s *Store) MarkAlertSent(ctx context.Context, id int64) error {
-	_, err := s.exec(ctx, `UPDATE scheduled_alerts SET sent = 1 WHERE id = ?`, id)
-	if err != nil {
-		return fmt.Errorf("mark alert sent: %w", err)
-	}
-	return nil
-}
-
 func (s *Store) WasAlertSentToday(ctx context.Context, learnerID, alertType string) (bool, error) {
-	today := time.Now().UTC().Truncate(24 * time.Hour)
+	availability, err := s.GetAvailability(ctx, learnerID)
+	if err != nil {
+		return false, fmt.Errorf("check alert sent today: load availability: %w", err)
+	}
+	bounds, err := availability.NotificationBounds(time.Now().UTC())
+	if err != nil {
+		return false, fmt.Errorf("check alert sent today: derive local day: %w", err)
+	}
 	var count int
-	err := s.queryRow(ctx,
+	err = s.queryRow(ctx,
 		`SELECT COUNT(*) FROM scheduled_alerts
-		 WHERE learner_id = ? AND alert_type = ? AND created_at >= ?`,
-		learnerID, alertType, today,
+		 WHERE learner_id = ? AND alert_type = ?
+		   AND created_at >= ? AND created_at < ?`,
+		learnerID, alertType, bounds.DayStart, bounds.DayEnd,
 	).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("check alert sent today: %w", err)
@@ -1550,15 +1890,40 @@ func (s *Store) getConceptsDueForReview(ctx context.Context, learnerID, domainID
 
 // ─── OAuth Persistence ──────────────────────────────────────────────────────
 
-func (s *Store) CreateAuthCode(ctx context.Context, code, learnerID, codeChallenge, clientID string, expiresAt time.Time) error {
+// CreateAuthCodeWithBinding persists the redirect URI and PKCE method used at
+// authorization time. Empty method/redirect values are accepted only so tests
+// can exercise rows created before those columns existed.
+func (s *Store) CreateAuthCodeWithBinding(ctx context.Context, code, learnerID, codeChallenge, codeChallengeMethod, clientID, redirectURI string, expiresAt time.Time) error {
 	_, err := s.exec(ctx,
-		`INSERT INTO oauth_codes (code, learner_id, code_challenge, client_id, expires_at) VALUES (?, ?, ?, ?, ?)`,
-		code, learnerID, codeChallenge, clientID, expiresAt,
+		`INSERT INTO oauth_codes
+		    (code, learner_id, code_challenge, code_challenge_method, client_id, redirect_uri, expires_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		code, learnerID, codeChallenge, codeChallengeMethod, clientID, redirectURI, expiresAt,
 	)
 	if err != nil {
 		return fmt.Errorf("create auth code: %w", err)
 	}
 	return nil
+}
+
+// GetAuthCode reads a still-valid code without consuming it. The token handler
+// uses this view to validate PKCE and redirect binding before performing the
+// atomic single-use deletion, so a bad verifier cannot burn a legitimate code.
+func (s *Store) GetAuthCode(ctx context.Context, code, clientID string) (*models.AuthCode, error) {
+	ac := &models.AuthCode{}
+	err := s.queryRow(ctx,
+		`SELECT code, learner_id, code_challenge, code_challenge_method, client_id, redirect_uri, expires_at
+		 FROM oauth_codes
+		 WHERE code = ? AND client_id = ? AND expires_at > ?`,
+		code, clientID, time.Now().UTC(),
+	).Scan(&ac.Code, &ac.LearnerID, &ac.CodeChallenge, &ac.CodeChallengeMethod, &ac.ClientID, &ac.RedirectURI, &ac.ExpiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("get auth code: %w", store.ErrInvalidAuthCode)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get auth code: %w", err)
+	}
+	return ac, nil
 }
 
 // ConsumeAuthCode retrieves and deletes an auth code in one SQL statement.
@@ -1570,16 +1935,47 @@ func (s *Store) ConsumeAuthCode(ctx context.Context, code, clientID string) (*mo
 	err := s.queryRow(ctx,
 		`DELETE FROM oauth_codes
 		 WHERE code = ? AND client_id = ? AND expires_at > ?
-		 RETURNING code, learner_id, code_challenge, client_id, expires_at`,
+		 RETURNING code, learner_id, code_challenge, code_challenge_method, client_id, redirect_uri, expires_at`,
 		code, clientID, time.Now().UTC(),
-	).Scan(&ac.Code, &ac.LearnerID, &ac.CodeChallenge, &ac.ClientID, &ac.ExpiresAt)
+	).Scan(&ac.Code, &ac.LearnerID, &ac.CodeChallenge, &ac.CodeChallengeMethod, &ac.ClientID, &ac.RedirectURI, &ac.ExpiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("invalid_grant")
+		return nil, fmt.Errorf("consume auth code: %w", store.ErrInvalidAuthCode)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("consume auth code: %w", err)
 	}
 	return ac, nil
+}
+
+// ExchangeAuthCodeForRefreshToken consumes a validated authorization code and
+// creates its client-bound refresh token in one transaction. A persistence
+// failure therefore leaves the single-use code redeemable instead of burning
+// it without issuing long-lived credentials.
+func (s *Store) ExchangeAuthCodeForRefreshToken(ctx context.Context, code, clientID string) (*models.AuthCode, *models.RefreshToken, error) {
+	if strings.TrimSpace(clientID) == "" {
+		return nil, nil, fmt.Errorf("exchange auth code: client_id is required")
+	}
+	rt, err := newRefreshToken("", clientID, "")
+	if err != nil {
+		return nil, nil, err
+	}
+	var authCode *models.AuthCode
+	err = s.inTx(ctx, nil, func(txs *Store) error {
+		var consumeErr error
+		authCode, consumeErr = txs.ConsumeAuthCode(ctx, code, clientID)
+		if consumeErr != nil {
+			return consumeErr
+		}
+		rt.LearnerID = authCode.LearnerID
+		if err := txs.insertRefreshToken(ctx, rt); err != nil {
+			return fmt.Errorf("create refresh token: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("exchange auth code: %w", err)
+	}
+	return authCode, rt, nil
 }
 
 func (s *Store) CreateOAuthClient(ctx context.Context, clientID, clientName, redirectURIs string) error {
@@ -1605,23 +2001,33 @@ func (s *Store) CreateOAuthClientWithSecretCapped(ctx context.Context, clientID,
 	if maxClients <= 0 {
 		return s.CreateOAuthClientWithSecret(ctx, clientID, clientName, redirectURIs, secretHash)
 	}
-	result, err := s.exec(ctx,
-		`INSERT INTO oauth_clients (client_id, client_name, redirect_uris, client_secret_hash)
-		 SELECT ?, ?, ?, ?
-		 WHERE (SELECT COUNT(*) FROM oauth_clients) < ?`,
-		clientID, clientName, redirectURIs, secretHash, maxClients,
-	)
-	if err != nil {
-		return fmt.Errorf("create oauth client: %w", err)
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("create oauth client rows affected: %w", err)
-	}
-	if rows == 0 {
-		return store.ErrOAuthClientLimitReached
-	}
-	return nil
+	return s.inTx(ctx, txOptionsForDialect(s.dialect), func(txs *Store) error {
+		if txs.dialect == DialectPostgres {
+			// COUNT + INSERT must share a serialized critical section. Under
+			// PostgreSQL READ COMMITTED, concurrent INSERT...WHERE COUNT
+			// statements can otherwise all observe the same remaining slot.
+			if _, err := txs.exec(ctx, `SELECT pg_advisory_xact_lock(?)`, int64(0x7475746f72444352)); err != nil {
+				return fmt.Errorf("lock oauth client registration: %w", err)
+			}
+		}
+		result, err := txs.exec(ctx,
+			`INSERT INTO oauth_clients (client_id, client_name, redirect_uris, client_secret_hash)
+			 SELECT ?, ?, ?, ?
+			 WHERE (SELECT COUNT(*) FROM oauth_clients) < ?`,
+			clientID, clientName, redirectURIs, secretHash, maxClients,
+		)
+		if err != nil {
+			return fmt.Errorf("create oauth client: %w", err)
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("create oauth client rows affected: %w", err)
+		}
+		if rows == 0 {
+			return store.ErrOAuthClientLimitReached
+		}
+		return nil
+	})
 }
 
 func (s *Store) CountOAuthClients(ctx context.Context) (int, error) {
@@ -1695,7 +2101,23 @@ func (s *Store) CleanupExpiredCodes(ctx context.Context) (int64, error) {
 }
 
 func (s *Store) CleanupExpiredRefreshTokens(ctx context.Context) (int64, error) {
-	result, err := s.exec(ctx, `DELETE FROM refresh_tokens WHERE expires_at < ?`, time.Now().UTC())
+	now := time.Now().UTC()
+	// Keep expired ancestors while a descendant in the same family remains
+	// live: their hashes are the evidence needed to detect a replay and revoke
+	// that descendant. Once the whole family has expired, all rows are eligible.
+	result, err := s.exec(ctx,
+		`DELETE FROM refresh_tokens
+		 WHERE expires_at < ?
+		   AND (
+		       family_id = ''
+		       OR NOT EXISTS (
+		           SELECT 1 FROM refresh_tokens AS active
+		           WHERE active.family_id = refresh_tokens.family_id
+		             AND active.expires_at >= ?
+		       )
+		   )`,
+		now, now,
+	)
 	if err != nil {
 		return 0, fmt.Errorf("cleanup expired refresh tokens: %w", err)
 	}
@@ -1767,8 +2189,8 @@ const fragileThreshold = 0.30
 // since `since`, surfaced through GlobalOLMSnapshot.RecentEvents. Events are
 // derived from existing tables — no new persistence:
 //
-//   - mastery_threshold : concept_state.p_mastery >= 0.70 and updated_at >= since
-//   - retention_drop    : p_mastery currently < 0.30 (proxy for the fragile state — not a real drop event,
+//   - estimate_threshold : concept_state.p_mastery >= the routing threshold and updated_at >= since
+//   - estimate_fragile   : p_mastery currently < 0.30 (a routing snapshot, not a retention event,
 //     since the query sees a snapshot, not a transition) and updated_at >= since
 //   - streak_start      : earliest interaction in a still-running streak (computed via GetActivityStreak)
 //
@@ -1798,13 +2220,13 @@ func (s *Store) GetRecentLearnerEvents(ctx context.Context, learnerID string, si
 		}
 		if mastery >= masteryKST {
 			events = append(events, models.RawLearnerEvent{
-				At: at, Kind: "mastery_threshold", Concept: concept,
-				Message: fmt.Sprintf("%s reached the mastery threshold", concept),
+				At: at, Kind: "estimate_threshold", Concept: concept,
+				Message: fmt.Sprintf("%s model estimate reached the routing threshold", concept),
 			})
 		} else if mastery < fragileThreshold {
 			events = append(events, models.RawLearnerEvent{
-				At: at, Kind: "retention_drop", Concept: concept,
-				Message: fmt.Sprintf("%s passe en fragile", concept),
+				At: at, Kind: "estimate_fragile", Concept: concept,
+				Message: fmt.Sprintf("%s model estimate entered the fragile routing band", concept),
 			})
 		}
 	}

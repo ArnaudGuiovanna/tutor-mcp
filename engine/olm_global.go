@@ -33,27 +33,33 @@ type TimePoint struct {
 
 // DomainSummary is one row of the Savoir column.
 type DomainSummary struct {
-	DomainID     string  `json:"domain_id"`
-	DomainName   string  `json:"domain_name"`
-	PersonalGoal string  `json:"personal_goal"`
-	Solid        int     `json:"solid"`
-	InProgress   int     `json:"in_progress"`
-	Fragile      int     `json:"fragile"`
-	NotStarted   int     `json:"not_started"`
-	KSTProgress  float64 `json:"kst_progress"`
+	DomainID         string  `json:"domain_id"`
+	DomainName       string  `json:"domain_name"`
+	PersonalGoal     string  `json:"personal_goal"`
+	Solid            int     `json:"solid"`
+	Estimated        int     `json:"estimated"`
+	Retained         int     `json:"retained"`
+	Demonstrated     int     `json:"demonstrated"`
+	Transferred      int     `json:"transferred"`
+	InProgress       int     `json:"in_progress"`
+	Fragile          int     `json:"fragile"`
+	NotStarted       int     `json:"not_started"`
+	EvidenceProgress float64 `json:"evidence_progress"`
+	KSTProgress      float64 `json:"kst_progress"` // deprecated alias
 }
 
 // GoalProgress is one row of the objectives column.
 type GoalProgress struct {
-	DomainID     string  `json:"domain_id"`
-	PersonalGoal string  `json:"personal_goal"`
-	Progress     float64 `json:"progress"` // mirror of KSTProgress
+	DomainID         string  `json:"domain_id"`
+	PersonalGoal     string  `json:"personal_goal"`
+	EvidenceProgress float64 `json:"evidence_progress"`
+	Progress         float64 `json:"progress"` // deprecated alias
 }
 
 // LearnerEvent is one row of the recent events timeline.
 type LearnerEvent struct {
 	At      time.Time `json:"at"`
-	Kind    string    `json:"kind"` // "mastery_threshold"|"calibration_threshold"|"retention_drop"|"streak_start"
+	Kind    string    `json:"kind"` // "estimate_threshold"|"estimate_fragile"|"calibration_threshold"|"streak_start"
 	Message string    `json:"message"`
 	Concept string    `json:"concept,omitempty"`
 }
@@ -61,7 +67,11 @@ type LearnerEvent struct {
 // GlobalOLMSnapshot is the aggregator payload for the global OLM scope.
 type GlobalOLMSnapshot struct {
 	Streak              int             `json:"streak"`
-	TotalSolid          int             `json:"total_solid"`
+	TotalEstimated      int             `json:"total_estimated"`
+	TotalRetained       int             `json:"total_retained"`
+	TotalDemonstrated   int             `json:"total_demonstrated"`
+	TotalTransferred    int             `json:"total_transferred"`
+	TotalSolid          int             `json:"total_solid"` // deprecated alias for TotalDemonstrated
 	Domains             []DomainSummary `json:"domains"`
 	CalibrationHistory  []TimePoint     `json:"calibration_history"`
 	AutonomyHistory     []TimePoint     `json:"autonomy_history"`
@@ -86,20 +96,30 @@ func BuildGlobalOLMSnapshot(ctx context.Context, store storeport.Store, learnerI
 			return nil, fmt.Errorf("global olm: build domain %s: %w", d.ID, err)
 		}
 		g.Domains = append(g.Domains, DomainSummary{
-			DomainID:     d.ID,
-			DomainName:   d.Name,
-			PersonalGoal: d.PersonalGoal,
-			Solid:        snap.Solid,
-			InProgress:   snap.InProgress,
-			Fragile:      snap.Fragile,
-			NotStarted:   snap.NotStarted,
-			KSTProgress:  snap.KSTProgress,
+			DomainID:         d.ID,
+			DomainName:       d.Name,
+			PersonalGoal:     d.PersonalGoal,
+			Solid:            snap.Solid,
+			Estimated:        snap.Estimated,
+			Retained:         snap.Retained,
+			Demonstrated:     snap.Demonstrated,
+			Transferred:      snap.Transferred,
+			InProgress:       snap.InProgress,
+			Fragile:          snap.Fragile,
+			NotStarted:       snap.NotStarted,
+			EvidenceProgress: snap.EvidenceProgress,
+			KSTProgress:      snap.EvidenceProgress,
 		})
+		g.TotalEstimated += snap.Estimated
+		g.TotalRetained += snap.Retained
+		g.TotalDemonstrated += snap.Demonstrated
+		g.TotalTransferred += snap.Transferred
 		g.TotalSolid += snap.Solid
 		g.Goals = append(g.Goals, GoalProgress{
-			DomainID:     d.ID,
-			PersonalGoal: d.PersonalGoal,
-			Progress:     snap.KSTProgress,
+			DomainID:         d.ID,
+			PersonalGoal:     d.PersonalGoal,
+			EvidenceProgress: snap.EvidenceProgress,
+			Progress:         snap.EvidenceProgress,
 		})
 	}
 

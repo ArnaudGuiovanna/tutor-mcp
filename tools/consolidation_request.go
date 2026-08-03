@@ -62,9 +62,9 @@ func maybeBuildConsolidationRequest(ctx context.Context, deps *Deps, learnerID s
 	if !memory.Enabled() {
 		return nil
 	}
-	pending, err := deps.Store.GetPendingConsolidations(ctx, learnerID)
+	pending, err := deps.Store.ClaimPendingConsolidations(ctx, learnerID, now)
 	if err != nil {
-		deps.Logger.Warn("get_next_activity: pending consolidations lookup failed", "err", err, "learner", learnerID)
+		deps.Logger.Warn("get_next_activity: consolidation claim failed", "err", err, "learner", learnerID)
 		return nil
 	}
 	if len(pending) == 0 {
@@ -73,15 +73,28 @@ func maybeBuildConsolidationRequest(ctx context.Context, deps *Deps, learnerID s
 	req, ids, err := buildConsolidationRequest(learnerID, pending)
 	if err != nil {
 		deps.Logger.Warn("get_next_activity: consolidation_request build failed", "err", err, "learner", learnerID)
+		if releaseErr := deps.Store.ReleaseConsolidationClaims(ctx, learnerID, consolidationIDs(pending)); releaseErr != nil {
+			deps.Logger.Warn("get_next_activity: release consolidation claims failed", "err", releaseErr, "learner", learnerID)
+		}
 		return nil
 	}
 	if len(req.PendingJobs) == 0 {
+		if releaseErr := deps.Store.ReleaseConsolidationClaims(ctx, learnerID, ids); releaseErr != nil {
+			deps.Logger.Warn("get_next_activity: release empty consolidation claims failed", "err", releaseErr, "learner", learnerID)
+		}
 		return nil
 	}
-	if err := deps.Store.MarkConsolidationsDelivered(ctx, learnerID, ids, now); err != nil {
-		deps.Logger.Warn("get_next_activity: mark consolidations delivered failed", "err", err, "learner", learnerID)
-	}
 	return req
+}
+
+func consolidationIDs(items []*models.PendingConsolidation) []int64 {
+	ids := make([]int64, 0, len(items))
+	for _, item := range items {
+		if item != nil {
+			ids = append(ids, item.ID)
+		}
+	}
+	return ids
 }
 
 func buildConsolidationRequest(learnerID string, pending []*models.PendingConsolidation) (*ConsolidationRequest, []int64, error) {

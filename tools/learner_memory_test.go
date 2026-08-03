@@ -13,10 +13,14 @@ import (
 func TestUpdateLearnerMemory_WriteSessionAndReadRawSession(t *testing.T) {
 	t.Setenv("TUTOR_MCP_MEMORY_ROOT", t.TempDir())
 	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
-	_, deps := setupToolsTest(t)
+	store, deps := setupToolsTest(t)
+	domain := makeOwnerDomain(t, store, "L_owner", "memory-domain")
+	session := openTestLearningSession(t, store, "L_owner", "sess_memory", domain.ID)
 
 	ts := time.Date(2026, 5, 14, 9, 30, 0, 0, time.UTC)
 	content := `---
+session_id: sess_memory
+domain_id: ` + domain.ID + `
 timestamp: 2026-05-14T09:30:00Z
 duration_minutes: 30
 affect_start: focused
@@ -30,9 +34,11 @@ novelty_flag: true
 ## Summary
 The learner built a first retrieval cue.`
 	res := callTool(t, deps, registerUpdateLearnerMemory, "L_owner", "update_learner_memory", map[string]any{
-		"scope":     "session",
-		"timestamp": ts.Format(time.RFC3339),
-		"content":   content,
+		"scope":      "session",
+		"session_id": session.ID,
+		"domain_id":  domain.ID,
+		"timestamp":  ts.Format(time.RFC3339),
+		"content":    content,
 	})
 	if res.IsError {
 		t.Fatalf("update_learner_memory failed: %s", resultText(res))
@@ -57,26 +63,68 @@ The learner built a first retrieval cue.`
 	if !strings.Contains(body, "retrieval cue") {
 		t.Fatalf("unexpected body: %q", body)
 	}
+	frontmatter, _ := payload["frontmatter"].(map[string]any)
+	if frontmatter["session_id"] != session.ID {
+		t.Fatalf("summary lost durable session ID: %v", frontmatter)
+	}
+}
+
+func TestUpdateLearnerMemory_RejectsMismatchedOrForeignSession(t *testing.T) {
+	t.Setenv("TUTOR_MCP_MEMORY_ROOT", t.TempDir())
+	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
+	store, deps := setupToolsTest(t)
+	domain := makeOwnerDomain(t, store, "L_owner", "memory-domain-mismatch")
+	session := openTestLearningSession(t, store, "L_owner", "sess_owner_memory", domain.ID)
+	ts := time.Date(2026, 5, 14, 9, 30, 0, 0, time.UTC)
+	content := `---
+session_id: wrong_session
+domain_id: ` + domain.ID + `
+timestamp: 2026-05-14T09:30:00Z
+duration_minutes: 30
+affect_start: focused
+affect_end: satisfied
+energy_level: high
+concepts_touched: ["a"]
+session_type: review
+novelty_flag: false
+---
+
+## Summary
+Signal.`
+	mismatch := callTool(t, deps, registerUpdateLearnerMemory, "L_owner", "update_learner_memory", map[string]any{
+		"scope": "session", "session_id": session.ID, "timestamp": ts.Format(time.RFC3339), "content": content,
+	})
+	if !mismatch.IsError || !strings.Contains(resultText(mismatch), "does not match") {
+		t.Fatalf("mismatched summary session accepted: %q", resultText(mismatch))
+	}
+	foreign := callTool(t, deps, registerUpdateLearnerMemory, "L_attacker", "update_learner_memory", map[string]any{
+		"scope": "session", "session_id": session.ID, "timestamp": ts.Format(time.RFC3339), "content": content,
+	})
+	if !foreign.IsError || !strings.Contains(resultText(foreign), "not found") {
+		t.Fatalf("foreign summary session accepted: %q", resultText(foreign))
+	}
 }
 
 func TestUpdateLearnerMemory_ConceptMustBeActive(t *testing.T) {
 	t.Setenv("TUTOR_MCP_MEMORY_ROOT", t.TempDir())
 	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
 	store, deps := setupToolsTest(t)
-	makeOwnerDomain(t, store, "L_owner", "math")
+	domain := makeOwnerDomain(t, store, "L_owner", "math")
 
 	res := callTool(t, deps, registerUpdateLearnerMemory, "L_owner", "update_learner_memory", map[string]any{
 		"scope":        "concept",
+		"domain_id":    domain.ID,
 		"concept_slug": "unknown",
 		"section_key":  "Current state",
 		"content":      "Observation.",
 	})
-	if !res.IsError || !strings.Contains(resultText(res), "active concept") {
+	if !res.IsError || !strings.Contains(resultText(res), "not part of domain") {
 		t.Fatalf("expected active concept validation, got %q", resultText(res))
 	}
 
 	ok := callTool(t, deps, registerUpdateLearnerMemory, "L_owner", "update_learner_memory", map[string]any{
 		"scope":        "concept",
+		"domain_id":    domain.ID,
 		"concept_slug": "a",
 		"section_key":  "Current state",
 		"content":      "Observation.",

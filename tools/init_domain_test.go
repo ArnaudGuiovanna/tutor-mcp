@@ -133,9 +133,10 @@ func TestAddConcepts_HappyPath(t *testing.T) {
 	d := makeOwnerDomain(t, store, "L_owner", "math")
 
 	res := callTool(t, deps, registerAddConcepts, "L_owner", "add_concepts", map[string]any{
-		"domain_id":     d.ID,
-		"concepts":      []string{"c", "d"},
-		"prerequisites": map[string][]string{"c": {"a"}, "d": {"c"}},
+		"domain_id":        d.ID,
+		"expected_version": 1,
+		"concepts":         []string{"c", "d"},
+		"prerequisites":    map[string][]string{"c": {"a"}, "d": {"c"}},
 	})
 	if res.IsError {
 		t.Fatalf("expected success, got %q", resultText(res))
@@ -163,9 +164,10 @@ func TestAddConcepts_DuplicateRejected(t *testing.T) {
 	d := makeOwnerDomain(t, store, "L_owner", "math")
 
 	res := callTool(t, deps, registerAddConcepts, "L_owner", "add_concepts", map[string]any{
-		"domain_id":     d.ID,
-		"concepts":      []string{"a"},
-		"prerequisites": map[string][]string{},
+		"domain_id":        d.ID,
+		"expected_version": 1,
+		"concepts":         []string{"a"},
+		"prerequisites":    map[string][]string{},
 	})
 	if !res.IsError || !strings.Contains(resultText(res), "duplicate concept name") {
 		t.Fatalf("expected duplicate error, got %q", resultText(res))
@@ -175,9 +177,10 @@ func TestAddConcepts_DuplicateRejected(t *testing.T) {
 func TestAddConcepts_NoConcepts(t *testing.T) {
 	_, deps := setupToolsTest(t)
 	res := callTool(t, deps, registerAddConcepts, "L_owner", "add_concepts", map[string]any{
-		"domain_id":     "x",
-		"concepts":      []string{},
-		"prerequisites": map[string][]string{},
+		"domain_id":        "x",
+		"expected_version": 1,
+		"concepts":         []string{},
+		"prerequisites":    map[string][]string{},
 	})
 	if !res.IsError || !strings.Contains(resultText(res), "at least one concept") {
 		t.Fatalf("got %q", resultText(res))
@@ -187,9 +190,10 @@ func TestAddConcepts_NoConcepts(t *testing.T) {
 func TestAddConcepts_DomainNotFound(t *testing.T) {
 	_, deps := setupToolsTest(t)
 	res := callTool(t, deps, registerAddConcepts, "L_owner", "add_concepts", map[string]any{
-		"domain_id":     "missing",
-		"concepts":      []string{"x"},
-		"prerequisites": map[string][]string{},
+		"domain_id":        "missing",
+		"expected_version": 1,
+		"concepts":         []string{"x"},
+		"prerequisites":    map[string][]string{},
 	})
 	if !res.IsError || !strings.Contains(resultText(res), "domain not found") {
 		t.Fatalf("got %q", resultText(res))
@@ -213,9 +217,10 @@ func TestAddConcepts_RejectsDuplicateInBatch(t *testing.T) {
 
 	// Duplicate WITHIN the new batch.
 	res := callTool(t, deps, registerAddConcepts, "L_owner", "add_concepts", map[string]any{
-		"domain_id":     d.ID,
-		"concepts":      []string{"c", "c"},
-		"prerequisites": map[string][]string{},
+		"domain_id":        d.ID,
+		"expected_version": 1,
+		"concepts":         []string{"c", "c"},
+		"prerequisites":    map[string][]string{},
 	})
 	if !res.IsError || !strings.Contains(resultText(res), "duplicate concept name") {
 		t.Fatalf("expected duplicate-in-batch error, got %q", resultText(res))
@@ -250,9 +255,10 @@ func TestAddConcepts_RejectsUnknownPrereqValue(t *testing.T) {
 	// Adding c with a prereq that references "ghost" should fail —
 	// "ghost" is not in the merged universe (existing[a,b] + new[c]).
 	res := callTool(t, deps, registerAddConcepts, "L_owner", "add_concepts", map[string]any{
-		"domain_id":     d.ID,
-		"concepts":      []string{"c"},
-		"prerequisites": map[string][]string{"c": {"ghost"}},
+		"domain_id":        d.ID,
+		"expected_version": 1,
+		"concepts":         []string{"c"},
+		"prerequisites":    map[string][]string{"c": {"ghost"}},
 	})
 	if !res.IsError {
 		t.Fatalf("expected validation error for unknown prereq in add_concepts, got %q", resultText(res))
@@ -260,9 +266,10 @@ func TestAddConcepts_RejectsUnknownPrereqValue(t *testing.T) {
 
 	// But referencing existing concept "a" must still succeed.
 	res = callTool(t, deps, registerAddConcepts, "L_owner", "add_concepts", map[string]any{
-		"domain_id":     d.ID,
-		"concepts":      []string{"c"},
-		"prerequisites": map[string][]string{"c": {"a"}},
+		"domain_id":        d.ID,
+		"expected_version": 1,
+		"concepts":         []string{"c"},
+		"prerequisites":    map[string][]string{"c": {"a"}},
 	})
 	if res.IsError {
 		t.Fatalf("expected success when prereq points at existing concept, got %q", resultText(res))

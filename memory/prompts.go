@@ -9,6 +9,8 @@ and call update_learner_memory to store it.
 Required summary format, including YAML frontmatter:
 
 ---
+session_id: {session_id}
+domain_id: {domain_id}
 timestamp: {session start time in ISO 8601}
 duration_minutes: {approximate duration}
 affect_start: {focused|distracted|tired|energized|frustrated|...}
@@ -35,10 +37,10 @@ If none was stated: "No explicit intention collected."]
 
 Calls to perform:
 
-update_learner_memory(scope="session", timestamp="{ISO}", operation="replace_file", content="<complete markdown>")
+update_learner_memory(scope="session", session_id="{session_id}", domain_id="{domain_id}", timestamp="{ISO}", operation="replace_file", content="<complete markdown>")
 
 If there is a durable concept-level observation:
-update_learner_memory(scope="concept", concept_slug="{slug}", operation="replace_section", section_key="Current state", content="...")
+update_learner_memory(scope="concept", domain_id="{domain_id}", concept_slug="{slug}", operation="replace_section", section_key="Current state", content="...")
 
 If a new fact may be durable but is not yet confirmed:
 update_learner_memory(scope="memory_pending", operation="append", content="- {date}: {dated factual observation}")

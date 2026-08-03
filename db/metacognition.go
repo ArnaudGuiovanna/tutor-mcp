@@ -213,9 +213,9 @@ func (s *Store) CreateTransferRecord(ctx context.Context, r *models.TransferReco
 	r.CreatedAt = time.Now().UTC()
 	_, err := s.exec(ctx,
 		`INSERT INTO transfer_records
-		    (learner_id, domain_id, concept_id, context_type, score, session_id, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		r.LearnerID, r.DomainID, r.ConceptID, r.ContextType, r.Score, r.SessionID, r.CreatedAt,
+		    (learner_id, domain_id, assessment_attempt_id, concept_id, context_type, score, session_id, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.LearnerID, r.DomainID, nullString(r.AssessmentAttemptID), r.ConceptID, r.ContextType, r.Score, r.SessionID, r.CreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("create transfer record: %w", err)
@@ -232,7 +232,7 @@ func (s *Store) GetTransferScoresInDomain(ctx context.Context, learnerID, domain
 }
 
 func (s *Store) getTransferScores(ctx context.Context, learnerID, domainID, conceptID string, exactDomain bool) ([]*models.TransferRecord, error) {
-	query := `SELECT id, learner_id, domain_id, concept_id, context_type, score, session_id, created_at
+	query := `SELECT id, learner_id, domain_id, assessment_attempt_id, concept_id, context_type, score, session_id, created_at
 		 FROM transfer_records WHERE learner_id = ? AND concept_id = ?`
 	args := []any{learnerID, conceptID}
 	if exactDomain {
@@ -251,9 +251,11 @@ func (s *Store) getTransferScores(ctx context.Context, learnerID, domainID, conc
 	var records []*models.TransferRecord
 	for rows.Next() {
 		r := &models.TransferRecord{}
-		if err := rows.Scan(&r.ID, &r.LearnerID, &r.DomainID, &r.ConceptID, &r.ContextType, &r.Score, &r.SessionID, &r.CreatedAt); err != nil {
+		var attemptID sql.NullString
+		if err := rows.Scan(&r.ID, &r.LearnerID, &r.DomainID, &attemptID, &r.ConceptID, &r.ContextType, &r.Score, &r.SessionID, &r.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan transfer record: %w", err)
 		}
+		r.AssessmentAttemptID = attemptID.String
 		records = append(records, r)
 	}
 	return records, rows.Err()
@@ -272,7 +274,7 @@ func (s *Store) GetTransferRecordsByDomain(ctx context.Context, learnerID, domai
 }
 
 func (s *Store) getTransferRecords(ctx context.Context, learnerID, domainID string) ([]*models.TransferRecord, error) {
-	query := `SELECT id, learner_id, domain_id, concept_id, context_type, score, session_id, created_at
+	query := `SELECT id, learner_id, domain_id, assessment_attempt_id, concept_id, context_type, score, session_id, created_at
 		 FROM transfer_records WHERE learner_id = ?`
 	args := []any{learnerID}
 	if domainID != "" {
@@ -291,9 +293,11 @@ func (s *Store) getTransferRecords(ctx context.Context, learnerID, domainID stri
 	var records []*models.TransferRecord
 	for rows.Next() {
 		r := &models.TransferRecord{}
-		if err := rows.Scan(&r.ID, &r.LearnerID, &r.DomainID, &r.ConceptID, &r.ContextType, &r.Score, &r.SessionID, &r.CreatedAt); err != nil {
+		var attemptID sql.NullString
+		if err := rows.Scan(&r.ID, &r.LearnerID, &r.DomainID, &attemptID, &r.ConceptID, &r.ContextType, &r.Score, &r.SessionID, &r.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan transfer record: %w", err)
 		}
+		r.AssessmentAttemptID = attemptID.String
 		records = append(records, r)
 	}
 	return records, rows.Err()

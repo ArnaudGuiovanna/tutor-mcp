@@ -29,6 +29,7 @@ func TestRecordAffect_MissingSessionID(t *testing.T) {
 
 func TestRecordAffect_StartOfSession(t *testing.T) {
 	store, deps := setupToolsTest(t)
+	openTestLearningSession(t, store, "L_owner", "s1", "")
 	res := callTool(t, deps, registerRecordAffect, "L_owner", "record_affect", map[string]any{
 		"session_id": "s1",
 		"energy":     3,
@@ -52,7 +53,8 @@ func TestRecordAffect_StartOfSession(t *testing.T) {
 }
 
 func TestRecordAffect_LowConfidenceTriggersScaffolding(t *testing.T) {
-	_, deps := setupToolsTest(t)
+	store, deps := setupToolsTest(t)
+	openTestLearningSession(t, store, "L_owner", "s2", "")
 	res := callTool(t, deps, registerRecordAffect, "L_owner", "record_affect", map[string]any{
 		"session_id": "s2",
 		"energy":     3,
@@ -68,7 +70,8 @@ func TestRecordAffect_LowConfidenceTriggersScaffolding(t *testing.T) {
 }
 
 func TestRecordAffect_LowEnergyTriggersLighter(t *testing.T) {
-	_, deps := setupToolsTest(t)
+	store, deps := setupToolsTest(t)
+	openTestLearningSession(t, store, "L_owner", "s3", "")
 	res := callTool(t, deps, registerRecordAffect, "L_owner", "record_affect", map[string]any{
 		"session_id": "s3",
 		"energy":     1,
@@ -85,6 +88,7 @@ func TestRecordAffect_LowEnergyTriggersLighter(t *testing.T) {
 
 func TestRecordAffect_RejectsOutOfRangeLikert(t *testing.T) {
 	store, deps := setupToolsTest(t)
+	openTestLearningSession(t, store, "L_owner", "s_bad", "")
 	res := callTool(t, deps, registerRecordAffect, "L_owner", "record_affect", map[string]any{
 		"session_id": "s_bad",
 		"energy":     99, // legal Likert is 1-4
@@ -104,7 +108,8 @@ func TestRecordAffect_RejectsOutOfRangeLikert(t *testing.T) {
 }
 
 func TestRecordAffect_RejectsNegativeLikert(t *testing.T) {
-	_, deps := setupToolsTest(t)
+	store, deps := setupToolsTest(t)
+	openTestLearningSession(t, store, "L_owner", "s_neg", "")
 	res := callTool(t, deps, registerRecordAffect, "L_owner", "record_affect", map[string]any{
 		"session_id":           "s_neg",
 		"perceived_difficulty": -2,
@@ -119,10 +124,12 @@ func TestRecordAffect_RejectsNegativeLikert(t *testing.T) {
 
 func TestRecordAffect_EndOfSessionAutonomyAndDelta(t *testing.T) {
 	store, deps := setupToolsTest(t)
+	session := openTestLearningSession(t, store, "L_owner", "s_end", "")
 
 	// Seed with a successful interaction so calibration delta is computed.
 	if err := store.CreateInteraction(context.Background(), &models.Interaction{
 		LearnerID:    "L_owner",
+		SessionID:    session.ID,
 		Concept:      "x",
 		ActivityType: "RECALL_EXERCISE",
 		Success:      true,

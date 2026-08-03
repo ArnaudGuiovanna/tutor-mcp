@@ -15,16 +15,16 @@ func TestGlobalOLMSnapshot_TypesCompile(t *testing.T) {
 		Streak:     3,
 		TotalSolid: 12,
 		Domains: []DomainSummary{
-			{DomainID: "d1", DomainName: "math", Solid: 5, KSTProgress: 0.6},
+			{DomainID: "d1", DomainName: "math", Solid: 5, EvidenceProgress: 0.6, KSTProgress: 0.6},
 		},
 		CalibrationHistory:  []TimePoint{{Day: "2026-05-03", Value: -1.2}},
 		AutonomyHistory:     []TimePoint{{Day: "2026-05-03", Value: 0.7}},
 		SatisfactionHistory: []TimePoint{{Day: "2026-05-03", Value: 3.0}},
 		Goals: []GoalProgress{
-			{DomainID: "d1", PersonalGoal: "g", Progress: 0.6},
+			{DomainID: "d1", PersonalGoal: "g", EvidenceProgress: 0.6, Progress: 0.6},
 		},
 		RecentEvents: []LearnerEvent{
-			{At: time.Now().UTC(), Kind: "mastery_threshold", Concept: "x", Message: "x atteint le seuil"},
+			{At: time.Now().UTC(), Kind: "estimate_threshold", Concept: "x", Message: "x estimate reached the routing threshold"},
 		},
 	}
 	if g.TotalSolid != 12 || len(g.Domains) != 1 || len(g.Goals) != 1 {
@@ -49,8 +49,11 @@ func TestBuildGlobalOLMSnapshot_AggregatesAcrossDomains(t *testing.T) {
 	if len(g.Domains) != 3 {
 		t.Fatalf("Domains=%d, want 3", len(g.Domains))
 	}
-	if g.TotalSolid < 2 {
-		t.Errorf("TotalSolid=%d, want >=2 (a + x)", g.TotalSolid)
+	if g.TotalEstimated != 2 || g.TotalRetained != 0 {
+		t.Errorf("TotalEstimated/TotalRetained=%d/%d, want 2/0 without delayed recall", g.TotalEstimated, g.TotalRetained)
+	}
+	if g.TotalDemonstrated != 0 || g.TotalSolid != 0 {
+		t.Errorf("TotalDemonstrated/TotalSolid=%d/%d, want 0/0 without varied evidence", g.TotalDemonstrated, g.TotalSolid)
 	}
 	if len(g.Goals) != 3 {
 		t.Errorf("Goals=%d, want 3", len(g.Goals))
@@ -118,7 +121,7 @@ func TestBuildGlobalOLMSnapshot_PopulatesSparklinesAndEvents(t *testing.T) {
 	store, raw := newOLMTestStore(t)
 	seedLearner(t, raw, "L1")
 	seedDomain(t, raw, "L1", "math", []string{"a"}, nil, false)
-	seedConceptState(t, store, "L1", "a", 0.90, "review") // → mastery_threshold event
+	seedConceptState(t, store, "L1", "a", 0.90, "review") // → estimate_threshold event
 
 	now := time.Now().UTC()
 	// Seed one interaction today so streak >= 1 (and streak_start event fires).
@@ -137,7 +140,7 @@ func TestBuildGlobalOLMSnapshot_PopulatesSparklinesAndEvents(t *testing.T) {
 		t.Errorf("Streak=%d, want >=1", g.Streak)
 	}
 	if len(g.RecentEvents) == 0 {
-		t.Errorf("RecentEvents empty — expected mastery_threshold from p_mastery=0.90")
+		t.Errorf("RecentEvents empty — expected estimate_threshold from p_mastery=0.90")
 	}
 	// Day format check on whichever sparkline is non-empty (calibration is empty
 	// without a calibration_id row, but RecentEvents.At should be a real time).

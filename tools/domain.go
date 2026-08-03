@@ -7,6 +7,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -233,11 +234,13 @@ type ValueFramingsInput struct {
 }
 
 type InitDomainParams struct {
+	IdempotentMutationParams
 	Name          string              `json:"name" jsonschema:"learning domain name"`
 	Concepts      []string            `json:"concepts" jsonschema:"list of domain concepts"`
 	Prerequisites map[string][]string `json:"prerequisites" jsonschema:"prerequisite graph (concept -> list of prerequisites)"`
 	PersonalGoal  string              `json:"personal_goal,omitempty" jsonschema:"learner's personal goal within this domain (optional)"`
 	ValueFramings *ValueFramingsInput `json:"value_framings,omitempty" jsonschema:"4 value axes (financial/employment/intellectual/innovation). 1-2 sentences per axis. Optional - can be filled in later."`
+	HighStakes    bool                `json:"high_stakes,omitempty" jsonschema:"mark regulated, clinical, legal, safety-critical, or other high-consequence learning; this safety classification cannot be unset through MCP"`
 }
 
 func registerInitDomain(server *mcp.Server, deps *Deps) {
@@ -312,6 +315,12 @@ func registerInitDomain(server *mcp.Server, deps *Deps) {
 			if createErr != nil {
 				return fmt.Errorf("create domain: %w", createErr)
 			}
+			if params.HighStakes {
+				if err := tx.MarkDomainHighStakes(ctx, domain.ID, learnerID); err != nil {
+					return fmt.Errorf("apply high-stakes safety policy: %w", err)
+				}
+				domain.HighStakes = true
+			}
 
 			for _, concept := range params.Concepts {
 				cs := models.NewConceptStateInDomain(learnerID, domain.ID, concept)
@@ -343,10 +352,15 @@ func registerInitDomain(server *mcp.Server, deps *Deps) {
 
 		response := map[string]interface{}{
 			"domain_id":              domain.ID,
+			"curriculum_version":     domain.GraphVersion,
+			"high_stakes":            domain.HighStakes,
 			"concept_count":          len(params.Concepts),
 			"graph_quality_report":   graphQualityReport,
 			"graph_quality_guidance": graphQualityGuidance(graphQualityReport),
 			"message":                fmt.Sprintf("Domain %q was created with %d concepts. Existing progress was preserved.", params.Name, len(params.Concepts)),
+		}
+		if domain.HighStakes {
+			response["high_stakes_policy"] = "demonstrated claims and intrusive notifications remain blocked until a trusted human-reviewed evaluation exists"
 		}
 		// [1] GoalDecomposer — instruct the LLM (versioned, structured,
 		// non-blocking per Q2). Only emitted when REGULATION_GOAL=on so
@@ -371,15 +385,20 @@ func registerInitDomain(server *mcp.Server, deps *Deps) {
 // ─── Add Concepts ────────────────────────────────────────────────────────────
 
 type AddConceptsParams struct {
-	DomainID      string              `json:"domain_id" jsonschema:"target domain ID"`
-	Concepts      []string            `json:"concepts" jsonschema:"new concepts to add"`
-	Prerequisites map[string][]string `json:"prerequisites" jsonschema:"new prerequisites (concept -> list of prerequisites). May include links to existing concepts."`
+	IdempotentMutationParams
+	DomainID        string                                 `json:"domain_id" jsonschema:"target domain ID"`
+	ExpectedVersion *int                                   `json:"expected_version" jsonschema:"current graph_version; stale revisions are rejected"`
+	Concepts        []string                               `json:"concepts" jsonschema:"new concepts to add"`
+	Prerequisites   map[string][]string                    `json:"prerequisites" jsonschema:"new prerequisites (concept -> list of prerequisites). May include links to existing concepts."`
+	Details         map[string]CurriculumConceptDefinition `json:"details,omitempty" jsonschema:"optional outcomes, level, criteria, and description keyed by new concept name"`
+	Provenance      *CurriculumProvenanceInput             `json:"provenance,omitempty" jsonschema:"optional explicit source; authenticated learner request is recorded by default"`
+	Review          *CurriculumReviewInput                 `json:"review,omitempty" jsonschema:"optional unreviewed/in-review annotation"`
 }
 
 func registerAddConcepts(server *mcp.Server, deps *Deps) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "add_concepts",
-		Description: "Add concepts to an existing domain without destroying progress. Use to enrich a domain mid-course.",
+		Description: "Add concepts through an immutable curriculum revision without destroying progress. Requires the latest expected_version; stale writers are rejected.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params AddConceptsParams) (*mcp.CallToolResult, any, error) {
 		learnerID, err := getLearnerID(ctx)
 		if err != nil {
@@ -392,12 +411,25 @@ func registerAddConcepts(server *mcp.Server, deps *Deps) {
 			r, _ := errorResult("at least one concept is required")
 			return r, nil, nil
 		}
+		if params.ExpectedVersion == nil || *params.ExpectedVersion < 1 {
+			r, _ := errorResult("expected_version >= 1 is required")
+			return r, nil, nil
+		}
 
 		// Resolve domain — needed so we can validate prerequisites
 		// against the merged (existing + new) concept universe.
 		domain, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "domain not found", err)
+			return r, nil, nil
+		}
+		current, err := deps.Store.EnsureCurriculumBaseline(ctx, learnerID, domain.ID)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to initialize curriculum history", err)
+			return r, nil, nil
+		}
+		if domain.GraphVersion != *params.ExpectedVersion || current.Version != *params.ExpectedVersion {
+			r, _ := curriculumConflictResult(*params.ExpectedVersion, domain.GraphVersion)
 			return r, nil, nil
 		}
 
@@ -416,6 +448,12 @@ func registerAddConcepts(server *mcp.Server, deps *Deps) {
 				return r, nil, nil
 			}
 			batchSet[c] = true
+		}
+		for key := range params.Details {
+			if !batchSet[key] {
+				r, _ := errorResult(fmt.Sprintf("details key %q is not present in concepts", key))
+				return r, nil, nil
+			}
 		}
 
 		candidateGraph := models.KnowledgeSpace{
@@ -441,13 +479,56 @@ func registerAddConcepts(server *mcp.Server, deps *Deps) {
 			r, _ := graphQualityBlockedResult(graphQualityReport)
 			return r, nil, nil
 		}
-		domain.Graph = candidateGraph
+		definitions := make([]CurriculumConceptDefinition, 0, len(params.Concepts))
+		for _, key := range params.Concepts {
+			definition := params.Details[key]
+			if definition.Label != "" && definition.Label != key {
+				r, _ := errorResult(fmt.Sprintf("details[%q].label must equal the graph concept name", key))
+				return r, nil, nil
+			}
+			definition.Label = key
+			definitions = append(definitions, definition)
+		}
+		newConcepts, err := newCurriculumConcepts(current, definitions)
+		if err != nil {
+			r, _ := errorResult(err.Error())
+			return r, nil, nil
+		}
+		next := models.CloneCurriculumSnapshot(current)
+		next.Graph = candidateGraph
+		next.Concepts = append(next.Concepts, newConcepts...)
+		provenance := models.CurriculumProvenance{
+			SourceType: "learner_request",
+			Author:     learnerID,
+			Rationale:  "add declared competencies to the active curriculum",
+		}
+		if params.Provenance != nil {
+			if err := validateCurriculumProvenanceInput(*params.Provenance); err != nil {
+				r, _ := errorResult(err.Error())
+				return r, nil, nil
+			}
+			provenance.SourceType = params.Provenance.SourceType
+			provenance.SourceRef = params.Provenance.SourceRef
+			provenance.Rationale = params.Provenance.Rationale
+		}
+		review, err := curriculumReviewFromInput(params.Review)
+		if err != nil {
+			r, _ := errorResult(err.Error())
+			return r, nil, nil
+		}
+		next.Operation = models.CurriculumOperation{
+			Type:             models.CurriculumOperationAdd,
+			TargetConceptIDs: curriculumConceptIDs(newConcepts),
+			Rationale:        provenance.Rationale,
+		}
+		next.Provenance = provenance
+		next.Review = review
 
 		// Graph and cognitive-state creation are one atomic unit. A failed
 		// concept insert cannot leave a graph that references a missing state.
 		err = deps.Store.WithTx(ctx, func(tx storeport.Store) error {
-			if err := tx.UpdateDomainGraph(ctx, domain.ID, domain.Graph); err != nil {
-				return fmt.Errorf("update domain graph: %w", err)
+			if err := tx.CompareAndSwapCurriculum(ctx, learnerID, domain.ID, *params.ExpectedVersion, next); err != nil {
+				return err
 			}
 			for _, concept := range params.Concepts {
 				cs := models.NewConceptStateInDomain(learnerID, domain.ID, concept)
@@ -457,6 +538,15 @@ func registerAddConcepts(server *mcp.Server, deps *Deps) {
 			}
 			return nil
 		})
+		if errors.Is(err, storeport.ErrCurriculumVersionConflict) {
+			fresh, _ := deps.Store.GetDomainByID(ctx, domain.ID)
+			currentVersion := domain.GraphVersion
+			if fresh != nil {
+				currentVersion = fresh.GraphVersion
+			}
+			r, _ := curriculumConflictResult(*params.ExpectedVersion, currentVersion)
+			return r, nil, nil
+		}
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to add concepts", err)
 			return r, nil, nil
@@ -465,10 +555,11 @@ func registerAddConcepts(server *mcp.Server, deps *Deps) {
 		response := map[string]interface{}{
 			"domain_id":              domain.ID,
 			"added":                  added,
-			"total_concepts":         len(domain.Graph.Concepts),
+			"total_concepts":         len(candidateGraph.Concepts),
+			"version":                *params.ExpectedVersion + 1,
 			"graph_quality_report":   graphQualityReport,
 			"graph_quality_guidance": graphQualityGuidance(graphQualityReport),
-			"message":                fmt.Sprintf("%d new concepts added. Total: %d. Existing progress was preserved.", added, len(domain.Graph.Concepts)),
+			"message":                fmt.Sprintf("%d new concepts added. Total: %d. Existing progress was preserved.", added, len(candidateGraph.Concepts)),
 		}
 		// [1] GoalDecomposer — after add_concepts the graph_version has
 		// advanced; per OQ-1.1 existing relevance entries remain valid but

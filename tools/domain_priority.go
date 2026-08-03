@@ -12,6 +12,7 @@ import (
 )
 
 type SetDomainPriorityParams struct {
+	IdempotentMutationParams
 	DomainID string `json:"domain_id" jsonschema:"target domain ID"`
 	Rank     *int   `json:"rank" jsonschema:"positive integer priority rank. Rank 1 is highest priority; explicit ranks route before unranked domains."`
 }

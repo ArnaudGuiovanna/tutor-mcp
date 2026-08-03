@@ -112,7 +112,7 @@ func nextValueAxis(lastAxis string, framings *models.DomainValueFramings) string
 
 // SelectBrief chooses which motivation brief kind to fire (or "" for silence).
 // Priority order (first match wins):
-//  1. milestone         — just crossed a mastery threshold
+//  1. milestone         — just crossed a model-estimate milestone
 //  2. competence_value  — reminder of the concrete gain this skill unlocks
 //  3. growth_mindset    — a failure occurred on this concept within 24h
 //  4. affect_reframe    — the latest end-of-session affect was negative

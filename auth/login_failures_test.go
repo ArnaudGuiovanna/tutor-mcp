@@ -5,10 +5,26 @@
 package auth
 
 import (
+	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 )
+
+type failingLoginFailureBackend struct{}
+
+func (failingLoginFailureBackend) Record(context.Context, string, time.Time) (int, error) {
+	return 0, errors.New("backend unavailable")
+}
+
+func (failingLoginFailureBackend) CountInWindow(context.Context, string, time.Duration, time.Time) (int, error) {
+	return 0, errors.New("backend unavailable")
+}
+
+func (failingLoginFailureBackend) Reset(context.Context, string) error {
+	return errors.New("backend unavailable")
+}
 
 // Issue #36 part 4: per-account login failure lockout. The tracker is
 // thread-safe, time-windowed, and resettable on success.
@@ -93,5 +109,24 @@ func TestLoginFailureTracker_ConcurrentAccessSafe(t *testing.T) {
 	// 50 goroutines × 20 records = 1000 — exactly at threshold (Allow uses <).
 	if tk.Allow("shared@x") {
 		t.Errorf("expected lockout at 1000 fails; tracker still allows")
+	}
+}
+
+func TestLoginFailureTracker_BackendFailureUsesLocalAccountBucket(t *testing.T) {
+	tk := NewLoginFailureTracker(2, time.Minute)
+	tk.SetBackend(failingLoginFailureBackend{})
+
+	if got := tk.Record("learner@example.test"); got != 1 {
+		t.Fatalf("first fallback record = %d, want 1", got)
+	}
+	if got := tk.Record("learner@example.test"); got != 2 {
+		t.Fatalf("second fallback record = %d, want 2", got)
+	}
+	if tk.Allow("learner@example.test") {
+		t.Fatal("backend outage must not bypass per-account lockout")
+	}
+	tk.Reset("learner@example.test")
+	if !tk.Allow("learner@example.test") {
+		t.Fatal("reset should clear the local fallback state")
 	}
 }

@@ -6,11 +6,26 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
+
+type recordingRateLimitBackend struct{ keys []string }
+
+func (b *recordingRateLimitBackend) Allow(_ context.Context, key string, _ float64, _ int, _ time.Time) (bool, error) {
+	b.keys = append(b.keys, key)
+	return true, nil
+}
+
+type failingRateLimitBackend struct{}
+
+func (failingRateLimitBackend) Allow(context.Context, string, float64, int, time.Time) (bool, error) {
+	return false, errors.New("backend unavailable")
+}
 
 func TestNewRateLimiter_FieldsInitialized(t *testing.T) {
 	rl := NewRateLimiter(2.5, 7)
@@ -30,6 +45,37 @@ func TestNewRateLimiter_FieldsInitialized(t *testing.T) {
 	}
 	if rl.stop == nil {
 		t.Fatal("stop channel is nil")
+	}
+}
+
+func TestRateLimiter_BackendNamespacesPolicies(t *testing.T) {
+	backend := &recordingRateLimitBackend{}
+	authLimiter := NewRateLimiterWithNamespace("oauth", 1, 1)
+	registerLimiter := NewRateLimiterWithNamespace("oauth_register", 1, 1)
+	defer authLimiter.Stop()
+	defer registerLimiter.Stop()
+	authLimiter.SetBackend(backend)
+	registerLimiter.SetBackend(backend)
+
+	if !authLimiter.Allow("198.51.100.7") || !registerLimiter.Allow("198.51.100.7") {
+		t.Fatal("recording backend unexpectedly rejected request")
+	}
+	want := []string{"oauth:198.51.100.7", "oauth_register:198.51.100.7"}
+	if len(backend.keys) != len(want) || backend.keys[0] != want[0] || backend.keys[1] != want[1] {
+		t.Fatalf("backend keys = %#v, want %#v", backend.keys, want)
+	}
+}
+
+func TestRateLimiter_BackendFailureUsesBoundedLocalFallback(t *testing.T) {
+	rl := NewRateLimiterWithNamespace("oauth_login", 0, 1)
+	defer rl.Stop()
+	rl.SetBackend(failingRateLimitBackend{})
+
+	if !rl.Allow("sensitive-caller-key") {
+		t.Fatal("first request should use the local fallback burst")
+	}
+	if rl.Allow("sensitive-caller-key") {
+		t.Fatal("backend outage must not turn rate limiting into fail-open")
 	}
 }
 

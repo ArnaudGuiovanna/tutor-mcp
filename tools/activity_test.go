@@ -131,10 +131,11 @@ func TestGetNextActivity_IncludesEpisodicContextAndReasoningRequest(t *testing.T
 	ts := time.Date(2026, 5, 14, 9, 30, 0, 0, time.UTC)
 	if err := memory.Write(memory.WriteRequest{
 		LearnerID: "L_owner",
+		DomainID:  d.ID,
 		Scope:     memory.ScopeSession,
 		Timestamp: ts,
 		Operation: memory.OpReplaceFile,
-		Content:   "---\ntimestamp: 2026-05-14T09:30:00Z\nnovelty_flag: true\n---\n\n## Summary\nThe learner relied on a brittle cue.",
+		Content:   "---\ndomain_id: " + d.ID + "\ntimestamp: 2026-05-14T09:30:00Z\nnovelty_flag: true\n---\n\n## Summary\nThe learner relied on a brittle cue.",
 	}); err != nil {
 		t.Fatalf("write memory session: %v", err)
 	}
@@ -268,7 +269,7 @@ func TestGetNextActivity_AttachesClientInitiatedConsolidationRequest(t *testing.
 	}
 }
 
-func TestGetNextActivity_OLMInconsistencyActivatesReasoningRequest(t *testing.T) {
+func TestGetNextActivity_HighBKTWithForgettingIsNotFalselySolid(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	d := makeOwnerDomain(t, store, "L_owner", "math")
 	cs := models.NewConceptState("L_owner", "a")
@@ -288,13 +289,10 @@ func TestGetNextActivity_OLMInconsistencyActivatesReasoningRequest(t *testing.T)
 		t.Fatalf("got %q", resultText(res))
 	}
 	out := decodeResult(t, res)
-	ec, ok := out["episodic_context"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected episodic_context, got %v", out)
-	}
-	inconsistencies, _ := ec["olm_inconsistencies"].([]any)
-	if len(inconsistencies) == 0 {
-		t.Fatalf("expected OLM inconsistency, got %v", ec)
+	if ec, ok := out["episodic_context"].(map[string]any); ok {
+		if inconsistencies, _ := ec["olm_inconsistencies"].([]any); len(inconsistencies) != 0 {
+			t.Fatalf("high BKT with expired retention must no longer be labelled solid: %v", inconsistencies)
+		}
 	}
 	contract, _ := out["pedagogical_contract"].(map[string]any)
 	req, ok := contract["reasoning_request"].(map[string]any)
@@ -304,12 +302,12 @@ func TestGetNextActivity_OLMInconsistencyActivatesReasoningRequest(t *testing.T)
 	reasons, _ := req["enabled_because"].([]any)
 	found := false
 	for _, reason := range reasons {
-		if reason == "olm_inconsistencies_to_compensate" {
+		if reason == "high_uncertainty_on_target" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("missing OLM inconsistency reason: %v", reasons)
+		t.Fatalf("missing high-uncertainty reasoning reason: %v", reasons)
 	}
 }
 
@@ -325,10 +323,17 @@ func TestGetNextActivity_OverloadUsesRealSessionStart(t *testing.T) {
 	}
 
 	oldStart := time.Now().UTC().Add(-1 * time.Hour)
+	session := openTestLearningSession(t, store, "L_owner", "sess_overload", d.ID)
 	if _, err := store.RawDB().Exec(
-		`INSERT INTO interactions (learner_id, concept, activity_type, success, response_time, confidence, created_at, domain_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		"L_owner", "a", string(models.ActivityPractice), 1, 1000, 0.8, oldStart, d.ID,
+		`UPDATE learning_sessions SET started_at = ?, last_active_at = ? WHERE id = ?`,
+		oldStart, oldStart, session.ID,
+	); err != nil {
+		t.Fatalf("backdate explicit session: %v", err)
+	}
+	if _, err := store.RawDB().Exec(
+		`INSERT INTO interactions (learner_id, session_id, concept, activity_type, success, response_time, confidence, created_at, domain_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"L_owner", session.ID, "a", string(models.ActivityPractice), 1, 1000, 0.8, oldStart, d.ID,
 	); err != nil {
 		t.Fatalf("seed old interaction: %v", err)
 	}
@@ -661,7 +666,7 @@ func TestGetNextActivity_PostOrchestratePhaseMatchesDB(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	d := makeOwnerDomain(t, store, "L_owner", "math")
 	var buf bytes.Buffer
-	deps.Logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	deps.Logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	// Seed phase = INSTRUCTION and goal-relevance so the FSM has
 	// something to evaluate.

@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"tutor-mcp/algorithms"
 	"tutor-mcp/engine"
 	"tutor-mcp/memory"
 	"tutor-mcp/models"
@@ -20,6 +19,7 @@ import (
 )
 
 type GetNextActivityParams struct {
+	IdempotentMutationParams
 	DomainID   string `json:"domain_id,omitempty" jsonschema:"target domain ID; if absent, the learner's last active domain is used"`
 	DomainName string `json:"domain_name,omitempty" jsonschema:"target domain name when the learner names a subject but the domain_id is unknown"`
 	Intent     string `json:"intent,omitempty" jsonschema:"learner intent: auto or review. Use review when the learner asks to revise/review already studied material"`
@@ -32,7 +32,7 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 			"When to call: this is the main tool of the learning cycle; it already includes alert-aware routing, metacognitive_mirror, tutor_mode and motivation_brief. " +
 			"When NOT to call: if another tool just returned needs_domain_setup=true (call init_domain first); do not call get_pending_alerts or get_metacognitive_mirror in the same turn unless the learner explicitly asks for those raw views. " +
 			"Precondition: a domain must exist; otherwise needs_domain_setup=true is returned with a setup_domain activity. " +
-			"Returns: {needs_domain_setup, domain_id, domain_name, intent, intent_status, activity, pedagogical_contract, consolidation_request, goal_relevance_status, session_concepts_done, metacognitive_mirror, tutor_mode, active_misconceptions, known_misconception_types, motivation_brief, mastery_evidence, mastery_uncertainty, transfer_profile, rasch_elo_calibration, degraded_components?}.",
+			"Returns: {needs_domain_setup, session_id, domain_id, domain_name, intent, intent_status, activity, pedagogical_contract, consolidation_request, goal_relevance_status, session_concepts_done, metacognitive_mirror, tutor_mode, active_misconceptions, known_misconception_types, motivation_brief, mastery_evidence, mastery_uncertainty, transfer_profile, degraded_components?}.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params GetNextActivityParams) (*mcp.CallToolResult, any, error) {
 		totalStart := time.Now()
 		learnerID, err := getLearnerID(ctx)
@@ -87,6 +87,11 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 
 		prefetchStart := time.Now()
 		now := time.Now().UTC()
+		learningSession, err := deps.Store.OpenLearningSession(ctx, learnerID, domain.ID, "", now)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to open learning session", err)
+			return r, nil, nil
+		}
 		states, err := deps.Store.GetConceptStatesByDomain(ctx, learnerID, domain.ID)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to load concept states", err)
@@ -106,7 +111,7 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 		}
 
 		// Get session interactions to track what was already practiced
-		sessionInteractions, err := deps.Store.GetSessionInteractionsInDomain(ctx, learnerID, domain.ID)
+		sessionInteractions, err := deps.Store.GetInteractionsBySessionInDomain(ctx, learnerID, learningSession.ID, domain.ID)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to load session interactions", err)
 			return r, nil, nil
@@ -132,8 +137,14 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 			}
 		}
 
-		// Compute alerts (only for domain concepts)
-		alerts := engine.ComputeAlertsAt(domainStates, domainInteractions, sessionStart, now)
+		// Compute alerts from the same attempt-linked retention and trusted
+		// transfer evidence used by check_mastery.
+		alertEvidence, err := engine.LoadMasteryAlertEvidence(ctx, deps.Store, learnerID, domain.ID, domainStates)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to load mastery alert evidence", err)
+			return r, nil, nil
+		}
+		alerts := engine.ComputeAlertsWithEvidenceAt(domainStates, domainInteractions, alertEvidence, sessionStart, now)
 
 		// Build set of concepts already practiced in this session
 		sessionConcepts := make(map[string]int)
@@ -223,17 +234,16 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 		if orchPhase != "" {
 			loggedPhase = string(orchPhase)
 		}
-		deps.Logger.Info("pipeline decision",
+		deps.Logger.Debug("pipeline decision",
 			"learner", learnerID,
+			"session", learningSession.ID,
 			"domain", domain.ID,
 			"route", route,
 			"phase", loggedPhase,
-			"intent", intent,
 			"intent_status", intentStatus,
 			"negotiation_override_status", overrideResult.Status,
 			"activity_type", activity.Type,
 			"concept", activity.Concept,
-			"rationale", activity.Rationale,
 		)
 
 		// Metacognitive mirror
@@ -241,18 +251,28 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 		since := time.Now().UTC().Add(-7 * 24 * time.Hour)
 		allInteractions, err := deps.Store.GetInteractionsSinceInDomain(ctx, learnerID, domain.ID, since)
 		if err != nil {
-			r, _ := safeErrorResult(deps.Logger, "failed to load metacognitive interactions", err)
-			return r, nil, nil
+			// The orchestrator may already have persisted a phase transition and
+			// the one-shot negotiation override may already have been consumed.
+			// Enrichment reads after those effects must not turn the whole call
+			// into an MCP error: the idempotency middleware would release the key
+			// and a retry could no longer reproduce the selected activity.
+			markDegraded("metacognitive_interactions", err)
+			allInteractions = nil
 		}
 		calibBias, err := deps.Store.GetCalibrationBiasInDomain(ctx, learnerID, domain.ID, 20)
 		if err != nil {
-			r, _ := safeErrorResult(deps.Logger, "failed to load calibration state", err)
-			return r, nil, nil
+			markDegraded("calibration_state", err)
+			calibBias = 0
+		}
+		calibHistory, err := deps.Store.GetCalibrationBiasHistoryInDomain(ctx, learnerID, domain.ID, 20)
+		if err != nil {
+			markDegraded("calibration_evidence", err)
+			calibHistory = nil
 		}
 		affects, err := deps.Store.GetRecentAffectStates(ctx, learnerID, 10)
 		if err != nil {
-			r, _ := safeErrorResult(deps.Logger, "failed to load affect state", err)
-			return r, nil, nil
+			markDegraded("affect_state", err)
+			affects = nil
 		}
 
 		var autonomyScores []float64
@@ -262,11 +282,12 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 		mirrorSessionCount := len(engine.GroupIntoSessionsExported(allInteractions, 2*time.Hour))
 
 		mirror := engine.DetectMirrorPattern(engine.MirrorInput{
-			Interactions:    allInteractions,
-			ConceptStates:   domainStates,
-			AutonomyScores:  autonomyScores,
-			CalibrationBias: calibBias,
-			SessionCount:    mirrorSessionCount,
+			Interactions:       allInteractions,
+			ConceptStates:      domainStates,
+			AutonomyScores:     autonomyScores,
+			CalibrationBias:    calibBias,
+			CalibrationSamples: len(calibHistory),
+			SessionCount:       mirrorSessionCount,
 		})
 
 		// Persist & enqueue the mirror so it can be pushed proactively via
@@ -395,7 +416,6 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 		var masteryEvidence any = map[string]any{}
 		var masteryUncertainty any = map[string]any{}
 		var transferProfile any = map[string]any{}
-		var raschEloCalibration any = map[string]any{}
 		var selectedState *models.ConceptState
 		var evidenceQuality engine.EvidenceQualityAssessment
 		var uncertainty engine.MasteryUncertainty
@@ -420,10 +440,6 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 				}
 				uncertainty = engine.ComputeMasteryUncertainty(selectedState, conceptInteractions, engine.MasteryEvidenceProfile{Now: now})
 				masteryUncertainty = uncertainty
-			}
-			if selectedState != nil {
-				raschState := algorithms.NewRaschEloState(selectedState.Theta, algorithms.FSRSDifficultyToIRT(selectedState.Difficulty))
-				raschEloCalibration = raschEloStateSnapshot(raschState)
 			}
 			if transferRecords, err := deps.Store.GetTransferScoresInDomain(ctx, learnerID, domain.ID, activity.Concept); err != nil {
 				markDegraded("transfer_diagnostics", err)
@@ -470,6 +486,7 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 
 		out := map[string]any{
 			"needs_domain_setup":        false,
+			"session_id":                learningSession.ID,
 			"domain_id":                 domain.ID,
 			"domain_name":               domain.Name,
 			"intent":                    intent,
@@ -484,7 +501,6 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 			"mastery_evidence":          masteryEvidence,
 			"mastery_uncertainty":       masteryUncertainty,
 			"transfer_profile":          transferProfile,
-			"rasch_elo_calibration":     raschEloCalibration,
 			"goal_relevance_status":     goalRelevanceStatus,
 			"pedagogical_contract":      contract,
 			"audit_rationale":           contract.AuditRationale,
@@ -588,7 +604,7 @@ func loadEpisodicContextForActivity(
 	if olmSnapshot != nil && olmSnapshot.FocusConcept != "" {
 		view.FocusConcept = olmSnapshot.FocusConcept
 	}
-	ec, err := memory.LoadContext(learnerID, focusConcept, view, alerts)
+	ec, err := memory.LoadContextForDomain(learnerID, domain.ID, focusConcept, view, alerts)
 	if err != nil {
 		if deps.Logger != nil {
 			deps.Logger.Warn("get_next_activity: episodic context load failed", "err", err, "learner", learnerID)
@@ -680,6 +696,17 @@ func buildPedagogicalContract(
 			"long_explanation_first",
 			"marking_mastery_without_evidence",
 		},
+	}
+	if activity.Type == models.ActivityDiagnosticAssessment {
+		constraints.MustCollect = append(constraints.MustCollect, "cold_response_before_feedback")
+		constraints.Avoid = append(constraints.Avoid,
+			"teaching_before_response",
+			"hints_before_response",
+			"worked_example_before_response",
+		)
+	}
+	if activity.Type == models.ActivityTransferProbe {
+		constraints.MustCollect = append(constraints.MustCollect, "transfer_dimension", "transfer_score")
 	}
 	if goalStatus.Status == "missing" || goalStatus.Status == "partial" || goalStatus.Status == "stale" {
 		constraints.Avoid = append(constraints.Avoid, "assuming_goal_relevance_is_complete")
@@ -781,6 +808,8 @@ func contractIntent(intent string, activity models.Activity) string {
 		return "close_overloaded_session"
 	case models.ActivityRecall:
 		return "stabilize_retention"
+	case models.ActivityDiagnosticAssessment:
+		return "measure_prior_knowledge_without_instruction"
 	case models.ActivityPractice:
 		return "build_reliable_skill"
 	case models.ActivityDebugMisconception:
@@ -804,14 +833,16 @@ func allowedVariants(t models.ActivityType) []string {
 		return []string{"recap_brief", "next_session_intention"}
 	case models.ActivityRecall:
 		return []string{"retrieval_prompt", "cloze_recall", "short_application"}
+	case models.ActivityDiagnosticAssessment:
+		return []string{"short_constructed_response", "cold_application", "misconception_probe"}
 	case models.ActivityDebugMisconception:
 		return []string{"contrastive_example", "micro_debug", "socratic_prompt"}
 	case models.ActivityFeynmanPrompt:
 		return []string{"teach_back", "analogy_check", "gap_explanation"}
 	case models.ActivityTransferProbe:
-		return []string{"near_transfer", "far_transfer", "debugging_transfer"}
+		return []string{"near_transfer", "far_transfer", "novel_context_application"}
 	case models.ActivityMasteryChallenge:
-		return []string{"build_challenge", "explain_then_apply", "rubric_scored_task"}
+		return []string{"integrated_performance_task", "explain_then_apply", "rubric_scored_task"}
 	default:
 		return []string{"socratic_prompt", "worked_example_completion", "micro_practice"}
 	}
@@ -823,6 +854,8 @@ func learnerExplanation(activity models.Activity) string {
 		return "We will close this session with a short recap and a clear next step."
 	case models.ActivityRecall:
 		return "We will refresh this concept so it stays available when you need it."
+	case models.ActivityDiagnosticAssessment:
+		return "We will first check what you can already do, without teaching or hints before your answer."
 	case models.ActivityDebugMisconception:
 		return "We will focus on a likely confusion and resolve it through a targeted example."
 	case models.ActivityFeynmanPrompt:

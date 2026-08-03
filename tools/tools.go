@@ -36,7 +36,7 @@ func logAuthFailure(deps *Deps, tool string, err error) {
 	if deps == nil || deps.Logger == nil {
 		return
 	}
-	deps.Logger.Info(tool+": auth failed", "err", err)
+	deps.Logger.Info(tool+": auth failed", "error_type", fmt.Sprintf("%T", err))
 }
 
 // resolveDomain resolves a domain by ID or falls back to the learner's most recent domain.
@@ -89,14 +89,14 @@ func errorResult(msg string) (*mcp.CallToolResult, error) {
 	}, nil
 }
 
-// safeErrorResult logs the full underlying error server-side and returns an
-// errorResult carrying only the public, LLM-facing message. Issue #3: raw
-// SQLite/internal error strings must never be interpolated into model context;
-// they leak schema and storage internals. Handlers pass a clean public message
-// and the real err — the err is recorded in the server log, not the response.
+// safeErrorResult logs only the underlying error class and returns an
+// errorResult carrying the public, LLM-facing message. Raw database errors can
+// contain learner values, filesystem paths, SQL details, or credentials, so
+// they belong in an explicitly protected diagnostic sink rather than ordinary
+// application logs.
 func safeErrorResult(logger *slog.Logger, publicMsg string, err error) (*mcp.CallToolResult, error) {
 	if logger != nil {
-		logger.Error(publicMsg, "err", err)
+		logger.Error(publicMsg, "error_type", fmt.Sprintf("%T", err))
 	}
 	return errorResult(publicMsg)
 }
@@ -120,14 +120,22 @@ func noActiveDomainResult() (*mcp.CallToolResult, any) {
 
 // RegisterTools registers all MCP tools and prompts on the given server.
 func RegisterTools(server *mcp.Server, deps *Deps) {
+	addIdempotencyMiddleware(server, deps)
+	registerStartLearningSession(server, deps)
 	registerGetPendingAlerts(server, deps)
 	registerGetNextActivity(server, deps)
 	registerRecordInteraction(server, deps)
+	registerPrepareAssessmentAttempt(server, deps)
+	registerSubmitAssessmentAttempt(server, deps)
+	registerCancelAssessmentAttempt(server, deps)
 	registerCheckMastery(server, deps)
 	registerGetLearnerContext(server, deps)
 	registerGetAvailabilityModel(server, deps)
+	registerUpdateAvailabilityModel(server, deps)
 	registerInitDomain(server, deps)
 	registerAddConcepts(server, deps)
+	registerGetCurriculumSnapshot(server, deps)
+	registerReviseCurriculum(server, deps)
 	registerValidateDomainGraph(server, deps)
 	registerUpdateLearnerProfile(server, deps)
 	registerRecordAffect(server, deps)
@@ -143,6 +151,7 @@ func RegisterTools(server *mcp.Server, deps *Deps) {
 	registerRecordTransferResult(server, deps)
 	registerLearningNegotiation(server, deps)
 	registerSetDomainPriority(server, deps)
+	registerMarkDomainHighStakes(server, deps)
 	registerUpdateLearnerMemory(server, deps)
 	registerReadRawSession(server, deps)
 	registerGetMemoryState(server, deps)
@@ -151,6 +160,8 @@ func RegisterTools(server *mcp.Server, deps *Deps) {
 	registerDeleteDomain(server, deps)
 	registerGetMisconceptions(server, deps)
 	registerRecordSessionClose(server, deps)
+	registerListImplementationIntentions(server, deps)
+	registerUpdateImplementationIntention(server, deps)
 	registerQueueWebhookMessage(server, deps)
 	registerGetDashboardState(server, deps)
 	// [1] GoalDecomposer — gated by REGULATION_GOAL=on. When off, neither

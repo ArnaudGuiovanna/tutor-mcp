@@ -141,6 +141,28 @@ func TestSelectAction_NewCardSkipsRetentionCheck(t *testing.T) {
 	}
 }
 
+func TestSelectActionForPhaseAt_DiagnosticIsColdAcrossDomains(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	for _, concept := range []string{"fraction addition", "past tense in Spanish", "causes of the French Revolution", "concurrency in Go"} {
+		concept := concept
+		t.Run(concept, func(t *testing.T) {
+			cs := models.NewConceptState("L1", concept)
+			action := SelectActionForPhaseAt(models.PhaseDiagnostic, concept, cs, &models.MisconceptionGroup{
+				Concept: concept, Status: "active", MisconceptionType: "pre-existing",
+			}, ActionHistory{}, now)
+			if action.Type != models.ActivityDiagnosticAssessment {
+				t.Fatalf("type=%q, want DIAGNOSTIC_ASSESSMENT", action.Type)
+			}
+			if action.Format != "cold_assessment" {
+				t.Fatalf("format=%q, want cold_assessment", action.Format)
+			}
+			if action.DifficultyTarget != 0.50 {
+				t.Fatalf("difficulty=%v, want 0.50", action.DifficultyTarget)
+			}
+		})
+	}
+}
+
 func TestSelectAction_MasteryUnder30_NewConcept(t *testing.T) {
 	cs := reviewedConceptState("Maps", 0.20)
 	a := SelectAction("Maps", cs, nil, ActionHistory{})

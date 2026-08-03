@@ -310,3 +310,33 @@ func TestConsumeLearningNegotiationOverride_RejectsHardPrerequisiteBypass(t *tes
 		t.Fatalf("hard-constraint rejection should return system activity, got %+v", gotActivity)
 	}
 }
+
+func TestConsumeLearningNegotiationOverride_PreservesColdDiagnosticContract(t *testing.T) {
+	store, _ := setupToolsTest(t)
+	d := makeOwnerDomain(t, store, "L_owner", "math")
+	now := time.Now().UTC()
+	override := &LearningNegotiationOverride{
+		DomainID:  d.ID,
+		Concept:   "a",
+		ExpiresAt: now.Add(time.Hour),
+		Activity: models.Activity{
+			Type: models.ActivityPractice, Concept: "a", Format: "worked_example", EstimatedMinutes: 10,
+		},
+	}
+	if _, err := PersistLearningNegotiationOverride(context.Background(), store, "L_owner", override, now); err != nil {
+		t.Fatal(err)
+	}
+	systemActivity := models.Activity{
+		Type: models.ActivityDiagnosticAssessment, Concept: "a", Format: "cold_assessment", EstimatedMinutes: 8,
+	}
+	got, consume, err := ConsumeLearningNegotiationOverride(context.Background(), store, "L_owner", d, systemActivity, nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if consume.Status != LearningNegotiationOverrideConsumeRejectedHardConstraint {
+		t.Fatalf("instructional override should not replace cold diagnostic: %+v", consume)
+	}
+	if got != systemActivity {
+		t.Fatalf("rejected override changed diagnostic: %+v", got)
+	}
+}

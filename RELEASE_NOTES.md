@@ -16,9 +16,9 @@ narrative-memory writes, and several silent partial-failure paths.
   atomically, refresh tokens rotate transactionally and are stored hashed, and
   Streamable HTTP/SSE keeps its streaming capabilities past ordinary HTTP
   write deadlines.
-- **Durable single-node operation.** Narrative-memory updates are serialized
-  per learner path and synced around atomic rename. Invalid deployment modes
-  now fail at startup instead of silently degrading.
+- **Durable single-node operation.** Narrative-memory updates are serialized,
+  synced around atomic rename, and isolated by domain for runtime routing.
+  Invalid deployment modes fail at startup instead of silently degrading.
 - **Protocol-level acceptance coverage.** The official MCP Go client connects
   to the authenticated production handler, fetches the tutor prompt, discovers
   tools, and persists a full pedagogical evidence loop.
@@ -30,6 +30,8 @@ narrative-memory writes, and several silent partial-failure paths.
 - Domain creation and concept extension are atomic.
 - Required storage failures are returned explicitly; optional failed
   enrichments are exposed as `degraded_components`.
+- Domain lifecycle changes cancel unsent domain webhooks, and durable delivery
+  attempts no longer multiply an in-memory retry loop.
 - The obsolete legacy activity router and unreachable helpers are removed.
 - CI runs PostgreSQL 17, the exact Go 1.25.12 toolchain, and a blocking pinned
   vulnerability scan.
@@ -38,8 +40,8 @@ narrative-memory writes, and several silent partial-failure paths.
 
 - Back up the SQLite database and narrative-memory directory before upgrading.
   Forward migrations run automatically at startup.
-- Existing plaintext refresh tokens remain usable until their next rotation or
-  expiry; newly issued tokens are stored hashed.
+- Existing plaintext or unbound refresh tokens are revoked during migration;
+  users must authorize the client again. Newly issued tokens are stored hashed.
 - No configuration change is required for the supported SQLite single-node
   profile.
 - PostgreSQL remains available for conformance and controlled experiments; see

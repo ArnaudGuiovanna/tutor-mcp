@@ -62,10 +62,21 @@ func NewScheduler(store storeport.Store, logger *slog.Logger) *Scheduler {
 	// learner could DoS the entire tutor at scheduled job times. See #35.
 	cl := slogCronLogger{l: logger}
 	return &Scheduler{
-		store:       store,
-		cron:        cron.New(cron.WithChain(cron.Recover(cl))),
-		logger:      logger,
-		client:      &http.Client{Timeout: 10 * time.Second},
+		store:  store,
+		cron:   cron.New(cron.WithChain(cron.Recover(cl))),
+		logger: logger,
+		client: &http.Client{
+			Timeout: 10 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) >= 10 {
+					return fmt.Errorf("too many webhook redirects")
+				}
+				if !safeWebhookURL(req.URL.String()) {
+					return fmt.Errorf("unsafe webhook redirect")
+				}
+				return nil
+			},
+		},
 		stopTimeout: defaultStopTimeout,
 		stopCh:      make(chan struct{}),
 	}
@@ -245,33 +256,35 @@ func (s *Scheduler) dispatchQueued(kind, alertTag string, fallback func(*models.
 			s.logger.Error("scheduler: dispatch availability", "err", err, "learner", learner.ID, "kind", kind)
 			continue
 		}
-		if avail != nil && avail.DoNotDisturb {
+		allowed, err := avail.AllowsNotificationAt(now)
+		if err != nil {
+			s.logger.Error("scheduler: invalid notification policy", "err", err, "learner", learner.ID, "kind", kind)
+			continue
+		}
+		if !allowed {
 			continue
 		}
 
-		// Dedup at the alert layer — don't fire twice in one day.
-		sent, err := s.store.WasAlertSentToday(ctx, learner.ID, alertTag)
+		item, err := s.store.ClaimNextPendingWebhook(ctx, learner.ID, kind, now, 30*time.Minute)
 		if err != nil {
-			s.logger.Error("scheduler: dispatch dedup", "err", err, "learner", learner.ID, "kind", kind)
-			continue
-		}
-		if sent {
-			continue
-		}
-
-		item, err := s.store.DequeueNextPending(ctx, learner.ID, kind, now, 30*time.Minute)
-		if err != nil {
-			s.logger.Error("scheduler: dequeue", "err", err, "learner", learner.ID, "kind", kind)
+			s.logger.Error("scheduler: claim webhook", "err", err, "learner", learner.ID, "kind", kind)
 			continue
 		}
 
 		var payload discordPayload
 		var source string
 		var briefForLog *models.WebhookBrief
+		domainID := ""
 		if item != nil && item.Content != "" {
 			embed, brief := embedFromWebhookContent(kind, item.Content, models.UrgencyInfo)
 			payload = discordPayload{Embeds: []discordEmbed{embed}}
 			briefForLog = brief
+			if brief != nil {
+				domainID = brief.DomainID
+			}
+			if domainID == "" && strings.HasPrefix(kind, "olm:") {
+				domainID = strings.TrimPrefix(kind, "olm:")
+			}
 			source = "queue"
 		} else if fallback != nil {
 			payload = fallback(learner)
@@ -280,8 +293,60 @@ func (s *Scheduler) dispatchQueued(kind, alertTag string, fallback func(*models.
 			continue
 		}
 
-		if err := s.sendDiscordEmbed(learner.WebhookURL, payload); err != nil {
+		reservationID, reserved, err := s.store.ReserveNotificationDelivery(
+			ctx, learner.ID, alertTag, domainID, models.IsIntrusiveWebhookKind(kind), now,
+		)
+		if err != nil {
+			s.logger.Error("scheduler: reserve notification", "err", err, "learner", learner.ID, "kind", kind)
+			if item != nil {
+				if releaseErr := s.store.ReleaseWebhookClaim(ctx, item.ID, learner.ID); releaseErr != nil {
+					s.logger.Error("scheduler: release webhook claim", "err", releaseErr, "learner", learner.ID, "queue_id", item.ID)
+				}
+			}
+			continue
+		}
+		if !reserved {
+			if item != nil {
+				if releaseErr := s.store.ReleaseWebhookClaim(ctx, item.ID, learner.ID); releaseErr != nil {
+					s.logger.Error("scheduler: release policy-blocked webhook", "err", releaseErr, "learner", learner.ID, "queue_id", item.ID)
+				}
+			}
+			continue
+		}
+		accessibility, err := avail.Accessibility()
+		if err != nil {
+			_ = s.store.ReleaseNotificationDelivery(ctx, reservationID, learner.ID)
+			if item != nil {
+				_ = s.store.ReleaseWebhookClaim(ctx, item.ID, learner.ID)
+			}
+			s.logger.Error("scheduler: invalid accessibility policy", "err", err, "learner", learner.ID)
+			continue
+		}
+		payload = applyAccessibilityPreferences(payload, accessibility)
+		if item != nil {
+			active, activeErr := s.store.IsWebhookClaimActive(ctx, item.ID, learner.ID)
+			if activeErr != nil || !active {
+				_ = s.store.ReleaseNotificationDelivery(ctx, reservationID, learner.ID)
+				if activeErr != nil {
+					_ = s.store.ReleaseWebhookClaim(ctx, item.ID, learner.ID)
+					s.logger.Error("scheduler: revalidate webhook claim", "err", activeErr, "learner", learner.ID, "queue_id", item.ID)
+				}
+				continue
+			}
+		}
+
+		send := s.sendDiscordEmbed
+		if item != nil {
+			// The queue owns retry timing and the dead-letter budget. Performing
+			// multiple HTTP attempts inside one claim would multiply that budget
+			// and create bursts after an outage.
+			send = s.sendDiscordEmbedDurable
+		}
+		if err := send(learner.WebhookURL, payload); err != nil {
 			s.logger.Error("scheduler: dispatch webhook", "err", err, "learner", learner.ID, "kind", kind)
+			if releaseErr := s.store.ReleaseNotificationDelivery(ctx, reservationID, learner.ID); releaseErr != nil {
+				s.logger.Error("scheduler: release failed delivery reservation", "err", releaseErr, "learner", learner.ID, "kind", kind)
+			}
 			if item != nil {
 				if markErr := s.store.MarkWebhookFailed(ctx, item.ID, learner.ID); markErr != nil {
 					s.logger.Error("scheduler: mark webhook failed", "err", markErr, "learner", learner.ID, "queue_id", item.ID)
@@ -303,8 +368,8 @@ func (s *Scheduler) dispatchQueued(kind, alertTag string, fallback func(*models.
 				s.logger.Warn("scheduler: push log", "err", err, "learner", learner.ID, "kind", kind)
 			}
 		}
-		if err := s.store.CreateScheduledAlert(ctx, learner.ID, alertTag, "", time.Now()); err != nil {
-			s.logger.Error("scheduler: webhook sent but dedup stamp failed", "err", err, "learner", learner.ID, "kind", kind)
+		if err := s.store.CompleteNotificationDelivery(ctx, reservationID, learner.ID); err != nil {
+			s.logger.Error("scheduler: webhook sent but reservation completion failed", "err", err, "learner", learner.ID, "kind", kind)
 		}
 		s.logger.Info("scheduler: dispatched", "learner", learner.ID, "kind", kind, "source", source)
 	}
@@ -509,6 +574,7 @@ func fallbackDailyRecap(_ *models.Learner) discordPayload {
 
 func (s *Scheduler) cleanupExpiredData() {
 	ctx := context.Background()
+	now := time.Now().UTC()
 	codes, err := s.store.CleanupExpiredCodes(ctx)
 	if err != nil {
 		s.logger.Error("scheduler: cleanup codes", "err", err)
@@ -523,7 +589,14 @@ func (s *Scheduler) cleanupExpiredData() {
 		s.logger.Info("scheduler: cleaned expired refresh tokens", "count", tokens)
 	}
 
-	expired, err := s.store.ExpirePastWebhookMessages(ctx, time.Now().UTC())
+	requeued, err := s.store.RequeueStaleWebhookClaims(ctx, now.Add(-15*time.Minute), now)
+	if err != nil {
+		s.logger.Error("scheduler: requeue stale webhook claims", "err", err)
+	} else if requeued > 0 {
+		s.logger.Info("scheduler: requeued stale webhook claims", "count", requeued)
+	}
+
+	expired, err := s.store.ExpirePastWebhookMessages(ctx, now)
 	if err != nil {
 		s.logger.Error("scheduler: expire webhook queue", "err", err)
 	} else if expired > 0 {
@@ -564,6 +637,52 @@ type discordPayload struct {
 	Embeds []discordEmbed `json:"embeds"`
 }
 
+func applyAccessibilityPreferences(payload discordPayload, prefs models.AccessibilityPreferences) discordPayload {
+	for i := range payload.Embeds {
+		if prefs.AvoidEmojis || prefs.ScreenReaderOptimized {
+			payload.Embeds[i].Title = stripEmoji(payload.Embeds[i].Title)
+			payload.Embeds[i].Description = stripEmoji(payload.Embeds[i].Description)
+			for j := range payload.Embeds[i].Fields {
+				payload.Embeds[i].Fields[j].Name = stripEmoji(payload.Embeds[i].Fields[j].Name)
+				payload.Embeds[i].Fields[j].Value = stripEmoji(payload.Embeds[i].Fields[j].Value)
+			}
+			if payload.Embeds[i].Footer != nil {
+				payload.Embeds[i].Footer.Text = stripEmoji(payload.Embeds[i].Footer.Text)
+			}
+		}
+		if prefs.ScreenReaderOptimized {
+			for j := range payload.Embeds[i].Fields {
+				payload.Embeds[i].Fields[j].Inline = false
+			}
+		}
+	}
+	return payload
+}
+
+func stripEmoji(value string) string {
+	value = strings.Map(func(r rune) rune {
+		switch {
+		case r == '\u200d', r == '\u20e3', r == '\ufe0e', r == '\ufe0f':
+			return -1
+		case r >= 0x1f000 && r <= 0x1faff:
+			return -1
+		case r >= 0x2300 && r <= 0x23ff:
+			return -1
+		case r >= 0x2600 && r <= 0x27bf:
+			return -1
+		case r >= 0x2b00 && r <= 0x2bff:
+			return -1
+		case r == 0x00a9, r == 0x00ae, r == 0x203c, r == 0x2049,
+			r == 0x2122, r == 0x2139, r == 0x3030, r == 0x303d,
+			r == 0x3297, r == 0x3299:
+			return -1
+		default:
+			return r
+		}
+	}, value)
+	return strings.TrimSpace(value)
+}
+
 // Note: formatDailyMotivation / formatDailyRecap / formatInactivityNudge have been
 // removed. Daily motivation and recap are now authored by Claude via queue_webhook_message
 // and dispatched by dispatchQueued (with sober Go fallbacks when the queue is empty).
@@ -575,10 +694,30 @@ func (s *Scheduler) sendDiscordEmbed(url string, payload discordPayload) error {
 	return s.doWithRetry(url, body)
 }
 
-// sendWebhook sends a plain text message (kept for backwards compatibility).
-func (s *Scheduler) sendWebhook(url, message string) error {
-	body, _ := json.Marshal(map[string]string{"content": message})
-	return s.doWithRetry(url, body)
+// sendDiscordEmbedDurable performs exactly one HTTP request. Its caller has
+// claimed a durable queue row, so failures are persisted with a later
+// next_attempt_at rather than retried synchronously in the scheduler tick.
+func (s *Scheduler) sendDiscordEmbedDurable(url string, payload discordPayload) error {
+	body, _ := json.Marshal(payload)
+	return s.doOnce(url, body)
+}
+
+func (s *Scheduler) doOnce(url string, body []byte) error {
+	if !safeWebhookURL(url) {
+		s.logger.Error("webhook blocked: unsafe url")
+		return fmt.Errorf("unsafe webhook url")
+	}
+	resp, err := s.client.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		// net/url errors can contain the credential-bearing webhook path.
+		s.logger.Warn("webhook network error", "error_type", fmt.Sprintf("%T", err))
+		return fmt.Errorf("webhook transport error")
+	}
+	resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("webhook returned %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // retryDelays defines the exponential backoff schedule for doWithRetry.
@@ -602,7 +741,9 @@ var safeWebhookURL = webhookurl.IsSafeWebhookURL
 // Stops on 4xx (except 429). Respects Discord Retry-After header on 429.
 func (s *Scheduler) doWithRetry(url string, body []byte) error {
 	if !safeWebhookURL(url) {
-		s.logger.Error("webhook blocked: unsafe url", "url", url)
+		// Discord webhook paths contain credentials. Never emit the rejected
+		// value: even an invalid URL can still carry a real token in its path.
+		s.logger.Error("webhook blocked: unsafe url")
 		return fmt.Errorf("unsafe webhook url")
 	}
 	delays := retryDelays
@@ -616,8 +757,10 @@ func (s *Scheduler) doWithRetry(url string, body []byte) error {
 		}
 		resp, err := s.client.Post(url, "application/json", bytes.NewReader(body))
 		if err != nil {
-			lastErr = err
-			s.logger.Warn("webhook network error", "attempt", attempt+1, "err", err)
+			// net/url errors include the full request URL, including Discord's
+			// secret webhook token. Preserve only a stable public category.
+			lastErr = fmt.Errorf("webhook transport error")
+			s.logger.Warn("webhook network error", "attempt", attempt+1, "error_type", fmt.Sprintf("%T", err))
 			continue
 		}
 		resp.Body.Close()
@@ -690,15 +833,12 @@ func (s *Scheduler) sendOLM() {
 			s.logger.Error("scheduler: olm availability", "err", err, "learner", learner.ID)
 			continue
 		}
-		if avail != nil && avail.DoNotDisturb {
-			continue
-		}
-		sent, err := s.store.WasAlertSentToday(ctx, learner.ID, alertKindOLM)
+		allowed, err := avail.AllowsNotificationAt(now)
 		if err != nil {
-			s.logger.Error("scheduler: olm dedup", "err", err, "learner", learner.ID)
+			s.logger.Error("scheduler: olm invalid notification policy", "err", err, "learner", learner.ID)
 			continue
 		}
-		if sent {
+		if !allowed {
 			continue
 		}
 
@@ -713,6 +853,16 @@ func (s *Scheduler) sendOLM() {
 			if len(prepared) >= 3 {
 				break
 			}
+			if d.HighStakes {
+				reviewed, err := s.store.HasHumanReviewedEvaluationInDomain(ctx, learner.ID, d.ID)
+				if err != nil {
+					s.logger.Error("scheduler: olm high-stakes review", "err", err, "learner", learner.ID, "domain", d.ID)
+					continue
+				}
+				if !reviewed {
+					continue
+				}
+			}
 			snap, err := BuildOLMSnapshotAt(ctx, s.store, learner.ID, d.ID, now)
 			if err != nil {
 				s.logger.Warn("scheduler: olm build", "err", err, "learner", learner.ID, "domain", d.ID)
@@ -723,7 +873,7 @@ func (s *Scheduler) sendOLM() {
 			}
 			var memCtx *memory.EpisodicContext
 			if memory.Enabled() && snap.FocusReason == "next frontier" {
-				if ctx, err := memory.LoadContext(learner.ID, snap.FocusConcept, &memory.OLMView{FocusConcept: snap.FocusConcept}, nil); err == nil {
+				if ctx, err := memory.LoadContextForDomain(learner.ID, d.ID, snap.FocusConcept, &memory.OLMView{FocusConcept: snap.FocusConcept}, nil); err == nil {
 					memCtx = ctx
 				} else {
 					s.logger.Warn("scheduler: olm memory context", "err", err, "learner", learner.ID, "domain", d.ID)
@@ -734,17 +884,17 @@ func (s *Scheduler) sendOLM() {
 			}
 
 			kind := "olm:" + d.ID
-			item, err := s.store.DequeueNextPending(ctx, learner.ID, kind, now, 30*time.Minute)
+			item, err := s.store.ClaimNextPendingWebhook(ctx, learner.ID, kind, now, 30*time.Minute)
 			if err != nil {
-				s.logger.Error("scheduler: olm dequeue", "err", err, "learner", learner.ID, "domain", d.ID)
+				s.logger.Error("scheduler: olm claim", "err", err, "learner", learner.ID, "domain", d.ID)
 				continue
 			}
 			if item != nil && item.Content != "" {
 				embed, brief := embedFromWebhookContent(kind, item.Content, snap.FocusUrgency)
-				prepared = append(prepared, preparedWebhookEmbed{Embed: embed, Item: item, Brief: brief})
+				prepared = append(prepared, preparedWebhookEmbed{DomainID: d.ID, Embed: embed, Item: item, Brief: brief})
 			} else {
 				brief := BuildOLMNudgeBrief(snap)
-				prepared = append(prepared, preparedWebhookEmbed{Embed: discordEmbedFromBrief(brief, snap.FocusUrgency), Brief: &brief})
+				prepared = append(prepared, preparedWebhookEmbed{DomainID: d.ID, Embed: discordEmbedFromBrief(brief, snap.FocusUrgency), Brief: &brief})
 			}
 		}
 
@@ -755,9 +905,80 @@ func (s *Scheduler) sendOLM() {
 		for _, p := range prepared {
 			embeds = append(embeds, p.Embed)
 		}
+		reservationID, reserved, err := s.store.ReserveNotificationDelivery(
+			ctx, learner.ID, alertKindOLM, prepared[0].DomainID, true, now,
+		)
+		if err != nil || !reserved {
+			if err != nil {
+				s.logger.Error("scheduler: olm reserve notification", "err", err, "learner", learner.ID)
+			}
+			for _, p := range prepared {
+				if p.Item != nil {
+					_ = s.store.ReleaseWebhookClaim(ctx, p.Item.ID, learner.ID)
+				}
+			}
+			continue
+		}
+		accessibility, err := avail.Accessibility()
+		if err != nil {
+			_ = s.store.ReleaseNotificationDelivery(ctx, reservationID, learner.ID)
+			for _, p := range prepared {
+				if p.Item != nil {
+					_ = s.store.ReleaseWebhookClaim(ctx, p.Item.ID, learner.ID)
+				}
+			}
+			s.logger.Error("scheduler: olm invalid accessibility policy", "err", err, "learner", learner.ID)
+			continue
+		}
+		payload := applyAccessibilityPreferences(discordPayload{Embeds: embeds}, accessibility)
+		claimsActive := true
+		for _, p := range prepared {
+			domain, domainErr := s.store.GetDomainByID(ctx, p.DomainID)
+			if domainErr != nil || domain.LearnerID != learner.ID || domain.Archived {
+				claimsActive = false
+				if domainErr != nil {
+					s.logger.Warn("scheduler: olm domain became inactive", "error_type", fmt.Sprintf("%T", domainErr), "learner", learner.ID, "domain", p.DomainID)
+				}
+			}
+			if p.Item == nil {
+				continue
+			}
+			active, activeErr := s.store.IsWebhookClaimActive(ctx, p.Item.ID, learner.ID)
+			if activeErr != nil || !active {
+				claimsActive = false
+				if activeErr != nil {
+					s.logger.Error("scheduler: olm revalidate claim", "err", activeErr, "learner", learner.ID, "queue_id", p.Item.ID)
+				}
+			}
+		}
+		if !claimsActive {
+			_ = s.store.ReleaseNotificationDelivery(ctx, reservationID, learner.ID)
+			for _, p := range prepared {
+				if p.Item != nil {
+					_ = s.store.ReleaseWebhookClaim(ctx, p.Item.ID, learner.ID)
+				}
+			}
+			continue
+		}
 
-		if err := s.sendDiscordEmbed(learner.WebhookURL, discordPayload{Embeds: embeds}); err != nil {
+		send := s.sendDiscordEmbed
+		for _, p := range prepared {
+			if p.Item != nil {
+				send = s.sendDiscordEmbedDurable
+				break
+			}
+		}
+		if err := send(learner.WebhookURL, payload); err != nil {
 			s.logger.Error("scheduler: olm webhook", "err", err, "learner", learner.ID)
+			_ = s.store.ReleaseNotificationDelivery(ctx, reservationID, learner.ID)
+			for _, p := range prepared {
+				if p.Item == nil {
+					continue
+				}
+				if markErr := s.store.MarkWebhookFailed(ctx, p.Item.ID, learner.ID); markErr != nil {
+					s.logger.Error("scheduler: olm mark failed", "err", markErr, "learner", learner.ID, "queue_id", p.Item.ID)
+				}
+			}
 			continue
 		}
 		for _, p := range prepared {
@@ -774,8 +995,8 @@ func (s *Scheduler) sendOLM() {
 				}
 			}
 		}
-		if err := s.store.CreateScheduledAlert(ctx, learner.ID, alertKindOLM, "", now); err != nil {
-			s.logger.Error("scheduler: olm sent but dedup stamp failed", "err", err, "learner", learner.ID)
+		if err := s.store.CompleteNotificationDelivery(ctx, reservationID, learner.ID); err != nil {
+			s.logger.Error("scheduler: olm sent but reservation completion failed", "err", err, "learner", learner.ID)
 		}
 		s.logger.Info("scheduler: olm dispatched", "learner", learner.ID, "embeds", len(embeds))
 	}
@@ -790,22 +1011,22 @@ func (s *Scheduler) runConsolidationCycleAt(now time.Time) {
 		return
 	}
 	ctx := context.Background()
-	learners, err := s.store.GetActiveLearners(ctx)
+	learnerIDs, err := s.store.GetLearnerIDsForConsolidation(ctx)
 	if err != nil {
 		s.logger.Error("scheduler: consolidation get learners", "err", err)
 		return
 	}
-	for _, learner := range learners {
-		jobs, err := memory.PrepareJobs(learner.ID, now)
+	for _, learnerID := range learnerIDs {
+		jobs, err := memory.PrepareJobs(learnerID, now)
 		if err != nil {
-			s.logger.Warn("scheduler: consolidation prepare", "err", err, "learner", learner.ID)
+			s.logger.Warn("scheduler: consolidation prepare", "err", err, "learner", learnerID)
 			continue
 		}
 		for _, job := range jobs {
-			if err := s.store.UpsertPendingConsolidation(ctx, learner.ID, string(job.Period), job.PeriodKey, now); err != nil {
-				s.logger.Warn("scheduler: consolidation enqueue failed", "err", err, "learner", learner.ID, "period", job.PeriodKey)
+			if err := s.store.UpsertPendingConsolidation(ctx, learnerID, string(job.Period), job.PeriodKey, now); err != nil {
+				s.logger.Warn("scheduler: consolidation enqueue failed", "err", err, "learner", learnerID, "period", job.PeriodKey)
 			} else {
-				s.logger.Info("scheduler: consolidation pending", "learner", learner.ID, "period_type", job.Period, "period", job.PeriodKey)
+				s.logger.Info("scheduler: consolidation pending", "learner", learnerID, "period_type", job.Period, "period", job.PeriodKey)
 			}
 		}
 	}
@@ -840,9 +1061,10 @@ func consolidationDeliveryTimeout() time.Duration {
 }
 
 type preparedWebhookEmbed struct {
-	Embed discordEmbed
-	Item  *models.WebhookQueueItem
-	Brief *models.WebhookBrief
+	DomainID string
+	Embed    discordEmbed
+	Item     *models.WebhookQueueItem
+	Brief    *models.WebhookBrief
 }
 
 func shouldPushDiscord(olm *OLMSnapshot, memCtx *memory.EpisodicContext) bool {
@@ -856,6 +1078,26 @@ func shouldPushDiscord(olm *OLMSnapshot, memCtx *memory.EpisodicContext) bool {
 		return true
 	}
 	return memCtx != nil && memCtx.HasRecentNarrativeSignal()
+}
+
+func allHighStakesDomainsHumanReviewed(ctx context.Context, persistence storeport.Store, learnerID string) (bool, error) {
+	domains, err := persistence.GetDomainsByLearner(ctx, learnerID, false)
+	if err != nil {
+		return false, err
+	}
+	for _, domain := range domains {
+		if domain == nil || !domain.HighStakes {
+			continue
+		}
+		reviewed, err := persistence.HasHumanReviewedEvaluationInDomain(ctx, learnerID, domain.ID)
+		if err != nil {
+			return false, err
+		}
+		if !reviewed {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // alertKindOLM is the alert tag used by sendOLM for daily-dedup checks
@@ -888,35 +1130,34 @@ func (s *Scheduler) sendMirrorMessages() {
 			s.logger.Error("scheduler: mirror availability", "err", err, "learner", learner.ID)
 			continue
 		}
-		if avail != nil && avail.DoNotDisturb {
+		allowed, err := avail.AllowsNotificationAt(now)
+		if err != nil {
+			s.logger.Error("scheduler: mirror invalid notification policy", "err", err, "learner", learner.ID)
+			continue
+		}
+		if !allowed {
+			continue
+		}
+		highStakesAllowed, err := allHighStakesDomainsHumanReviewed(ctx, s.store, learner.ID)
+		if err != nil {
+			s.logger.Error("scheduler: mirror high-stakes review", "err", err, "learner", learner.ID)
+			continue
+		}
+		if !highStakesAllowed {
 			continue
 		}
 
-		// The in-session emission already records a scheduled_alert with
-		// MirrorAlertKind for dedup. WasAlertSentToday catches both the
-		// in-session enqueue AND any prior tick today.
-		sent, err := s.store.WasAlertSentToday(ctx, learner.ID, MirrorAlertKind)
-		if err != nil {
-			s.logger.Error("scheduler: mirror dedup", "err", err, "learner", learner.ID)
-			continue
-		}
-		if sent {
-			// We still want to mark queued items as sent so they don't
-			// pile up — best-effort dequeue + mark.
-			item, dequeueErr := s.store.DequeueNextPending(ctx, learner.ID, models.WebhookKindMirror, now, 30*time.Minute)
-			if dequeueErr != nil {
-				s.logger.Error("scheduler: mirror cleanup dequeue", "err", dequeueErr, "learner", learner.ID)
-			} else if item != nil {
-				if markErr := s.store.MarkWebhookSent(ctx, item.ID, learner.ID, now); markErr != nil {
-					s.logger.Error("scheduler: mirror cleanup queue update", "err", markErr, "learner", learner.ID, "queue_id", item.ID)
-				}
-			}
-			continue
+		// Official in-session enqueue records a daily reservation before the
+		// scheduler runs. That reservation prevents duplicate enqueue; it is not
+		// proof of delivery, so a pending queue row must still be claimed and sent.
+		reserved, reservationErr := s.store.WasAlertSentToday(ctx, learner.ID, MirrorAlertKind)
+		if reservationErr != nil {
+			s.logger.Warn("scheduler: mirror reservation lookup", "err", reservationErr, "learner", learner.ID)
 		}
 
-		item, err := s.store.DequeueNextPending(ctx, learner.ID, models.WebhookKindMirror, now, 30*time.Minute)
+		item, err := s.store.ClaimNextPendingWebhook(ctx, learner.ID, models.WebhookKindMirror, now, 30*time.Minute)
 		if err != nil {
-			s.logger.Error("scheduler: mirror dequeue", "err", err, "learner", learner.ID)
+			s.logger.Error("scheduler: mirror claim", "err", err, "learner", learner.ID)
 			continue
 		}
 		if item == nil || item.Content == "" {
@@ -924,8 +1165,45 @@ func (s *Scheduler) sendMirrorMessages() {
 		}
 
 		embed := mirrorEmbedFromContent(item.Content)
-		if err := s.sendDiscordEmbed(learner.WebhookURL, discordPayload{Embeds: []discordEmbed{embed}}); err != nil {
+		reservationID := int64(0)
+		if !reserved {
+			reservationID, reserved, err = s.store.ReserveNotificationDelivery(
+				ctx, learner.ID, MirrorAlertKind, "", true, now,
+			)
+			if err != nil || !reserved {
+				if err != nil {
+					s.logger.Error("scheduler: mirror reserve notification", "err", err, "learner", learner.ID)
+				}
+				_ = s.store.ReleaseWebhookClaim(ctx, item.ID, learner.ID)
+				continue
+			}
+		}
+		accessibility, err := avail.Accessibility()
+		if err != nil {
+			if reservationID != 0 {
+				_ = s.store.ReleaseNotificationDelivery(ctx, reservationID, learner.ID)
+			}
+			_ = s.store.ReleaseWebhookClaim(ctx, item.ID, learner.ID)
+			s.logger.Error("scheduler: mirror invalid accessibility policy", "err", err, "learner", learner.ID)
+			continue
+		}
+		payload := applyAccessibilityPreferences(discordPayload{Embeds: []discordEmbed{embed}}, accessibility)
+		active, activeErr := s.store.IsWebhookClaimActive(ctx, item.ID, learner.ID)
+		if activeErr != nil || !active {
+			if reservationID != 0 {
+				_ = s.store.ReleaseNotificationDelivery(ctx, reservationID, learner.ID)
+			}
+			if activeErr != nil {
+				_ = s.store.ReleaseWebhookClaim(ctx, item.ID, learner.ID)
+				s.logger.Error("scheduler: mirror revalidate claim", "err", activeErr, "learner", learner.ID, "queue_id", item.ID)
+			}
+			continue
+		}
+		if err := s.sendDiscordEmbedDurable(learner.WebhookURL, payload); err != nil {
 			s.logger.Error("scheduler: mirror webhook", "err", err, "learner", learner.ID)
+			if reservationID != 0 {
+				_ = s.store.ReleaseNotificationDelivery(ctx, reservationID, learner.ID)
+			}
 			if markErr := s.store.MarkWebhookFailed(ctx, item.ID, learner.ID); markErr != nil {
 				s.logger.Error("scheduler: mirror mark failed", "err", markErr, "learner", learner.ID, "queue_id", item.ID)
 			}
@@ -934,8 +1212,10 @@ func (s *Scheduler) sendMirrorMessages() {
 		if err := s.store.MarkWebhookSent(ctx, item.ID, learner.ID, now); err != nil {
 			s.logger.Error("scheduler: mirror sent but queue update failed", "err", err, "learner", learner.ID, "queue_id", item.ID)
 		}
-		if err := s.store.CreateScheduledAlert(ctx, learner.ID, MirrorAlertKind, "", now); err != nil {
-			s.logger.Error("scheduler: mirror sent but dedup stamp failed", "err", err, "learner", learner.ID)
+		if reservationID != 0 {
+			if err := s.store.CompleteNotificationDelivery(ctx, reservationID, learner.ID); err != nil {
+				s.logger.Error("scheduler: mirror sent but reservation completion failed", "err", err, "learner", learner.ID)
+			}
 		}
 		s.logger.Info("scheduler: mirror dispatched", "learner", learner.ID)
 	}

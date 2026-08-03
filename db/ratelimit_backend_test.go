@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 )
@@ -56,6 +57,45 @@ func TestRateLimitBackendTokenBucket(t *testing.T) {
 	}
 }
 
+func TestRateLimitBackendConcurrentFirstKeyHonorsBurst(t *testing.T) {
+	store := setupTestDB(t)
+	backend := NewRateLimitBackend(store)
+	ctx := context.Background()
+	const burst = 3
+	now := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
+
+	const contenders = 12
+	start := make(chan struct{})
+	results := make(chan bool, contenders)
+	var wg sync.WaitGroup
+	for range contenders {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			ok, err := backend.Allow(ctx, "oauth:198.51.100.42", 0, burst, now)
+			if err != nil {
+				t.Errorf("Allow: %v", err)
+				return
+			}
+			results <- ok
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	allowed := 0
+	for ok := range results {
+		if ok {
+			allowed++
+		}
+	}
+	if allowed != burst {
+		t.Fatalf("concurrent first-key allowed=%d, want burst=%d", allowed, burst)
+	}
+}
+
 // TestLoginFailureBackendWindow verifies Record/CountInWindow/Reset on the
 // shared store. Runs on SQLite and (when TUTOR_TEST_PG_DSN is set) Postgres.
 func TestLoginFailureBackendWindow(t *testing.T) {
@@ -98,5 +138,47 @@ func TestLoginFailureBackendWindow(t *testing.T) {
 		t.Fatalf("CountInWindow after reset: %v", err)
 	} else if n != 0 {
 		t.Fatalf("CountInWindow after reset = %d, want 0", n)
+	}
+}
+
+func TestCleanupRateLimitState(t *testing.T) {
+	store := setupTestDB(t)
+	ctx := context.Background()
+	rateBackend := NewRateLimitBackend(store)
+	loginBackend := NewLoginFailureBackend(store)
+	old := time.Date(2026, 6, 6, 10, 0, 0, 0, time.UTC)
+	recent := old.Add(2 * time.Hour)
+	cutoff := old.Add(time.Hour)
+
+	if _, err := rateBackend.Allow(ctx, "old-bucket", 0, 2, old); err != nil {
+		t.Fatalf("seed old bucket: %v", err)
+	}
+	if _, err := rateBackend.Allow(ctx, "recent-bucket", 0, 2, recent); err != nil {
+		t.Fatalf("seed recent bucket: %v", err)
+	}
+	if _, err := loginBackend.Record(ctx, "old@example.com", old); err != nil {
+		t.Fatalf("seed old failure: %v", err)
+	}
+	if _, err := loginBackend.Record(ctx, "recent@example.com", recent); err != nil {
+		t.Fatalf("seed recent failure: %v", err)
+	}
+
+	buckets, failures, err := store.CleanupRateLimitState(ctx, cutoff, cutoff)
+	if err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if buckets != 1 || failures != 1 {
+		t.Fatalf("deleted buckets=%d failures=%d, want 1/1", buckets, failures)
+	}
+
+	var bucketRows, failureRows int
+	if err := store.root.QueryRow(`SELECT COUNT(*) FROM rate_limit_buckets`).Scan(&bucketRows); err != nil {
+		t.Fatalf("count buckets: %v", err)
+	}
+	if err := store.root.QueryRow(`SELECT COUNT(*) FROM login_failures`).Scan(&failureRows); err != nil {
+		t.Fatalf("count failures: %v", err)
+	}
+	if bucketRows != 1 || failureRows != 1 {
+		t.Fatalf("remaining buckets=%d failures=%d, want 1/1", bucketRows, failureRows)
 	}
 }

@@ -61,8 +61,9 @@ func TestAddConcepts_RejectsCycleAfterMergingExistingGraph(t *testing.T) {
 	d := makeOwnerDomain(t, store, "L_owner", "math")
 
 	res := callTool(t, deps, registerAddConcepts, "L_owner", "add_concepts", map[string]any{
-		"domain_id": d.ID,
-		"concepts":  []string{"c"},
+		"domain_id":        d.ID,
+		"expected_version": 1,
+		"concepts":         []string{"c"},
 		"prerequisites": map[string][]string{
 			"c": {"b"},
 			"a": {"c"},

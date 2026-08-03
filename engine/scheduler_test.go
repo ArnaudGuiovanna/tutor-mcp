@@ -64,6 +64,7 @@ func TestSendOLM_DispatchesFallbackWhenQueueEmpty(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+	optInSchedulerNotifications(t, store, "L1")
 	seedDomain(t, raw, "L1", "math",
 		[]string{"a", "b"},
 		map[string][]string{"b": {"a"}},
@@ -124,7 +125,7 @@ func TestShouldPushDiscord_RefinesKSTFallbackWithMemory(t *testing.T) {
 func TestRunConsolidationCycleEnqueuesPendingOnly(t *testing.T) {
 	t.Setenv("TUTOR_MCP_MEMORY_ROOT", t.TempDir())
 	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
-	_, store, learnerID := rawTestSetup(t, "https://discord.com/api/webhooks/1/a")
+	_, store, learnerID := rawTestSetup(t, "")
 	sched := schedulerForTest(store)
 
 	sched.runConsolidationCycleAt(time.Date(2026, time.May, 3, 13, 30, 0, 0, time.UTC))
@@ -176,6 +177,7 @@ func TestSendOLM_SkipsWhenNothingActionable(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+	optInSchedulerNotifications(t, store, "L1")
 	seedDomain(t, raw, "L1", "math", []string{"a"}, nil, false)
 	seedConceptState(t, store, "L1", "a", 0.90, "review")
 

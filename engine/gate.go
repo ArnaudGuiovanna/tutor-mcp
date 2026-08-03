@@ -236,7 +236,7 @@ func ApplyGate(input GateInput) (GateResult, error) {
 				missing := missingPrereqs(c, input.Graph, input.States, kstThreshold)
 				slog.Info("gate: misconception on concept with unsatisfied prereqs (pathological — possible domain misconfig)",
 					"concept", c,
-					"missing_prereqs", missing,
+					"missing_prereq_count", len(missing),
 					"phase", string(input.Phase))
 			}
 		}

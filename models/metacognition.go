@@ -54,12 +54,13 @@ type ConceptGap struct {
 }
 
 type TransferRecord struct {
-	ID          int64
-	LearnerID   string
-	DomainID    string
-	ConceptID   string
-	ContextType string
-	Score       float64
-	SessionID   string
-	CreatedAt   time.Time
+	ID                  int64
+	LearnerID           string
+	DomainID            string
+	AssessmentAttemptID string
+	ConceptID           string
+	ContextType         string
+	Score               float64
+	SessionID           string
+	CreatedAt           time.Time
 }

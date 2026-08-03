@@ -35,22 +35,35 @@ type bucket struct {
 
 // RateLimiter implements a token bucket rate limiter keyed by caller identity.
 type RateLimiter struct {
-	mu      sync.Mutex
-	buckets map[string]*bucket
-	rate    float64 // tokens per second
-	burst   int     // max tokens
-	stop    chan struct{}
-	backend RateLimitBackend // optional shared store; nil = in-memory only
+	mu        sync.Mutex
+	buckets   map[string]*bucket
+	rate      float64 // tokens per second
+	burst     int     // max tokens
+	namespace string  // separates policies sharing one persistent backend
+	stop      chan struct{}
+	backend   RateLimitBackend // optional shared store; nil = in-memory only
 }
 
 // NewRateLimiter creates a rate limiter. rate is tokens/second, burst is max tokens.
 // Starts a background goroutine to purge stale entries.
 func NewRateLimiter(rate float64, burst int) *RateLimiter {
+	return NewRateLimiterWithNamespace("default", rate, burst)
+}
+
+// NewRateLimiterWithNamespace creates a limiter whose persistent bucket keys
+// are isolated from other policies sharing the same backend. The in-memory
+// path already has one map per limiter, so the prefix is needed only on the
+// backend call.
+func NewRateLimiterWithNamespace(namespace string, rate float64, burst int) *RateLimiter {
+	if strings.TrimSpace(namespace) == "" {
+		namespace = "default"
+	}
 	rl := &RateLimiter{
-		buckets: make(map[string]*bucket),
-		rate:    rate,
-		burst:   burst,
-		stop:    make(chan struct{}),
+		buckets:   make(map[string]*bucket),
+		rate:      rate,
+		burst:     burst,
+		namespace: namespace,
+		stop:      make(chan struct{}),
 	}
 	go rl.cleanup()
 	return rl
@@ -58,26 +71,37 @@ func NewRateLimiter(rate float64, burst int) *RateLimiter {
 
 // SetBackend installs a shared backend after construction. Passing nil restores
 // the in-memory default.
-func (rl *RateLimiter) SetBackend(backend RateLimitBackend) { rl.backend = backend }
+func (rl *RateLimiter) SetBackend(backend RateLimitBackend) {
+	rl.mu.Lock()
+	rl.backend = backend
+	rl.mu.Unlock()
+}
 
 // Allow consumes one token for the given key. Returns false if the bucket is empty.
 func (rl *RateLimiter) Allow(key string) bool {
-	if rl.backend != nil {
-		allowed, err := rl.backend.Allow(context.Background(), key, rl.rate, rl.burst, time.Now())
+	rl.mu.Lock()
+	backend := rl.backend
+	rl.mu.Unlock()
+	if backend != nil {
+		backendKey := rl.namespace + ":" + key
+		allowed, err := backend.Allow(context.Background(), backendKey, rl.rate, rl.burst, time.Now())
 		if err != nil {
-			// Fail OPEN: a shared-store outage must not lock the whole fleet
-			// out of its own endpoints. Log and allow; the per-process limiter
-			// is intentionally bypassed when a backend is configured.
-			slog.Warn("rate limit backend error, failing open", "err", err, "key", key)
-			return true
+			// Preserve availability without turning a shared-store outage into
+			// an unthrottled authentication endpoint. The local bucket is weaker
+			// than the fleet-wide policy, but still bounds each process. Never log
+			// the bucket key: it can contain an IP address or learner identifier.
+			slog.Warn("rate limit backend error, using local fallback", "err", err, "namespace", rl.namespace)
+			return rl.allowLocal(key, time.Now())
 		}
 		return allowed
 	}
+	return rl.allowLocal(key, time.Now())
+}
 
+func (rl *RateLimiter) allowLocal(key string, now time.Time) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
-	now := time.Now()
 	b, ok := rl.buckets[key]
 	if !ok {
 		rl.buckets[key] = &bucket{tokens: float64(rl.burst) - 1, lastTime: now}

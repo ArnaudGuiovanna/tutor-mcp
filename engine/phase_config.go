@@ -27,10 +27,9 @@ type PhaseConfig struct {
 	// (H(P(L)=0.1) ≈ 0.469) and would short-circuit the phase.
 	DeltaHThreshold float64
 
-	// NDiagnosticMax is the hard upper bound on diagnostic items
-	// before forced exit, regardless of entropy reduction. Acts as
-	// the escape against pathological cases where entropy refuses to
-	// reduce (saturated concepts, calibration-off BKT params).
+	// NDiagnosticMax bounds required diagnostic concept coverage. Domains with
+	// at most this many concepts cover every concept; larger domains cover this
+	// many distinct concepts. Repeated items never consume the bound.
 	NDiagnosticMax int
 
 	// RetentionRecallThreshold is the FSRS Retrievability below which

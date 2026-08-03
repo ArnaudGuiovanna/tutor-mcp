@@ -130,6 +130,23 @@ func SelectAction(concept string, cs *models.ConceptState, mc *models.Misconcept
 	return SelectActionAt(concept, cs, mc, history, time.Now().UTC())
 }
 
+// SelectActionForPhaseAt applies the phase-level pedagogical contract before
+// the normal mastery/retention cascade. DIAGNOSTIC is deliberately a separate
+// cold-assessment activity: feeding a bootstrap P(L)=0.1 state into the normal
+// selector would otherwise emit NEW_CONCEPT and teach before measuring.
+func SelectActionForPhaseAt(phase models.Phase, concept string, cs *models.ConceptState, mc *models.MisconceptionGroup, history ActionHistory, now time.Time) Action {
+	if phase == models.PhaseDiagnostic {
+		return Action{
+			Type:             models.ActivityDiagnosticAssessment,
+			DifficultyTarget: 0.50,
+			Format:           "cold_assessment",
+			EstimatedMinutes: 8,
+			Rationale:        "diagnostic froid : mesurer avant toute explication ou aide",
+		}
+	}
+	return SelectActionAt(concept, cs, mc, history, now)
+}
+
 // SelectActionAt is the clock-injected action decision used by the runtime.
 // Retention is derived from the card's current age (now - LastReview), not
 // from FSRS ElapsedDays, which records the interval before the last review.
@@ -175,14 +192,14 @@ func SelectActionAt(concept string, cs *models.ConceptState, mc *models.Misconce
 			return Action{
 				Type:             models.ActivityRecall,
 				DifficultyTarget: 0.65,
-				Format:           "code_completion",
+				Format:           "cold_retrieval",
 				EstimatedMinutes: 8,
 				Rationale:        fmt.Sprintf("retention FSRS basse (%.0f%%)", retention*100),
 			}
 		}
 	}
 
-	// (4) Mastery brackets.
+	// (4) Model-estimate brackets.
 	p := cs.PMastery
 	switch {
 	case p < 0.30:
@@ -191,7 +208,7 @@ func SelectActionAt(concept string, cs *models.ConceptState, mc *models.Misconce
 			DifficultyTarget: 0.55,
 			Format:           "introduction",
 			EstimatedMinutes: 15,
-			Rationale:        fmt.Sprintf("introduction : mastery %.2f < 0.30", p),
+			Rationale:        fmt.Sprintf("introduction : model estimate %.2f < 0.30", p),
 		}
 	case p < 0.70:
 		return Action{
@@ -199,7 +216,7 @@ func SelectActionAt(concept string, cs *models.ConceptState, mc *models.Misconce
 			DifficultyTarget: 0.55,
 			Format:           "practice_standard",
 			EstimatedMinutes: 10,
-			Rationale:        fmt.Sprintf("practice standard : mastery %.2f", p),
+			Rationale:        fmt.Sprintf("practice standard : model estimate %.2f", p),
 		}
 	case p < algorithms.MasteryBKT():
 		d := zpdDifficultyFromTheta(cs.Theta)
@@ -223,7 +240,7 @@ func SelectActionAt(concept string, cs *models.ConceptState, mc *models.Misconce
 				Format:           "practice_zpd",
 				EstimatedMinutes: 12,
 				Rationale: fmt.Sprintf(
-					"mastery %.2f >= seuil mais stabilite insuffisante (%d/%d)",
+					"model estimate %.2f >= threshold but stability insufficient (%d/%d)",
 					p, history.InteractionsAboveBKT, HighMasteryStabilityWindow),
 			}
 		}
@@ -258,9 +275,9 @@ func selectHighMasteryAction(history ActionHistory) Action {
 		return Action{
 			Type:             models.ActivityMasteryChallenge,
 			DifficultyTarget: 0.75,
-			Format:           "build_challenge",
+			Format:           "integrated_performance_task",
 			EstimatedMinutes: 45,
-			Rationale:        "mastery >= seuil stable : premier mastery challenge",
+			Rationale:        "stable high model estimate: first mastery challenge",
 		}
 	case history.FeynmanCount < history.MasteryChallengeCount:
 		return Action{
@@ -268,7 +285,7 @@ func selectHighMasteryAction(history ActionHistory) Action {
 			DifficultyTarget: 0.50,
 			Format:           "feynman_explanation",
 			EstimatedMinutes: 15,
-			Rationale:        "consolidation post-mastery via Feynman",
+			Rationale:        "deep-evidence probe after high estimate via Feynman",
 		}
 	case history.TransferCount < history.FeynmanCount:
 		return Action{
@@ -283,9 +300,9 @@ func selectHighMasteryAction(history ActionHistory) Action {
 		return Action{
 			Type:             models.ActivityMasteryChallenge,
 			DifficultyTarget: 0.75,
-			Format:           "build_challenge",
+			Format:           "integrated_performance_task",
 			EstimatedMinutes: 45,
-			Rationale:        "mastery stable: new challenge cycle",
+			Rationale:        "stable high model estimate: new challenge cycle",
 		}
 	}
 }

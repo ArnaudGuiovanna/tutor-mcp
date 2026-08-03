@@ -17,7 +17,6 @@ package engine
 import (
 	"context"
 	"fmt"
-	"math"
 	"strings"
 	"time"
 
@@ -40,8 +39,12 @@ const (
 	NodeNotStarted NodeState = "not_started"
 	NodeFragile    NodeState = "fragile"
 	NodeInProgress NodeState = "in_progress"
-	NodeSolid      NodeState = "solid"
-	NodeFocus      NodeState = "focus"
+	NodeEstimated  NodeState = "estimated"
+	// NodeSolid retains the stable legacy classifier value. The full OLM only
+	// counts strong evidence as demonstrated/solid; use MasteryStatus for the
+	// authoritative distinction between estimated and demonstrated.
+	NodeSolid NodeState = "solid"
+	NodeFocus NodeState = "focus"
 )
 
 // NodeClassify maps a concept_state to its OLM node state, matching the
@@ -50,9 +53,9 @@ const (
 //
 // Rules (in order):
 //   - nil OR CardState == "new"             → NotStarted
-//   - PMastery >= MasteryKST() (unified 0.85 threshold) → Solid
-//   - PMastery < 0.30                        → Fragile
-//   - retention(elapsed, stability) < 0.50   → Fragile
+//   - retention(current age, stability) < 0.50         → Fragile
+//   - PMastery >= MasteryKST() (unified 0.85 threshold) → Estimated
+//   - PMastery < 0.30                                   → Fragile
 //   - otherwise                              → InProgress
 func NodeClassify(cs *models.ConceptState) NodeState {
 	return NodeClassifyAt(cs, time.Now().UTC())
@@ -64,22 +67,20 @@ func NodeClassifyAt(cs *models.ConceptState, now time.Time) NodeState {
 	if cs == nil || cs.CardState == "new" {
 		return NodeNotStarted
 	}
+	if algorithms.CurrentRetrievability(now, cs.LastReview, cs.Stability) < 0.50 {
+		return NodeFragile
+	}
+	// This classifier only sees model state, not assessment evidence. It may
+	// therefore surface a high estimate, but can never call it demonstrated or
+	// solid. BuildOLMSnapshot owns the evidence-bearing solid counter.
 	if cs.PMastery >= algorithms.MasteryKST() {
-		return NodeSolid
+		return NodeEstimated
 	}
 	if cs.PMastery < nodeFragileMasteryThreshold {
 		return NodeFragile
 	}
-	if algorithms.CurrentRetrievability(now, cs.LastReview, cs.Stability) < 0.50 {
-		return NodeFragile
-	}
 	return NodeInProgress
 }
-
-// Calibration bias is "actionable" when |bias| exceeds this threshold.
-// Surfaced both in HasActionable and in MetacogLine, so a single source
-// of truth avoids them drifting apart.
-const calibrationActionableThreshold = 1.5
 
 // Discord embed colors for FormatOLMEmbed, keyed on FocusUrgency.
 const (
@@ -98,8 +99,17 @@ type OLMSnapshot struct {
 	DomainName   string `json:"domain_name"`
 	PersonalGoal string `json:"personal_goal,omitempty"`
 
-	// Mastery distribution on ACTIVE concepts (KST threshold = 0.70).
-	Solid      int `json:"solid"`
+	// Evidence ladder on active concepts. Counts are cumulative: transferred is
+	// also demonstrated, retained and estimated. Solid is a deprecated alias for
+	// Demonstrated kept for response compatibility.
+	Estimated     int                      `json:"estimated"`
+	Retained      int                      `json:"retained"`
+	Demonstrated  int                      `json:"demonstrated"`
+	Transferred   int                      `json:"transferred"`
+	Solid         int                      `json:"solid"`
+	MasteryStages map[string]MasteryStatus `json:"mastery_stages"`
+
+	// Mutually exclusive display buckets for concepts below demonstrated.
 	InProgress int `json:"in_progress"`
 	Fragile    int `json:"fragile"`
 	NotStarted int `json:"not_started"`
@@ -111,13 +121,17 @@ type OLMSnapshot struct {
 	FocusUrgency models.AlertUrgency `json:"focus_urgency,omitempty"`
 
 	// Metacognitive signals — empty string / zero means "no actionable signal".
-	AutonomyTrend   string  `json:"autonomy_trend,omitempty"` // "improving" | "stable" | "declining"
-	CalibrationBias float64 `json:"calibration_bias"`         // signed; |x|>1.5 → actionable
-	AffectTrend     string  `json:"affect_trend,omitempty"`   // "improving" | "stable" | "declining"
+	AutonomyTrend      string  `json:"autonomy_trend,omitempty"` // "improving" | "stable" | "declining"
+	CalibrationBias    float64 `json:"calibration_bias"`
+	CalibrationSamples int     `json:"calibration_samples"`
+	AffectTrend        string  `json:"affect_trend,omitempty"` // "improving" | "stable" | "declining"
 
-	// KST progress toward the personal goal.
-	KSTProgress     float64 `json:"kst_progress"` // 0..1
-	NextStepConcept string  `json:"next_step_concept,omitempty"`
+	// EvidenceProgress is the demonstrated fraction of active competencies.
+	// KSTProgress is a deprecated response alias retained for older clients; it
+	// carries the same evidence-backed value and is not a graph-threshold count.
+	EvidenceProgress float64 `json:"evidence_progress"` // 0..1
+	KSTProgress      float64 `json:"kst_progress"`      // deprecated alias
+	NextStepConcept  string  `json:"next_step_concept,omitempty"`
 
 	// HasActionable: true if anything in this snapshot is worth surfacing.
 	// The scheduler skips dispatch when false (silence ≠ panne).
@@ -141,9 +155,10 @@ func BuildOLMSnapshotAt(ctx context.Context, store storeport.Store, learnerID, d
 	}
 
 	snap := &OLMSnapshot{
-		DomainID:     domain.ID,
-		DomainName:   domain.Name,
-		PersonalGoal: domain.PersonalGoal,
+		DomainID:      domain.ID,
+		DomainName:    domain.Name,
+		PersonalGoal:  domain.PersonalGoal,
+		MasteryStages: make(map[string]MasteryStatus, len(domain.Graph.Concepts)),
 	}
 
 	allStates, err := store.GetConceptStatesByDomain(ctx, learnerID, domain.ID)
@@ -153,20 +168,6 @@ func BuildOLMSnapshotAt(ctx context.Context, store storeport.Store, learnerID, d
 	statesByConcept := make(map[string]*models.ConceptState, len(allStates))
 	for _, cs := range allStates {
 		statesByConcept[cs.Concept] = cs
-	}
-
-	for _, c := range domain.Graph.Concepts {
-		cs := statesByConcept[c] // nil if missing — NodeClassify handles that
-		switch NodeClassifyAt(cs, now) {
-		case NodeNotStarted:
-			snap.NotStarted++
-		case NodeFragile:
-			snap.Fragile++
-		case NodeInProgress:
-			snap.InProgress++
-		case NodeSolid:
-			snap.Solid++
-		}
 	}
 
 	// Focus: alerts (forgetting, ZPD, plateau) win over frontier fallback.
@@ -192,7 +193,50 @@ func BuildOLMSnapshotAt(ctx context.Context, store storeport.Store, learnerID, d
 			domainInteractions = append(domainInteractions, in)
 		}
 	}
-	alerts := ComputeAlertsAt(domainStates, domainInteractions, time.Time{}, now)
+
+	// Authoritative mastery ladder. A high BKT estimate alone is represented as
+	// estimated; only strong, retained evidence becomes demonstrated/solid.
+	for _, concept := range domain.Graph.Concepts {
+		transfers, err := store.GetTransferScoresInDomain(ctx, learnerID, domain.ID, concept)
+		if err != nil {
+			return nil, fmt.Errorf("olm: get transfer evidence for %s: %w", concept, err)
+		}
+		assessments, err := store.GetEvaluatedAssessmentAttemptsInDomain(ctx, learnerID, domain.ID, concept, 100)
+		if err != nil {
+			return nil, fmt.Errorf("olm: get evaluated assessment evidence for %s: %w", concept, err)
+		}
+		status := AssessMasteryStatus(learnerID, concept, statesByConcept[concept], domainInteractions, transfers, assessments, now)
+		snap.MasteryStages[concept] = status
+		if status.Estimated {
+			snap.Estimated++
+		}
+		if status.Retained {
+			snap.Retained++
+		}
+		if status.Demonstrated {
+			snap.Demonstrated++
+		}
+		if status.Transferred {
+			snap.Transferred++
+		}
+
+		cs := statesByConcept[concept]
+		switch {
+		case cs == nil || cs.CardState == "new":
+			snap.NotStarted++
+		case status.Demonstrated:
+			snap.Solid++
+		case cs.PMastery < nodeFragileMasteryThreshold || status.RetentionEstimate < algorithms.RetentionRecallRoutingThreshold:
+			snap.Fragile++
+		default:
+			snap.InProgress++
+		}
+	}
+	alertEvidence, err := LoadMasteryAlertEvidence(ctx, store, learnerID, domain.ID, domainStates)
+	if err != nil {
+		return nil, fmt.Errorf("olm: load alert evidence: %w", err)
+	}
+	alerts := ComputeAlertsWithEvidenceAt(domainStates, domainInteractions, alertEvidence, time.Time{}, now)
 
 	if focus := pickFocus(alerts); focus != nil {
 		snap.FocusConcept = focus.Concept
@@ -227,21 +271,29 @@ func BuildOLMSnapshotAt(ctx context.Context, store storeport.Store, learnerID, d
 		// Satisfaction is a 1..4 Likert; require a ≥2-step move before calling it a trend.
 		snap.AffectTrend = trendDirection(float64(affects[0].Satisfaction-affects[2].Satisfaction), 1.5)
 	}
-	bias, err := store.GetCalibrationBiasInDomain(ctx, learnerID, domain.ID, 20)
+	calibrationHistory, err := store.GetCalibrationBiasHistoryInDomain(ctx, learnerID, domain.ID, 20)
 	if err != nil {
-		return nil, fmt.Errorf("olm: get calibration bias: %w", err)
+		return nil, fmt.Errorf("olm: get calibration history: %w", err)
 	}
-	snap.CalibrationBias = bias
+	for _, delta := range calibrationHistory {
+		snap.CalibrationBias += delta
+	}
+	if len(calibrationHistory) > 0 {
+		snap.CalibrationBias /= float64(len(calibrationHistory))
+	}
+	snap.CalibrationSamples = len(calibrationHistory)
 
-	// KST progress: fraction of active concepts that are Solid.
+	// Progress is evidence-backed: fraction of active concepts demonstrated,
+	// rather than the fraction whose BKT estimate merely crossed a threshold.
 	totalConcepts := snap.Solid + snap.InProgress + snap.Fragile + snap.NotStarted
 	if totalConcepts > 0 {
-		snap.KSTProgress = float64(snap.Solid) / float64(totalConcepts)
+		snap.EvidenceProgress = float64(snap.Demonstrated) / float64(totalConcepts)
+		snap.KSTProgress = snap.EvidenceProgress
 	}
 
 	// HasActionable: a focus exists OR a metacog signal warrants surfacing.
 	if snap.FocusConcept != "" ||
-		math.Abs(snap.CalibrationBias) > calibrationActionableThreshold ||
+		calibrationBiasIsActionable(snap.CalibrationBias, snap.CalibrationSamples) ||
 		snap.AutonomyTrend == "declining" ||
 		snap.AffectTrend == "declining" {
 		snap.HasActionable = true
@@ -383,7 +435,7 @@ func FormatOLMEmbed(snap *OLMSnapshot) DiscordEmbed {
 	}
 
 	if snap.PersonalGoal != "" {
-		lines = append(lines, fmt.Sprintf("Goal \"%s\": %s.", snap.PersonalGoal, progressPhrase(snap.KSTProgress)))
+		lines = append(lines, fmt.Sprintf("Goal \"%s\": %s.", snap.PersonalGoal, progressPhrase(snap.EvidenceProgress)))
 	}
 
 	return DiscordEmbed{
@@ -405,7 +457,7 @@ type DiscordEmbed struct {
 func compactBuckets(snap *OLMSnapshot) string {
 	parts := []string{}
 	if snap.Solid > 0 {
-		parts = append(parts, fmt.Sprintf("%d solid", snap.Solid))
+		parts = append(parts, fmt.Sprintf("%d demonstrated", snap.Solid))
 	}
 	if snap.InProgress > 0 {
 		parts = append(parts, fmt.Sprintf("%d in progress", snap.InProgress))
@@ -425,10 +477,10 @@ func compactBuckets(snap *OLMSnapshot) string {
 // that needs the metacog signal can produce the same text as the webhook's
 // FormatOLMEmbed.
 func MetacogLine(snap *OLMSnapshot) string {
-	if snap.CalibrationBias > calibrationActionableThreshold {
+	if calibrationBiasIsActionable(snap.CalibrationBias, snap.CalibrationSamples) && snap.CalibrationBias > 0 {
 		return "You have been slightly over-estimating your knowledge for 3 sessions — a few cold exercises will help you recalibrate."
 	}
-	if snap.CalibrationBias < -calibrationActionableThreshold {
+	if calibrationBiasIsActionable(snap.CalibrationBias, snap.CalibrationSamples) && snap.CalibrationBias < 0 {
 		return "You are slightly under-estimating yourself — you know more than you think."
 	}
 	if snap.AutonomyTrend == "declining" {

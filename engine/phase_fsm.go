@@ -23,23 +23,29 @@ type PhaseObservables struct {
 
 	// PhaseEntryEntropy is the entropy snapshot taken at the moment
 	// the phase was last set to DIAGNOSTIC. Zero (or NaN) means "no
-	// snapshot available" — the relative criterion does not fire
-	// and only NDiagnosticMax governs DIAGNOSTIC exit.
+	// snapshot available" — the relative criterion is omitted from the
+	// rationale. Qualified concept coverage still governs exit.
 	PhaseEntryEntropy float64
 
-	// DiagnosticItemsCount is the number of interactions on the
-	// domain since PhaseChangedAt, derived by the orchestrator via
-	// db.CountInteractionsSince. Used for the NDiagnosticMax cap.
+	// DiagnosticItemsCount is retained as a compatibility name, but carries the
+	// number of distinct concepts covered by hint-free, attempt-linked,
+	// evaluated DIAGNOSTIC_ASSESSMENT interactions since PhaseChangedAt.
 	DiagnosticItemsCount int
 
-	// MasteredGoalRelevant is the count of concepts that are
-	// *goal-relevant* (per cfg.GoalRelevantCutoff) AND have
-	// PMastery >= MasteryBKT(). Used for INSTRUCTION → MAINTENANCE.
-	MasteredGoalRelevant int
+	// DiagnosticCoverageTarget is min(domain concept count, NDiagnosticMax).
+	// Coverage is mandatory: entropy derived from repeated or unverified
+	// observations cannot end the diagnostic early.
+	DiagnosticCoverageTarget int
+
+	// EstimatedGoalRelevant is the count of concepts that are
+	// *goal-relevant* (per cfg.GoalRelevantCutoff) AND have a BKT estimate
+	// above the routing threshold. This phase signal is not a demonstrated
+	// mastery claim; learner-facing progress uses MasteryStatus.
+	EstimatedGoalRelevant int
 
 	// TotalGoalRelevant is the total count of goal-relevant concepts
-	// (denominator of the mastery check). Equality with
-	// MasteredGoalRelevant fires the INSTRUCTION → MAINTENANCE
+	// (denominator of the phase check). Equality with
+	// EstimatedGoalRelevant fires the INSTRUCTION → MAINTENANCE
 	// transition.
 	TotalGoalRelevant int
 
@@ -66,13 +72,13 @@ type PhaseEvaluation struct {
 //
 // Transitions (cf. docs/regulation-design/02-phase-controller.md §3) :
 //
-//   - DIAGNOSTIC → INSTRUCTION :
-//     (entropy_entry - entropy_now >= cfg.DeltaHThreshold)
-//     OR (n_items >= cfg.NDiagnosticMax)
+//   - DIAGNOSTIC → INSTRUCTION: qualified distinct-concept coverage reaches
+//     min(domain concepts, cfg.NDiagnosticMax). Entropy remains an audit signal
+//     but cannot bypass coverage.
 //
 //   - INSTRUCTION → MAINTENANCE :
-//     all goal-relevant concepts have PMastery >= MasteryBKT()
-//     (encoded via MasteredGoalRelevant == TotalGoalRelevant > 0)
+//     all goal-relevant concepts have an estimated PMastery above the routing
+//     threshold (encoded via EstimatedGoalRelevant == TotalGoalRelevant > 0)
 //
 //   - MAINTENANCE → INSTRUCTION :
 //     at least one goal-relevant concept has retention <
@@ -90,47 +96,52 @@ func EvaluatePhase(current models.Phase, obs PhaseObservables, cfg PhaseConfig) 
 		hasSnapshot := obs.PhaseEntryEntropy > 0 && !math.IsNaN(obs.PhaseEntryEntropy)
 		entropyDelta := obs.PhaseEntryEntropy - obs.MeanEntropy
 		entropyExit := hasSnapshot && entropyDelta >= cfg.DeltaHThreshold
-		countExit := obs.DiagnosticItemsCount >= cfg.NDiagnosticMax
+		coverageTarget := obs.DiagnosticCoverageTarget
+		if coverageTarget <= 0 {
+			coverageTarget = cfg.NDiagnosticMax
+		}
+		coverageReached := coverageTarget > 0 && obs.DiagnosticItemsCount >= coverageTarget
 
-		if entropyExit {
+		if entropyExit && coverageReached {
 			return PhaseEvaluation{
 				From: current, To: models.PhaseInstruction, Transitioned: true,
 				Rationale: fmt.Sprintf(
-					"DIAGNOSTIC→INSTRUCTION: entropy reduction reached (%.3f >= %.3f bits)",
-					entropyDelta, cfg.DeltaHThreshold),
+					"DIAGNOSTIC→INSTRUCTION: qualified concept coverage reached (%d/%d) and entropy reduction reached (%.3f >= %.3f bits)",
+					obs.DiagnosticItemsCount, coverageTarget, entropyDelta, cfg.DeltaHThreshold),
 			}
 		}
-		if countExit {
+		if coverageReached {
 			return PhaseEvaluation{
 				From: current, To: models.PhaseInstruction, Transitioned: true,
 				Rationale: fmt.Sprintf(
-					"DIAGNOSTIC→INSTRUCTION: N_max reached (%d >= %d items)",
-					obs.DiagnosticItemsCount, cfg.NDiagnosticMax),
+					"DIAGNOSTIC→INSTRUCTION: qualified concept coverage reached (%d/%d distinct concepts)",
+					obs.DiagnosticItemsCount, coverageTarget),
 			}
 		}
 		return PhaseEvaluation{
 			From: current, To: current, Transitioned: false,
 			Rationale: fmt.Sprintf(
-				"DIAGNOSTIC: delta=%.3f bits (threshold %.3f), items=%d/%d — stay",
+				"DIAGNOSTIC: delta=%.3f bits (threshold %.3f), qualified coverage=%d/%d concepts — stay",
 				entropyDelta, cfg.DeltaHThreshold,
-				obs.DiagnosticItemsCount, cfg.NDiagnosticMax),
+				obs.DiagnosticItemsCount, coverageTarget),
 		}
 
 	case models.PhaseInstruction:
-		// All goal-relevant concepts mastered.
-		if obs.TotalGoalRelevant > 0 && obs.MasteredGoalRelevant == obs.TotalGoalRelevant {
+		// Shift into spaced maintenance once instruction has raised every
+		// goal-relevant estimate. This is routing, not a mastery declaration.
+		if obs.TotalGoalRelevant > 0 && obs.EstimatedGoalRelevant == obs.TotalGoalRelevant {
 			return PhaseEvaluation{
 				From: current, To: models.PhaseMaintenance, Transitioned: true,
 				Rationale: fmt.Sprintf(
-					"INSTRUCTION→MAINTENANCE: %d/%d goal-relevant concepts mastered",
-					obs.MasteredGoalRelevant, obs.TotalGoalRelevant),
+					"INSTRUCTION→MAINTENANCE: %d/%d goal-relevant concepts estimated above routing threshold",
+					obs.EstimatedGoalRelevant, obs.TotalGoalRelevant),
 			}
 		}
 		return PhaseEvaluation{
 			From: current, To: current, Transitioned: false,
 			Rationale: fmt.Sprintf(
-				"INSTRUCTION: %d/%d goal-relevant concepts mastered — stay",
-				obs.MasteredGoalRelevant, obs.TotalGoalRelevant),
+				"INSTRUCTION: %d/%d goal-relevant concepts estimated above routing threshold — stay",
+				obs.EstimatedGoalRelevant, obs.TotalGoalRelevant),
 		}
 
 	case models.PhaseMaintenance:

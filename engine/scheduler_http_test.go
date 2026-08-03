@@ -92,6 +92,27 @@ func TestDoWithRetry_SucceedsImmediately(t *testing.T) {
 	}
 }
 
+func TestSendDiscordEmbedDurable_PerformsOneAttempt(t *testing.T) {
+	allowAnyURL(t)
+	withoutBackoff(t)
+
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	s := newTestScheduler()
+	err := s.sendDiscordEmbedDurable(srv.URL, discordPayload{})
+	if err == nil {
+		t.Fatal("expected failed durable delivery")
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("durable HTTP attempts = %d, want 1", got)
+	}
+}
+
 func TestDoWithRetry_RetriesUntilSuccess(t *testing.T) {
 	allowAnyURL(t)
 	withoutBackoff(t)
@@ -358,37 +379,6 @@ func TestSendDiscordEmbed_PostsJSONPayload(t *testing.T) {
 	}
 }
 
-// ─── sendWebhook: backwards-compat plain content payload ────────────────────
-
-func TestSendWebhook_PostsContentField(t *testing.T) {
-	allowAnyURL(t)
-	withoutBackoff(t)
-
-	var body []byte
-	var contentType string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		contentType = r.Header.Get("Content-Type")
-		body, _ = io.ReadAll(r.Body)
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(srv.Close)
-
-	s := newTestScheduler()
-	if err := s.sendWebhook(srv.URL, "ping"); err != nil {
-		t.Fatalf("sendWebhook: %v", err)
-	}
-	if contentType != "application/json" {
-		t.Errorf("content-type = %q, want application/json", contentType)
-	}
-	var m map[string]string
-	if err := json.Unmarshal(body, &m); err != nil {
-		t.Fatalf("body not JSON: %v", err)
-	}
-	if m["content"] != "ping" {
-		t.Errorf("content field = %q, want %q", m["content"], "ping")
-	}
-}
-
 // ─── queueKindTitle / queueKindColor ────────────────────────────────────────
 
 func TestQueueKindTitleAndColor(t *testing.T) {
@@ -456,6 +446,21 @@ func TestNewSchedulerAndStop(t *testing.T) {
 	}
 	// Stop on a never-Started cron must not panic.
 	s.Stop()
+}
+
+func TestNewSchedulerRejectsUnsafeWebhookRedirect(t *testing.T) {
+	s := NewScheduler(nil, quietLogger())
+	if s.client.CheckRedirect == nil {
+		t.Fatal("webhook HTTP client has no redirect policy")
+	}
+	unsafe := httptest.NewRequest(http.MethodGet, "http://169.254.169.254/latest/meta-data", nil)
+	if err := s.client.CheckRedirect(unsafe, []*http.Request{{}}); err == nil {
+		t.Fatal("unsafe redirect was accepted")
+	}
+	safe := httptest.NewRequest(http.MethodGet, "https://discord.com/api/webhooks/123/token", nil)
+	if err := s.client.CheckRedirect(safe, []*http.Request{{}}); err != nil {
+		t.Fatalf("safe Discord redirect was rejected: %v", err)
+	}
 }
 
 // Sanity guard: doWithRetry still returns the *last* status when all attempts fail.

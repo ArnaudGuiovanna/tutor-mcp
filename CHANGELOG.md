@@ -6,6 +6,105 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Security
+
+- Bind OAuth authorization codes to their redirect URI and PKCE challenge,
+  consume them atomically, rotate refresh-token families transactionally, and
+  revoke a family when an already-used member is replayed. Access tokens now
+  expire after 30 minutes.
+- Enforce bounded public request bodies, strict normalized emails, single-use
+  CSRF state, namespaced race-safe rate limits, and per-account login limits.
+- Add learner-scoped idempotency keys to every state-changing MCP tool, with
+  canonical request hashing, exact successful-response replay, conflict
+  rejection, and fail-closed handling after an ambiguous completion.
+- Stop webhook transport failures and rejected delivery targets from leaking
+  credential-bearing URLs into logs or tool responses; harden install and
+  backup scripts against unsafe paths and permissions.
+- Revoke plaintext/unbound refresh-token families, purge legacy authorization
+  codes without exact redirect/S256 binding, pseudonymize structured learning
+  identifiers in logs, and remove free-form pedagogical text from INFO logs.
+
+### Added
+
+- Add durable learning sessions and implementation-intention lifecycles so
+  interactions, affect, assessments, transfer evidence and summaries share a
+  canonical episode ID instead of a sliding two-hour approximation.
+- Add versioned assessment attempts that freeze task and rubric before the
+  learner responds, commit the response before evaluation, derive pass/fail
+  server-side, and atomically consume an attempt with its interaction.
+- Add the shared `estimated` → `retained` → `demonstrated` →
+  `transferred` evidence ladder to mastery checks, the OLM and dashboards.
+  Host-LLM evaluations remain explicitly untrusted; high-stakes domains accept
+  only trusted human-review evidence.
+- Add immutable, CAS-protected curriculum snapshots with stable competency,
+  outcome and criterion identifiers; observable outcomes, level descriptors,
+  provenance and review state; audited rename/split/merge/removal; and
+  evidence-preserving domain tombstones.
+- Add learner-owned IANA timezones, weekly local availability, DND,
+  notification consent/frequency/caps and accessibility preferences. Delivery
+  reservations are atomic and DST-aware.
+- Add durable webhook retry state, bounded backoff, stale-claim recovery,
+  expiration and dead-letter metadata.
+- Add the dry-run-first `tutor-retention` maintenance command for terminal and
+  orphaned live webhooks, abandoned assessment plaintext with verified hashes,
+  completed consolidation markers, narrative Markdown, old pedagogical
+  snapshots and notification event logs.
+
+### Changed
+
+- Replace one-step IRT updates with a finite, clamped, regularized cumulative
+  MAP estimate and remove the unused Rasch/Elo path.
+- Make a cold domain emit only `DIAGNOSTIC_ASSESSMENT` probes until bounded,
+  distinct, attempt-linked concept coverage is satisfied; ordinary practice,
+  hinted attempts and repeated items cannot exhaust the diagnostic budget.
+- Define `MASTERY_READY` as readiness to attempt a challenge, requiring delayed
+  successful recall, varied evidence and acceptable uncertainty rather than a
+  BKT threshold alone.
+- Require delayed-retention evidence to reference a submitted/evaluated
+  assessment attempt; unlinked public interactions remain explicitly
+  unverified routing observations even after 24 hours.
+- Count diagnostic completion by hint-free, evaluated attempt coverage over
+  distinct concepts (all concepts up to eight, otherwise eight), so repetitions
+  and entropy changes cannot bypass cold measurement.
+- Feed trusted transfer successes and failures into both `check_mastery` and
+  `MASTERY_READY`; an unresolved recent trusted failure blocks readiness and the
+  transferred stage, including under the human-only high-stakes gate.
+- Separate model-estimated routing state from evidence-backed progress in the
+  dashboard. The deprecated `mastered_count` alias now means demonstrated, not
+  merely high estimated probability.
+- Treat direct `record_transfer_result` calls as legacy unverified
+  observations. Transfer claims require trusted passed transfer attempts in at
+  least three independent dimensions with no blocking failure.
+- Consolidate narrative memory for every learner, including those without a
+  webhook, and claim scheduled work atomically across workers.
+- Scope runtime narrative sessions and concept notes by domain; ambiguous
+  learner-global legacy narratives are retained for export but not injected
+  into activity generation.
+
+### Fixed
+
+- Preserve successful write semantics when optional post-write enrichment
+  fails, preventing transport retries from duplicating memory, calibration or
+  transfer mutations.
+- Validate affect input before opening/touching a session and make transfer
+  interaction plus transfer-profile updates atomic.
+- Ensure deleted domains disappear from runtime selection while retaining
+  curriculum, completed intentions, terminal delivery history and learning
+  evidence for audit.
+- Make one queued metacognitive mirror map to one durable delivery and prevent
+  webhook retries from being lost across process restarts or scheduler gaps.
+- Normalize webhook domain ownership, terminalize queued work on archive or
+  deletion, revalidate claims immediately before the HTTP boundary, and use
+  one HTTP attempt per durable claim.
+
+### Documentation and tests
+
+- Add the normative learning-integrity contract and operator runbooks for
+  retention and webhook dead-letter handling.
+- Add multi-domain, domain-neutral diagnostic, assessment rollback,
+  idempotency, DST/availability, curriculum-history, retention, retry and
+  property/fuzz coverage across SQLite and PostgreSQL migrations.
+
 ## [0.4.1] — 2026-07-30
 
 ### Security

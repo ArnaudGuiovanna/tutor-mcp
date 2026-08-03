@@ -108,7 +108,7 @@ func TestFirstTouchNoLostUpdate(t *testing.T) {
 }
 
 // TestSkipLockedExactlyOnce enqueues M pending webhook messages and has N
-// workers concurrently dequeue+mark-sent inside WithTx. Each message must be
+// workers concurrently claim+mark-sent. Each message must be
 // claimed exactly once (no double dispatch, none lost).
 func TestSkipLockedExactlyOnce(t *testing.T) {
 	s := setupTestDB(t)
@@ -129,24 +129,20 @@ func TestSkipLockedExactlyOnce(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for {
-				var gotID int64
-				err := s.WithTx(ctx, func(tx store.Store) error {
-					item, err := tx.DequeueNextPending(ctx, "L1", "olm", now, time.Hour)
-					if err != nil || item == nil {
-						return err
-					}
-					gotID = item.ID
-					return tx.MarkWebhookSent(ctx, item.ID, "L1", now)
-				})
+				item, err := s.ClaimNextPendingWebhook(ctx, "L1", "olm", now, time.Hour)
 				if err != nil {
 					t.Error(err)
 					return
 				}
-				if gotID == 0 {
+				if item == nil {
 					return // queue drained
 				}
+				if err := s.MarkWebhookSent(ctx, item.ID, "L1", now); err != nil {
+					t.Error(err)
+					return
+				}
 				mu.Lock()
-				claimed[gotID]++
+				claimed[item.ID]++
 				mu.Unlock()
 			}
 		}()

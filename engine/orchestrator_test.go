@@ -17,12 +17,19 @@ import (
 
 	"tutor-mcp/db"
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 
 	_ "modernc.org/sqlite"
 )
 
 // orchTestDBCounter avoids collisions across in-memory DSNs.
 var orchTestDBCounter int
+
+type failActionHistoryStore struct{ storeport.Store }
+
+func (s *failActionHistoryStore) GetActionHistoryForConceptInDomain(context.Context, string, string, string, int) (models.ActionHistoryCounts, error) {
+	return models.ActionHistoryCounts{}, errors.New("injected action-history read failure")
+}
 
 // setupOrchStore returns a freshly migrated in-memory Store with a
 // learner already inserted. The orchestrator tests reuse this helper.
@@ -229,27 +236,134 @@ func TestOrchestrate_UnknownDomain_ReturnsError(t *testing.T) {
 
 // ─── DIAGNOSTIC → INSTRUCTION ──────────────────────────────────────────────
 
+func TestOrchestrate_DiagnosticEmitsColdAssessment(t *testing.T) {
+	store := setupOrchStore(t)
+	domainID := seedOrchDomain(t, store, []string{"Spanish past tense"}, nil, models.PhaseDiagnostic)
+	setGoalRelevance(t, store, domainID, map[string]float64{"Spanish past tense": 1.0})
+
+	input := defaultInput(domainID)
+	input.Now = time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	input.SessionStart = input.Now
+	activity, err := Orchestrate(context.Background(), store, input)
+	if err != nil {
+		t.Fatalf("Orchestrate: %v", err)
+	}
+	if activity.Type != models.ActivityDiagnosticAssessment || activity.Format != "cold_assessment" {
+		t.Fatalf("diagnostic activity=%+v, want cold DIAGNOSTIC_ASSESSMENT", activity)
+	}
+	if !strings.Contains(activity.PromptForLLM, "before giving any explanation") ||
+		!strings.Contains(activity.PromptForLLM, "Do not teach") {
+		t.Fatalf("diagnostic prompt permits teaching before measurement: %q", activity.PromptForLLM)
+	}
+}
+
 func TestOrchestrate_Diagnostic_NMaxReached_TransitionsToInstruction(t *testing.T) {
 	store := setupOrchStore(t)
 	domainID := seedOrchDomain(t, store, []string{"A"}, nil, models.PhaseDiagnostic)
 	setGoalRelevance(t, store, domainID, map[string]float64{"A": 1.0})
 
-	// Inject 8 interactions to reach NDiagnosticMax
+	// Unrelated practice events cannot force the diagnostic cap.
 	now := time.Now().UTC()
+	eventStart := now.Add(-30 * time.Minute)
 	for i := range 8 {
-		_, _ = recordSyntheticInteraction(t, store, domainID, "A", true, now.Add(time.Duration(i)*time.Second))
+		_, _ = recordSyntheticInteraction(t, store, domainID, "A", string(models.ActivityPractice), true, eventStart.Add(time.Duration(i)*time.Second))
 	}
 	// Force phase_changed_at far in the past so all 8 count.
 	if err := store.UpdateDomainPhase(context.Background(), domainID, models.PhaseDiagnostic, 0.469, now.Add(-1*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := Orchestrate(context.Background(), store, defaultInput(domainID)); err != nil {
+		t.Fatalf("unexpected error before diagnostic evidence: %v", err)
+	}
+	d, _ := store.GetDomainByID(context.Background(), domainID)
+	if d.Phase != models.PhaseDiagnostic {
+		t.Fatalf("practice interactions forced diagnostic exit: phase=%q", d.Phase)
+	}
+
+	// Eight actual cold assessments reach NDiagnosticMax.
+	for i := range 8 {
+		_, _ = recordSyntheticInteraction(t, store, domainID, "A", string(models.ActivityDiagnosticAssessment), true, eventStart.Add(time.Duration(20+i)*time.Second))
+	}
 
 	if _, err := Orchestrate(context.Background(), store, defaultInput(domainID)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	d, _ := store.GetDomainByID(context.Background(), domainID)
+	d, _ = store.GetDomainByID(context.Background(), domainID)
 	if d.Phase != models.PhaseInstruction {
 		t.Errorf("expected transition to INSTRUCTION via NMax, got phase=%q", d.Phase)
+	}
+}
+
+func TestOrchestrate_DiagnosticRequiresAttemptLinkedHintFreeDistinctCoverage(t *testing.T) {
+	store := setupOrchStore(t)
+	domainID := seedOrchDomain(t, store, []string{"A", "B", "C"}, nil, models.PhaseDiagnostic)
+	setGoalRelevance(t, store, domainID, map[string]float64{"A": 1, "B": 1, "C": 1})
+	now := time.Now().UTC()
+	if err := store.UpdateDomainPhase(context.Background(), domainID, models.PhaseDiagnostic, 0.469, now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Eight public diagnostic-shaped observations without an assessment
+	// envelope are routing data only and contribute zero qualified coverage.
+	for i := range 8 {
+		if err := store.CreateInteraction(context.Background(), &models.Interaction{
+			LearnerID: "L1", DomainID: domainID, Concept: "A",
+			ActivityType: string(models.ActivityDiagnosticAssessment), Success: true,
+			CreatedAt: now.Add(-50*time.Minute + time.Duration(i)*time.Second),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// An otherwise valid evaluated diagnostic that requested a hint is also
+	// excluded from cold-diagnostic coverage.
+	hintedAt := now.Add(-40 * time.Minute)
+	hintedAttempt := insertQualifiedDiagnosticEnvelope(t, store, "L1", domainID, "B", true, hintedAt)
+	if err := store.CreateInteraction(context.Background(), &models.Interaction{
+		LearnerID: "L1", DomainID: domainID, AssessmentAttemptID: hintedAttempt,
+		Concept: "B", ActivityType: string(models.ActivityDiagnosticAssessment),
+		Success: true, HintsRequested: 1, CreatedAt: hintedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Repeating one qualified concept cannot impersonate coverage of the
+	// three-concept curriculum.
+	for i := range 8 {
+		_, err := recordSyntheticInteraction(t, store, domainID, "A", string(models.ActivityDiagnosticAssessment), true, now.Add(-30*time.Minute+time.Duration(i)*time.Second))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Qualified rows for concepts no longer present in the active curriculum
+	// are preserved for audit but cannot satisfy current-domain coverage.
+	for index, stale := range []string{"RETIRED-1", "RETIRED-2"} {
+		if _, err := recordSyntheticInteraction(t, store, domainID, stale, string(models.ActivityDiagnosticAssessment), true, now.Add(-20*time.Minute+time.Duration(index)*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	input := defaultInput(domainID)
+	input.Now = now
+	input.SessionStart = now
+	if _, err := Orchestrate(context.Background(), store, input); err != nil {
+		t.Fatal(err)
+	}
+	domain, _ := store.GetDomainByID(context.Background(), domainID)
+	if domain.Phase != models.PhaseDiagnostic {
+		t.Fatalf("unlinked, hinted, or repeated diagnostics bypassed coverage: phase=%q", domain.Phase)
+	}
+
+	for index, concept := range []string{"B", "C"} {
+		if _, err := recordSyntheticInteraction(t, store, domainID, concept, string(models.ActivityDiagnosticAssessment), true, now.Add(-10*time.Minute+time.Duration(index)*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := Orchestrate(context.Background(), store, input); err != nil {
+		t.Fatal(err)
+	}
+	domain, _ = store.GetDomainByID(context.Background(), domainID)
+	if domain.Phase != models.PhaseInstruction {
+		t.Fatalf("all three qualified distinct concepts should complete diagnostic, phase=%q", domain.Phase)
 	}
 }
 
@@ -437,6 +551,51 @@ func TestOrchestrateWithPhase_ReturnedPhaseMatchesPersisted(t *testing.T) {
 	}
 }
 
+func TestOrchestrateWithPhase_PreviewProjectsWithoutPersisting(t *testing.T) {
+	store := setupOrchStore(t)
+	domainID := seedOrchDomain(t, store, []string{"A", "B"}, nil, models.PhaseInstruction)
+	setGoalRelevance(t, store, domainID, map[string]float64{"A": 1.0, "B": 0.8})
+	setMastery(t, store, "A", 0.95)
+	setMastery(t, store, "B", 0.95)
+	input := defaultInput(domainID)
+	input.PreviewOnly = true
+
+	_, projected, err := OrchestrateWithPhase(context.Background(), store, input)
+	if err != nil {
+		t.Fatalf("unexpected preview error: %v", err)
+	}
+	if projected != models.PhaseMaintenance {
+		t.Fatalf("projected phase = %q, want MAINTENANCE", projected)
+	}
+	stored, err := store.GetDomainByID(context.Background(), domainID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Phase != models.PhaseInstruction {
+		t.Fatalf("preview persisted phase %q; want original INSTRUCTION", stored.Phase)
+	}
+}
+
+func TestOrchestrateWithPhase_PipelineFailureDoesNotPersistProjectedPhase(t *testing.T) {
+	store := setupOrchStore(t)
+	domainID := seedOrchDomain(t, store, []string{"A", "B"}, nil, models.PhaseInstruction)
+	setGoalRelevance(t, store, domainID, map[string]float64{"A": 1.0, "B": 0.8})
+	setMastery(t, store, "A", 0.95)
+	setMastery(t, store, "B", 0.95)
+
+	_, _, err := OrchestrateWithPhase(context.Background(), &failActionHistoryStore{Store: store}, defaultInput(domainID))
+	if err == nil {
+		t.Fatal("expected injected pipeline read failure")
+	}
+	stored, getErr := store.GetDomainByID(context.Background(), domainID)
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if stored.Phase != models.PhaseInstruction {
+		t.Fatalf("failed pipeline persisted projected phase %q; want INSTRUCTION", stored.Phase)
+	}
+}
+
 // TestOrchestrateWithPhase_NoTransition_ReturnsCurrentPhase asserts
 // the no-transition case: when the FSM does not move, the returned
 // phase is the (unchanged) current phase, still matching the DB.
@@ -479,7 +638,7 @@ func TestOrchestrateWithPhase_NoTransition_ReturnsCurrentPhase(t *testing.T) {
 //   - In MAINTENANCE, selectMaintenance returns NoFringe (no concept
 //     mastered → mastered pool empty). fsmTransitioned=false, so the
 //     orchestrator enters the noFringeFallbackPhase retry, switches
-//     currentPhase to INSTRUCTION, and persists via UpdateDomainPhase.
+//     currentPhase to INSTRUCTION, and persists via the phase CAS.
 //   - In INSTRUCTION, A is in the external fringe (mastery 0.1 < BKT,
 //     no prereqs) and eligible (rel=1.0) → activity produced.
 //
@@ -488,7 +647,7 @@ func TestOrchestrateWithPhase_NoTransition_ReturnsCurrentPhase(t *testing.T) {
 //     the docstring's INSTRUCTION→MAINTENANCE example, but exercises the
 //     same noFringeFallbackPhase code path).
 //  2. store.GetDomainByID(context.Background(), domainID).Phase == gotPhase (DB consistency
-//     after the fallback's UpdateDomainPhase write).
+//     after the fallback's CAS write).
 func TestOrchestrateWithPhase_NoFringeFallback_ReturnedPhaseMatchesPersisted(t *testing.T) {
 	store := setupOrchStore(t)
 	domainID := seedOrchDomain(t, store, []string{"A"}, nil, models.PhaseMaintenance)
@@ -527,19 +686,57 @@ func TestOrchestrateWithPhase_NoFringeFallback_ReturnedPhaseMatchesPersisted(t *
 // orchestrator's CountInteractionsSince and GetActionHistoryForConcept
 // see something. Mimics what record_interaction would do, minus BKT/
 // FSRS updates (those are tested separately in their own modules).
-func recordSyntheticInteraction(t *testing.T, store *db.Store, domainID, concept string, success bool, when time.Time) (int, error) {
+func recordSyntheticInteraction(t *testing.T, store *db.Store, domainID, concept, activityType string, success bool, when time.Time) (int, error) {
 	t.Helper()
 	successInt := 0
 	if success {
 		successInt = 1
 	}
 	conn := storeRawDB(store)
+	attemptID := ""
+	if activityType == string(models.ActivityDiagnosticAssessment) {
+		attemptID = insertQualifiedDiagnosticEnvelope(t, store, "L1", domainID, concept, success, when)
+	}
 	_, err := conn.Exec(
-		`INSERT INTO interactions (learner_id, domain_id, concept, activity_type, success, response_time, confidence, error_type, notes, hints_requested, self_initiated, calibration_id, is_proactive_review, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, '', '', 0, 0, '', 0, ?)`,
-		"L1", domainID, concept, "PRACTICE", successInt, 1000, 0.7, when,
+		`INSERT INTO interactions (learner_id, domain_id, assessment_attempt_id, concept, activity_type, success, response_time, confidence, error_type, notes, hints_requested, self_initiated, calibration_id, is_proactive_review, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', '', 0, 0, '', 0, ?)`,
+		"L1", domainID, nullStringForTest(attemptID), concept, activityType, successInt, 1000, 0.7, when,
 	)
 	return 0, err
+}
+
+func insertQualifiedDiagnosticEnvelope(t *testing.T, store *db.Store, learnerID, domainID, concept string, success bool, when time.Time) string {
+	t.Helper()
+	attemptID := fmt.Sprintf("diag-%s-%d", strings.ReplaceAll(concept, " ", "-"), when.UnixNano())
+	passed := 0
+	if success {
+		passed = 1
+	}
+	createdAt := when.Add(-2 * time.Minute)
+	submittedAt := when.Add(-time.Minute)
+	_, err := store.RawDB().Exec(`INSERT INTO assessment_attempts
+		(id, learner_id, domain_id, concept_id, activity_id, activity_version,
+		 activity_type, observable, task_text, task_content_hash, rubric_json, passing_score,
+		 status, response_text, rubric_score_json, score, passed, evaluator_id,
+		 evaluation_method, trusted_evaluation, created_at, submitted_at, evaluated_at)
+		VALUES (?, ?, ?, ?, ?, 1, 'DIAGNOSTIC_ASSESSMENT', 'cold response',
+		 'diagnostic task', '', '{"criteria":["correct"]}', 0.6, 'evaluated',
+		 'learner response', '{"correct":1}', ?, ?, 'test-host', 'host_llm', 0,
+		 ?, ?, ?)`,
+		attemptID, learnerID, domainID, concept, attemptID+"-activity",
+		map[bool]float64{true: 1, false: 0}[success], passed,
+		createdAt, submittedAt, when)
+	if err != nil {
+		t.Fatalf("insert qualified diagnostic envelope: %v", err)
+	}
+	return attemptID
+}
+
+func nullStringForTest(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 // storeRawDB returns the underlying *sql.DB from the Store. Used by

@@ -69,8 +69,6 @@ func registerCheckMastery(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		bktState := algorithms.BKTState{PMastery: cs.PMastery}
-		bktMastered := algorithms.BKTIsMastered(bktState)
 		recent, err := deps.Store.GetRecentInteractionsInDomain(ctx, learnerID, domainID, concept, 50)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to compute mastery evidence", err)
@@ -85,15 +83,24 @@ func registerCheckMastery(server *mcp.Server, deps *Deps) {
 			deps.Logger.Warn("check_mastery: transfer profile fetch failed", "err", err, "learner", learnerID, "concept", concept)
 			transferRecords = nil
 		}
-		transferProfile := engine.BuildTransferProfile(concept, transferRecords)
+		assessments, err := deps.Store.GetEvaluatedAssessmentAttemptsInDomain(ctx, learnerID, domainID, concept, 100)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to read evaluated assessment evidence", err)
+			return r, nil, nil
+		}
+		transferProfile := engine.BuildTrustedTransferProfileFromEvidence(concept, transferRecords, assessments, now)
+		masteryStatus := engine.AssessMasteryStatus(learnerID, concept, cs, recent, transferRecords, assessments, now)
+		bktMastered := masteryStatus.Estimated
 		evidenceOK := evidenceQuality.Quality != engine.EvidenceQualityWeak
 		uncertaintyOK := uncertainty.ConfidenceLabel != engine.MasteryConfidenceLow
 		transferOK := transferProfile.ReadinessLabel != engine.TransferReadinessBlocked
-		isMastered := bktMastered && evidenceOK && uncertaintyOK && transferOK
+		challengeReady := engine.ReadyForMasteryChallenge(masteryStatus, evidenceQuality, uncertainty, transferProfile)
 
-		if !isMastered {
-			message := fmt.Sprintf("Not ready yet. Current mastery: %.0f%%, threshold: %.0f%%", cs.PMastery*100, algorithms.MasteryBKT()*100)
-			if bktMastered && !evidenceOK {
+		if !challengeReady {
+			message := fmt.Sprintf("Not ready yet. Current model estimate: %.0f%%, routing threshold: %.0f%%", cs.PMastery*100, algorithms.MasteryBKT()*100)
+			if bktMastered && !masteryStatus.Retained {
+				message = "The mastery estimate is above threshold, but retention is below the recall threshold: retrieve the concept successfully before a mastery challenge."
+			} else if bktMastered && !evidenceOK {
 				message = "BKT is above threshold, but the evidence is still not varied enough for a mastery challenge."
 			}
 			if bktMastered && evidenceOK && !uncertaintyOK {
@@ -104,8 +111,11 @@ func registerCheckMastery(server *mcp.Server, deps *Deps) {
 			}
 			r, _ := jsonResult(map[string]interface{}{
 				"mastery_ready":       false,
+				"challenge_ready":     false,
 				"bkt_mastery_ready":   bktMastered,
-				"mastery":             cs.PMastery,
+				"mastery_estimate":    cs.PMastery,
+				"mastery":             cs.PMastery, // deprecated estimate alias
+				"mastery_status":      masteryStatus,
 				"threshold":           algorithms.MasteryBKT(),
 				"evidence_profile":    evidenceProfile,
 				"evidence_quality":    evidenceQuality,
@@ -118,8 +128,11 @@ func registerCheckMastery(server *mcp.Server, deps *Deps) {
 
 		r, _ := jsonResult(map[string]interface{}{
 			"mastery_ready":       true,
+			"challenge_ready":     true,
 			"bkt_mastery_ready":   bktMastered,
-			"mastery":             cs.PMastery,
+			"mastery_estimate":    cs.PMastery,
+			"mastery":             cs.PMastery, // deprecated estimate alias
+			"mastery_status":      masteryStatus,
 			"evidence_profile":    evidenceProfile,
 			"evidence_quality":    evidenceQuality,
 			"mastery_uncertainty": uncertainty,
@@ -127,16 +140,16 @@ func registerCheckMastery(server *mcp.Server, deps *Deps) {
 			"challenge": map[string]interface{}{
 				"prompt_for_llm": fmt.Sprintf(
 					"Generate a mastery challenge on %s. "+
-						"The learner must build something complete that demonstrates transfer. "+
-						"Evaluate: autonomous application, edge-case handling, code quality. "+
+						"The learner must produce a complete, domain-appropriate performance that integrates the concept in a novel task. "+
+						"Evaluate correctness, completeness, autonomous application, domain-appropriate boundary conditions or counterexamples, and clarity of reasoning or execution. "+
 						"Do not guide - observe whether the learner can apply the concept alone.",
 					concept,
 				),
 				"evaluation_criteria": []string{
 					"Autonomous application without help",
-					"Correct handling of edge cases",
-					"Clean, idiomatic code",
-					"Clear explanation of reasoning",
+					"Correct and complete response for the domain",
+					"Handles relevant boundary conditions or counterexamples",
+					"Clear reasoning or execution",
 				},
 			},
 		})

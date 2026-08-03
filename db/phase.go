@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 )
 
 // UpdateDomainPhase persists a phase transition for a domain. The
@@ -24,23 +25,55 @@ import (
 // Used by [2] PhaseController. Idempotent at the row level: writing
 // the same phase twice is a no-op semantically (timestamp updates).
 func (s *Store) UpdateDomainPhase(ctx context.Context, domainID string, phase models.Phase, phaseEntryEntropy float64, now time.Time) error {
-	var entropyArg any
-	if phase == models.PhaseDiagnostic {
-		entropyArg = phaseEntryEntropy
-	} else {
-		// Reset entropy snapshot when leaving DIAGNOSTIC — it would
-		// be stale otherwise.
-		entropyArg = nil
-	}
 	_, err := s.exec(ctx,
 		`UPDATE domains
 		 SET phase = ?, phase_changed_at = ?, phase_entry_entropy = ?
 		 WHERE id = ?`,
-		string(phase), now, entropyArg, domainID,
+		string(phase), now, domainPhaseEntropyArg(phase, phaseEntryEntropy), domainID,
 	)
 	if err != nil {
 		return fmt.Errorf("update domain phase: %w", err)
 	}
+	return nil
+}
+
+// CompareAndSwapDomainPhase persists a runtime phase transition only when the
+// stored phase still matches the snapshot used by the orchestrator. Empty and
+// NULL are the same stored legacy state, but they remain distinct from the
+// effective INSTRUCTION fallback used for phase evaluation. UpdateDomainPhase
+// remains available for initialization and operator/test fixtures.
+func (s *Store) CompareAndSwapDomainPhase(
+	ctx context.Context,
+	domainID string,
+	expectedPhase, phase models.Phase,
+	phaseEntryEntropy float64,
+	now time.Time,
+) error {
+	result, err := s.exec(ctx,
+		`UPDATE domains
+		 SET phase = ?, phase_changed_at = ?, phase_entry_entropy = ?
+		 WHERE id = ? AND COALESCE(phase, '') = ?`,
+		string(phase), now, domainPhaseEntropyArg(phase, phaseEntryEntropy), domainID, string(expectedPhase),
+	)
+	if err != nil {
+		return fmt.Errorf("compare-and-swap domain phase: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("compare-and-swap domain phase rows: %w", err)
+	}
+	if rows != 1 {
+		return storeport.ErrDomainPhaseConflict
+	}
+	return nil
+}
+
+func domainPhaseEntropyArg(phase models.Phase, phaseEntryEntropy float64) any {
+	if phase == models.PhaseDiagnostic {
+		return phaseEntryEntropy
+	}
+	// Reset entropy snapshot when leaving DIAGNOSTIC — it would be stale
+	// otherwise.
 	return nil
 }
 
@@ -266,17 +299,46 @@ func (s *Store) CountInteractionsSince(ctx context.Context, learnerID string, si
 	return n, rows.Err()
 }
 
-func (s *Store) CountInteractionsSinceInDomain(ctx context.Context, learnerID, domainID string, since time.Time) (int, error) {
-	var count int
-	err := s.queryRow(ctx,
-		`SELECT COUNT(*) FROM interactions
-		 WHERE learner_id = ? AND domain_id = ? AND created_at >= ?`,
+// GetQualifiedDiagnosticConceptsSinceInDomain returns qualified diagnostic
+// concept coverage. A diagnostic observation
+// counts only when it is linked to the exact submitted/evaluated assessment
+// envelope, carries no hints, and matches learner/domain/concept/activity on
+// both rows. SELECT DISTINCT prevents eight repetitions of one easy
+// item from ending diagnosis of a broad curriculum.
+func (s *Store) GetQualifiedDiagnosticConceptsSinceInDomain(ctx context.Context, learnerID, domainID string, since time.Time) ([]string, error) {
+	rows, err := s.query(ctx,
+		`SELECT DISTINCT i.concept
+		 FROM interactions i
+		 JOIN assessment_attempts a
+		   ON a.id = i.assessment_attempt_id
+		  AND a.learner_id = i.learner_id
+		  AND a.domain_id = i.domain_id
+		  AND a.concept_id = i.concept
+		  AND a.activity_type = i.activity_type
+		 WHERE i.learner_id = ? AND i.domain_id = ? AND i.created_at >= ?
+		   AND i.activity_type = 'DIAGNOSTIC_ASSESSMENT'
+		   AND i.hints_requested = 0
+		   AND a.status = 'evaluated'
+		   AND a.submitted_at IS NOT NULL
+		   AND a.evaluated_at IS NOT NULL`,
 		learnerID, domainID, since,
-	).Scan(&count)
+	)
 	if err != nil {
-		return 0, fmt.Errorf("count domain interactions: %w", err)
+		return nil, fmt.Errorf("get qualified domain diagnostic concepts: %w", err)
 	}
-	return count, nil
+	defer rows.Close()
+	var concepts []string
+	for rows.Next() {
+		var concept string
+		if err := rows.Scan(&concept); err != nil {
+			return nil, fmt.Errorf("scan qualified domain diagnostic concept: %w", err)
+		}
+		concepts = append(concepts, concept)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate qualified domain diagnostic concepts: %w", err)
+	}
+	return concepts, nil
 }
 
 // GetActionHistoryForConcept returns the rotation/streak counts for a

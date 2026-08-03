@@ -19,7 +19,7 @@ type GetOLMSnapshotParams struct {
 func registerGetOLMSnapshot(server *mcp.Server, deps *Deps) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_olm_snapshot",
-		Description: "Return a transparent snapshot of the learning state: mastery distribution, focus concept, active metacognitive signals, progress toward the goal. Learner and tutor see the same data. Call before queue_webhook_message(kind='olm:<domain_id>') or for in-session metacognitive reflection.",
+		Description: "Return a transparent snapshot of model estimates and evidence-backed stages (retained, demonstrated, transferred), plus focus and metacognitive signals. Learner and tutor see the same data.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params GetOLMSnapshotParams) (*mcp.CallToolResult, any, error) {
 		learnerID, err := getLearnerID(ctx)
 		if err != nil {

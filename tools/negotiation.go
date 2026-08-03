@@ -19,11 +19,12 @@ import (
 )
 
 type LearningNegotiationParams struct {
+	IdempotentMutationParams
 	SessionID        string `json:"session_id" jsonschema:"current session ID"`
 	Concept          string `json:"concept,omitempty" jsonschema:"concept proposed by the learner; canonical key for concept overrides"`
 	LearnerConcept   string `json:"learner_concept,omitempty" jsonschema:"concept proposed by the learner (optional)"`
 	Format           string `json:"format,omitempty" jsonschema:"requested activity format override (optional)"`
-	ActivityType     string `json:"activity_type,omitempty" jsonschema:"requested activity type override: RECALL_EXERCISE, NEW_CONCEPT, MASTERY_CHALLENGE, DEBUGGING_CASE, REST, PRACTICE, DEBUG_MISCONCEPTION, FEYNMAN_PROMPT, TRANSFER_PROBE"`
+	ActivityType     string `json:"activity_type,omitempty" jsonschema:"requested activity type override: DIAGNOSTIC_ASSESSMENT, RECALL_EXERCISE, NEW_CONCEPT, MASTERY_CHALLENGE, DEBUGGING_CASE, REST, PRACTICE, DEBUG_MISCONCEPTION, FEYNMAN_PROMPT, TRANSFER_PROBE"`
 	Scaffold         bool   `json:"scaffold,omitempty" jsonschema:"whether the next activity should include extra scaffolding"`
 	MicroDiagnostic  bool   `json:"micro_diagnostic,omitempty" jsonschema:"whether the next activity should be a short diagnostic prompt"`
 	DeferActivity    bool   `json:"defer_activity,omitempty" jsonschema:"whether the learner wants to defer the next activity briefly"`
@@ -141,11 +142,12 @@ func registerLearningNegotiation(server *mcp.Server, deps *Deps) {
 		// served on the next activity request.
 		now := time.Now().UTC()
 		systemActivity, orchErr := engine.Orchestrate(ctx, deps.Store, engine.OrchestratorInput{
-			LearnerID: learnerID,
-			DomainID:  domain.ID,
-			Now:       now,
-			Config:    engine.NewDefaultPhaseConfig(),
-			Logger:    deps.Logger,
+			LearnerID:   learnerID,
+			DomainID:    domain.ID,
+			Now:         now,
+			PreviewOnly: true,
+			Config:      engine.NewDefaultPhaseConfig(),
+			Logger:      deps.Logger,
 		})
 		if orchErr != nil {
 			deps.Logger.Error("learning_negotiation: orchestrator failed", "err", orchErr, "learner", learnerID)

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"tutor-mcp/engine"
 	"tutor-mcp/models"
 )
 
@@ -105,5 +106,51 @@ func TestGetDashboardState_ColorEnumIsEnglish(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("no retention_alert for concept 'a' in alerts=%v", alerts)
+	}
+}
+
+func TestGetDashboardState_DoesNotLabelHighEstimateAsMasteredProgress(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	domain := makeOwnerDomain(t, store, "L_owner", "evidence ladder")
+	lastReview := time.Now().UTC().Add(-time.Hour)
+	state := models.NewConceptStateInDomain("L_owner", domain.ID, "a")
+	state.PMastery = 0.95
+	state.CardState = "review"
+	state.Stability = 30
+	state.LastReview = &lastReview
+	if err := store.UpsertConceptState(context.Background(), state); err != nil {
+		t.Fatal(err)
+	}
+
+	res := callTool(t, deps, registerGetDashboardState, "L_owner", "get_dashboard_state", map[string]any{
+		"domain_id": domain.ID,
+	})
+	if res.IsError {
+		t.Fatalf("dashboard failed: %q", resultText(res))
+	}
+	out := decodeResult(t, res)
+	if out["total_estimated"] != float64(1) || out["total_demonstrated"] != float64(0) {
+		t.Fatalf("unexpected global evidence counts: %v", out)
+	}
+	if out["total_mastered"] != float64(0) || out["global_progress_percent"] != float64(0) {
+		t.Fatalf("high BKT estimate was mislabeled as mastered progress: %v", out)
+	}
+	if out["global_estimated_progress_percent"] != float64(50) {
+		t.Fatalf("estimated progress=%v, want 50", out["global_estimated_progress_percent"])
+	}
+	domains, ok := out["domains"].([]any)
+	if !ok || len(domains) != 1 {
+		t.Fatalf("domains=%T %#v", out["domains"], out["domains"])
+	}
+	dashboard := domains[0].(map[string]any)
+	if dashboard["mastered_count"] != float64(0) || dashboard["demonstrated_count"] != float64(0) || dashboard["estimated_count"] != float64(1) {
+		t.Fatalf("unexpected domain evidence counts: %v", dashboard)
+	}
+	concepts := dashboard["concepts"].([]any)
+	for _, raw := range concepts {
+		concept := raw.(map[string]any)
+		if concept["concept"] == "a" && concept["status"] != string(engine.MasteryStageEstimated) {
+			t.Fatalf("concept a status=%v, want estimated", concept["status"])
+		}
 	}
 }

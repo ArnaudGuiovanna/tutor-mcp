@@ -193,8 +193,14 @@ func TestRecordInteraction_HappyPath_Success(t *testing.T) {
 	if _, ok := out["new_mastery"]; !ok {
 		t.Fatalf("expected new_mastery key, got %v", out)
 	}
+	if _, ok := out["new_mastery_estimate"]; !ok {
+		t.Fatalf("expected canonical new_mastery_estimate key, got %v", out)
+	}
 	if out["engagement_signal"] != "positive" {
 		t.Fatalf("expected positive engagement (success+conf>=0.8), got %v", out["engagement_signal"])
+	}
+	if out["evidence_verification"] != "unverified_observation" {
+		t.Fatalf("public observation trust marker=%v, want unverified_observation", out["evidence_verification"])
 	}
 
 	// DB: interaction created.
@@ -216,6 +222,154 @@ func TestRecordInteraction_HappyPath_Success(t *testing.T) {
 	}
 	if cs.Reps == 0 {
 		t.Fatalf("expected reps to be incremented, got %d", cs.Reps)
+	}
+}
+
+func TestRecordInteraction_AcceptsDiagnosticAssessment(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	domain := makeOwnerDomain(t, store, "L_owner", "math")
+
+	res := callTool(t, deps, registerRecordInteraction, "L_owner", "record_interaction", map[string]any{
+		"concept":               "a",
+		"activity_type":         "DIAGNOSTIC_ASSESSMENT",
+		"success":               true,
+		"response_time_seconds": 20.0,
+		"confidence":            0.6,
+		"notes":                 "cold diagnostic response",
+	})
+	if res.IsError {
+		t.Fatalf("cold diagnostic evidence rejected: %q", resultText(res))
+	}
+	recent, err := store.GetRecentInteractionsByLearner(context.Background(), "L_owner", 1)
+	if err != nil || len(recent) != 1 {
+		t.Fatalf("diagnostic interaction not persisted: len=%d err=%v", len(recent), err)
+	}
+	if recent[0].ActivityType != string(models.ActivityDiagnosticAssessment) {
+		t.Fatalf("activity_type=%q, want DIAGNOSTIC_ASSESSMENT", recent[0].ActivityType)
+	}
+	coverage, err := store.GetQualifiedDiagnosticConceptsSinceInDomain(context.Background(), "L_owner", domain.ID, time.Now().UTC().Add(-time.Hour))
+	if err != nil || len(coverage) != 0 {
+		t.Fatalf("unlinked diagnostic counted as qualified coverage=%v err=%v", coverage, err)
+	}
+}
+
+func TestRecordInteraction_TransferRequiresDimensionAndScore(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	makeOwnerDomain(t, store, "L_owner", "math")
+	base := map[string]any{
+		"concept": "a", "activity_type": "TRANSFER_PROBE", "success": true,
+		"response_time_seconds": 20.0, "confidence": 0.7,
+		"notes": "transfer evidence validation",
+	}
+
+	res := callTool(t, deps, registerRecordInteraction, "L_owner", "record_interaction", base)
+	if !res.IsError || !strings.Contains(resultText(res), "transfer_dimension is required") {
+		t.Fatalf("missing dimension should fail explicitly, got %q", resultText(res))
+	}
+	base["transfer_dimension"] = "far"
+	res = callTool(t, deps, registerRecordInteraction, "L_owner", "record_interaction", base)
+	if !res.IsError || !strings.Contains(resultText(res), "transfer_score is required") {
+		t.Fatalf("missing score should fail explicitly, got %q", resultText(res))
+	}
+
+	recent, err := store.GetRecentInteractionsByLearner(context.Background(), "L_owner", 5)
+	if err != nil || len(recent) != 0 {
+		t.Fatalf("invalid transfer call persisted interactions: len=%d err=%v", len(recent), err)
+	}
+}
+
+func TestRecordInteraction_TransferPersistsZeroScoreAtomically(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	domain := makeOwnerDomain(t, store, "L_owner", "math")
+	session := openTestLearningSession(t, store, "L_owner", "session-zero", domain.ID)
+
+	res := callTool(t, deps, registerRecordInteraction, "L_owner", "record_interaction", map[string]any{
+		"concept": "a", "activity_type": "TRANSFER_PROBE", "success": false,
+		"response_time_seconds": 30.0, "confidence": 0.4,
+		"transfer_dimension": "real_world", "transfer_score": 0.0,
+		"session_id": session.ID,
+		"notes":      "observed far transfer failure",
+	})
+	if res.IsError {
+		t.Fatalf("valid transfer interaction rejected: %q", resultText(res))
+	}
+	out := decodeResult(t, res)
+	if out["transfer_recorded"] != true {
+		t.Fatalf("transfer_recorded=%v, want true", out["transfer_recorded"])
+	}
+	profile, ok := out["transfer_profile"].(map[string]any)
+	if !ok || profile["readiness_label"] == "" {
+		t.Fatalf("missing updated transfer_profile: %v", out["transfer_profile"])
+	}
+	records, err := store.GetTransferScoresInDomain(context.Background(), "L_owner", domain.ID, "a")
+	if err != nil || len(records) != 1 {
+		t.Fatalf("transfer records len=%d err=%v", len(records), err)
+	}
+	if records[0].Score != 0 || records[0].ContextType != "far" || records[0].SessionID != "session-zero" {
+		t.Fatalf("unexpected canonical transfer record: %+v", records[0])
+	}
+	snapshots, err := store.GetPedagogicalSnapshots(context.Background(), "L_owner", domain.ID, "a", 5)
+	if err != nil || len(snapshots) != 1 || !strings.Contains(snapshots[0].ObservationJSON, `"transfer_evidence"`) {
+		t.Fatalf("transfer evidence missing from snapshot: len=%d err=%v", len(snapshots), err)
+	}
+}
+
+func TestRecordInteraction_RejectsTransferFieldsOnOtherActivities(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	makeOwnerDomain(t, store, "L_owner", "math")
+	res := callTool(t, deps, registerRecordInteraction, "L_owner", "record_interaction", map[string]any{
+		"concept": "a", "activity_type": "PRACTICE", "success": true,
+		"response_time_seconds": 10.0, "confidence": 0.7,
+		"transfer_dimension": "near", "transfer_score": 0.8,
+		"notes": "invalid transfer fields",
+	})
+	if !res.IsError || !strings.Contains(resultText(res), "only valid for TRANSFER_PROBE") {
+		t.Fatalf("transfer fields on PRACTICE should be rejected, got %q", resultText(res))
+	}
+}
+
+func TestApplyInteraction_TransferFailureRollsBackAllWrites(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	domain := makeOwnerDomain(t, store, "L_owner", "math")
+	lastReview := time.Now().UTC().Add(-time.Hour)
+	seed := models.NewConceptStateInDomain("L_owner", domain.ID, "a")
+	seed.PMastery = 0.45
+	seed.CardState = "review"
+	seed.Stability = 10
+	seed.Difficulty = 5
+	seed.Reps = 2
+	seed.Theta = 0.25
+	seed.LastReview = &lastReview
+	if err := store.UpsertConceptState(context.Background(), seed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RawDB().Exec(`CREATE TRIGGER reject_transfer_record BEFORE INSERT ON transfer_records BEGIN SELECT RAISE(ABORT, 'forced transfer failure'); END`); err != nil {
+		t.Fatalf("create transfer failure trigger: %v", err)
+	}
+	score := 0.8
+	_, _, err := applyInteraction(context.Background(), deps, "L_owner", interactionInput{
+		Concept: "a", ActivityType: string(models.ActivityTransferProbe), Success: true,
+		ResponseTimeSeconds: 15, Confidence: 0.8, DomainID: domain.ID,
+		TransferDimension: "near", TransferScore: &score,
+	}, time.Now().UTC())
+	if err == nil || !strings.Contains(err.Error(), "create transfer evidence") {
+		t.Fatalf("expected forced transfer persistence failure, got %v", err)
+	}
+
+	recent, queryErr := store.GetRecentInteractionsByLearner(context.Background(), "L_owner", 5)
+	if queryErr != nil || len(recent) != 0 {
+		t.Fatalf("interaction write escaped rollback: len=%d err=%v", len(recent), queryErr)
+	}
+	after, queryErr := store.GetConceptStateInDomain(context.Background(), "L_owner", domain.ID, "a")
+	if queryErr != nil {
+		t.Fatalf("read concept state after rollback: %v", queryErr)
+	}
+	if after.PMastery != seed.PMastery || after.Reps != seed.Reps || after.Theta != seed.Theta {
+		t.Fatalf("concept state changed despite rollback: before=%+v after=%+v", seed, after)
+	}
+	records, queryErr := store.GetTransferScoresInDomain(context.Background(), "L_owner", domain.ID, "a")
+	if queryErr != nil || len(records) != 0 {
+		t.Fatalf("transfer write escaped rollback: len=%d err=%v", len(records), queryErr)
 	}
 }
 
@@ -392,12 +546,8 @@ func TestRecordInteraction_ReturnsPedagogicalModelObservation(t *testing.T) {
 	if _, ok := params["p_learn"].(float64); !ok {
 		t.Fatalf("expected p_learn in individualized BKT params, got %v", params)
 	}
-	rasch, ok := obs["rasch_elo"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected rasch_elo in observation, got %v", obs)
-	}
-	if _, ok := rasch["success_probability_before"].(float64); !ok {
-		t.Fatalf("expected success_probability_before in rasch_elo, got %v", rasch)
+	if _, ok := obs["rasch_elo"]; ok {
+		t.Fatalf("non-persistent rasch_elo signal must not be exposed: %v", obs)
 	}
 	if _, ok := obs["semantic_observation"]; ok {
 		t.Fatalf("semantic_observation should be absent when semantic_observation_json is omitted: %v", obs)
@@ -414,9 +564,9 @@ func TestRecordInteraction_ReturnsPedagogicalModelObservation(t *testing.T) {
 	if len(snapshots) != 1 {
 		t.Fatalf("got %d snapshots, want 1", len(snapshots))
 	}
-	if !strings.Contains(snapshots[0].ObservationJSON, `"rasch_elo"`) ||
+	if strings.Contains(snapshots[0].ObservationJSON, `"rasch_elo"`) ||
 		!strings.Contains(snapshots[0].ObservationJSON, `"bkt_learn"`) {
-		t.Fatalf("snapshot observation should include model signals, got %s", snapshots[0].ObservationJSON)
+		t.Fatalf("snapshot should include BKT but no non-persistent Rasch/Elo signal, got %s", snapshots[0].ObservationJSON)
 	}
 	if strings.Contains(snapshots[0].ObservationJSON, `"semantic_observation"`) {
 		t.Fatalf("snapshot observation should omit semantic_observation when absent, got %s", snapshots[0].ObservationJSON)
@@ -1048,7 +1198,7 @@ func TestApplyInteraction_IRTReadsPreFSRSDifficulty(t *testing.T) {
 		Difficulty:     algorithms.FSRSDifficultyToIRT(9.0),
 		Discrimination: 1.0,
 	}
-	expectedTheta := algorithms.IRTUpdateTheta(seed.Theta, []algorithms.IRTItem{expectedItem}, []bool{false})
+	expectedTheta := algorithms.IRTUpdateThetaCumulative(seed.Theta, seed.Reps, []algorithms.IRTItem{expectedItem}, []bool{false})
 
 	// And the *post-FSRS* difficulty θ — what today's buggy code computes.
 	// We capture this so the assertion can also confirm the two values are
@@ -1068,7 +1218,7 @@ func TestApplyInteraction_IRTReadsPreFSRSDifficulty(t *testing.T) {
 		Difficulty:     algorithms.FSRSDifficultyToIRT(postFSRSDiff),
 		Discrimination: 1.0,
 	}
-	buggyTheta := algorithms.IRTUpdateTheta(seed.Theta, []algorithms.IRTItem{buggyItem}, []bool{false})
+	buggyTheta := algorithms.IRTUpdateThetaCumulative(seed.Theta, seed.Reps, []algorithms.IRTItem{buggyItem}, []bool{false})
 	if math.Abs(expectedTheta-buggyTheta) < 1e-6 {
 		t.Fatalf("test setup is vacuous: pre/post FSRS thetas are identical (%v)", expectedTheta)
 	}

@@ -25,7 +25,7 @@ import (
 func TestEndToEnd_TenSuccessesMoveMastery(t *testing.T) {
 	store, deps := setupToolsTest(t)
 
-	if res := callTool(t, deps, registerInitDomain, "L", "init_domain", map[string]any{
+	if res := callTool(t, deps, registerInitDomain, "L_owner", "init_domain", map[string]any{
 		"name":          "e2e",
 		"concepts":      []string{"a", "b", "c", "d", "e"},
 		"prerequisites": map[string][]string{},
@@ -34,7 +34,7 @@ func TestEndToEnd_TenSuccessesMoveMastery(t *testing.T) {
 	}
 
 	for i := 0; i < 10; i++ {
-		actRes := callTool(t, deps, registerGetNextActivity, "L", "get_next_activity", map[string]any{})
+		actRes := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{})
 		if actRes.IsError {
 			t.Fatalf("iter %d: get_next_activity errored: %s", i, resultText(actRes))
 		}
@@ -47,7 +47,7 @@ func TestEndToEnd_TenSuccessesMoveMastery(t *testing.T) {
 		if concept == "" {
 			t.Fatalf("iter %d: empty concept in activity: %v", i, activity)
 		}
-		recRes := callTool(t, deps, registerRecordInteraction, "L", "record_interaction", map[string]any{
+		recRes := callTool(t, deps, registerRecordInteraction, "L_owner", "record_interaction", map[string]any{
 			"concept":               concept,
 			"activity_type":         "RECALL_EXERCISE",
 			"success":               true,
@@ -63,7 +63,7 @@ func TestEndToEnd_TenSuccessesMoveMastery(t *testing.T) {
 	movedConcepts := 0
 	totalReps := 0
 	for _, c := range []string{"a", "b", "c", "d", "e"} {
-		cs, err := store.GetConceptState(context.Background(), "L", c)
+		cs, err := store.GetConceptState(context.Background(), "L_owner", c)
 		if err != nil || cs == nil {
 			continue
 		}

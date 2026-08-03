@@ -66,6 +66,49 @@ func findAlert(alerts []models.Alert, typ models.AlertType, concept string) (mod
 	return models.Alert{}, false
 }
 
+func masteryReadyEvidence(now time.Time, learnerID, concept string) []*models.Interaction {
+	interactions := []*models.Interaction{
+		{
+			LearnerID:    learnerID,
+			Concept:      concept,
+			ActivityType: string(models.ActivityPractice),
+			Success:      true,
+			CreatedAt:    now.Add(-48 * time.Hour),
+		},
+		{
+			LearnerID:    learnerID,
+			Concept:      concept,
+			ActivityType: string(models.ActivityFeynmanPrompt),
+			Success:      true,
+			CreatedAt:    now.Add(-2 * time.Hour),
+		},
+		{
+			LearnerID:    learnerID,
+			Concept:      concept,
+			ActivityType: string(models.ActivityRecall),
+			Success:      true,
+			CreatedAt:    now.Add(-time.Hour),
+		},
+	}
+	interactions[2].AssessmentAttemptID = "retention-" + concept
+	return interactions
+}
+
+func masteryReadyAlertEvidence(now time.Time, learnerID, concept string) map[string]MasteryAlertEvidence {
+	submittedAt := now.Add(-time.Hour - time.Minute)
+	evaluatedAt := now.Add(-time.Hour)
+	return map[string]MasteryAlertEvidence{
+		concept: {
+			Assessments: []*models.AssessmentAttempt{{
+				ID: "retention-" + concept, LearnerID: learnerID, ConceptID: concept,
+				ActivityType: string(models.ActivityRecall), Status: models.AssessmentAttemptEvaluated,
+				Passed: true, EvaluationMethod: models.EvaluationMethodHostLLM,
+				SubmittedAt: &submittedAt, EvaluatedAt: &evaluatedAt,
+			}},
+		},
+	}
+}
+
 func TestComputeAlertsForgetting(t *testing.T) {
 	states := []*models.ConceptState{
 		{Concept: "goroutines", Stability: 0.2, ElapsedDays: 5, PMastery: 0.5, CardState: "review",
@@ -135,12 +178,18 @@ func TestComputeAlertsForgettingRetentionBoundaries(t *testing.T) {
 }
 
 func TestComputeAlertsMasteryReady(t *testing.T) {
-	// Stability=1.0, ElapsedDays=1 yields retention well above the named
-	// FORGETTING warning threshold, so FORGETTING/MASTERY_READY arbitration does
-	// not suppress MASTERY_READY here.
-	lastReview := time.Now().UTC().Add(-24 * time.Hour)
-	states := []*models.ConceptState{{Concept: "basics", PMastery: 0.90, Stability: 1.0, ElapsedDays: 1, LastReview: &lastReview, CardState: "review"}}
-	alerts := ComputeAlerts(states, nil, time.Time{})
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	lastReview := now.Add(-time.Hour)
+	states := []*models.ConceptState{{
+		LearnerID:  "learner-1",
+		Concept:    "basics",
+		PMastery:   0.90,
+		Stability:  1.0,
+		LastReview: &lastReview,
+		CardState:  "review",
+		Reps:       6,
+	}}
+	alerts := ComputeAlertsWithEvidenceAt(states, masteryReadyEvidence(now, "learner-1", "basics"), masteryReadyAlertEvidence(now, "learner-1", "basics"), time.Time{}, now)
 	found := false
 	for _, a := range alerts {
 		if a.Type == models.AlertMasteryReady && a.Concept == "basics" {
@@ -152,11 +201,61 @@ func TestComputeAlertsMasteryReady(t *testing.T) {
 	}
 }
 
+func TestComputeAlertsMasteryReadyUsesTrustedTransferFailures(t *testing.T) {
+	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+	lastReview := now.Add(-time.Hour)
+	states := []*models.ConceptState{{
+		LearnerID: "learner-1", Concept: "basics", PMastery: 0.90,
+		Stability: 30, LastReview: &lastReview, CardState: "review", Reps: 8,
+	}}
+	interactions := masteryReadyEvidence(now, "learner-1", "basics")
+	evidence := masteryReadyAlertEvidence(now, "learner-1", "basics")
+	for index, dimension := range []string{"near", "far", "debugging"} {
+		attemptID := "transfer-pass-" + dimension
+		at := now.Add(-time.Duration(4-index) * time.Hour)
+		submittedAt := at.Add(-time.Minute)
+		evaluatedAt := at
+		evidence["basics"] = MasteryAlertEvidence{
+			Transfers: append(evidence["basics"].Transfers, &models.TransferRecord{
+				ConceptID: "basics", AssessmentAttemptID: attemptID,
+				ContextType: dimension, Score: 0.9, CreatedAt: at,
+			}),
+			Assessments: append(evidence["basics"].Assessments, &models.AssessmentAttempt{
+				ID: attemptID, LearnerID: "learner-1", ConceptID: "basics",
+				ActivityType: string(models.ActivityTransferProbe), Status: models.AssessmentAttemptEvaluated,
+				Passed: true, TrustedEvaluation: true, EvaluationMethod: models.EvaluationMethodExternal,
+				SubmittedAt: &submittedAt, EvaluatedAt: &evaluatedAt,
+			}),
+		}
+	}
+	if _, ok := findAlert(ComputeAlertsWithEvidenceAt(states, interactions, evidence, time.Time{}, now), models.AlertMasteryReady, "basics"); !ok {
+		t.Fatal("three trusted passing dimensions should leave mastery challenge ready")
+	}
+
+	failureAt := now.Add(-30 * time.Minute)
+	submittedAt := failureAt.Add(-time.Minute)
+	failureEvidence := evidence["basics"]
+	failureEvidence.Transfers = append(failureEvidence.Transfers, &models.TransferRecord{
+		ConceptID: "basics", AssessmentAttemptID: "transfer-fail-near",
+		ContextType: "near", Score: 0.95, CreatedAt: failureAt,
+	})
+	failureEvidence.Assessments = append(failureEvidence.Assessments, &models.AssessmentAttempt{
+		ID: "transfer-fail-near", LearnerID: "learner-1", ConceptID: "basics",
+		ActivityType: string(models.ActivityTransferProbe), Status: models.AssessmentAttemptEvaluated,
+		Passed: false, TrustedEvaluation: true, EvaluationMethod: models.EvaluationMethodExternal,
+		SubmittedAt: &submittedAt, EvaluatedAt: &failureAt,
+	})
+	evidence["basics"] = failureEvidence
+	if _, ok := findAlert(ComputeAlertsWithEvidenceAt(states, interactions, evidence, time.Time{}, now), models.AlertMasteryReady, "basics"); ok {
+		t.Fatal("recent trusted transfer failure must suppress MASTERY_READY")
+	}
+}
+
 // TestComputeAlertsMasteryForgettingArbitration covers the four corners of the
-// (PMastery × retention) matrix to verify the alert-level arbitration rule:
-// FORGETTING at UrgencyCritical suppresses MASTERY_READY for the same concept.
-// FORGETTING at UrgencyWarning does NOT suppress — the learner is in a nuanced
-// "almost mastered, slightly stale" state that warrants both nudges.
+// (PMastery × retention) matrix. MASTERY_READY is challenge readiness rather
+// than a probability alias: it requires retained, varied evidence in addition
+// to a high model estimate. Any FORGETTING band is below the shared retained
+// threshold, so it cannot coincide with MASTERY_READY.
 //
 // Threshold rationale: suppression is tied to
 // algorithms.RetentionAlertCriticalThreshold; retuning the critical band retunes
@@ -187,13 +286,13 @@ func TestComputeAlertsMasteryForgettingArbitration(t *testing.T) {
 			wantMasteryReady: true,
 		},
 		{
-			name:                  "high mastery + warning retention → both alerts kept",
+			name:                  "high mastery + warning retention → forgetting only",
 			pMastery:              masteryHigh,
 			stability:             0.2,
 			elapsedDays:           5,
 			wantForgetting:        true,
 			wantForgettingUrgency: models.UrgencyWarning,
-			wantMasteryReady:      true,
+			wantMasteryReady:      false,
 		},
 		{
 			name:                  "high mastery + critical retention → only FORGETTING (arbitration)",
@@ -217,18 +316,21 @@ func TestComputeAlertsMasteryForgettingArbitration(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			lastReview := time.Now().UTC().Add(-time.Duration(tc.elapsedDays) * 24 * time.Hour)
+			now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
+			lastReview := now.Add(-time.Duration(tc.elapsedDays) * 24 * time.Hour)
 			states := []*models.ConceptState{
 				{
+					LearnerID:   "learner-1",
 					Concept:     "arbitration_concept",
 					Stability:   tc.stability,
 					ElapsedDays: tc.elapsedDays,
 					LastReview:  &lastReview,
 					PMastery:    tc.pMastery,
 					CardState:   "review",
+					Reps:        6,
 				},
 			}
-			alerts := ComputeAlerts(states, nil, time.Time{})
+			alerts := ComputeAlertsWithEvidenceAt(states, masteryReadyEvidence(now, "learner-1", "arbitration_concept"), masteryReadyAlertEvidence(now, "learner-1", "arbitration_concept"), time.Time{}, now)
 
 			gotForgetting := false
 			gotForgettingUrgency := models.AlertUrgency("")
@@ -398,7 +500,7 @@ func TestComputeAlertsDependencyIncreasing(t *testing.T) {
 }
 
 func TestComputeAlertsCalibrationDiverging(t *testing.T) {
-	alerts := ComputeMetacognitiveAlerts(nil, 1.6, nil, nil)
+	alerts := ComputeMetacognitiveAlerts(nil, 0.3, nil, nil, WithCalibrationEvidence(5))
 
 	found := false
 	for _, a := range alerts {

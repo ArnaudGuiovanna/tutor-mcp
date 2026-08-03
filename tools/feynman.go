@@ -22,7 +22,7 @@ type FeynmanChallengeParams struct {
 func registerFeynmanChallenge(server *mcp.Server, deps *Deps) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "feynman_challenge",
-		Description: "Ask the learner to explain a mastered concept in their own words. The LLM identifies gaps and injects them into the BKT graph.",
+		Description: "Ask the learner to explain a concept whose model estimate reached the deep-evidence routing threshold. This probes understanding; it is not itself a demonstrated-mastery claim.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params FeynmanChallengeParams) (*mcp.CallToolResult, any, error) {
 		learnerID, err := getLearnerID(ctx)
 		if err != nil {
@@ -80,10 +80,11 @@ func registerFeynmanChallenge(server *mcp.Server, deps *Deps) {
 		bktState := algorithms.BKTState{PMastery: cs.PMastery}
 		if !algorithms.BKTIsMastered(bktState) {
 			r, _ := jsonResult(map[string]interface{}{
-				"eligible":  false,
-				"mastery":   cs.PMastery,
-				"threshold": algorithms.MasteryBKT(),
-				"message":   "Concept not yet mastered. Keep up the regular practice.",
+				"eligible":         false,
+				"mastery_estimate": cs.PMastery,
+				"mastery":          cs.PMastery, // deprecated estimate alias
+				"threshold":        algorithms.MasteryBKT(),
+				"message":          "The model estimate has not reached the Feynman-probe routing threshold. Continue with varied practice first.",
 			})
 			return r, nil, nil
 		}
@@ -103,13 +104,14 @@ func registerFeynmanChallenge(server *mcp.Server, deps *Deps) {
 			"concept":     concept,
 			"instructions_for_llm": "After the learner's explanation, identify the specific conceptual gaps. " +
 				"For each gap, generate a short label and a description. " +
-				"Ask the learner for confirmation before injecting the gaps into the graph via add_concepts(). " +
-				"The new micro-concepts must have the source concept as a prerequisite.",
+				"Ask the learner for confirmation, reload get_curriculum_snapshot, then add the gaps with its expected_version. " +
+				"When a confirmed gap is prerequisite knowledge, make the source concept depend on the new micro-concept; do not reverse that edge.",
 			"gap_template": map[string]interface{}{
-				"label":          "<nom court du gap>",
-				"description":    "<ce qui manque dans l'explication>",
-				"initial_pl0":    0.1,
-				"source_concept": concept,
+				"label":            "<short gap name>",
+				"description":      "<what is missing from the explanation>",
+				"relationship":     "prerequisite_of_source",
+				"source_concept":   concept,
+				"expected_version": "<version from get_curriculum_snapshot>",
 			},
 		})
 		return r, nil, nil

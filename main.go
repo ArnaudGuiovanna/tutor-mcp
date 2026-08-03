@@ -7,6 +7,10 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -39,8 +43,12 @@ func main() {
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: parseLogLevel(os.Getenv("LOG_LEVEL")),
+		Level:       parseLogLevel(os.Getenv("LOG_LEVEL")),
+		ReplaceAttr: newPrivacySafeLogAttr(),
 	}))
+	// Packages using the package-level slog helpers must inherit the same
+	// privacy and level policy as explicitly injected components.
+	slog.SetDefault(logger)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -147,12 +155,14 @@ func main() {
 	// TRUSTED_PROXY_CIDRS is unset - without it every IP-limited request shares
 	// one bucket under the proxy's loopback IP (issue #37).
 	auth.WarnRateLimiterMisconfig(baseURL)
-	authLimiter := auth.NewRateLimiter(10.0/60, 10)   // 10/min for auth endpoints
-	registerLimiter := auth.NewRateLimiter(5.0/60, 5) // 5/min for client registration
+	authorizeLimiter := auth.NewRateLimiterWithNamespace("oauth_authorize", 30.0/60, 10) // consent/login page loads
+	loginLimiter := auth.NewRateLimiterWithNamespace("oauth_login", 5.0/60, 5)           // password verification
+	tokenLimiter := auth.NewRateLimiterWithNamespace("oauth_token", 20.0/60, 10)         // code exchange and refresh
+	registerLimiter := auth.NewRateLimiterWithNamespace("oauth_register", 5.0/60, 5)     // dynamic client registration
 	mcpRatePerMinute := envFloat("MCP_RATE_LIMIT_PER_MIN", 60)
 	mcpBurst := envInt("MCP_RATE_LIMIT_BURST", 60)
-	mcpIPLimiter := auth.NewRateLimiter(mcpRatePerMinute/60, mcpBurst)
-	mcpLearnerLimiter := auth.NewRateLimiter(mcpRatePerMinute/60, mcpBurst)
+	mcpIPLimiter := auth.NewRateLimiterWithNamespace("mcp_ip", mcpRatePerMinute/60, mcpBurst)
+	mcpLearnerLimiter := auth.NewRateLimiterWithNamespace("mcp_learner", mcpRatePerMinute/60, mcpBurst)
 
 	// RATELIMIT_BACKEND=postgres (alias "db") opts every rate limiter and the
 	// per-account login-failure tracker into a shared, DB-backed store so a
@@ -162,7 +172,9 @@ func main() {
 	switch cfg.RateLimitBackend {
 	case "postgres":
 		rlBackend := db.NewRateLimitBackend(store)
-		authLimiter.SetBackend(rlBackend)
+		authorizeLimiter.SetBackend(rlBackend)
+		loginLimiter.SetBackend(rlBackend)
+		tokenLimiter.SetBackend(rlBackend)
 		registerLimiter.SetBackend(rlBackend)
 		mcpIPLimiter.SetBackend(rlBackend)
 		mcpLearnerLimiter.SetBackend(rlBackend)
@@ -172,7 +184,9 @@ func main() {
 		// In-process default; no shared state.
 	}
 
-	defer authLimiter.Stop()
+	defer authorizeLimiter.Stop()
+	defer loginLimiter.Stop()
+	defer tokenLimiter.Stop()
 	defer registerLimiter.Stop()
 	defer mcpIPLimiter.Stop()
 	defer mcpLearnerLimiter.Stop()
@@ -180,9 +194,9 @@ func main() {
 	// OAuth routes — rate-limit sensitive endpoints
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", oauthServer.HandleAuthServerMetadata)
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource", oauthServer.HandleProtectedResourceMetadata)
-	mux.Handle("GET /authorize", auth.RateLimitMiddleware(authLimiter, http.HandlerFunc(oauthServer.HandleAuthorizeGet)))
-	mux.Handle("POST /authorize", auth.RateLimitMiddleware(authLimiter, http.HandlerFunc(oauthServer.HandleAuthorizePost)))
-	mux.Handle("POST /token", auth.RateLimitMiddleware(authLimiter, http.HandlerFunc(oauthServer.HandleToken)))
+	mux.Handle("GET /authorize", auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleAuthorizeGet)))
+	mux.Handle("POST /authorize", auth.RateLimitMiddleware(loginLimiter, http.HandlerFunc(oauthServer.HandleAuthorizePost)))
+	mux.Handle("POST /token", auth.RateLimitMiddleware(tokenLimiter, http.HandlerFunc(oauthServer.HandleToken)))
 	mux.Handle("POST /register", auth.RateLimitMiddleware(registerLimiter, http.HandlerFunc(oauthServer.HandleRegister)))
 
 	// MCP route: per-IP shield before auth, then per-learner limiting after auth.
@@ -253,6 +267,37 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("server stopped cleanly")
+}
+
+var pseudonymizedLogKeys = map[string]struct{}{
+	"learner": {}, "learner_id": {}, "email": {},
+	"session": {}, "session_id": {},
+	"domain": {}, "domain_id": {}, "concept": {},
+	"assessment_attempt": {}, "evaluator_id": {}, "prediction_id": {},
+	"redirect_uri": {}, "webhook_url": {}, "url": {},
+	"ua": {}, "client_name": {}, "domain_name": {},
+}
+
+// newPrivacySafeLogAttr creates process-local, keyed pseudonyms for structured
+// learning identifiers. The random key is intentionally not persisted: logs
+// remain correlatable during one process lifetime without exposing stable
+// cross-restart identifiers or dictionary-hashable concept labels.
+func newPrivacySafeLogAttr() func([]string, slog.Attr) slog.Attr {
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		key = nil
+	}
+	return func(_ []string, attr slog.Attr) slog.Attr {
+		if _, sensitive := pseudonymizedLogKeys[attr.Key]; !sensitive {
+			return attr
+		}
+		if attr.Value.Kind() != slog.KindString || attr.Value.String() == "" || len(key) == 0 {
+			return slog.String(attr.Key, "[redacted]")
+		}
+		mac := hmac.New(sha256.New, key)
+		_, _ = mac.Write([]byte(attr.Value.String()))
+		return slog.String(attr.Key, "anon:"+hex.EncodeToString(mac.Sum(nil)[:8]))
+	}
 }
 
 func shouldPrintVersion(args []string) bool {

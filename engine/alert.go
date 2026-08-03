@@ -6,7 +6,6 @@ package engine
 
 import (
 	"fmt"
-	"math"
 	"time"
 
 	"tutor-mcp/algorithms"
@@ -17,11 +16,26 @@ func ComputeAlerts(states []*models.ConceptState, recentInteractions []*models.I
 	return ComputeAlertsAt(states, recentInteractions, sessionStart, time.Now())
 }
 
+// MasteryAlertEvidence carries the protocol envelopes needed to distinguish
+// routing observations from retained/trusted evidence for one concept.
+type MasteryAlertEvidence struct {
+	Transfers   []*models.TransferRecord
+	Assessments []*models.AssessmentAttempt
+}
+
 // ComputeAlertsAt is the clock-injected variant of ComputeAlerts: it derives all
 // elapsed-time computations (FORGETTING retention decay, OVERLOAD session length)
 // from the supplied now rather than the wall clock, making the logic deterministic
 // and testable. ComputeAlerts is a thin wrapper that passes time.Now().
 func ComputeAlertsAt(states []*models.ConceptState, recentInteractions []*models.Interaction, sessionStart time.Time, now time.Time) []models.Alert {
+	return ComputeAlertsWithEvidenceAt(states, recentInteractions, nil, sessionStart, now)
+}
+
+// ComputeAlertsWithEvidenceAt is the authoritative MASTERY_READY variant.
+// Callers backed by persistence must provide evaluated attempts and transfer
+// records per concept; absent evidence is conservative and cannot emit
+// MASTERY_READY.
+func ComputeAlertsWithEvidenceAt(states []*models.ConceptState, recentInteractions []*models.Interaction, evidenceByConcept map[string]MasteryAlertEvidence, sessionStart time.Time, now time.Time) []models.Alert {
 	var alerts []models.Alert
 
 	// criticalForgetting tracks concepts where FORGETTING fired at UrgencyCritical.
@@ -58,11 +72,14 @@ func ComputeAlertsAt(states []*models.ConceptState, recentInteractions []*models
 			})
 		}
 
-		// MASTERY_READY: BKT >= 0.85
+		// MASTERY_READY means ready to attempt the challenge, not already
+		// mastered. Use the same retained/diverse/uncertainty policy as
+		// check_mastery; a high BKT estimate alone is insufficient.
 		// Arbitration: if FORGETTING already fired at UrgencyCritical for this
 		// concept, suppress MASTERY_READY to avoid emitting contradictory nudges
 		// on the same tick.
-		if cs.PMastery >= algorithms.MasteryBKT() && !criticalForgetting[cs.Concept] {
+		evidence := evidenceByConcept[cs.Concept]
+		if masteryChallengeReadyForAlert(cs, recentInteractions, evidence.Transfers, evidence.Assessments, now) && !criticalForgetting[cs.Concept] {
 			alerts = append(alerts, models.Alert{
 				Type:              models.AlertMasteryReady,
 				Concept:           cs.Concept,
@@ -183,6 +200,27 @@ func ComputeAlertsAt(states []*models.ConceptState, recentInteractions []*models
 	return alerts
 }
 
+func masteryChallengeReadyForAlert(cs *models.ConceptState, interactions []*models.Interaction, transfers []*models.TransferRecord, assessments []*models.AssessmentAttempt, now time.Time) bool {
+	if cs == nil {
+		return false
+	}
+	relevant := make([]*models.Interaction, 0)
+	for _, interaction := range interactions {
+		if interaction == nil || interaction.Concept != cs.Concept {
+			continue
+		}
+		if cs.LearnerID != "" && interaction.LearnerID != "" && interaction.LearnerID != cs.LearnerID {
+			continue
+		}
+		relevant = append(relevant, interaction)
+	}
+	status := AssessMasteryStatus(cs.LearnerID, cs.Concept, cs, relevant, transfers, assessments, now)
+	evidence := MasteryEvidenceQuality(BuildEvidenceProfile(cs.LearnerID, cs.Concept, relevant, now))
+	uncertainty := ComputeMasteryUncertainty(cs, relevant, MasteryEvidenceProfile{Now: now})
+	transfer := BuildTrustedTransferProfileFromEvidence(cs.Concept, transfers, assessments, now)
+	return ReadyForMasteryChallenge(status, evidence, uncertainty, transfer)
+}
+
 func estimateReviewMinutes(cs *models.ConceptState) int {
 	if cs.Lapses > 2 {
 		return 12
@@ -200,8 +238,9 @@ func groupByConcept(interactions []*models.Interaction) map[string][]*models.Int
 
 // MetacognitiveAlertOptions holds optional data for metacognitive alerts.
 type MetacognitiveAlertOptions struct {
-	ConceptStates   []*models.ConceptState
-	TransferRecords []*models.TransferRecord
+	ConceptStates      []*models.ConceptState
+	TransferRecords    []*models.TransferRecord
+	CalibrationSamples int
 }
 
 type MetacognitiveAlertOption func(*MetacognitiveAlertOptions)
@@ -210,6 +249,15 @@ func WithTransferData(states []*models.ConceptState, transfers []*models.Transfe
 	return func(o *MetacognitiveAlertOptions) {
 		o.ConceptStates = states
 		o.TransferRecords = transfers
+	}
+}
+
+// WithCalibrationEvidence supplies the number of completed observations used
+// to compute calibrationBias. A bias is not labelled as a persistent pattern
+// until the shared calibration policy has enough evidence.
+func WithCalibrationEvidence(samples int) MetacognitiveAlertOption {
+	return func(o *MetacognitiveAlertOptions) {
+		o.CalibrationSamples = samples
 	}
 }
 
@@ -246,8 +294,10 @@ func ComputeMetacognitiveAlerts(
 		}
 	}
 
-	// CALIBRATION_DIVERGING: |calibration_bias| > 1.5
-	if math.Abs(calibrationBias) > 1.5 {
+	// CALIBRATION_DIVERGING: normalized bias is actionable only after enough
+	// completed predictions. This shares the same policy as the OLM and mirror
+	// paths so one learner cannot receive contradictory calibration labels.
+	if calibrationBiasIsActionable(calibrationBias, options.CalibrationSamples) {
 		direction := "sur-estimation"
 		if calibrationBias < 0 {
 			direction = "sous-estimation"

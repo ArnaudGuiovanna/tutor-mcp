@@ -22,8 +22,14 @@ func IsSafeWebhookURL(rawURL string) bool {
 	if u.Scheme != "https" {
 		return false
 	}
+	if u.User != nil || u.Fragment != "" {
+		return false
+	}
 	host := u.Hostname()
 	if host == "" || strings.Contains(host, "..") {
+		return false
+	}
+	if port := u.Port(); port != "" && port != "443" {
 		return false
 	}
 	if net.ParseIP(host) != nil {
@@ -31,8 +37,17 @@ func IsSafeWebhookURL(rawURL string) bool {
 	}
 	host = strings.ToLower(host)
 	switch host {
-	case "discord.com", "discordapp.com":
-		return true
+	case "discord.com", "discordapp.com", "canary.discord.com",
+		"canary.discordapp.com", "ptb.discord.com", "ptb.discordapp.com":
+		// Accepted below after validating the endpoint path.
+	default:
+		return false
 	}
-	return strings.HasSuffix(host, ".discord.com") || strings.HasSuffix(host, ".discordapp.com")
+
+	parts := strings.Split(strings.Trim(u.EscapedPath(), "/"), "/")
+	if len(parts) < 4 || parts[0] != "api" || parts[1] != "webhooks" || parts[2] == "" || parts[3] == "" {
+		return false
+	}
+	// Discord supports optional /github and /slack compatibility suffixes.
+	return len(parts) == 4 || (len(parts) == 5 && (parts[4] == "github" || parts[4] == "slack"))
 }

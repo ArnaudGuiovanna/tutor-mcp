@@ -20,27 +20,36 @@ import (
 // relevant to a given call site (e.g. HintsRequested for submit_answer)
 // should be left at their zero values.
 type interactionInput struct {
-	Concept             string
-	ActivityType        string
-	Success             bool
-	ResponseTimeSeconds float64
-	Confidence          float64 // 0 if not provided
-	ErrorType           string  // "" if not applicable
-	Notes               string
-	HintsRequested      int
-	SelfInitiated       bool
-	CalibrationID       string
-	MisconceptionType   string
-	MisconceptionDetail string
-	DomainID            string // persisted on the interaction row (issue #24)
-	RubricJSON          string
-	RubricScoreJSON     string
-	Rubric              any
-	RubricScore         any
-	RubricWarnings      []string
-	RubricScoreWarnings []string
-	SemanticObservation map[string]any
-	InterpretationBrief string
+	Concept                  string
+	ActivityType             string
+	Success                  bool
+	ResponseTimeSeconds      float64
+	Confidence               float64 // 0 if not provided
+	ErrorType                string  // "" if not applicable
+	Notes                    string
+	HintsRequested           int
+	SelfInitiated            bool
+	CalibrationID            string
+	MisconceptionType        string
+	MisconceptionDetail      string
+	DomainID                 string // persisted on the interaction row (issue #24)
+	SessionID                string // durable session boundary; blank only for legacy internal callers
+	AssessmentAttemptID      string
+	EvaluatorID              string
+	EvaluationMethod         models.EvaluationMethod
+	EvaluationProvenanceJSON string
+	AssessmentScore          float64
+	RubricJSON               string
+	RubricScoreJSON          string
+	Rubric                   any
+	RubricScore              any
+	RubricWarnings           []string
+	RubricScoreWarnings      []string
+	SemanticObservation      map[string]any
+	InterpretationBrief      string
+	TransferDimension        string
+	TransferScore            *float64
+	TransferSessionID        string
 }
 
 // applyInteraction persists the interaction and updates the learner's
@@ -75,6 +84,11 @@ func applyInteraction(
 			input.ActivityType,
 		)
 	}
+	transferDimension, err := normalizeTransferEvidence(input.ActivityType, input.TransferDimension, input.TransferScore, input.TransferSessionID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("applyInteraction: %w", err)
+	}
+	input.TransferDimension = transferDimension
 
 	// R008 / security-todo F-5.1: group the read-modify-write cycle
 	// (concept_states + interaction + pedagogical_snapshot) under a
@@ -85,7 +99,31 @@ func applyInteraction(
 	// tx start, not at first write.
 	var resultCS *models.ConceptState
 	var resultMeta map[string]any
-	err := deps.Store.WithTx(ctx, func(s store.Store) error {
+	err = deps.Store.WithTx(ctx, func(s store.Store) error {
+		// Lock and consume the assessment state in the same transaction as the
+		// interaction/model update. A duplicate evaluator call therefore cannot
+		// double-count one learner response, and any later write failure rolls the
+		// evaluation back to submitted.
+		if input.AssessmentAttemptID != "" {
+			attempt, err := s.GetAssessmentAttemptForUpdate(ctx, learnerID, input.AssessmentAttemptID)
+			if err != nil {
+				return fmt.Errorf("load assessment attempt: %w", err)
+			}
+			if attempt.Status != models.AssessmentAttemptSubmitted ||
+				attempt.DomainID != input.DomainID || attempt.ConceptID != input.Concept ||
+				attempt.ActivityType != input.ActivityType ||
+				(attempt.SessionID != "" && attempt.SessionID != input.SessionID) {
+				return fmt.Errorf("assessment attempt state or scope conflict")
+			}
+			if err := s.CompleteAssessmentEvaluation(
+				ctx, learnerID, input.AssessmentAttemptID, input.RubricScoreJSON,
+				input.EvaluatorID, input.EvaluationMethod, input.EvaluationProvenanceJSON,
+				input.AssessmentScore, input.Success, now,
+			); err != nil {
+				return fmt.Errorf("complete assessment evaluation: %w", err)
+			}
+		}
+
 		// Load or bootstrap concept state. GetOrCreateConceptStateForUpdate
 		// materializes the row before taking the FOR UPDATE lock so concurrent
 		// first-touch interactions on a brand-new (learner, concept) serialize
@@ -143,37 +181,32 @@ func applyInteraction(
 		slipUsed := bktResult.Params.PSlip
 		guessUsed := bktResult.Params.PGuess
 
-		// ── Rasch/Elo calibration — audit-grade estimate for the
-		// learner/exercise difficulty pair. The concept state's Theta still
-		// follows the existing IRT update below; this model exposes an
-		// independent calibration signal for exercise selection and replay.
-		raschBefore := algorithms.NewRaschEloState(priorTheta, algorithms.FSRSDifficultyToIRT(priorDifficulty))
-		raschAfter := algorithms.RaschEloUpdate(raschBefore, input.Success)
 		observation = mergeObservation(observation, map[string]any{
 			"bkt_individualized_profile": individualBKTProfileSnapshot(bktProfile),
 			"bkt_individualized_params":  individualBKTParamsSnapshot(bktResult.Params),
-			"rasch_elo":                  raschEloObservation(raschBefore, raschAfter),
 		})
 
 		// Build and persist the interaction row.
 		interaction := &models.Interaction{
-			LearnerID:       learnerID,
-			Concept:         input.Concept,
-			ActivityType:    input.ActivityType,
-			Success:         input.Success,
-			ResponseTime:    int(input.ResponseTimeSeconds),
-			Confidence:      input.Confidence,
-			ErrorType:       input.ErrorType,
-			Notes:           input.Notes,
-			HintsRequested:  input.HintsRequested,
-			SelfInitiated:   input.SelfInitiated,
-			CalibrationID:   input.CalibrationID,
-			DomainID:        input.DomainID,
-			BKTSlip:         &slipUsed,
-			BKTGuess:        &guessUsed,
-			RubricJSON:      input.RubricJSON,
-			RubricScoreJSON: input.RubricScoreJSON,
-			CreatedAt:       now,
+			LearnerID:           learnerID,
+			SessionID:           input.SessionID,
+			AssessmentAttemptID: input.AssessmentAttemptID,
+			Concept:             input.Concept,
+			ActivityType:        input.ActivityType,
+			Success:             input.Success,
+			ResponseTime:        int(input.ResponseTimeSeconds),
+			Confidence:          input.Confidence,
+			ErrorType:           input.ErrorType,
+			Notes:               input.Notes,
+			HintsRequested:      input.HintsRequested,
+			SelfInitiated:       input.SelfInitiated,
+			CalibrationID:       input.CalibrationID,
+			DomainID:            input.DomainID,
+			BKTSlip:             &slipUsed,
+			BKTGuess:            &guessUsed,
+			RubricJSON:          input.RubricJSON,
+			RubricScoreJSON:     input.RubricScoreJSON,
+			CreatedAt:           now,
 		}
 
 		// Misconception fields — only stored on failures.
@@ -189,6 +222,31 @@ func applyInteraction(
 
 		if err := s.CreateInteraction(ctx, interaction); err != nil {
 			return fmt.Errorf("create interaction: %w", err)
+		}
+		if input.TransferScore != nil {
+			transferSessionID := input.SessionID
+			if transferSessionID == "" {
+				transferSessionID = input.TransferSessionID
+			}
+			record := &models.TransferRecord{
+				LearnerID:           learnerID,
+				DomainID:            input.DomainID,
+				AssessmentAttemptID: input.AssessmentAttemptID,
+				ConceptID:           input.Concept,
+				ContextType:         input.TransferDimension,
+				Score:               *input.TransferScore,
+				SessionID:           transferSessionID,
+			}
+			if err := s.CreateTransferRecord(ctx, record); err != nil {
+				return fmt.Errorf("create transfer evidence: %w", err)
+			}
+			observation = mergeObservation(observation, map[string]any{
+				"transfer_evidence": map[string]any{
+					"dimension": input.TransferDimension,
+					"score":     *input.TransferScore,
+					"recorded":  true,
+				},
+			})
 		}
 
 		// ── FSRS update — reads from prior snapshot. ───────────────────
@@ -220,7 +278,7 @@ func applyInteraction(
 			Difficulty:     algorithms.FSRSDifficultyToIRT(priorDifficulty),
 			Discrimination: 1.0,
 		}
-		newTheta := algorithms.IRTUpdateTheta(priorTheta, []algorithms.IRTItem{item}, []bool{input.Success})
+		newTheta := algorithms.IRTUpdateThetaCumulative(priorTheta, priorReps, []algorithms.IRTItem{item}, []bool{input.Success})
 
 		// ── Single write-back of the merged result. ────────────────────
 		cs.PMastery = bktState.PMastery
@@ -270,6 +328,7 @@ func applyInteraction(
 func isCognitiveEvidenceActivity(activityType string) bool {
 	switch models.ActivityType(activityType) {
 	case models.ActivityRecall,
+		models.ActivityDiagnosticAssessment,
 		models.ActivityNewConcept,
 		models.ActivityMasteryChallenge,
 		models.ActivityDebuggingCase,
@@ -284,12 +343,25 @@ func isCognitiveEvidenceActivity(activityType string) bool {
 }
 
 func structuredObservation(input interactionInput) map[string]any {
-	observation := map[string]any{}
+	observation := map[string]any{
+		"evidence_verification": "unverified_observation",
+	}
 	if input.Rubric != nil {
 		observation["rubric"] = input.Rubric
 	}
 	if input.RubricScore != nil {
 		observation["rubric_score"] = input.RubricScore
+	}
+	if input.AssessmentAttemptID != "" {
+		observation["evidence_verification"] = "assessment_linked_untrusted_evaluation"
+		observation["assessment"] = map[string]any{
+			"attempt_id":        input.AssessmentAttemptID,
+			"score":             input.AssessmentScore,
+			"derived_success":   input.Success,
+			"evaluation_method": input.EvaluationMethod,
+			"evaluator_id":      input.EvaluatorID,
+			"trusted":           false,
+		}
 	}
 	if len(input.RubricWarnings) > 0 {
 		observation["rubric_schema_warnings"] = input.RubricWarnings
@@ -299,9 +371,6 @@ func structuredObservation(input interactionInput) map[string]any {
 	}
 	if input.SemanticObservation != nil {
 		observation["semantic_observation"] = input.SemanticObservation
-	}
-	if len(observation) == 0 {
-		return nil
 	}
 	return observation
 }

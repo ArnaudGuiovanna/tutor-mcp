@@ -31,15 +31,20 @@ var allowedMemoryOperations = []string{
 	string(memory.OpReplaceFile),
 }
 
+var writeLearnerMemory = memory.Write
+
 type UpdateLearnerMemoryParams struct {
+	IdempotentMutationParams
 	Scope       string `json:"scope" jsonschema:"memory scope: memory, memory_pending, session, concept, or archive"`
 	Content     string `json:"content" jsonschema:"markdown content to write"`
 	Operation   string `json:"operation,omitempty" jsonschema:"write operation: append, replace_section, or replace_file"`
 	ConceptSlug string `json:"concept_slug,omitempty" jsonschema:"required when scope=concept; must match an active concept"`
+	DomainID    string `json:"domain_id,omitempty" jsonschema:"domain owning a concept note or session; required for new domain-scoped concept memory"`
 	Period      string `json:"period,omitempty" jsonschema:"archive period key alias, for example 2026-05 or 2026-Q2"`
 	PeriodType  string `json:"period_type,omitempty" jsonschema:"required with period_key when scope=archive consolidation completion: monthly, quarterly, or annual"`
 	PeriodKey   string `json:"period_key,omitempty" jsonschema:"required when scope=archive; for example 2026-05, 2026-Q2, or 2026"`
 	Timestamp   string `json:"timestamp,omitempty" jsonschema:"required when scope=session, ISO 8601 timestamp"`
+	SessionID   string `json:"session_id,omitempty" jsonschema:"durable learning session ID for a session summary; omit only when importing legacy summaries"`
 	SectionKey  string `json:"section_key,omitempty" jsonschema:"required when operation=replace_section"`
 }
 
@@ -75,6 +80,7 @@ func registerUpdateLearnerMemory(server *mcp.Server, deps *Deps) {
 		periodKey := archivePeriodKey(params)
 		writeReq := memory.WriteRequest{
 			LearnerID:   learnerID,
+			DomainID:    params.DomainID,
 			Scope:       scope,
 			ConceptSlug: params.ConceptSlug,
 			Period:      periodKey,
@@ -83,23 +89,49 @@ func registerUpdateLearnerMemory(server *mcp.Server, deps *Deps) {
 			Content:     params.Content,
 			SectionKey:  params.SectionKey,
 		}
-		if err := memory.Write(writeReq); err != nil {
-			deps.Logger.Warn("update_learner_memory: write failed", "err", err, "learner", learnerID, "scope", params.Scope)
-			r, _ := errorResult(err.Error())
-			return r, nil, nil
+		var degradedComponents []string
+		if err := writeLearnerMemory(writeReq); err != nil {
+			if !memory.IsCommittedWriteError(err) {
+				deps.Logger.Warn("update_learner_memory: write failed", "err", err, "learner", learnerID, "scope", params.Scope)
+				r, _ := errorResult(err.Error())
+				return r, nil, nil
+			}
+			// Rename already made the exact new content visible. Retrying an
+			// append could duplicate it, so retain a successful idempotency result
+			// while exposing the directory-sync durability degradation.
+			degradedComponents = append(degradedComponents, "memory_directory_sync")
+			deps.Logger.Warn("update_learner_memory: file committed with degraded directory sync", "err", err, "learner", learnerID, "scope", params.Scope)
 		}
+		consolidationCompletionRecorded := false
 		if scope == memory.ScopeArchive && params.PeriodType != "" && periodKey != "" {
 			if err := deps.Store.MarkConsolidationCompleted(ctx, learnerID, params.PeriodType, periodKey, time.Now().UTC()); err != nil {
 				deps.Logger.Warn("update_learner_memory: mark consolidation completed failed", "err", err, "learner", learnerID, "period_type", params.PeriodType, "period_key", periodKey)
+				degradedComponents = append(degradedComponents, "consolidation_completion_marker")
+			} else {
+				consolidationCompletionRecorded = true
 			}
 		}
 		key := memoryReadKey(scope, params.ConceptSlug, periodKey, ts)
-		path, _ := memory.PathForRead(learnerID, scope, key)
-		r, _ := jsonResult(map[string]any{
+		payload := map[string]any{
 			"ok":            true,
-			"source_path":   path,
+			"memory_key":    key,
 			"bytes_written": len(params.Content),
-		})
+			"session_id":    params.SessionID,
+		}
+		if params.DomainID != "" {
+			payload["domain_id"] = params.DomainID
+		}
+		if scope == memory.ScopeArchive && params.PeriodType != "" && periodKey != "" {
+			payload["archive_saved"] = true
+			payload["consolidation_completion_recorded"] = consolidationCompletionRecorded
+			if !consolidationCompletionRecorded {
+				payload["warning"] = "archive saved, but consolidation completion could not be recorded; reconcile the consolidation marker without rewriting the archive"
+			}
+		}
+		if len(degradedComponents) > 0 {
+			payload["degraded_components"] = degradedComponents
+		}
+		r, _ := jsonResult(payload)
 		return r, nil, nil
 	})
 }
@@ -206,10 +238,12 @@ func validateMemoryWriteParams(ctx context.Context, deps *Deps, learnerID string
 		{"scope", params.Scope, maxShortLabelLen},
 		{"operation", params.Operation, maxShortLabelLen},
 		{"concept_slug", params.ConceptSlug, maxShortLabelLen},
+		{"domain_id", params.DomainID, maxShortLabelLen},
 		{"period", params.Period, maxShortLabelLen},
 		{"period_type", params.PeriodType, maxShortLabelLen},
 		{"period_key", params.PeriodKey, maxShortLabelLen},
 		{"timestamp", params.Timestamp, maxShortLabelLen},
+		{"session_id", params.SessionID, maxShortLabelLen},
 		{"section_key", params.SectionKey, maxShortLabelLen},
 		{"content", params.Content, maxMemoryContentLen},
 	} {
@@ -244,12 +278,22 @@ func validateMemoryWriteParams(ctx context.Context, deps *Deps, learnerID string
 		if params.ConceptSlug == "" {
 			return fmt.Errorf("concept_slug is required for concept scope")
 		}
-		active, err := deps.Store.ActiveDomainConceptSet(ctx, learnerID)
-		if err != nil {
-			return fmt.Errorf("active concept lookup failed: %w", err)
-		}
-		if !active[params.ConceptSlug] {
-			return fmt.Errorf("concept_slug must match an active concept")
+		if params.DomainID != "" {
+			domain, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
+			if err != nil || domain == nil {
+				return fmt.Errorf("domain not found")
+			}
+			if err := validateConceptInDomain(domain, params.ConceptSlug); err != nil {
+				return err
+			}
+		} else {
+			active, err := deps.Store.ActiveDomainConceptSet(ctx, learnerID)
+			if err != nil {
+				return fmt.Errorf("active concept lookup failed: %w", err)
+			}
+			if !active[params.ConceptSlug] {
+				return fmt.Errorf("concept_slug must match an active concept")
+			}
 		}
 	case memory.ScopeArchive:
 		periodKey := archivePeriodKey(params)
@@ -272,7 +316,18 @@ func validateMemoryWriteParams(ctx context.Context, deps *Deps, learnerID string
 		if err != nil {
 			return err
 		}
-		if err := validateSessionMemoryContent(ts, params.Content); err != nil {
+		expectedDomainID := params.DomainID
+		if params.SessionID != "" {
+			session, err := deps.Store.GetLearningSession(ctx, learnerID, params.SessionID)
+			if err != nil {
+				return fmt.Errorf("learning session not found")
+			}
+			if expectedDomainID != "" && expectedDomainID != session.DomainID {
+				return fmt.Errorf("domain_id does not match the durable session")
+			}
+			expectedDomainID = session.DomainID
+		}
+		if err := validateSessionMemoryContent(ts, params.SessionID, expectedDomainID, params.Content); err != nil {
 			return err
 		}
 	}
@@ -341,7 +396,7 @@ func validMemoryPeriod(period string) bool {
 	return false
 }
 
-func validateSessionMemoryContent(fallback time.Time, content string) error {
+func validateSessionMemoryContent(fallback time.Time, expectedSessionID, expectedDomainID, content string) error {
 	payload, err := memory.ParseSessionPayload(fallback, content)
 	if err != nil {
 		return err
@@ -359,6 +414,24 @@ func validateSessionMemoryContent(fallback time.Time, content string) error {
 	for _, key := range required {
 		if _, ok := payload.Frontmatter[key]; !ok {
 			return fmt.Errorf("session memory frontmatter missing %q", key)
+		}
+	}
+	if expectedSessionID != "" {
+		stored, ok := payload.Frontmatter["session_id"]
+		if !ok {
+			return fmt.Errorf("session memory frontmatter missing %q", "session_id")
+		}
+		if fmt.Sprint(stored) != expectedSessionID {
+			return fmt.Errorf("session memory frontmatter session_id does not match the durable session")
+		}
+	}
+	if expectedDomainID != "" {
+		stored, ok := payload.Frontmatter["domain_id"]
+		if !ok {
+			return fmt.Errorf("session memory frontmatter missing %q", "domain_id")
+		}
+		if fmt.Sprint(stored) != expectedDomainID {
+			return fmt.Errorf("session memory frontmatter domain_id does not match the durable session")
 		}
 	}
 	return nil

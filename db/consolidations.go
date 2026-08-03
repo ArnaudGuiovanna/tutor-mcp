@@ -7,11 +7,36 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
 	"tutor-mcp/models"
 )
+
+// GetLearnerIDsForConsolidation returns every registered learner. Periodic
+// consolidation is a memory concern and must not depend on webhook opt-in or
+// recent activity, unlike the scheduler's notification audience queries.
+func (s *Store) GetLearnerIDsForConsolidation(ctx context.Context) ([]string, error) {
+	rows, err := s.query(ctx, `SELECT id FROM learners ORDER BY id ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("get learners for consolidation: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan learner for consolidation: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate learners for consolidation: %w", err)
+	}
+	return ids, nil
+}
 
 func (s *Store) UpsertPendingConsolidation(ctx context.Context, learnerID, periodType, periodKey string, now time.Time) error {
 	if learnerID == "" || periodType == "" || periodKey == "" {
@@ -47,6 +72,72 @@ func (s *Store) GetPendingConsolidations(ctx context.Context, learnerID string) 
 	return scanConsolidationRows(rows)
 }
 
+// ClaimPendingConsolidations atomically transitions all currently pending jobs
+// for one learner to delivered and returns the claimed rows. The claim is a
+// single statement so concurrent application instances cannot deliver the same
+// consolidation request twice.
+func (s *Store) ClaimPendingConsolidations(ctx context.Context, learnerID string, now time.Time) ([]*models.PendingConsolidation, error) {
+	if learnerID == "" {
+		return nil, fmt.Errorf("learner_id is required")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+
+	// A plain UPDATE (without SKIP LOCKED) deliberately makes a competing
+	// PostgreSQL statement wait on the first matching row, then re-check the
+	// status after the winner commits. This keeps the learner's batch together
+	// instead of allowing two workers to partition it into separate requests.
+	rows, err := s.query(ctx,
+		`UPDATE pending_consolidations
+		 SET status = 'delivered', delivered_at = ?
+		 WHERE learner_id = ? AND status = 'pending'
+		 RETURNING id, learner_id, period_type, period_key, status,
+		           detected_at, delivered_at, completed_at`,
+		now.UTC(), learnerID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("claim pending consolidations: %w", err)
+	}
+	defer rows.Close()
+	items, err := scanConsolidationRows(rows)
+	if err != nil {
+		return nil, fmt.Errorf("scan claimed consolidations: %w", err)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].DetectedAt.Equal(items[j].DetectedAt) {
+			return items[i].ID < items[j].ID
+		}
+		return items[i].DetectedAt.Before(items[j].DetectedAt)
+	})
+	return items, nil
+}
+
+// ReleaseConsolidationClaims makes claimed jobs eligible again when request
+// construction fails before the response is returned to the learner.
+func (s *Store) ReleaseConsolidationClaims(ctx context.Context, learnerID string, ids []int64) error {
+	if learnerID == "" || len(ids) == 0 {
+		return nil
+	}
+	args := make([]any, 0, len(ids)+1)
+	args = append(args, learnerID)
+	placeholders := make([]string, 0, len(ids))
+	for _, id := range ids {
+		placeholders = append(placeholders, "?")
+		args = append(args, id)
+	}
+	_, err := s.exec(ctx,
+		`UPDATE pending_consolidations
+		 SET status = 'pending', delivered_at = NULL
+		 WHERE learner_id = ? AND status = 'delivered' AND id IN (`+strings.Join(placeholders, ",")+`)`,
+		args...,
+	)
+	if err != nil {
+		return fmt.Errorf("release consolidation claims: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) GetConsolidation(ctx context.Context, learnerID, periodType, periodKey string) (*models.PendingConsolidation, error) {
 	row := s.queryRow(ctx,
 		`SELECT id, learner_id, period_type, period_key, status, detected_at, delivered_at, completed_at
@@ -59,32 +150,6 @@ func (s *Store) GetConsolidation(ctx context.Context, learnerID, periodType, per
 		return nil, err
 	}
 	return item, nil
-}
-
-func (s *Store) MarkConsolidationsDelivered(ctx context.Context, learnerID string, ids []int64, now time.Time) error {
-	if learnerID == "" || len(ids) == 0 {
-		return nil
-	}
-	if now.IsZero() {
-		now = time.Now().UTC()
-	}
-	args := make([]any, 0, len(ids)+2)
-	args = append(args, now.UTC(), learnerID)
-	placeholders := make([]string, 0, len(ids))
-	for _, id := range ids {
-		placeholders = append(placeholders, "?")
-		args = append(args, id)
-	}
-	_, err := s.exec(ctx,
-		`UPDATE pending_consolidations
-		 SET status = 'delivered', delivered_at = ?
-		 WHERE learner_id = ? AND status = 'pending' AND id IN (`+strings.Join(placeholders, ",")+`)`,
-		args...,
-	)
-	if err != nil {
-		return fmt.Errorf("mark consolidations delivered: %w", err)
-	}
-	return nil
 }
 
 func (s *Store) MarkConsolidationCompleted(ctx context.Context, learnerID, periodType, periodKey string, now time.Time) error {

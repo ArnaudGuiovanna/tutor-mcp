@@ -5,8 +5,11 @@ package db
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
+
+	"tutor-mcp/models"
 )
 
 func TestEnqueueWebhookMessage_ValidationErrors(t *testing.T) {
@@ -77,11 +80,12 @@ func TestEnqueueWebhookMessage_PersistsRow(t *testing.T) {
 	}
 }
 
-func TestDequeueNextPending(t *testing.T) {
+func TestClaimNextPendingWebhook(t *testing.T) {
 	store := setupTestDB(t)
 	now := time.Now().UTC()
 
-	// Out-of-window (before lower bound).
+	// Overdue but unexpired: it remains eligible after downtime. Its low
+	// priority means current messages still win first.
 	if _, err := store.EnqueueWebhookMessage(context.Background(),
 		"L1", "daily_motivation", "old", now.Add(-2*time.Hour), time.Time{}, 0,
 	); err != nil {
@@ -107,16 +111,16 @@ func TestDequeueNextPending(t *testing.T) {
 	); err != nil {
 		t.Fatalf("enqueue other kind: %v", err)
 	}
-	// Already-expired pending row in window: should NOT dequeue.
+	// Already-expired pending row in window: should NOT be claimed.
 	if _, err := store.EnqueueWebhookMessage(context.Background(),
 		"L1", "daily_motivation", "stale", now, now.Add(-1*time.Minute), 99,
 	); err != nil {
 		t.Fatalf("enqueue stale: %v", err)
 	}
 
-	got, err := store.DequeueNextPending(context.Background(), "L1", "daily_motivation", now, 30*time.Minute)
+	got, err := store.ClaimNextPendingWebhook(context.Background(), "L1", "daily_motivation", now, 30*time.Minute)
 	if err != nil {
-		t.Fatalf("dequeue: %v", err)
+		t.Fatalf("claim: %v", err)
 	}
 	if got == nil {
 		t.Fatal("expected a pending item, got nil")
@@ -130,11 +134,14 @@ func TestDequeueNextPending(t *testing.T) {
 	if got.Priority != 9 {
 		t.Errorf("priority = %d want 9", got.Priority)
 	}
-	if got.Status != "pending" {
-		t.Errorf("status = %q want 'pending'", got.Status)
+	if got.Status != "processing" {
+		t.Errorf("status = %q want 'processing'", got.Status)
+	}
+	if got.ClaimedAt == nil {
+		t.Error("claimed_at must be set on a claimed item")
 	}
 
-	// Mark high-priority as sent; next dequeue should pick the low-priority one.
+	// Mark high-priority as sent; the next claim should pick the low-priority one.
 	sentAt := time.Now().UTC()
 	if err := store.MarkWebhookSent(context.Background(), idHigh, "L1", sentAt); err != nil {
 		t.Fatalf("mark sent: %v", err)
@@ -150,16 +157,16 @@ func TestDequeueNextPending(t *testing.T) {
 		t.Errorf("status after MarkWebhookSent = %q want 'sent'", status)
 	}
 
-	got, err = store.DequeueNextPending(context.Background(), "L1", "daily_motivation", now, 30*time.Minute)
+	got, err = store.ClaimNextPendingWebhook(context.Background(), "L1", "daily_motivation", now, 30*time.Minute)
 	if err != nil {
-		t.Fatalf("dequeue after send: %v", err)
+		t.Fatalf("claim after send: %v", err)
 	}
 	if got == nil || got.ID != idLow {
 		t.Fatalf("expected idLow=%d, got %+v", idLow, got)
 	}
 
 	// Empty case for unknown learner returns (nil, nil).
-	got, err = store.DequeueNextPending(context.Background(), "L-missing", "daily_motivation", now, 30*time.Minute)
+	got, err = store.ClaimNextPendingWebhook(context.Background(), "L-missing", "daily_motivation", now, 30*time.Minute)
 	if err != nil {
 		t.Errorf("expected nil err on no rows, got %v", err)
 	}
@@ -168,12 +175,16 @@ func TestDequeueNextPending(t *testing.T) {
 	}
 }
 
-func TestMarkWebhookFailed(t *testing.T) {
+func TestMarkWebhookFailedDeadLettersAtMaxAttempts(t *testing.T) {
 	store := setupTestDB(t)
 	now := time.Now().UTC()
-	id, err := store.EnqueueWebhookMessage(context.Background(), "L1", "reminder", "retry", now, time.Time{}, 0)
+	id, err := store.EnqueueWebhookMessageWithMaxAttempts(context.Background(), "L1", "reminder", "retry", now, time.Time{}, 0, 1)
 	if err != nil {
 		t.Fatalf("enqueue: %v", err)
+	}
+	claimed, err := store.ClaimNextPendingWebhook(context.Background(), "L1", "reminder", now, time.Minute)
+	if err != nil || claimed == nil || claimed.ID != id {
+		t.Fatalf("claim before failure: item=%+v err=%v", claimed, err)
 	}
 	if err := store.MarkWebhookFailed(context.Background(), id, "L1"); err != nil {
 		t.Fatalf("MarkWebhookFailed: %v", err)
@@ -208,16 +219,28 @@ func TestMarkWebhookMutatorsRequireLearnerOwnership(t *testing.T) {
 		t.Fatalf("enqueue failed guard row: %v", err)
 	}
 
-	if err := store.MarkWebhookSent(context.Background(), idSent, "L1", now); err != nil {
-		t.Fatalf("MarkWebhookSent with wrong learner: %v", err)
+	first, err := store.ClaimNextPendingWebhook(context.Background(), "L2", "reminder", now, time.Minute)
+	if err != nil || first == nil {
+		t.Fatalf("claim first L2 row: item=%+v err=%v", first, err)
 	}
-	if err := store.MarkWebhookFailed(context.Background(), idFailed, "L1"); err != nil {
-		t.Fatalf("MarkWebhookFailed with wrong learner: %v", err)
+	second, err := store.ClaimNextPendingWebhook(context.Background(), "L2", "reminder", now, time.Minute)
+	if err != nil || second == nil {
+		t.Fatalf("claim second L2 row: item=%+v err=%v", second, err)
+	}
+	if first.ID == second.ID {
+		t.Fatal("claim returned the same row twice")
+	}
+
+	if err := store.MarkWebhookSent(context.Background(), idSent, "L1", now); err == nil {
+		t.Fatal("MarkWebhookSent with wrong learner should fail")
+	}
+	if err := store.MarkWebhookFailed(context.Background(), idFailed, "L1"); err == nil {
+		t.Fatal("MarkWebhookFailed with wrong learner should fail")
 	}
 
 	var sentGuardCount int
 	if err := store.root.QueryRow(
-		rb(store, `SELECT COUNT(*) FROM webhook_message_queue WHERE id = ? AND status = 'pending' AND sent_at IS NULL`),
+		rb(store, `SELECT COUNT(*) FROM webhook_message_queue WHERE id = ? AND status = 'processing' AND sent_at IS NULL`),
 		idSent,
 	).Scan(&sentGuardCount); err != nil {
 		t.Fatalf("scan sent guard row: %v", err)
@@ -232,8 +255,8 @@ func TestMarkWebhookMutatorsRequireLearnerOwnership(t *testing.T) {
 	).Scan(&failedStatus); err != nil {
 		t.Fatalf("scan failed guard row: %v", err)
 	}
-	if failedStatus != "pending" {
-		t.Fatalf("MarkWebhookFailed status = %q want 'pending'", failedStatus)
+	if failedStatus != "processing" {
+		t.Fatalf("MarkWebhookFailed status = %q want 'processing'", failedStatus)
 	}
 }
 
@@ -308,12 +331,16 @@ func TestGetPendingWebhookMessages(t *testing.T) {
 	if _, err := store.EnqueueWebhookMessage(context.Background(), "L1", "k", "b", now.Add(2*time.Hour), time.Time{}, 0); err != nil {
 		t.Fatalf("b: %v", err)
 	}
-	idC, err := store.EnqueueWebhookMessage(context.Background(), "L1", "k", "c", now.Add(3*time.Hour), time.Time{}, 0)
+	idC, err := store.EnqueueWebhookMessage(context.Background(), "L1", "k", "c", now.Add(3*time.Hour), time.Time{}, 99)
 	if err != nil {
 		t.Fatalf("c: %v", err)
 	}
-	// Mark one as sent: should not appear in pending list.
-	if err := store.MarkWebhookSent(context.Background(), idC, "L1", now); err != nil {
+	// Claim and mark one as sent: it should not appear in the pending list.
+	claimed, err := store.ClaimNextPendingWebhook(context.Background(), "L1", "k", now, 4*time.Hour)
+	if err != nil || claimed == nil || claimed.ID != idC {
+		t.Fatalf("claim c: item=%+v err=%v", claimed, err)
+	}
+	if err := store.MarkWebhookSent(context.Background(), claimed.ID, "L1", now); err != nil {
 		t.Fatalf("mark sent: %v", err)
 	}
 
@@ -333,5 +360,151 @@ func TestGetPendingWebhookMessages(t *testing.T) {
 	got, _ = store.GetPendingWebhookMessages(context.Background(), "L-other")
 	if len(got) != 0 {
 		t.Errorf("expected 0 for other learner, got %d", len(got))
+	}
+}
+
+func TestClaimNextPendingWebhook_ConcurrentSingleWinner(t *testing.T) {
+	store := setupTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if _, err := store.EnqueueWebhookMessage(ctx, "L1", "mirror_message", "one", now, time.Time{}, 0); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	const contenders = 12
+	start := make(chan struct{})
+	results := make(chan *webhookClaimResult, contenders)
+	var wg sync.WaitGroup
+	for i := 0; i < contenders; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			item, err := store.ClaimNextPendingWebhook(ctx, "L1", "mirror_message", now, time.Minute)
+			results <- &webhookClaimResult{item: item, err: err}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	winners := 0
+	for result := range results {
+		if result.err != nil {
+			t.Fatalf("concurrent claim: %v", result.err)
+		}
+		if result.item != nil {
+			winners++
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("successful claims = %d, want exactly 1", winners)
+	}
+}
+
+type webhookClaimResult struct {
+	item *models.WebhookQueueItem
+	err  error
+}
+
+func TestRequeueStaleWebhookClaims(t *testing.T) {
+	store := setupTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	claimedAt := now.Add(-20 * time.Minute)
+
+	idFresh, err := store.EnqueueWebhookMessage(ctx, "L1", "fresh", "retry me", claimedAt, now.Add(time.Hour), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idExpired, err := store.EnqueueWebhookMessage(ctx, "L1", "expired", "too late", claimedAt, now.Add(-time.Minute), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{"fresh", "expired"} {
+		item, claimErr := store.ClaimNextPendingWebhook(ctx, "L1", kind, claimedAt, time.Minute)
+		if claimErr != nil || item == nil {
+			t.Fatalf("claim %s: item=%+v err=%v", kind, item, claimErr)
+		}
+	}
+
+	n, err := store.RequeueStaleWebhookClaims(ctx, now.Add(-15*time.Minute), now)
+	if err != nil {
+		t.Fatalf("requeue: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("requeued rows = %d, want 2", n)
+	}
+
+	for id, want := range map[int64]string{idFresh: "pending", idExpired: "expired"} {
+		var status string
+		var claimed any
+		if err := store.root.QueryRow(
+			rb(store, `SELECT status, claimed_at FROM webhook_message_queue WHERE id = ?`), id,
+		).Scan(&status, &claimed); err != nil {
+			t.Fatal(err)
+		}
+		if status != want || claimed != nil {
+			t.Errorf("id=%d status=%q claimed_at=%v, want status=%q claimed_at=NULL", id, status, claimed, want)
+		}
+	}
+}
+
+func TestEnqueueWebhookMessageOncePerDay_ConcurrentSingleReservation(t *testing.T) {
+	store := setupTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	availability := models.DefaultAvailability("L1")
+	availability.NotificationConsent = true
+	availability.NotificationFrequency = models.NotificationFrequencyAsScheduled
+	if err := store.UpsertAvailability(ctx, availability); err != nil {
+		t.Fatalf("enable notification consent: %v", err)
+	}
+
+	const contenders = 12
+	start := make(chan struct{})
+	results := make(chan error, contenders)
+	wins := make(chan bool, contenders)
+	var wg sync.WaitGroup
+	for i := 0; i < contenders; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, enqueued, err := store.EnqueueWebhookMessageOncePerDay(
+				ctx, "L1", "mirror_message", "METACOG_MIRROR", "body",
+				now, now.Add(time.Hour), 0,
+			)
+			results <- err
+			wins <- enqueued
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	close(wins)
+
+	for err := range results {
+		if err != nil {
+			t.Fatalf("concurrent daily enqueue: %v", err)
+		}
+	}
+	winners := 0
+	for won := range wins {
+		if won {
+			winners++
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("daily enqueue winners = %d, want 1", winners)
+	}
+	for table, want := range map[string]int{"webhook_message_queue": 1, "scheduled_alerts": 1} {
+		var count int
+		if err := store.root.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != want {
+			t.Errorf("%s rows = %d, want %d", table, count, want)
+		}
 	}
 }

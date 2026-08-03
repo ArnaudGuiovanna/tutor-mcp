@@ -13,10 +13,11 @@
 //     active misconceptions, goal_relevance) and computes the mean
 //     binary entropy of P(L).
 //  3. Evaluates the FSM (pure call to EvaluatePhase).
-//  4. Persists the transition if any.
-//  5. Runs the Gate → ConceptSelector → ActionSelector pipeline
+//  4. Runs the Gate → ConceptSelector → ActionSelector pipeline
 //     with one-shot retry on NoFringe (the FSM is re-evaluated and
 //     the pipeline retried once).
+//  5. CAS-persists the settled transition only after the pipeline succeeds
+//     (unless PreviewOnly is requested).
 //  6. Returns a models.Activity with concept and prompt composed.
 //
 // The function takes a *db.Store (impure) but its sub-helpers
@@ -58,6 +59,11 @@ type OrchestratorInput struct {
 	// ReviewOnly biases the pipeline toward previously studied material
 	// while preserving Gate and ActionSelector constraints.
 	ReviewOnly bool
+	// PreviewOnly projects FSM transitions and selects an activity without
+	// persisting phase changes. It is intended for planning surfaces such as
+	// learning negotiation; only serving an activity should advance runtime
+	// phase state.
+	PreviewOnly bool
 	// Config is injected — typically NewDefaultPhaseConfig() in
 	// production. Tests can pass narrower configs to drive specific
 	// scenarios.
@@ -89,9 +95,9 @@ func Orchestrate(ctx context.Context, store storeport.Store, input OrchestratorI
 // phase the orchestrator settled on (after FSM transition and any
 // NoFringe fallback). This lets callers — notably get_next_activity —
 // observe the post-orchestrate phase without re-reading the domain
-// from the DB. The returned phase is the one the activity was
-// produced under and matches what was persisted by
-// store.UpdateDomainPhase during the call.
+// from the DB. Unless PreviewOnly is set, the returned phase is the one
+// persisted by store.CompareAndSwapDomainPhase during the call. PreviewOnly
+// returns the projected phase without changing storage.
 //
 // On error, the returned phase is the empty string ("").
 func OrchestrateWithPhase(ctx context.Context, store storeport.Store, input OrchestratorInput) (models.Activity, models.Phase, error) {
@@ -102,9 +108,25 @@ func OrchestrateWithPhase(ctx context.Context, store storeport.Store, input Orch
 	}
 
 	// 1. Read current phase ; NULL → INSTRUCTION fallback (OQ-2.1.b).
-	currentPhase := domain.Phase
+	storedPhase := domain.Phase
+	currentPhase := storedPhase
 	if currentPhase == "" {
 		currentPhase = models.PhaseInstruction
+	}
+	phaseWritePending := false
+	phaseEntryEntropy := 0.0
+	persistSettledPhase := func() error {
+		if input.PreviewOnly || !phaseWritePending {
+			return nil
+		}
+		if err := store.CompareAndSwapDomainPhase(
+			ctx, domain.ID, storedPhase, currentPhase, phaseEntryEntropy, input.Now,
+		); err != nil {
+			return err
+		}
+		storedPhase = currentPhase
+		phaseWritePending = false
+		return nil
 	}
 
 	// 2. Fetch observables (states, recent, misconceptions, alerts).
@@ -130,13 +152,10 @@ func OrchestrateWithPhase(ctx context.Context, store storeport.Store, input Orch
 			}
 			logger.Info("phase transition (FSM)",
 				"domain", domain.ID, "from", eval.From, "to", eval.To,
-				"entry_entropy", entryEntropy, "rationale", eval.Rationale)
-			if persistErr := store.UpdateDomainPhase(ctx, domain.ID, eval.To, entryEntropy, input.Now); persistErr != nil {
-				logger.Error("orchestrator: failed to persist phase transition",
-					"domain", domain.ID, "from", eval.From, "to", eval.To, "err", persistErr)
-				return models.Activity{}, "", fmt.Errorf("persist phase transition: %w", persistErr)
-			}
+				"entry_entropy", entryEntropy)
 			currentPhase = eval.To
+			phaseEntryEntropy = entryEntropy
+			phaseWritePending = true
 		}
 	}
 
@@ -154,6 +173,11 @@ func OrchestrateWithPhase(ctx context.Context, store storeport.Store, input Orch
 			return models.Activity{}, "", err
 		}
 		if !sig.IsNoFringe {
+			if persistErr := persistSettledPhase(); persistErr != nil {
+				logger.Error("orchestrator: failed to persist settled phase",
+					"domain", domain.ID, "to", currentPhase, "err", persistErr)
+				return models.Activity{}, "", fmt.Errorf("persist phase transition: %w", persistErr)
+			}
 			return activity, currentPhase, nil
 		}
 		if input.ReviewOnly {
@@ -170,12 +194,14 @@ func OrchestrateWithPhase(ctx context.Context, store storeport.Store, input Orch
 		}
 		logger.Info("phase fallback (NoFringe)",
 			"domain", domain.ID, "from", currentPhase, "to", next, "retry", retry)
-		if persistErr := store.UpdateDomainPhase(ctx, domain.ID, next, 0, input.Now); persistErr != nil {
-			logger.Error("orchestrator: failed to persist NoFringe fallback transition",
-				"domain", domain.ID, "from", currentPhase, "to", next, "err", persistErr)
-			return models.Activity{}, "", fmt.Errorf("persist fallback phase transition: %w", persistErr)
-		}
 		currentPhase = next
+		phaseEntryEntropy = 0
+		phaseWritePending = true
+	}
+	if persistErr := persistSettledPhase(); persistErr != nil {
+		logger.Error("orchestrator: failed to persist settled fallback phase",
+			"domain", domain.ID, "to", currentPhase, "err", persistErr)
+		return models.Activity{}, "", fmt.Errorf("persist fallback phase transition: %w", persistErr)
 	}
 
 	if input.ReviewOnly {
@@ -259,9 +285,15 @@ func fetchPipelineFixtures(ctx context.Context, store storeport.Store, domain *m
 	// fetch.
 	var diagItems int
 	if !domain.PhaseChangedAt.IsZero() {
-		diagItems, err = store.CountInteractionsSinceInDomain(ctx, input.LearnerID, domain.ID, domain.PhaseChangedAt)
+		qualifiedConcepts, queryErr := store.GetQualifiedDiagnosticConceptsSinceInDomain(ctx, input.LearnerID, domain.ID, domain.PhaseChangedAt)
+		err = queryErr
 		if err != nil {
-			return nil, fmt.Errorf("count diagnostic items: %w", err)
+			return nil, fmt.Errorf("get qualified diagnostic concept coverage: %w", err)
+		}
+		for _, concept := range qualifiedConcepts {
+			if domainConcepts[concept] {
+				diagItems++
+			}
 		}
 	}
 
@@ -285,7 +317,11 @@ func fetchPipelineFixtures(ctx context.Context, store storeport.Store, domain *m
 			return nil, fmt.Errorf("get session start: %w", sessionErr)
 		}
 	}
-	alerts := ComputeAlertsAt(domainStates, domainInteractions, sessionStart, input.Now)
+	alertEvidence, err := LoadMasteryAlertEvidence(ctx, store, input.LearnerID, domain.ID, domainStates)
+	if err != nil {
+		return nil, fmt.Errorf("load alert evidence: %w", err)
+	}
+	alerts := ComputeAlertsWithEvidenceAt(domainStates, domainInteractions, alertEvidence, sessionStart, input.Now)
 
 	return &pipelineFixtures{
 		StatesList:         domainStates,
@@ -303,7 +339,7 @@ func buildObservables(domain *models.Domain, pf *pipelineFixtures, cfg PhaseConf
 	meanH := MeanBinaryEntropyOverGraph(domain.Graph, pf.StatesByConcept)
 
 	bkt := algorithms.MasteryBKT()
-	mastered := 0
+	estimated := 0
 	totalGoalRelevant := 0
 	belowRetention := false
 
@@ -326,13 +362,13 @@ func buildObservables(domain *models.Domain, pf *pipelineFixtures, cfg PhaseConf
 
 		cs := pf.StatesByConcept[c]
 		if cs == nil {
-			// No state ≡ never practised ≡ not mastered, not
+			// No state ≡ never practised ≡ not estimated, not
 			// "below retention" (nothing to forget).
 			continue
 		}
 		if cs.PMastery >= bkt {
-			mastered++
-			// Even mastered concepts can be "below retention" —
+			estimated++
+			// Even high-estimate concepts can be "below retention" —
 			// the MAINTENANCE → INSTRUCTION trigger looks at
 			// retention drop on goal-relevants, mastered or not.
 		}
@@ -348,7 +384,8 @@ func buildObservables(domain *models.Domain, pf *pipelineFixtures, cfg PhaseConf
 		MeanEntropy:                meanH,
 		PhaseEntryEntropy:          domain.PhaseEntryEntropy,
 		DiagnosticItemsCount:       pf.DiagnosticItems,
-		MasteredGoalRelevant:       mastered,
+		DiagnosticCoverageTarget:   min(len(domain.Graph.Concepts), cfg.NDiagnosticMax),
+		EstimatedGoalRelevant:      estimated,
 		TotalGoalRelevant:          totalGoalRelevant,
 		GoalRelevantBelowRetention: belowRetention,
 	}
@@ -360,14 +397,16 @@ func buildObservables(domain *models.Domain, pf *pipelineFixtures, cfg PhaseConf
 func noFringeFallbackPhase(current models.Phase) models.Phase {
 	switch current {
 	case models.PhaseInstruction:
-		// Probably everything's mastered — try MAINTENANCE.
+		// Probably every estimate crossed the routing threshold — try
+		// MAINTENANCE without presenting this as demonstrated mastery.
 		return models.PhaseMaintenance
 	case models.PhaseMaintenance:
 		// Probably nothing mastered — back to INSTRUCTION.
 		return models.PhaseInstruction
 	case models.PhaseDiagnostic:
-		// Stuck at saturation — go to INSTRUCTION.
-		return models.PhaseInstruction
+		// Diagnostic coverage is an integrity gate. A temporary NoFringe must
+		// not bypass the required attempt-linked concept coverage.
+		return models.PhaseDiagnostic
 	default:
 		return current
 	}
@@ -406,9 +445,9 @@ func runPipeline(
 	if gateResult.EscapeAction != nil {
 		return composeEscapeActivity(*gateResult.EscapeAction), pipelineSignal{}, nil
 	}
-	if !input.ReviewOnly {
+	if !input.ReviewOnly && phase != models.PhaseDiagnostic {
 		if selection, ok := criticalForgettingBypassSelection(pf.Alerts, phase); ok {
-			action, err := selectActionForSelection(ctx, store, pf, selection, input)
+			action, err := selectActionForSelection(ctx, store, pf, selection, phase, input)
 			if err != nil {
 				return models.Activity{}, pipelineSignal{}, err
 			}
@@ -443,7 +482,7 @@ func runPipeline(
 	}
 
 	// ── [5] ActionSelector — on the chosen concept ────────────────
-	action, err := selectActionForSelection(ctx, store, pf, selection, input)
+	action, err := selectActionForSelection(ctx, store, pf, selection, phase, input)
 	if err != nil {
 		return models.Activity{}, pipelineSignal{}, err
 	}
@@ -453,10 +492,12 @@ func runPipeline(
 
 	// Honor Gate's ActionRestriction (defensive — [5] already
 	// prioritises misconception, so this is belt + braces).
-	if restrictions, ok := gateResult.ActionRestriction[selection.Concept]; ok && len(restrictions) > 0 {
-		if !containsActivityType(restrictions, action.Type) {
-			action.Type = restrictions[0]
-			action.Rationale = "gate ActionRestriction override : " + action.Rationale
+	if phase != models.PhaseDiagnostic {
+		if restrictions, ok := gateResult.ActionRestriction[selection.Concept]; ok && len(restrictions) > 0 {
+			if !containsActivityType(restrictions, action.Type) {
+				action.Type = restrictions[0]
+				action.Rationale = "gate ActionRestriction override : " + action.Rationale
+			}
 		}
 	}
 
@@ -494,6 +535,7 @@ func selectActionForSelection(
 	store storeport.Store,
 	pf *pipelineFixtures,
 	selection Selection,
+	phase models.Phase,
 	input OrchestratorInput,
 ) (Action, error) {
 	cs := pf.StatesByConcept[selection.Concept]
@@ -514,7 +556,7 @@ func selectActionForSelection(
 	if err != nil {
 		return Action{}, fmt.Errorf("action history: %w", err)
 	}
-	return SelectActionAt(selection.Concept, cs, mc, ActionHistory{
+	return SelectActionForPhaseAt(phase, selection.Concept, cs, mc, ActionHistory{
 		InteractionsAboveBKT:  history.InteractionsAboveBKT,
 		MasteryChallengeCount: history.MasteryChallengeCount,
 		FeynmanCount:          history.FeynmanCount,

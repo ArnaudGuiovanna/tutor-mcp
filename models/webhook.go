@@ -9,6 +9,12 @@ import (
 	"time"
 )
 
+// IsIntrusiveWebhookKind classifies proactive suggestions. Unknown kinds fail
+// closed as intrusive; daily recap is the sole informational exception.
+func IsIntrusiveWebhookKind(kind string) bool {
+	return strings.TrimSpace(kind) != WebhookKindDailyRecap
+}
+
 const WebhookBriefVersion = 1
 
 // WebhookBrief is the structured content contract for learner-facing pushes.

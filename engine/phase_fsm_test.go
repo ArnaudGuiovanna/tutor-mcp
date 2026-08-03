@@ -7,6 +7,7 @@ package engine
 import (
 	"math"
 	"testing"
+	"time"
 
 	"tutor-mcp/models"
 )
@@ -20,9 +21,10 @@ func defaultCfg() PhaseConfig {
 func TestEvaluatePhase_DiagnosticToInstruction_EntropyReductionMet(t *testing.T) {
 	cfg := defaultCfg() // DeltaH=0.2, NMax=8
 	obs := PhaseObservables{
-		MeanEntropy:          0.20,
-		PhaseEntryEntropy:    0.50, // delta = 0.30 >= 0.20
-		DiagnosticItemsCount: 3,
+		MeanEntropy:              0.20,
+		PhaseEntryEntropy:        0.50, // delta = 0.30 >= 0.20
+		DiagnosticItemsCount:     3,
+		DiagnosticCoverageTarget: 3,
 	}
 	got := EvaluatePhase(models.PhaseDiagnostic, obs, cfg)
 	if !got.Transitioned || got.To != models.PhaseInstruction {
@@ -33,9 +35,10 @@ func TestEvaluatePhase_DiagnosticToInstruction_EntropyReductionMet(t *testing.T)
 func TestEvaluatePhase_DiagnosticToInstruction_NItemsMaxReached(t *testing.T) {
 	cfg := defaultCfg()
 	obs := PhaseObservables{
-		MeanEntropy:          0.45,
-		PhaseEntryEntropy:    0.50, // delta = 0.05 < 0.20
-		DiagnosticItemsCount: 8,    // NMax hit
+		MeanEntropy:              0.45,
+		PhaseEntryEntropy:        0.50, // delta = 0.05 < 0.20
+		DiagnosticItemsCount:     8,
+		DiagnosticCoverageTarget: 8,
 	}
 	got := EvaluatePhase(models.PhaseDiagnostic, obs, cfg)
 	if !got.Transitioned || got.To != models.PhaseInstruction {
@@ -46,9 +49,10 @@ func TestEvaluatePhase_DiagnosticToInstruction_NItemsMaxReached(t *testing.T) {
 func TestEvaluatePhase_DiagnosticToInstruction_NeitherCondition_Stays(t *testing.T) {
 	cfg := defaultCfg()
 	obs := PhaseObservables{
-		MeanEntropy:          0.45,
-		PhaseEntryEntropy:    0.50, // delta = 0.05 < 0.20
-		DiagnosticItemsCount: 3,    // < NMax
+		MeanEntropy:              0.45,
+		PhaseEntryEntropy:        0.50, // delta = 0.05 < 0.20
+		DiagnosticItemsCount:     3,
+		DiagnosticCoverageTarget: 8,
 	}
 	got := EvaluatePhase(models.PhaseDiagnostic, obs, cfg)
 	if got.Transitioned {
@@ -56,13 +60,46 @@ func TestEvaluatePhase_DiagnosticToInstruction_NeitherCondition_Stays(t *testing
 	}
 }
 
+func TestEvaluatePhase_DiagnosticEntropyCannotBypassConceptCoverage(t *testing.T) {
+	obs := PhaseObservables{
+		MeanEntropy:              0.10,
+		PhaseEntryEntropy:        0.50,
+		DiagnosticItemsCount:     1,
+		DiagnosticCoverageTarget: 4,
+	}
+	got := EvaluatePhase(models.PhaseDiagnostic, obs, defaultCfg())
+	if got.Transitioned {
+		t.Fatalf("entropy from repeated/unqualified observations bypassed coverage: %+v", got)
+	}
+}
+
+func TestBuildObservablesDiagnosticCoverageTargetIsAllUpToEight(t *testing.T) {
+	cfg := defaultCfg()
+	pf := &pipelineFixtures{StatesByConcept: map[string]*models.ConceptState{}}
+	for _, tc := range []struct {
+		concepts int
+		want     int
+	}{{concepts: 3, want: 3}, {concepts: 8, want: 8}, {concepts: 12, want: 8}} {
+		graph := make([]string, tc.concepts)
+		for index := range graph {
+			graph[index] = string(rune('A' + index))
+		}
+		domain := &models.Domain{Graph: models.KnowledgeSpace{Concepts: graph}}
+		got := buildObservables(domain, pf, cfg, time.Time{})
+		if got.DiagnosticCoverageTarget != tc.want {
+			t.Fatalf("concepts=%d target=%d, want %d", tc.concepts, got.DiagnosticCoverageTarget, tc.want)
+		}
+	}
+}
+
 func TestEvaluatePhase_Diagnostic_NoSnapshot_OnlyNMaxApplies(t *testing.T) {
 	cfg := defaultCfg()
 	// PhaseEntryEntropy=0 → no snapshot (legacy/corrupted). Only NMax.
 	obs := PhaseObservables{
-		MeanEntropy:          0.10, // very low — would normally trigger entropy criterion
-		PhaseEntryEntropy:    0,
-		DiagnosticItemsCount: 3,
+		MeanEntropy:              0.10, // very low — would normally trigger entropy criterion
+		PhaseEntryEntropy:        0,
+		DiagnosticItemsCount:     3,
+		DiagnosticCoverageTarget: 8,
 	}
 	got := EvaluatePhase(models.PhaseDiagnostic, obs, cfg)
 	if got.Transitioned {
@@ -80,9 +117,10 @@ func TestEvaluatePhase_Diagnostic_NoSnapshot_OnlyNMaxApplies(t *testing.T) {
 func TestEvaluatePhase_Diagnostic_NaNSnapshot_TreatedAsAbsent(t *testing.T) {
 	cfg := defaultCfg()
 	obs := PhaseObservables{
-		MeanEntropy:          0.10,
-		PhaseEntryEntropy:    math.NaN(),
-		DiagnosticItemsCount: 5,
+		MeanEntropy:              0.10,
+		PhaseEntryEntropy:        math.NaN(),
+		DiagnosticItemsCount:     5,
+		DiagnosticCoverageTarget: 8,
 	}
 	got := EvaluatePhase(models.PhaseDiagnostic, obs, cfg)
 	if got.Transitioned {
@@ -95,8 +133,8 @@ func TestEvaluatePhase_Diagnostic_NaNSnapshot_TreatedAsAbsent(t *testing.T) {
 func TestEvaluatePhase_InstructionToMaintenance_AllGoalMastered(t *testing.T) {
 	cfg := defaultCfg()
 	obs := PhaseObservables{
-		MasteredGoalRelevant: 5,
-		TotalGoalRelevant:    5,
+		EstimatedGoalRelevant: 5,
+		TotalGoalRelevant:     5,
 	}
 	got := EvaluatePhase(models.PhaseInstruction, obs, cfg)
 	if !got.Transitioned || got.To != models.PhaseMaintenance {
@@ -107,8 +145,8 @@ func TestEvaluatePhase_InstructionToMaintenance_AllGoalMastered(t *testing.T) {
 func TestEvaluatePhase_InstructionToMaintenance_OneNotMastered_Stays(t *testing.T) {
 	cfg := defaultCfg()
 	obs := PhaseObservables{
-		MasteredGoalRelevant: 4,
-		TotalGoalRelevant:    5,
+		EstimatedGoalRelevant: 4,
+		TotalGoalRelevant:     5,
 	}
 	got := EvaluatePhase(models.PhaseInstruction, obs, cfg)
 	if got.Transitioned {
@@ -119,8 +157,8 @@ func TestEvaluatePhase_InstructionToMaintenance_OneNotMastered_Stays(t *testing.
 func TestEvaluatePhase_Instruction_NoGoalRelevantConcepts_Stays(t *testing.T) {
 	cfg := defaultCfg()
 	obs := PhaseObservables{
-		MasteredGoalRelevant: 0,
-		TotalGoalRelevant:    0, // empty set : no transition (would be 0/0 == 0 trivially true otherwise)
+		EstimatedGoalRelevant: 0,
+		TotalGoalRelevant:     0, // empty set : no transition (would be 0/0 == 0 trivially true otherwise)
 	}
 	got := EvaluatePhase(models.PhaseInstruction, obs, cfg)
 	if got.Transitioned {

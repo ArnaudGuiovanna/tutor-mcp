@@ -11,6 +11,7 @@ import (
 
 	"tutor-mcp/memory"
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -22,6 +23,8 @@ type ImplementationIntentionInput struct {
 }
 
 type RecordSessionCloseParams struct {
+	IdempotentMutationParams
+	SessionID               string                        `json:"session_id,omitempty" jsonschema:"durable learning session ID; omit to close the learner's active session"`
 	DomainID                string                        `json:"domain_id,omitempty" jsonschema:"domain ID (optional)"`
 	ImplementationIntention *ImplementationIntentionInput `json:"implementation_intention,omitempty" jsonschema:"optional if-then commitment (Gollwitzer)"`
 }
@@ -29,7 +32,7 @@ type RecordSessionCloseParams struct {
 func registerRecordSessionClose(server *mcp.Server, deps *Deps) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "record_session_close",
-		Description: "Close the session: optionally record an implementation intention (if-then) and return structured signals for composing the closing message (concepts practiced, wins, intent prompt, message queue filler).",
+		Description: "Idempotently close the durable learning session, optionally record its implementation intention (if-then), and return structured recap and summary signals.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params RecordSessionCloseParams) (*mcp.CallToolResult, any, error) {
 		learnerID, err := getLearnerID(ctx)
 		if err != nil {
@@ -37,8 +40,27 @@ func registerRecordSessionClose(server *mcp.Server, deps *Deps) {
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
 		}
+		if err := validateString("session_id", params.SessionID, maxShortLabelLen); err != nil {
+			r, _ := errorResult(err.Error())
+			return r, nil, nil
+		}
 
-		domain, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
+		var learningSession *models.LearningSession
+		if params.SessionID != "" {
+			learningSession, err = deps.Store.GetLearningSession(ctx, learnerID, params.SessionID)
+			if err != nil {
+				r, _ := errorResult("learning session not found")
+				return r, nil, nil
+			}
+		} else {
+			learningSession, _ = deps.Store.GetActiveLearningSession(ctx, learnerID)
+		}
+
+		domainID := params.DomainID
+		if domainID == "" && learningSession != nil {
+			domainID = learningSession.DomainID
+		}
+		domain, err := resolveDomain(ctx, deps.Store, learnerID, domainID)
 		if err != nil || domain == nil {
 			if params.DomainID != "" {
 				deps.Logger.Error("record_session_close: domain not found by id", "err", err, "learner", learnerID, "domain_id", params.DomainID)
@@ -49,11 +71,26 @@ func registerRecordSessionClose(server *mcp.Server, deps *Deps) {
 			r, _ := noActiveDomainResult()
 			return r, nil, nil
 		}
+		if learningSession == nil {
+			// Compatibility for clients that have not called
+			// start_learning_session yet: create the durable boundary now.
+			learningSession, err = deps.Store.OpenLearningSession(ctx, learnerID, domain.ID, "", time.Now().UTC())
+			if err != nil {
+				r, _ := safeErrorResult(deps.Logger, "failed to open learning session", err)
+				return r, nil, nil
+			}
+		}
+		if learningSession.DomainID != "" && learningSession.DomainID != domain.ID {
+			r, _ := errorResult("learning session belongs to another domain")
+			return r, nil, nil
+		}
 
-		// Persist the implementation intention if provided.
-		if params.ImplementationIntention != nil &&
+		// Validate the optional intention before any intention/close write.
+		hasIntention := params.ImplementationIntention != nil &&
 			params.ImplementationIntention.Trigger != "" &&
-			params.ImplementationIntention.Action != "" {
+			params.ImplementationIntention.Action != ""
+		var intentionScheduled time.Time
+		if hasIntention {
 			// String length caps (issue #82). Trigger / Action are user-authored
 			// if-then sentences that flow straight into implementation_intentions
 			// rows; without these guards a misbehaving caller could push multi-MB
@@ -74,37 +111,65 @@ func registerRecordSessionClose(server *mcp.Server, deps *Deps) {
 					return r, nil, nil
 				}
 			}
-			var scheduled time.Time
 			if params.ImplementationIntention.ScheduledFor != "" {
 				parsed, parseErr := time.Parse(time.RFC3339, params.ImplementationIntention.ScheduledFor)
 				if parseErr != nil {
 					r, _ := errorResult("implementation_intention.scheduled_for must be RFC3339")
 					return r, nil, nil
 				}
-				scheduled = parsed
-			}
-			if _, err := deps.Store.InsertImplementationIntention(ctx,
-				learnerID, domain.ID,
-				params.ImplementationIntention.Trigger,
-				params.ImplementationIntention.Action,
-				scheduled,
-			); err != nil {
-				r, _ := safeErrorResult(deps.Logger, "failed to record implementation intention", err)
-				return r, nil, nil
+				intentionScheduled = parsed
 			}
 		}
 
-		recap, err := buildRecapBrief(ctx, deps, learnerID, domain)
+		// Build every fallible read-side enrichment before the atomic write.
+		// If recap construction fails, neither an intention nor a closed session
+		// is left behind for the idempotency middleware to misclassify.
+		recap, err := buildRecapBrief(ctx, deps, learnerID, learningSession.ID, domain)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to build session recap", err)
 			return r, nil, nil
 		}
-		payload := map[string]any{"recap_brief": recap}
+		if hasIntention {
+			// The intention is committed immediately below in the same transaction
+			// as the close, so the response must not ask for another one merely
+			// because the pre-write recap query could not see it yet.
+			recap.PromptForImplementationIntent = false
+		}
+		var closedSession *models.LearningSession
+		err = deps.Store.WithTx(ctx, func(tx storeport.Store) error {
+			if hasIntention {
+				if _, err := tx.InsertImplementationIntentionForSession(ctx,
+					learnerID, domain.ID, learningSession.ID,
+					params.ImplementationIntention.Trigger,
+					params.ImplementationIntention.Action,
+					intentionScheduled,
+				); err != nil {
+					return fmt.Errorf("record implementation intention: %w", err)
+				}
+			}
+			var closeErr error
+			closedSession, closeErr = tx.CloseLearningSession(ctx, learnerID, learningSession.ID, time.Now().UTC())
+			if closeErr != nil {
+				return fmt.Errorf("close learning session: %w", closeErr)
+			}
+			return nil
+		})
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to finalize learning session", err)
+			return r, nil, nil
+		}
+		payload := map[string]any{
+			"recap_brief": recap,
+			"session":     closedSession,
+			"session_id":  closedSession.ID,
+		}
 		if memory.Enabled() {
 			payload["summary_request"] = map[string]any{
-				"template": memory.SessionSummaryTemplate,
+				"session_id": learningSession.ID,
+				"domain_id":  domain.ID,
+				"template":   memory.SessionSummaryTemplate,
 				"expected_calls": []string{
-					"update_learner_memory(scope='session', ...)",
+					"update_learner_memory(scope='session', session_id='" + learningSession.ID + "', ...)",
 					"optionally update_learner_memory(scope='concept', ...)",
 					"optionally update_learner_memory(scope='memory_pending', ...)",
 				},
@@ -116,15 +181,29 @@ func registerRecordSessionClose(server *mcp.Server, deps *Deps) {
 }
 
 // buildRecapBrief produces session-close signals for Claude.
-func buildRecapBrief(ctx context.Context, deps *Deps, learnerID string, domain *models.Domain) (*models.RecapBrief, error) {
+func buildRecapBrief(ctx context.Context, deps *Deps, learnerID, sessionID string, domain *models.Domain) (*models.RecapBrief, error) {
 	domainSet := make(map[string]bool, len(domain.Graph.Concepts))
 	for _, c := range domain.Graph.Concepts {
 		domainSet[c] = true
 	}
 
-	sessionInteractions, err := deps.Store.GetSessionInteractionsInDomain(ctx, learnerID, domain.ID)
+	sessionInteractions, err := deps.Store.GetInteractionsBySessionInDomain(ctx, learnerID, sessionID, domain.ID)
 	if err != nil {
 		return nil, fmt.Errorf("load session interactions: %w", err)
+	}
+	if len(sessionInteractions) == 0 {
+		// Legacy compatibility: pre-migration interactions have no session_id.
+		// They may contribute to the recap, but explicit rows from prior closed
+		// sessions are never pulled into the new durable session.
+		legacy, legacyErr := deps.Store.GetInteractionsSinceInDomain(ctx, learnerID, domain.ID, time.Now().UTC().Add(-2*time.Hour))
+		if legacyErr != nil {
+			return nil, fmt.Errorf("load legacy session interactions: %w", legacyErr)
+		}
+		for _, interaction := range legacy {
+			if interaction.SessionID == "" {
+				sessionInteractions = append(sessionInteractions, interaction)
+			}
+		}
 	}
 
 	practicedSet := map[string]bool{}

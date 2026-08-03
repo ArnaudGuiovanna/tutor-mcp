@@ -342,7 +342,8 @@ func masteryDeltaFinding(snapshot *models.PedagogicalSnapshot, before, after, de
 
 func replayRequiresRubricEvidence(activityType string) bool {
 	switch models.ActivityType(activityType) {
-	case models.ActivityRecall,
+	case models.ActivityDiagnosticAssessment,
+		models.ActivityRecall,
 		models.ActivityPractice,
 		models.ActivityMasteryChallenge,
 		models.ActivityDebuggingCase,

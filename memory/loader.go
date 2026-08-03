@@ -56,6 +56,15 @@ type OLMView struct {
 }
 
 func LoadContext(learnerID, focusConcept string, olmSnapshot *OLMView, alerts []models.Alert) (*EpisodicContext, error) {
+	return LoadContextForDomain(learnerID, "", focusConcept, olmSnapshot, alerts)
+}
+
+// LoadContextForDomain is the runtime-safe context loader. Domain-scoped calls
+// include only sessions whose frontmatter names that exact domain and concept
+// notes stored under that domain. Learner-global legacy narratives and archives
+// remain available through LoadContext for maintenance/export, but are not fed
+// into activity generation where homonymous concepts could contaminate it.
+func LoadContextForDomain(learnerID, domainID, focusConcept string, olmSnapshot *OLMView, alerts []models.Alert) (*EpisodicContext, error) {
 	if !Enabled() {
 		return &EpisodicContext{LoadedAt: time.Now().UTC()}, nil
 	}
@@ -68,20 +77,26 @@ func LoadContext(learnerID, focusConcept string, olmSnapshot *OLMView, alerts []
 	}
 
 	var err error
-	ec.LearnerMemory, err = Read(learnerID, ScopeMemory, "")
-	if err != nil {
-		return nil, err
-	}
-	ec.memoryModifiedAt = modifiedAt(learnerID, ScopeMemory, "")
+	if domainID == "" {
+		ec.LearnerMemory, err = Read(learnerID, ScopeMemory, "")
+		if err != nil {
+			return nil, err
+		}
+		ec.memoryModifiedAt = modifiedAt(learnerID, ScopeMemory, "")
 
-	ec.PendingMemory, err = Read(learnerID, ScopeMemoryPending, "")
-	if err != nil {
-		return nil, err
+		ec.PendingMemory, err = Read(learnerID, ScopeMemoryPending, "")
+		if err != nil {
+			return nil, err
+		}
+		ec.pendingModifiedAt = modifiedAt(learnerID, ScopeMemoryPending, "")
 	}
-	ec.pendingModifiedAt = modifiedAt(learnerID, ScopeMemoryPending, "")
 
 	if focusConcept != "" {
-		ec.ConceptNotes, err = Read(learnerID, ScopeConcept, focusConcept)
+		if domainID == "" {
+			ec.ConceptNotes, err = Read(learnerID, ScopeConcept, focusConcept)
+		} else {
+			ec.ConceptNotes, err = ReadDomainConcept(learnerID, domainID, focusConcept)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -90,9 +105,6 @@ func LoadContext(learnerID, focusConcept string, olmSnapshot *OLMView, alerts []
 	sessions, err := ListSessions(learnerID)
 	if err != nil {
 		return nil, err
-	}
-	if len(sessions) > 3 {
-		sessions = sessions[:3]
 	}
 	for _, ts := range sessions {
 		raw, err := Read(learnerID, ScopeSession, ts.Format(time.RFC3339))
@@ -103,22 +115,30 @@ func LoadContext(learnerID, focusConcept string, olmSnapshot *OLMView, alerts []
 		if err != nil {
 			return nil, err
 		}
+		if domainID != "" && strings.TrimSpace(fmt.Sprint(payload.Frontmatter["domain_id"])) != domainID {
+			continue
+		}
 		ec.RecentSessions = append(ec.RecentSessions, payload)
+		if len(ec.RecentSessions) == 3 {
+			break
+		}
 	}
 
-	archives, err := ListArchives(learnerID)
-	if err != nil {
-		return nil, err
-	}
-	if len(archives) > 2 {
-		archives = archives[:2]
-	}
-	for _, period := range archives {
-		body, err := Read(learnerID, ScopeArchive, period)
+	if domainID == "" {
+		archives, err := ListArchives(learnerID)
 		if err != nil {
 			return nil, err
 		}
-		ec.RecentArchives = append(ec.RecentArchives, ArchivePayload{Period: period, Body: body})
+		if len(archives) > 2 {
+			archives = archives[:2]
+		}
+		for _, period := range archives {
+			body, err := Read(learnerID, ScopeArchive, period)
+			if err != nil {
+				return nil, err
+			}
+			ec.RecentArchives = append(ec.RecentArchives, ArchivePayload{Period: period, Body: body})
+		}
 	}
 
 	ec.OLMInconsistencies = DetectOLMInconsistencies(olmSnapshot, alerts)

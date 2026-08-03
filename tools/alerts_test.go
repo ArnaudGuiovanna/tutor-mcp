@@ -49,11 +49,10 @@ func TestGetPendingAlerts_FilterByDomain(t *testing.T) {
 	}
 }
 
-// orphanMasteryState builds a ConceptState shaped to trigger the
-// MASTERY_READY branch of engine.ComputeAlerts (CardState != "new" and
-// PMastery >= MasteryBKT()=0.85). Used to assert the orphan-filter
-// contract: this state should be skipped when the concept is not in any
-// active domain.
+// orphanMasteryState builds the high-estimate part of a MASTERY_READY fixture.
+// Readiness additionally requires retained, diverse evidence; tests that need
+// a positive alert seed that evidence separately. Orphan filtering must happen
+// before either component can influence the learner-facing alert stream.
 func orphanMasteryState(learnerID, concept string) *models.ConceptState {
 	now := time.Now().UTC()
 	cs := models.NewConceptState(learnerID, concept)
@@ -182,19 +181,20 @@ func TestMergeMetacognitiveAlerts_Dedupes(t *testing.T) {
 
 // Reproducer for issue #29: when the learner has multiple non-archived
 // domains and no domain_id filter is given, alerts must be computed only
-// over the union of concepts across active domains — orphan concepts
-// (e.g. survivors of a deleted domain) must be filtered out. Also: alerts
-// on concepts belonging to *any* active domain must surface (i.e. the
+// over the union of concepts across active domains — both legacy unowned rows
+// and evidence preserved under a domain tombstone must be filtered out. Also:
+// alerts on concepts belonging to *any* active domain must surface (i.e. the
 // handler shouldn't pick a single arbitrary domain in this case).
-func TestGetPendingAlerts_MultipleActiveDomains_FiltersOutOrphan(t *testing.T) {
+func TestGetPendingAlerts_MultipleActiveDomains_FiltersOutOrphanAndTombstone(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	// Two active domains with disjoint concept sets. D2 is created last,
 	// so a single-domain fallback in resolveDomain would only see {x,y}
 	// and silently drop a legitimate alert on "a".
-	if _, err := store.CreateDomain(context.Background(), "L_owner", "d1", "", models.KnowledgeSpace{
+	d1, err := store.CreateDomain(context.Background(), "L_owner", "d1", "", models.KnowledgeSpace{
 		Concepts:      []string{"a", "b"},
 		Prerequisites: map[string][]string{"b": {"a"}},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("create d1: %v", err)
 	}
 	if _, err := store.CreateDomain(context.Background(), "L_owner", "d2", "", models.KnowledgeSpace{
@@ -203,14 +203,57 @@ func TestGetPendingAlerts_MultipleActiveDomains_FiltersOutOrphan(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create d2: %v", err)
 	}
+	retired, err := store.CreateDomain(context.Background(), "L_owner", "retired-domain", "", models.KnowledgeSpace{
+		Concepts: []string{"retired"},
+	})
+	if err != nil {
+		t.Fatalf("create retired domain: %v", err)
+	}
 
-	// Seed a MASTERY_READY-trigger state on "a" (D1) and on "ghost"
-	// (no domain). Only "a" should surface.
-	if err := store.InsertConceptStateIfNotExists(context.Background(), orphanMasteryState("L_owner", "a")); err != nil {
+	// Seed readiness states with explicit ownership for active D1 and the future
+	// tombstone, plus a legacy unowned "ghost" row. Only D1 may surface.
+	aState := orphanMasteryState("L_owner", "a")
+	aState.DomainID = d1.ID
+	if err := store.InsertConceptStateIfNotExists(context.Background(), aState); err != nil {
 		t.Fatalf("seed a: %v", err)
+	}
+	retiredState := orphanMasteryState("L_owner", "retired")
+	retiredState.DomainID = retired.ID
+	if err := store.InsertConceptStateIfNotExists(context.Background(), retiredState); err != nil {
+		t.Fatalf("seed retired: %v", err)
 	}
 	if err := store.InsertConceptStateIfNotExists(context.Background(), orphanMasteryState("L_owner", "ghost")); err != nil {
 		t.Fatalf("seed ghost: %v", err)
+	}
+	// MASTERY_READY is challenge readiness, not a BKT threshold alias. Seed
+	// retained, temporally separated and activity-diverse evidence for both
+	// owned concepts. Tombstoning must preserve the retired evidence for audit
+	// while removing it from active routing.
+	now := time.Now().UTC()
+	aRetentionAttempt := seedEvaluatedAssessmentFixture(t, store, "L_owner", d1.ID, "a", models.ActivityRecall, true, now.Add(-time.Hour), "")
+	retiredRetentionAttempt := seedEvaluatedAssessmentFixture(t, store, "L_owner", retired.ID, "retired", models.ActivityRecall, true, now.Add(-time.Hour), "")
+	for _, interaction := range []*models.Interaction{
+		{LearnerID: "L_owner", DomainID: d1.ID, Concept: "a", ActivityType: string(models.ActivityPractice), Success: true, CreatedAt: now.Add(-48 * time.Hour)},
+		{LearnerID: "L_owner", DomainID: d1.ID, Concept: "a", ActivityType: string(models.ActivityFeynmanPrompt), Success: true, CreatedAt: now.Add(-2 * time.Hour)},
+		{LearnerID: "L_owner", DomainID: d1.ID, AssessmentAttemptID: aRetentionAttempt, Concept: "a", ActivityType: string(models.ActivityRecall), Success: true, CreatedAt: now.Add(-time.Hour)},
+		{LearnerID: "L_owner", DomainID: retired.ID, Concept: "retired", ActivityType: string(models.ActivityPractice), Success: true, CreatedAt: now.Add(-48 * time.Hour)},
+		{LearnerID: "L_owner", DomainID: retired.ID, Concept: "retired", ActivityType: string(models.ActivityFeynmanPrompt), Success: true, CreatedAt: now.Add(-2 * time.Hour)},
+		{LearnerID: "L_owner", DomainID: retired.ID, AssessmentAttemptID: retiredRetentionAttempt, Concept: "retired", ActivityType: string(models.ActivityRecall), Success: true, CreatedAt: now.Add(-time.Hour)},
+	} {
+		createdAt := interaction.CreatedAt
+		if err := store.CreateInteraction(context.Background(), interaction); err != nil {
+			t.Fatalf("seed mastery-ready evidence: %v", err)
+		}
+		// CreateInteraction assigns the production clock. Restore the fixture's
+		// explicit timestamps so this test actually contains a delayed recall.
+		if _, err := store.RawDB().ExecContext(context.Background(),
+			`UPDATE interactions SET created_at = ? WHERE id = ?`, createdAt, interaction.ID,
+		); err != nil {
+			t.Fatalf("date mastery-ready evidence: %v", err)
+		}
+	}
+	if err := store.DeleteDomain(context.Background(), retired.ID, "L_owner"); err != nil {
+		t.Fatalf("tombstone retired domain: %v", err)
 	}
 
 	// Call with no domain_id — handler should aggregate concepts from
@@ -230,6 +273,9 @@ func TestGetPendingAlerts_MultipleActiveDomains_FiltersOutOrphan(t *testing.T) {
 		}
 		if m["concept"] == "ghost" {
 			t.Fatalf("orphan concept 'ghost' surfaced in alerts: %v", alerts)
+		}
+		if m["concept"] == "retired" {
+			t.Fatalf("tombstoned concept 'retired' surfaced in alerts: %v", alerts)
 		}
 		if m["concept"] == "a" {
 			sawA = true

@@ -57,6 +57,26 @@ func TestVersionLine(t *testing.T) {
 	}
 }
 
+func TestPrivacySafeLogAttrPseudonymizesLearningIdentifiers(t *testing.T) {
+	var out bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&out, &slog.HandlerOptions{
+		ReplaceAttr: newPrivacySafeLogAttr(),
+	}))
+	logger.Info("interaction", "learner", "learner-secret", "concept", "sensitive-topic", "status", "ok")
+	logged := out.String()
+	for _, secret := range []string{"learner-secret", "sensitive-topic"} {
+		if strings.Contains(logged, secret) {
+			t.Fatalf("sensitive structured attribute leaked in log: %q", logged)
+		}
+	}
+	if !strings.Contains(logged, "learner=anon:") || !strings.Contains(logged, "concept=anon:") {
+		t.Fatalf("expected correlatable pseudonyms, got %q", logged)
+	}
+	if !strings.Contains(logged, "status=ok") {
+		t.Fatalf("non-sensitive operational attribute was changed: %q", logged)
+	}
+}
+
 type streamingTestWriter struct {
 	header        http.Header
 	status        int

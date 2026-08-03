@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -124,6 +125,55 @@ func TestValidateAuthorizationParams(t *testing.T) {
 					tc.responseType, tc.scope, err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestValidateEmail(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		email   string
+		wantErr bool
+	}{
+		{name: "ordinary", email: "learner@example.com"},
+		{name: "plus tag", email: "learner+math@example.co.uk"},
+		{name: "missing at", email: "learner.example.com", wantErr: true},
+		{name: "display name rejected", email: "Learner <learner@example.com>", wantErr: true},
+		{name: "newline rejected", email: "learner@example.com\nBcc:x@example.com", wantErr: true},
+		{name: "over max", email: strings.Repeat("a", emailMaxLen) + "@x", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateEmail(tc.email)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validateEmail(%q) error = %v, wantErr=%v", tc.email, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestAuthorizePost_BodyTooLarge(t *testing.T) {
+	s, _ := newTestServer(t)
+	body := "padding=" + strings.Repeat("x", int(authorizeBodyLimitBytes))
+	req := httptest.NewRequest(http.MethodPost, "/authorize", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	// Exercise MaxBytesReader rather than only the Content-Length fast path.
+	req.ContentLength = -1
+	rec := httptest.NewRecorder()
+	s.HandleAuthorizePost(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413; body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestToken_BodyTooLarge(t *testing.T) {
+	s, _ := newTestServer(t)
+	body := "padding=" + strings.Repeat("x", int(tokenBodyLimitBytes))
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.ContentLength = -1
+	rec := httptest.NewRecorder()
+	s.HandleToken(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413; body=%q", rec.Code, rec.Body.String())
 	}
 }
 
@@ -274,6 +324,86 @@ func TestAuthorizePost_CSRFMismatch(t *testing.T) {
 	}
 }
 
+func TestAuthorizePost_RotatesCSRFAndRejectsReplay(t *testing.T) {
+	s, store := newTestServer(t)
+	seedClient(t, store, "cid", "https://good.example/cb")
+	seedLearner(t, store, "u@example.com", "correct-password")
+
+	form := url.Values{}
+	form.Set("csrf_token", "one-time-token")
+	form.Set("mode", "login")
+	form.Set("client_id", "cid")
+	form.Set("redirect_uri", "https://good.example/cb")
+	form.Set("response_type", "code")
+	form.Set("code_challenge", "abc")
+	form.Set("code_challenge_method", "S256")
+	form.Set("email", "u@example.com")
+	form.Set("password", "wrong-password")
+
+	post := func(cookieValue string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/authorize", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(&http.Cookie{Name: "csrf_token", Value: cookieValue})
+		rec := httptest.NewRecorder()
+		s.HandleAuthorizePost(rec, req)
+		return rec
+	}
+
+	first := post("one-time-token")
+	if first.Code != http.StatusUnauthorized {
+		t.Fatalf("first status = %d, want 401; body=%q", first.Code, first.Body.String())
+	}
+	var rotated *http.Cookie
+	for _, cookie := range first.Result().Cookies() {
+		if cookie.Name == "csrf_token" && cookie.MaxAge > 0 {
+			rotated = cookie
+		}
+	}
+	if rotated == nil || rotated.Value == "one-time-token" || !strings.Contains(first.Body.String(), rotated.Value) {
+		t.Fatalf("CSRF token was not rotated consistently: cookie=%+v", rotated)
+	}
+
+	if replay := post("one-time-token"); replay.Code != http.StatusForbidden {
+		t.Fatalf("replay status = %d, want 403; body=%q", replay.Code, replay.Body.String())
+	}
+}
+
+func TestAuthorizePost_SuccessClearsCSRFCookie(t *testing.T) {
+	s, store := newTestServer(t)
+	seedClient(t, store, "cid", "https://good.example/cb")
+	seedLearner(t, store, "u-success@example.com", "correct-password")
+
+	form := url.Values{}
+	form.Set("csrf_token", "success-token")
+	form.Set("mode", "login")
+	form.Set("client_id", "cid")
+	form.Set("redirect_uri", "https://good.example/cb")
+	form.Set("response_type", "code")
+	form.Set("code_challenge", "abc")
+	form.Set("code_challenge_method", "S256")
+	form.Set("email", "u-success@example.com")
+	form.Set("password", "correct-password")
+	form.Set("approve_client", "yes")
+
+	req := httptest.NewRequest(http.MethodPost, "/authorize", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "success-token"})
+	rec := httptest.NewRecorder()
+	s.HandleAuthorizePost(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302; body=%q", rec.Code, rec.Body.String())
+	}
+	cleared := false
+	for _, cookie := range rec.Result().Cookies() {
+		if cookie.Name == "csrf_token" && cookie.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Fatal("successful authorization did not clear the CSRF cookie")
+	}
+}
+
 func TestAuthorizeGet_RendersStrictCSPWithoutInlineHandlers(t *testing.T) {
 	s, store := newTestServer(t)
 	seedClient(t, store, "cid", "https://good.example/cb")
@@ -356,6 +486,39 @@ func TestAuthorizePost_CSRFMatch_InvalidCreds(t *testing.T) {
 	}
 }
 
+func TestAuthorizePost_InvalidEmailRejectedBeforePersistence(t *testing.T) {
+	s, store := newTestServer(t)
+	seedClient(t, store, "cid", "https://good.example/cb")
+
+	form := url.Values{}
+	form.Set("csrf_token", "matching-token")
+	form.Set("mode", "register")
+	form.Set("client_id", "cid")
+	form.Set("redirect_uri", "https://good.example/cb")
+	form.Set("response_type", "code")
+	form.Set("code_challenge", "abc")
+	form.Set("code_challenge_method", "S256")
+	form.Set("email", "not-an-email")
+	form.Set("password", "long-enough-password")
+	form.Set("password_confirm", "long-enough-password")
+
+	req := httptest.NewRequest(http.MethodPost, "/authorize", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "matching-token"})
+	rec := httptest.NewRecorder()
+	s.HandleAuthorizePost(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401; body=%q", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "valid email") {
+		t.Fatalf("validation message missing: %q", rec.Body.String())
+	}
+	if _, err := store.GetLearnerByEmail(context.Background(), "not-an-email"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("invalid email was persisted: %v", err)
+	}
+}
+
 // ─── refresh_token grant: client authentication required (issue #30) ────────
 
 // TestRefreshTokenGrant_RejectsMissingClientID locks down the RFC 6749 §6
@@ -367,7 +530,7 @@ func TestAuthorizePost_CSRFMatch_InvalidCreds(t *testing.T) {
 func TestRefreshTokenGrant_RejectsMissingClientID(t *testing.T) {
 	s, store := newTestServer(t)
 	learnerID := seedLearner(t, store, "rt-noclient@example.com", "pw")
-	rt, err := store.CreateRefreshToken(context.Background(), learnerID, "")
+	rt, err := store.CreateRefreshToken(context.Background(), learnerID, "client-A")
 	if err != nil {
 		t.Fatalf("seed refresh token: %v", err)
 	}
@@ -547,6 +710,7 @@ func TestTokenEndpoint_ConfidentialClientWithoutPKCE_Issue114(t *testing.T) {
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
+	form.Set("redirect_uri", redirectURI)
 	tokReq := httptest.NewRequest("POST", "/token", strings.NewReader(form.Encode()))
 	tokReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	tokReq.SetBasicAuth(clientID, clientSec)
@@ -581,6 +745,7 @@ func TestTokenEndpoint_ConfidentialClientWithoutPKCE_Issue114(t *testing.T) {
 	form2 := url.Values{}
 	form2.Set("grant_type", "authorization_code")
 	form2.Set("code", code)
+	form2.Set("redirect_uri", redirectURI)
 	tokReq2 := httptest.NewRequest("POST", "/token", strings.NewReader(form2.Encode()))
 	tokReq2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	tokReq2.SetBasicAuth(clientID, clientSec)
@@ -614,6 +779,7 @@ func TestTokenEndpoint_ConfidentialClientWithoutPKCE_Issue114_ClientSecretPost(t
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
+	form.Set("redirect_uri", redirectURI)
 	form.Set("client_id", clientID)
 	form.Set("client_secret", clientSec)
 	tokReq := httptest.NewRequest("POST", "/token", strings.NewReader(form.Encode()))
@@ -654,6 +820,7 @@ func TestTokenEndpoint_ConfidentialClientWithPKCE_StillEnforced(t *testing.T) {
 		form.Set("grant_type", "authorization_code")
 		form.Set("code", code)
 		form.Set("code_verifier", verifier)
+		form.Set("redirect_uri", redirectURI)
 		tokReq := httptest.NewRequest("POST", "/token", strings.NewReader(form.Encode()))
 		tokReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		tokReq.SetBasicAuth(clientID, clientSec)
@@ -672,6 +839,7 @@ func TestTokenEndpoint_ConfidentialClientWithPKCE_StillEnforced(t *testing.T) {
 		form.Set("grant_type", "authorization_code")
 		form.Set("code", code)
 		form.Set("code_verifier", "wrong-verifier-aaaaaaaaaaaaaaaaaaaaaaaaa")
+		form.Set("redirect_uri", redirectURI)
 		tokReq := httptest.NewRequest("POST", "/token", strings.NewReader(form.Encode()))
 		tokReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		tokReq.SetBasicAuth(clientID, clientSec)
@@ -692,6 +860,7 @@ func TestTokenEndpoint_ConfidentialClientWithPKCE_StillEnforced(t *testing.T) {
 		form := url.Values{}
 		form.Set("grant_type", "authorization_code")
 		form.Set("code", code)
+		form.Set("redirect_uri", redirectURI)
 		// No code_verifier.
 		tokReq := httptest.NewRequest("POST", "/token", strings.NewReader(form.Encode()))
 		tokReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -727,7 +896,7 @@ func TestTokenEndpoint_PublicClientStillRequiresPKCE(t *testing.T) {
 	// Direct seed: empty code_challenge for a public client. /token must
 	// still require a verifier (or otherwise refuse) because public clients
 	// have no secret to authenticate with.
-	if err := store.CreateAuthCode(context.Background(), "pub-code-114", learner, "", "cid-pub", time.Now().Add(time.Hour)); err != nil {
+	if err := store.CreateAuthCodeWithBinding(context.Background(), "pub-code-114", learner, "", "", "cid-pub", "", time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("seed auth code: %v", err)
 	}
 

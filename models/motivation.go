@@ -112,26 +112,39 @@ type AffectMeta struct {
 // ProgressNarrative is attached to get_learner_context responses. Claude uses it
 // to open the session with a short (1-2 sentence) trajectory story.
 type ProgressNarrative struct {
-	MasteryTrajectory  []ConceptDelta `json:"mastery_trajectory"`
-	SessionStreak      int            `json:"session_streak"`
-	AutonomyTrend      string         `json:"autonomy_trend"` // rising | stable | declining
-	MilestonesThisWeek []string       `json:"milestones_this_week"`
-	DormancyImminent   bool           `json:"dormancy_imminent"` // true if last_session > 24h ago
-	Instruction        string         `json:"instruction"`
+	EstimateTrajectory     []ConceptDelta `json:"estimate_trajectory"`
+	SessionStreak          int            `json:"session_streak"`
+	AutonomyTrend          string         `json:"autonomy_trend"` // rising | stable | declining
+	EstimateMilestonesWeek []string       `json:"estimate_milestones_this_week"`
+	DormancyImminent       bool           `json:"dormancy_imminent"` // true if last_session > 24h ago
+	Instruction            string         `json:"instruction"`
 }
 
 // ImplementationIntention is a Gollwitzer-style if-then commitment captured at
 // session close ("when X happens, I will Y").
 type ImplementationIntention struct {
-	ID           int64      `json:"id"`
-	LearnerID    string     `json:"learner_id"`
-	DomainID     string     `json:"domain_id"`
-	Trigger      string     `json:"trigger"`
-	Action       string     `json:"action"`
+	ID        int64  `json:"id"`
+	LearnerID string `json:"learner_id"`
+	DomainID  string `json:"domain_id"`
+	SessionID string `json:"session_id,omitempty"`
+	Trigger   string `json:"trigger"`
+	Action    string `json:"action"`
+	Status    string `json:"status"`
+	// Honored is retained for API compatibility with legacy consumers. New
+	// clients should use Status, which also represents cancelled and pending.
 	Honored      *bool      `json:"honored,omitempty"`
 	CreatedAt    time.Time  `json:"created_at"`
 	ScheduledFor *time.Time `json:"scheduled_for,omitempty"`
+	ResolvedAt   *time.Time `json:"resolved_at,omitempty"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
+
+const (
+	IntentionStatusPending   = "pending"
+	IntentionStatusHonored   = "honored"
+	IntentionStatusMissed    = "missed"
+	IntentionStatusCancelled = "cancelled"
+)
 
 // RecapBrief is returned by record_session_close — signals for Claude to compose
 // the closing message.
@@ -158,22 +171,30 @@ const (
 
 // Webhook queue statuses.
 const (
-	WebhookStatusPending = "pending"
-	WebhookStatusSent    = "sent"
-	WebhookStatusExpired = "expired"
-	WebhookStatusFailed  = "failed"
+	WebhookStatusPending    = "pending"
+	WebhookStatusProcessing = "processing"
+	WebhookStatusSent       = "sent"
+	WebhookStatusExpired    = "expired"
+	WebhookStatusFailed     = "failed"
 )
 
 // WebhookQueueItem represents a scheduled, LLM-authored webhook nudge.
 type WebhookQueueItem struct {
-	ID           int64      `json:"id"`
-	LearnerID    string     `json:"learner_id"`
-	Kind         string     `json:"kind"`
-	ScheduledFor time.Time  `json:"scheduled_for"`
-	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
-	Content      string     `json:"content"`
-	Priority     int        `json:"priority"`
-	Status       string     `json:"status"`
-	CreatedAt    time.Time  `json:"created_at"`
-	SentAt       *time.Time `json:"sent_at,omitempty"`
+	ID             int64      `json:"id"`
+	LearnerID      string     `json:"learner_id"`
+	Kind           string     `json:"kind"`
+	DomainID       string     `json:"domain_id,omitempty"`
+	ScheduledFor   time.Time  `json:"scheduled_for"`
+	ExpiresAt      *time.Time `json:"expires_at,omitempty"`
+	Content        string     `json:"content"`
+	Priority       int        `json:"priority"`
+	Status         string     `json:"status"`
+	CreatedAt      time.Time  `json:"created_at"`
+	ClaimedAt      *time.Time `json:"claimed_at,omitempty"`
+	SentAt         *time.Time `json:"sent_at,omitempty"`
+	AttemptCount   int        `json:"attempt_count"`
+	MaxAttempts    int        `json:"max_attempts"`
+	NextAttemptAt  *time.Time `json:"next_attempt_at,omitempty"`
+	LastError      string     `json:"last_error,omitempty"`
+	DeadLetteredAt *time.Time `json:"dead_lettered_at,omitempty"`
 }

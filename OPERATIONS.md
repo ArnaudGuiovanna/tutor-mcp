@@ -145,6 +145,135 @@ If the migration corrupts something, the on-demand backup taken in step 1 is you
 - **Open the backup**: every quarter, run `sqlite3 <backup> 'SELECT COUNT(*) FROM interactions;'` against the latest off-host copy. Compare to live. Mismatch = the off-host pipeline is broken.
 - **Practice restore**: every six months, run the restore procedure into a scratch directory (`DB_PATH=/tmp/test-restore.db`) and boot a second instance on a different port. If it doesn't come up clean, your backups are theatre.
 
+## Data retention maintenance
+
+Retention is **disabled by default**. The server never deletes learning history
+merely because it starts, and zero days always means “preserve”, not “delete
+immediately”. The separate `tutor-retention` maintenance command is read-only
+unless `--apply` is supplied.
+
+Build it alongside the server:
+
+```bash
+go build -o tutor-retention ./cmd/tutor-retention
+```
+
+Preview a policy against the existing SQLite database:
+
+```bash
+DB_PATH=/home/ubuntu/mcp/data/runtime.db ./tutor-retention \
+  --webhook-days=30 \
+  --webhook-live-days=14 \
+  --assessment-plaintext-days=90 \
+  --assessment-abandoned-days=30 \
+  --idempotency-response-days=30 \
+  --snapshot-days=180 \
+  --event-days=90 \
+  --consolidation-days=180 \
+  --memory-days=180
+```
+
+The JSON report separates `eligible` rows from `applied` mutations. In a
+dry-run every `applied` value is zero. Review the report, take a fresh backup,
+then repeat the exact command with `--apply`. Apply mode is one database
+transaction: any category failure rolls the whole run back.
+
+```bash
+systemctl --user start tutor-mcp-backup.service
+DB_PATH=/home/ubuntu/mcp/data/runtime.db ./tutor-retention \
+  --webhook-days=30 \
+  --webhook-live-days=14 \
+  --assessment-plaintext-days=90 \
+  --assessment-abandoned-days=30 \
+  --idempotency-response-days=30 \
+  --snapshot-days=180 \
+  --event-days=90 \
+  --consolidation-days=180 \
+  --memory-days=180 \
+  --apply
+```
+
+The command refuses to create a missing SQLite file and does not run schema
+migrations. Point it only at a database already migrated by the matching server
+binary. For PostgreSQL, set `DB_DRIVER=postgres` and `DATABASE_URL`; do not put
+the DSN on the command line where process listings can expose it.
+
+SQLite dry-run opens the main database with `mode=ro` and `query_only=ON`; it
+does not run a write transaction or change journal mode. SQLite may still
+create or update `-wal`/`-shm` coordination sidecars when inspecting a live WAL
+database. Those files are part of SQLite locking/visibility, not retention
+mutations. The main database file remains read-only. Stop the service first if
+your filesystem policy forbids even coordination sidecars.
+
+| Setting / flag | Default | Lifecycle action |
+|---|---:|---|
+| `TUTOR_MCP_RETENTION_WEBHOOK_DAYS` / `--webhook-days` | `0` | Delete only terminal (`sent`, `failed`, `expired`) queue rows. `pending` and `processing` are never selected. Retained push logs have their logical `queue_id` cleared first. |
+| `TUTOR_MCP_RETENTION_WEBHOOK_LIVE_DAYS` / `--webhook-live-days` | `0` | Terminalize stale `pending`/`processing` rows as `expired`, including work made undispatchable by consent or configuration changes. |
+| `TUTOR_MCP_RETENTION_ASSESSMENT_PLAINTEXT_DAYS` / `--assessment-plaintext-days` | `0` | Set task/response plaintext to `NULL` only on evaluated or cancelled attempts and only when the corresponding content hash exists. The evidence envelope, rubric, score, provenance and hashes remain. |
+| `TUTOR_MCP_RETENTION_ASSESSMENT_ABANDONED_DAYS` / `--assessment-abandoned-days` | `0` | Cancel stale prepared/submitted attempts and immediately clear task/response plaintext wherever a content hash exists. |
+| `TUTOR_MCP_RETENTION_IDEMPOTENCY_RESPONSE_DAYS` / `--idempotency-response-days` | `0` | Clear only the cached `response_text` payload of old completed mutations and set `response_expired_at`. The learner/tool/key tuple, request hash, `completed` status and timestamps remain, so the mutation can never be claimed again. |
+| `TUTOR_MCP_RETENTION_SNAPSHOT_DAYS` / `--snapshot-days` | `0` | Delete old pedagogical decision snapshots; parent interactions remain. |
+| `TUTOR_MCP_RETENTION_EVENT_DAYS` / `--event-days` | `0` | Delete old notification event logs (`webhook_push_log`, `scheduled_alerts`). A future-dated push or scheduled alert is preserved even if its row was created before the cutoff. |
+| `TUTOR_MCP_RETENTION_CONSOLIDATION_DAYS` / `--consolidation-days` | `0` | Delete completed consolidation scheduling markers; narrative archive files are governed separately. |
+| `TUTOR_MCP_RETENTION_MEMORY_DAYS` / `--memory-days` | `0` | Delete regular Markdown files older than the cutoff below the configured narrative-memory root; symlinks are never followed. |
+
+`assessment_plaintext_blocked` is deliberately conservative: it counts old
+rows whose plaintext is their only representation. Those fields are retained
+even during `--apply`; backfill a verified hash or choose explicit legal/manual
+handling rather than silently destroying the evidence.
+
+`idempotency_response_plaintext` reports cached response payloads selected and
+cleared. After expiry, an exact retry returns “mutation already completed;
+cached response expired” and does not call the mutation handler. Never delete
+the corresponding idempotency row to reclaim space: doing so would release the
+key and could duplicate a learning-state write after an ambiguous client retry.
+
+Core learning evidence — interactions, affect, calibration, transfer,
+implementation intentions and concept state — is outside this generic policy.
+Deleting it changes the learner model and requires a separate product/legal
+decision. Expired OAuth codes and refresh-token families continue to use their
+existing security-specific cleanup and are intentionally not duplicated here.
+Run maintenance during a low-write window if the dry-run counts must match the
+subsequent apply exactly. Also align backup-object retention with the same
+privacy policy: deleting live rows does not erase older backup copies.
+
+## Webhook retry and dead-letter lifecycle
+
+Webhook delivery state is durable in `webhook_message_queue`; a process restart
+does not reset its retry budget. A claim increments `attempt_count`. A transport
+failure returns the row to `pending` with `next_attempt_at` set using the fixed
+backoff sequence 1 minute, 5 minutes, 30 minutes, 2 hours, then 12 hours. The
+last delay is reused if a caller explicitly configures more than the default
+five attempts. A policy/consent denial releases the claim and restores the
+counter because no delivery was attempted.
+
+Once `max_attempts` is reached, the existing terminal `failed` state is the
+dead-letter queue; `dead_lettered_at` and a bounded, sanitized `last_error` code
+are retained for diagnosis. Expiration wins over retry/DLQ: an expired message
+becomes `expired` and is never dispatched again. The hourly cleanup also
+recovers `processing` claims older than 15 minutes, applying the same
+expiry/backoff/DLQ rules. Do not persist webhook URLs, credentials, or raw
+response bodies in `last_error`.
+
+For a metadata-only DLQ check (intentionally omit the sensitive `content`
+column):
+
+```sql
+SELECT id, learner_id, kind, attempt_count, max_attempts,
+       last_error, dead_lettered_at
+FROM webhook_message_queue
+WHERE status = 'failed'
+ORDER BY dead_lettered_at DESC;
+```
+
+Retries are picked up when the dispatcher for that message kind runs and the
+stored `next_attempt_at` is due. Row-level claims prevent two workers from
+dispatching the same attempt concurrently, but delivery remains at-least-once:
+a crash after the remote service accepts a request and before `sent` is stored
+can cause a later retry. Terminal queue retention also applies to DLQ rows and
+uses `dead_lettered_at`, so investigate/export required metadata before the
+configured `--webhook-days` cutoff.
+
 ## Pipeline observability
 
 The regulation pipeline emits structured `level=INFO` log lines so each `get_next_activity` call leaves a trace. The four key event types:
@@ -172,7 +301,9 @@ journalctl --user -u tutor-mcp --since "1 hour ago" \
   | grep "session=sess_<your_session_id>"
 ```
 
-(currently the `session_id` is not in the pipeline-decision log — add it if you need cross-event correlation; see `tools/activity.go` and the `record_interaction` params).
+Both pipeline decisions and recorded interactions include the canonical durable
+`session_id`, so the filter above follows one episode even when it lasts longer
+than the former sliding activity window.
 
 ### Aggregations (last hour)
 

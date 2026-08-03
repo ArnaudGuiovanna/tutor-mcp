@@ -52,7 +52,7 @@ sha256_file() {
 	elif command -v shasum >/dev/null 2>&1; then
 		shasum -a 256 "$file" | awk '{print $1}'
 	else
-		printf '%s\n' ""
+		die "missing required checksum command: sha256sum or shasum"
 	fi
 }
 
@@ -61,18 +61,17 @@ verify_checksum() {
 	archive_file="$2"
 	archive_name="$3"
 
-	expected="$(awk -v name="$archive_name" '$2 == name {print $1; exit}' "$sums_file")"
+	expected="$(awk -v name="$archive_name" '$2 == name || $2 == "*" name {print $1; exit}' "$sums_file")"
 	if [ -z "$expected" ]; then
-		printf '%s\n' "warning: $archive_name not found in SHA256SUMS; skipping checksum verification" >&2
-		return
+		die "$archive_name not found in SHA256SUMS"
 	fi
+	[ "${#expected}" -eq 64 ] || die "invalid checksum entry for $archive_name"
+	case "$expected" in
+		*[!0-9A-Fa-f]*) die "invalid checksum entry for $archive_name" ;;
+	esac
+	expected="$(printf '%s' "$expected" | tr 'A-F' 'a-f')"
 
 	actual="$(sha256_file "$archive_file")"
-	if [ -z "$actual" ]; then
-		printf '%s\n' "warning: sha256sum/shasum unavailable; skipping checksum verification" >&2
-		return
-	fi
-
 	[ "$actual" = "$expected" ] || die "checksum mismatch for $archive_name"
 }
 
@@ -83,6 +82,7 @@ need_cmd find
 need_cmd head
 need_cmd install
 need_cmd mktemp
+need_cmd tr
 
 os="$(detect_os)"
 arch="$(detect_arch)"
@@ -103,9 +103,8 @@ sums_path="${tmpdir}/SHA256SUMS"
 printf '%s\n' "Downloading ${asset}..."
 download "${base_url}/${asset}" "$archive_path"
 
-if download "${base_url}/SHA256SUMS" "$sums_path"; then
-	verify_checksum "$sums_path" "$archive_path" "$asset"
-fi
+download "${base_url}/SHA256SUMS" "$sums_path" || die "failed to download required SHA256SUMS"
+verify_checksum "$sums_path" "$archive_path" "$asset"
 
 tar -xzf "$archive_path" -C "$tmpdir"
 binary_path="$(find "$tmpdir" -type f -name "$binary_name" | head -n 1)"

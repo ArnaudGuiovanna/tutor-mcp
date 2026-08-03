@@ -6,6 +6,7 @@ package tools
 
 import (
 	"context"
+	"time"
 
 	"tutor-mcp/engine"
 	"tutor-mcp/models"
@@ -82,7 +83,12 @@ func registerGetPendingAlerts(server *mcp.Server, deps *Deps) {
 				r, _ := safeErrorResult(deps.Logger, "failed to load interactions", err)
 				return r, nil, nil
 			}
-			domainAlerts := engine.ComputeAlerts(domainStates, domainInteractions, sessionStart)
+			alertEvidence, err := engine.LoadMasteryAlertEvidence(ctx, deps.Store, learnerID, domain.ID, domainStates)
+			if err != nil {
+				r, _ := safeErrorResult(deps.Logger, "failed to load mastery alert evidence", err)
+				return r, nil, nil
+			}
+			domainAlerts := engine.ComputeAlertsWithEvidenceAt(domainStates, domainInteractions, alertEvidence, sessionStart, time.Now().UTC())
 			for i := range domainAlerts {
 				domainAlerts[i].DomainID = domain.ID
 			}
@@ -109,6 +115,11 @@ func registerGetPendingAlerts(server *mcp.Server, deps *Deps) {
 			r, _ := safeErrorResult(deps.Logger, "failed to load calibration alerts", err)
 			return r, nil, nil
 		}
+		calibHistory, err := deps.Store.GetCalibrationBiasHistory(ctx, learnerID, 20)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to load calibration evidence", err)
+			return r, nil, nil
+		}
 		transfers, err := deps.Store.GetTransferRecordsByLearner(ctx, learnerID)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to load transfer alerts", err)
@@ -120,6 +131,7 @@ func registerGetPendingAlerts(server *mcp.Server, deps *Deps) {
 			affects,
 			interactions,
 			engine.WithTransferData(states, transfers),
+			engine.WithCalibrationEvidence(len(calibHistory)),
 		)
 		alerts = mergeMetacognitiveAlerts(alerts, metaAlerts)
 

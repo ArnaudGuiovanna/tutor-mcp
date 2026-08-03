@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"tutor-mcp/algorithms"
+	"tutor-mcp/engine"
 	"tutor-mcp/models"
 	storeport "tutor-mcp/store"
 )
@@ -59,6 +60,7 @@ type LearningNegotiationOverrideConsumeResult struct {
 }
 
 var allowedLearningNegotiationActivityTypes = []string{
+	string(models.ActivityDiagnosticAssessment),
 	string(models.ActivityRecall),
 	string(models.ActivityNewConcept),
 	string(models.ActivityMasteryChallenge),
@@ -335,6 +337,13 @@ func ConsumeLearningNegotiationOverride(ctx context.Context, store storeport.Sto
 			Override: &override,
 		}, nil
 	}
+	if systemActivity.Type == models.ActivityDiagnosticAssessment && override.Activity.Type == models.ActivityDiagnosticAssessment {
+		override.Activity.PromptForLLM = engine.BuildActivityPrompt(
+			override.Activity.Type,
+			override.Activity.Concept,
+			override.Activity.Format,
+		)
+	}
 
 	return override.Activity, LearningNegotiationOverrideConsumeResult{
 		Status:   LearningNegotiationOverrideConsumeConsumed,
@@ -349,6 +358,11 @@ func validateConsumedLearningNegotiationOverride(ctx context.Context, store stor
 	}
 	if systemActivity.Type == models.ActivityCloseSession {
 		return "system selected CLOSE_SESSION; negotiated override cannot bypass overload"
+	}
+	if systemActivity.Type == models.ActivityDiagnosticAssessment &&
+		override.Activity.Type != models.ActivityDiagnosticAssessment &&
+		override.Activity.Type != models.ActivityRest {
+		return "system selected DIAGNOSTIC_ASSESSMENT; negotiated override cannot replace cold measurement with instruction or practice"
 	}
 	for _, alert := range alerts {
 		if alert.Type == models.AlertOverload {

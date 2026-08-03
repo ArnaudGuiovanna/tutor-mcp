@@ -8,11 +8,13 @@ import "time"
 // AuthCode holds the authorization code state (persisted in DB).
 // Moved from package db so the store port can return it without consumers importing db.
 type AuthCode struct {
-	Code          string
-	LearnerID     string
-	CodeChallenge string
-	ClientID      string
-	ExpiresAt     time.Time
+	Code                string
+	LearnerID           string
+	CodeChallenge       string
+	CodeChallengeMethod string
+	ClientID            string
+	RedirectURI         string
+	ExpiresAt           time.Time
 }
 
 // OAuthClient is a dynamically-registered OAuth client.

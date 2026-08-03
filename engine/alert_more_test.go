@@ -245,7 +245,7 @@ func TestComputeMetacognitiveAlerts_DifficultyBranch(t *testing.T) {
 
 // TestComputeMetacognitiveAlerts_NegCalibration covers the bias < 0 branch.
 func TestComputeMetacognitiveAlerts_NegCalibration(t *testing.T) {
-	alerts := ComputeMetacognitiveAlerts(nil, -2.0, nil, nil)
+	alerts := ComputeMetacognitiveAlerts(nil, -0.3, nil, nil, WithCalibrationEvidence(5))
 	for _, a := range alerts {
 		if a.Type == models.AlertCalibrationDiverging {
 			if !strings.Contains(a.RecommendedAction, "sous-estimation") {

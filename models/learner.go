@@ -68,6 +68,8 @@ func NewConceptStateInDomain(learnerID, domainID, concept string) *ConceptState 
 type Interaction struct {
 	ID                  int64
 	LearnerID           string
+	SessionID           string // empty only for interactions created before durable sessions
+	AssessmentAttemptID string // empty only for legacy/unverified observations
 	Concept             string
 	ActivityType        string
 	Success             bool
@@ -99,24 +101,9 @@ type RefreshToken struct {
 	Token     string
 	LearnerID string
 	ClientID  string // optional, blank for pre-issue-#30 tokens
+	FamilyID  string
 	ExpiresAt time.Time
 	CreatedAt time.Time
-}
-
-type Availability struct {
-	LearnerID    string
-	WindowsJSON  string
-	AvgDuration  int
-	SessionsWeek int
-	DoNotDisturb bool
-}
-
-type ScheduledAlert struct {
-	ID          int64
-	LearnerID   string
-	AlertType   string
-	Concept     string
-	ScheduledAt time.Time
-	Sent        bool
-	CreatedAt   time.Time
+	UsedAt    *time.Time
+	RevokedAt *time.Time
 }

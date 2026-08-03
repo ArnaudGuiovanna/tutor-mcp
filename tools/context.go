@@ -6,6 +6,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"time"
@@ -38,6 +39,15 @@ func registerGetLearnerContext(server *mcp.Server, deps *Deps) {
 			r, _ := safeErrorResult(deps.Logger, "learner not found", err)
 			return r, nil, nil
 		}
+		profile := models.LearnerProfile{}
+		if learner.ProfileJSON != "" && learner.ProfileJSON != "{}" {
+			if err := json.Unmarshal([]byte(learner.ProfileJSON), &profile); err != nil {
+				deps.Logger.Error("stored learner profile is invalid", "err", err, "learner", learnerID)
+				r, _ := errorResult("stored learner profile is invalid")
+				return r, nil, nil
+			}
+		}
+		now := time.Now().UTC()
 
 		allDomains, err := deps.Store.GetDomainsByLearner(ctx, learnerID, false)
 		if err != nil {
@@ -63,9 +73,10 @@ func registerGetLearnerContext(server *mcp.Server, deps *Deps) {
 			r, _ := safeErrorResult(deps.Logger, "failed to load concept states", err)
 			return r, nil, nil
 		}
-		interactions, err := deps.Store.GetRecentInteractionsByLearner(ctx, learnerID, 10)
+		startOfTodayUTC := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+		interactions, err := deps.Store.GetInteractionsSince(ctx, learnerID, startOfTodayUTC)
 		if err != nil {
-			r, _ := safeErrorResult(deps.Logger, "failed to load recent interactions", err)
+			r, _ := safeErrorResult(deps.Logger, "failed to load today's interactions", err)
 			return r, nil, nil
 		}
 
@@ -107,12 +118,12 @@ func registerGetLearnerContext(server *mcp.Server, deps *Deps) {
 		interactions = scopedInteractions
 
 		// Compute day number since account creation (day 1 = creation day)
-		dayNumber := int(math.Floor(time.Since(learner.CreatedAt).Hours()/24)) + 1
+		dayNumber := int(math.Floor(now.Sub(learner.CreatedAt).Hours()/24)) + 1
 
 		// Last session info
 		lastSessionInfo := "premiere session"
 		if !learner.LastActive.IsZero() {
-			hoursSince := time.Since(learner.LastActive).Hours()
+			hoursSince := now.Sub(learner.LastActive).Hours()
 			if hoursSince < 24 {
 				lastSessionInfo = fmt.Sprintf("derniere session il y a %.0fh", hoursSince)
 			} else {
@@ -124,7 +135,6 @@ func registerGetLearnerContext(server *mcp.Server, deps *Deps) {
 		var priorityConcept string
 		var priorityConceptDomainID string
 		var priorityRetention float64 = 1.0
-		now := time.Now().UTC()
 		for _, cs := range states {
 			if cs.CardState == "new" {
 				continue
@@ -162,6 +172,7 @@ func registerGetLearnerContext(server *mcp.Server, deps *Deps) {
 				"name":          d.Name,
 				"concept_count": len(d.Graph.Concepts),
 				"priority_rank": priorityRank,
+				"high_stakes":   d.HighStakes,
 			})
 		}
 		if domainList == nil {
@@ -200,6 +211,7 @@ func registerGetLearnerContext(server *mcp.Server, deps *Deps) {
 		payload := map[string]interface{}{
 			"learner_id":         learnerID,
 			"objective":          learner.Objective,
+			"profile":            profile,
 			"day_number":         dayNumber,
 			"last_session":       lastSessionInfo,
 			"concepts_count":     len(states),
@@ -211,6 +223,12 @@ func registerGetLearnerContext(server *mcp.Server, deps *Deps) {
 			"domains":            domainList,
 			"archived_domains":   archivedList,
 			"progress_narrative": narrative,
+		}
+		// An interrupted client can resume the canonical durable session
+		// instead of inventing a second correlation ID.
+		if activeSession, sessionErr := deps.Store.GetActiveLearningSession(ctx, learnerID); sessionErr == nil {
+			payload["active_session"] = activeSession
+			payload["session_id"] = activeSession.ID
 		}
 		if priorityConcept != "" {
 			payload["priority_concept_domain_id"] = priorityConceptDomainID
@@ -264,11 +282,11 @@ func buildProgressNarrative(ctx context.Context, deps *Deps, learnerID string, l
 	}
 
 	return &models.ProgressNarrative{
-		MasteryTrajectory:  deltas,
-		SessionStreak:      streak,
-		AutonomyTrend:      trend,
-		MilestonesThisWeek: milestones,
-		DormancyImminent:   dormancy,
-		Instruction:        "Describe the trajectory in 1-2 sentences, not a list. If dormancy_imminent is true, make the return welcoming and non-blaming.",
+		EstimateTrajectory:     deltas,
+		SessionStreak:          streak,
+		AutonomyTrend:          trend,
+		EstimateMilestonesWeek: milestones,
+		DormancyImminent:       dormancy,
+		Instruction:            "Describe the model-estimate trajectory in 1-2 sentences, not a list. Never present an estimate milestone as demonstrated mastery. If dormancy_imminent is true, make the return welcoming and non-blaming.",
 	}, nil
 }

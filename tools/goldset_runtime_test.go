@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"testing"
+	"time"
 
 	"tutor-mcp/models"
 )
@@ -31,6 +32,7 @@ type staticGoldsetRecord struct {
 	ActivityType string `json:"activity_type"`
 	Success      bool   `json:"success"`
 	WithRubric   bool   `json:"with_rubric"`
+	AgeHours     int    `json:"age_hours,omitempty"`
 }
 
 type goldsetMasteryExpectation struct {
@@ -80,12 +82,44 @@ func TestRuntimeGoldsetStatic(t *testing.T) {
 					"domain_id":             domain.ID,
 				}
 				if record.WithRubric {
-					args["rubric_json"] = goldsetRubricJSON()
+					prepared := callTool(t, deps, registerPrepareAssessmentAttempt, "L_owner", "prepare_assessment_attempt", map[string]any{
+						"domain_id": domain.ID, "concept": goldsetConcept,
+						"activity_type": record.ActivityType, "observable": "Goldset observable response",
+						"task_text": "Frozen goldset task", "rubric_json": goldsetRubricJSON(),
+					})
+					if prepared.IsError {
+						t.Fatalf("%s: prepare record %d failed: %s", scenario.Name, i, resultText(prepared))
+					}
+					preparedOut := decodeResult(t, prepared)
+					attemptID, _ := preparedOut["attempt_id"].(string)
+					sessionID, _ := preparedOut["session_id"].(string)
+					submitted := callTool(t, deps, registerSubmitAssessmentAttempt, "L_owner", "submit_assessment_attempt", map[string]any{
+						"attempt_id": attemptID, "learner_response": "Committed goldset response",
+					})
+					if submitted.IsError {
+						t.Fatalf("%s: submit record %d failed: %s", scenario.Name, i, resultText(submitted))
+					}
+					args["attempt_id"] = attemptID
+					args["session_id"] = sessionID
+					args["evaluator_id"] = "goldset-host-v1"
+					args["evaluation_method"] = "host_llm"
 					args["rubric_score_json"] = goldsetRubricScoreJSON(record.Success)
+				}
+				if record.ActivityType == string(models.ActivityTransferProbe) {
+					args["transfer_dimension"] = "far"
+					args["transfer_score"] = goldsetTransferScore(record.Success)
 				}
 				res := callTool(t, deps, registerRecordInteraction, "L_owner", "record_interaction", args)
 				if res.IsError {
 					t.Fatalf("%s: record %d failed: %s", scenario.Name, i, resultText(res))
+				}
+				if record.AgeHours > 0 {
+					if _, err := store.RawDB().Exec(`UPDATE interactions SET created_at = ?
+						WHERE learner_id = ? AND domain_id = ? AND concept = ? AND activity_type = ?`,
+						time.Now().UTC().Add(-time.Duration(record.AgeHours)*time.Hour),
+						"L_owner", domain.ID, goldsetConcept, record.ActivityType); err != nil {
+						t.Fatalf("%s: backdate record %d: %v", scenario.Name, i, err)
+					}
 				}
 			}
 
@@ -203,6 +237,13 @@ func nestedString(root map[string]any, objectKey, valueKey string) any {
 func goldsetConfidence(success bool) float64 {
 	if success {
 		return 0.9
+	}
+	return 0.2
+}
+
+func goldsetTransferScore(success bool) float64 {
+	if success {
+		return 0.85
 	}
 	return 0.2
 }

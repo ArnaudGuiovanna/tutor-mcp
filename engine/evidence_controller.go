@@ -53,7 +53,7 @@ func ApplyEvidenceController(input EvidenceControllerInput) EvidenceControllerDe
 
 func evidenceControllerEligible(activity models.Activity) bool {
 	switch activity.Type {
-	case models.ActivityCloseSession, models.ActivityRest, models.ActivitySetupDomain:
+	case models.ActivityCloseSession, models.ActivityRest, models.ActivitySetupDomain, models.ActivityDiagnosticAssessment:
 		return false
 	default:
 		return activity.Concept != ""
@@ -70,5 +70,14 @@ func evidenceAdjusted(activity models.Activity, t models.ActivityType, format st
 }
 
 func BuildActivityPrompt(t models.ActivityType, concept, format string) string {
-	return fmt.Sprintf("Generate a %s activity on %s. Format: %s. Use the final structured activity.difficulty_target field as the difficulty target.", t, concept, format)
+	switch t {
+	case models.ActivityDiagnosticAssessment:
+		return fmt.Sprintf("Generate one cold diagnostic assessment on %s. Format: %s. Freeze the exact task and domain-appropriate scoring rubric with prepare_assessment_attempt before showing it. Ask for an observable response before giving any explanation, hint, worked example, correction, or feedback. Do not teach the concept before the learner commits an answer. Persist that response with submit_assessment_attempt before scoring it, then record the derived evaluation with record_interaction.", concept, format)
+	case models.ActivityTransferProbe:
+		return fmt.Sprintf("Generate a novel transfer activity on %s. Format: %s. Choose one canonical transfer dimension (near, far, debugging, teaching, or creative). Freeze the task and rubric with prepare_assessment_attempt before showing it; after the learner responds, call submit_assessment_attempt before evaluating, then pass the attempt_id, criterion scores, transfer dimension and 0..1 transfer score to record_interaction with activity_type=TRANSFER_PROBE.", concept, format)
+	case models.ActivityMasteryChallenge:
+		return fmt.Sprintf("Generate a domain-appropriate integrated performance task on %s. Format: %s. Require autonomous application and evaluate correctness, completeness, boundary conditions or counterexamples appropriate to the domain, and clarity of reasoning or execution. Freeze the exact task and rubric with prepare_assessment_attempt before showing it; persist the learner response with submit_assessment_attempt before evaluating; then record criterion scores through record_interaction.", concept, format)
+	default:
+		return fmt.Sprintf("Generate a %s activity on %s. Format: %s. Use the final structured activity.difficulty_target field as the difficulty target.", t, concept, format)
+	}
 }

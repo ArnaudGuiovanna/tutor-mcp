@@ -76,6 +76,37 @@ func TestGroupIntoSessions(t *testing.T) {
 	}
 }
 
+func TestGroupIntoSessions_PrefersDurableSessionIDAndKeepsLegacyFallback(t *testing.T) {
+	now := time.Now().UTC()
+	interactions := []*models.Interaction{
+		{SessionID: "sess_a", CreatedAt: now},
+		// Same durable session survives a gap much larger than the legacy
+		// heuristic.
+		{SessionID: "sess_a", CreatedAt: now.Add(5 * time.Hour)},
+		// A new explicit session is a boundary even only one minute later.
+		{SessionID: "sess_b", CreatedAt: now.Add(5*time.Hour + time.Minute)},
+		// Legacy rows never merge into an explicit session; legacy rows still
+		// use the requested gap amongst themselves.
+		{CreatedAt: now.Add(5*time.Hour + 2*time.Minute)},
+		{CreatedAt: now.Add(5*time.Hour + 30*time.Minute)},
+		{CreatedAt: now.Add(8 * time.Hour)},
+	}
+
+	sessions := groupIntoSessions(interactions, 2*time.Hour)
+	if len(sessions) != 4 {
+		t.Fatalf("sessions = %d, want 4: %+v", len(sessions), sessions)
+	}
+	if len(sessions[0]) != 2 || sessions[0][0].SessionID != "sess_a" {
+		t.Fatalf("durable session A was split: %+v", sessions[0])
+	}
+	if len(sessions[1]) != 1 || sessions[1][0].SessionID != "sess_b" {
+		t.Fatalf("durable session B merged unexpectedly: %+v", sessions[1])
+	}
+	if len(sessions[2]) != 2 || len(sessions[3]) != 1 {
+		t.Fatalf("legacy gap fallback incorrect: %+v", sessions[2:])
+	}
+}
+
 func TestComputeAutonomyTrend(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -160,10 +191,11 @@ func TestDetectMirrorPattern(t *testing.T) {
 					is[0].SelfInitiated = true
 					return is
 				}(),
-				ConceptStates:   []*models.ConceptState{{Concept: "A", PMastery: 0.5}},
-				AutonomyScores:  []float64{0.5, 0.5, 0.5},
-				CalibrationBias: 1.2,
-				SessionCount:    5,
+				ConceptStates:      []*models.ConceptState{{Concept: "A", PMastery: 0.5}},
+				AutonomyScores:     []float64{0.5, 0.5, 0.5},
+				CalibrationBias:    0.3,
+				CalibrationSamples: 5,
+				SessionCount:       5,
 			},
 			wantNil: false,
 			wantPat: "calibration_drift",

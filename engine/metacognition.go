@@ -99,7 +99,8 @@ func ComputeAutonomyMetrics(input AutonomyInput) models.AutonomyMetrics {
 	}
 }
 
-// groupIntoSessions splits interactions into sessions separated by gaps > sessionGap.
+// groupIntoSessions groups durable session IDs exactly. The time-gap heuristic
+// is retained only for rows written before explicit sessions existed.
 // Interactions are sorted oldest-first internally.
 func groupIntoSessions(interactions []*models.Interaction, gap time.Duration) [][]*models.Interaction {
 	if len(interactions) == 0 {
@@ -116,9 +117,22 @@ func groupIntoSessions(interactions []*models.Interaction, gap time.Duration) []
 	var current []*models.Interaction
 
 	for _, i := range sorted {
-		if len(current) > 0 && i.CreatedAt.Sub(current[len(current)-1].CreatedAt) > gap {
-			sessions = append(sessions, current)
-			current = nil
+		if len(current) > 0 {
+			previous := current[len(current)-1]
+			boundary := false
+			switch {
+			case previous.SessionID != "" || i.SessionID != "":
+				// Explicit and legacy events never merge. Two explicit events
+				// share a session only when their durable IDs match, regardless
+				// of elapsed wall time.
+				boundary = previous.SessionID == "" || i.SessionID == "" || previous.SessionID != i.SessionID
+			default:
+				boundary = i.CreatedAt.Sub(previous.CreatedAt) > gap
+			}
+			if boundary {
+				sessions = append(sessions, current)
+				current = nil
+			}
 		}
 		current = append(current, i)
 	}
@@ -180,11 +194,12 @@ func ComputeAutonomyTrendExported(scores []float64) string {
 
 // MirrorInput holds data for metacognitive mirror pattern detection.
 type MirrorInput struct {
-	Interactions    []*models.Interaction
-	ConceptStates   []*models.ConceptState
-	AutonomyScores  []float64 // newest-first from affect_states.autonomy_score
-	CalibrationBias float64
-	SessionCount    int
+	Interactions       []*models.Interaction
+	ConceptStates      []*models.ConceptState
+	AutonomyScores     []float64 // newest-first from affect_states.autonomy_score
+	CalibrationBias    float64
+	CalibrationSamples int
+	SessionCount       int
 }
 
 // DetectMirrorPattern returns a mirror message if a dependency pattern is consolidated
@@ -212,7 +227,7 @@ func DetectMirrorPattern(input MirrorInput) *models.MirrorMessage {
 		}
 	}
 
-	// Priority 2: hint_overuse — hints on mastered concepts (PMastery >= MasteryMid)
+	// Priority 2: hint_overuse — hints on high-estimate concepts (PMastery >= MasteryMid)
 	masteryMid := algorithms.MasteryMid()
 	masteredConcepts := make(map[string]bool)
 	for _, cs := range input.ConceptStates {
@@ -232,7 +247,7 @@ func DetectMirrorPattern(input MirrorInput) *models.MirrorMessage {
 		if totalOnMastered >= 5 && float64(hintsOnMastered)/float64(totalOnMastered) > 0.5 {
 			return &models.MirrorMessage{
 				Pattern:      "hint_overuse",
-				Message:      "You often ask for hints on concepts you have already mastered.",
+				Message:      "You often ask for hints on concepts that your recent results make look familiar.",
 				OpenQuestion: "Is it by reflex, or is there an aspect of these concepts that still feels unclear to you?",
 			}
 		}
@@ -256,8 +271,10 @@ func DetectMirrorPattern(input MirrorInput) *models.MirrorMessage {
 		}
 	}
 
-	// Priority 4: calibration_drift — bias increasing over 5 sessions
-	if math.Abs(input.CalibrationBias) > 1.0 && input.SessionCount >= 5 {
+	// Priority 4: calibration_drift. Calibration deltas are normalized to
+	// [-1,1]; use the same evidence threshold as alerts and the OLM rather than
+	// an unreachable >1.0 comparison.
+	if calibrationBiasIsActionable(input.CalibrationBias, input.CalibrationSamples) {
 		direction := "overestimate"
 		if input.CalibrationBias < 0 {
 			direction = "underestimate"
@@ -274,18 +291,21 @@ func DetectMirrorPattern(input MirrorInput) *models.MirrorMessage {
 
 // ─── Mirror webhook persistence ─────────────────────────────────────────────
 
-// MirrorAlertKind is the alert tag used by EnqueueMirrorWebhook for daily
-// dedup checks (WasAlertSentToday + CreateScheduledAlert). Single source of
-// truth — the scheduler reuses it via its dispatchQueued path.
+// MirrorAlertKind is the daily reservation tag used by EnqueueMirrorWebhook.
+// The scheduler still dispatches the claimed queue row carrying that
+// reservation; it must not interpret reservation as successful delivery.
 const MirrorAlertKind = "MIRROR_MESSAGE"
 
 // mirrorWebhookStore is the narrow surface EnqueueMirrorWebhook needs from
 // *db.Store. Keeping it as an interface lets the call sites (and tests) wire
 // up a real or mock store without dragging the whole Store API into engine.
 type mirrorWebhookStore interface {
-	WasAlertSentToday(ctx context.Context, learnerID, alertType string) (bool, error)
-	EnqueueWebhookMessage(ctx context.Context, learnerID, kind, content string, scheduledFor, expiresAt time.Time, priority int) (int64, error)
-	CreateScheduledAlert(ctx context.Context, learnerID, alertType, concept string, scheduledAt time.Time) error
+	EnqueueWebhookMessageOncePerDay(
+		ctx context.Context,
+		learnerID, kind, alertType, content string,
+		scheduledFor, expiresAt time.Time,
+		priority int,
+	) (int64, bool, error)
 }
 
 // MirrorWebhookContent is the JSON shape persisted into webhook_message_queue.content
@@ -303,10 +323,9 @@ type MirrorWebhookContent struct {
 //
 // Behaviour:
 //   - Returns (0, false, nil) on a no-op (mirror is nil, or one was already
-//     enqueued for this learner today — per-day dedup mirrors the pattern
-//     used by the OLM and daily-motivation dispatchers).
-//   - On enqueue success, records a scheduled_alerts row tagged MirrorAlertKind
-//     so subsequent calls within the same UTC day short-circuit.
+//     reserved for this learner today).
+//   - Queue insertion and the daily reservation are one database transaction,
+//     so concurrent callers cannot create duplicate official mirror items.
 //   - The message content is JSON-encoded so the scheduler can render the
 //     full mirror (pattern + open question) when it dispatches.
 //
@@ -314,16 +333,6 @@ type MirrorWebhookContent struct {
 // time-sensitive — a stale dependency-pattern nudge is noise, not signal).
 func EnqueueMirrorWebhook(ctx context.Context, store mirrorWebhookStore, learnerID string, mirror *models.MirrorMessage, now time.Time) (int64, bool, error) {
 	if store == nil || mirror == nil || learnerID == "" {
-		return 0, false, nil
-	}
-
-	// Per-day dedup: if a mirror was already pushed today for this learner,
-	// don't enqueue another one. Same pattern as OLM / DAILY_MOTIVATION.
-	sent, err := store.WasAlertSentToday(ctx, learnerID, MirrorAlertKind)
-	if err != nil {
-		return 0, false, fmt.Errorf("mirror dedup check: %w", err)
-	}
-	if sent {
 		return 0, false, nil
 	}
 
@@ -339,10 +348,11 @@ func EnqueueMirrorWebhook(ctx context.Context, store mirrorWebhookStore, learner
 
 	scheduledFor := now.UTC()
 	expiresAt := scheduledFor.Add(24 * time.Hour)
-	id, err := store.EnqueueWebhookMessage(
+	id, enqueued, err := store.EnqueueWebhookMessageOncePerDay(
 		ctx,
 		learnerID,
 		models.WebhookKindMirror,
+		MirrorAlertKind,
 		string(body),
 		scheduledFor,
 		expiresAt,
@@ -351,18 +361,7 @@ func EnqueueMirrorWebhook(ctx context.Context, store mirrorWebhookStore, learner
 	if err != nil {
 		return 0, false, fmt.Errorf("enqueue mirror webhook: %w", err)
 	}
-
-	// Record the alert so the dedup check above blocks subsequent same-day
-	// emissions. Stored under the same alert_type the scheduler will mark
-	// when the message is actually dispatched.
-	if err := store.CreateScheduledAlert(ctx, learnerID, MirrorAlertKind, "", now.UTC()); err != nil {
-		// The webhook is already in the queue — log via error return so the
-		// caller can surface it, but treat enqueue as success (dedup will
-		// just not work today; better than losing the nudge entirely).
-		return id, true, fmt.Errorf("record mirror alert: %w", err)
-	}
-
-	return id, true, nil
+	return id, enqueued, nil
 }
 
 // ─── Tutor Mode ─────────────────────────────────────────────────────────────

@@ -67,6 +67,10 @@ const (
 	ActivityDebugMisconception ActivityType = "DEBUG_MISCONCEPTION"
 	ActivityFeynmanPrompt      ActivityType = "FEYNMAN_PROMPT"
 	ActivityTransferProbe      ActivityType = "TRANSFER_PROBE"
+	// ActivityDiagnosticAssessment is a cold, evidence-only probe used while
+	// the domain FSM is in DIAGNOSTIC. It must not introduce, explain or scaffold
+	// the target concept before the learner commits an answer.
+	ActivityDiagnosticAssessment ActivityType = "DIAGNOSTIC_ASSESSMENT"
 
 	// ActivityCloseSession is emitted by [3] Gate Controller as an
 	// *escape action* when the OVERLOAD alert fires (session has run
@@ -148,14 +152,18 @@ type KnowledgeSpace struct {
 }
 
 type Domain struct {
-	ID                   string
-	LearnerID            string
-	Name                 string
-	PersonalGoal         string
-	Graph                KnowledgeSpace
-	ValueFramingsJSON    string
-	LastValueAxis        string
-	Archived             bool
+	ID                string
+	LearnerID         string
+	Name              string
+	PersonalGoal      string
+	Graph             KnowledgeSpace
+	ValueFramingsJSON string
+	LastValueAxis     string
+	Archived          bool
+	// HighStakes activates the conservative evidence and notification policy:
+	// demonstrated claims and intrusive pushes require a trusted human-reviewed
+	// assessment. The public MCP surface can mark this flag but cannot unset it.
+	HighStakes           bool
 	PriorityRank         *int
 	GraphVersion         int
 	GoalRelevanceJSON    string
@@ -164,18 +172,19 @@ type Domain struct {
 	// means "not yet initialised" — read as PhaseInstruction by the
 	// orchestrator (legacy backward-compat fallback per OQ-2.1).
 	Phase Phase
-	// PhaseChangedAt is the UTC timestamp of the last phase
-	// transition. Used to count diagnostic items lazily (interactions
-	// since this timestamp).
+	// PhaseChangedAt is the UTC timestamp of the last phase transition. It
+	// bounds the query for qualified, distinct diagnostic concept coverage.
 	PhaseChangedAt time.Time
 	// PhaseEntryEntropy is the mean binary entropy of P(L) over the
 	// domain's concepts at the moment the phase was last set to
-	// DIAGNOSTIC. Compared against current mean entropy to determine
-	// the DIAGNOSTIC → INSTRUCTION transition (OQ-2.2). Zero (or
-	// effectively unset) means "no snapshot available" — only the
-	// NDiagnosticMax escape applies.
+	// DIAGNOSTIC. It enriches the transition audit rationale; qualified
+	// concept coverage remains mandatory even when entropy falls.
 	PhaseEntryEntropy float64
 	CreatedAt         time.Time
+	// DeletedAt is set for a logically deleted domain. Runtime readers filter
+	// tombstones, while assessment and curriculum audit rows keep their stable
+	// domain reference.
+	DeletedAt *time.Time
 }
 
 // GoalRelevance is the parsed payload of Domain.GoalRelevanceJSON. It maps

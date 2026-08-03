@@ -1,6 +1,7 @@
 package algorithms
 
 import (
+	"math"
 	"testing"
 )
 
@@ -33,6 +34,41 @@ func TestIRTUpdateTheta(t *testing.T) {
 	}
 }
 
+func TestIRTUpdateThetaSingletonIsRegularized(t *testing.T) {
+	gotCorrect := IRTUpdateTheta(0, []IRTItem{{Difficulty: 2, Discrimination: 1}}, []bool{true})
+	if gotCorrect <= 0 || gotCorrect >= 2 {
+		t.Fatalf("one correct response should make a finite, moderate update, got %f", gotCorrect)
+	}
+	gotIncorrect := IRTUpdateTheta(0, []IRTItem{{Difficulty: -2, Discrimination: 1}}, []bool{false})
+	if gotIncorrect >= 0 || gotIncorrect <= -2 {
+		t.Fatalf("one incorrect response should make a finite, moderate update, got %f", gotIncorrect)
+	}
+}
+
+func TestIRTUpdateThetaCumulativeTrajectory(t *testing.T) {
+	theta := 0.0
+	for prior := 0; prior < 20; prior++ {
+		next := IRTUpdateThetaCumulative(theta, prior,
+			[]IRTItem{{Difficulty: 0.5, Discrimination: 1}}, []bool{true})
+		if next <= theta {
+			t.Fatalf("theta must increase on success at step %d: before=%f after=%f", prior, theta, next)
+		}
+		if prior == 0 && next >= 2 {
+			t.Fatalf("first observation saturated the estimate: %f", next)
+		}
+		theta = next
+	}
+	if theta >= 4 {
+		t.Fatalf("20 sequential successes should approach the bound gradually, got %f", theta)
+	}
+
+	afterFailure := IRTUpdateThetaCumulative(theta, 20,
+		[]IRTItem{{Difficulty: 0.5, Discrimination: 1}}, []bool{false})
+	if afterFailure >= theta {
+		t.Fatalf("a failure must reverse the trajectory: before=%f after=%f", theta, afterFailure)
+	}
+}
+
 func TestIRTIsInZPD(t *testing.T) {
 	if !IRTIsInZPD(0.65) {
 		t.Error("0.65 should be in ZPD")
@@ -53,6 +89,8 @@ func TestFSRSDifficultyToIRT(t *testing.T) {
 		{1.0, -3.0}, // easiest FSRS → lowest IRT
 		{10.0, 3.0}, // hardest FSRS → highest IRT
 		{5.5, 0.0},  // midpoint → zero
+		{0.3, -3.0}, // imported/bootstrap values are normalized
+		{12.0, 3.0}, // out-of-range values cannot create extreme items
 	}
 	for _, tt := range tests {
 		got := FSRSDifficultyToIRT(tt.fsrs)
@@ -188,4 +226,46 @@ func TestIRTProbabilityBounds(t *testing.T) {
 		}
 		prev = p
 	}
+}
+
+func FuzzIRTUpdateThetaCumulativeAlwaysFiniteAndDirectional(f *testing.F) {
+	for _, seed := range []struct {
+		theta, difficulty, discrimination float64
+		prior                             uint16
+		response                          bool
+	}{
+		{0, 0, 1, 0, true},
+		{3.9, -3, 2, 100, true},
+		{-3.9, 3, 2, 100, false},
+		{0.5, 0.2, 0.1, 65535, false},
+	} {
+		f.Add(seed.theta, seed.difficulty, seed.discrimination, seed.prior, seed.response)
+	}
+	f.Fuzz(func(t *testing.T, theta, difficulty, discrimination float64, prior uint16, response bool) {
+		if math.IsNaN(theta) || math.IsInf(theta, 0) ||
+			math.IsNaN(difficulty) || math.IsInf(difficulty, 0) ||
+			math.IsNaN(discrimination) || math.IsInf(discrimination, 0) {
+			t.Skip()
+		}
+		// Direction has a stable interpretation only for the conventional
+		// positive-discrimination 2PL model. Normalize arbitrary fuzzer input
+		// into that supported parameter space.
+		discrimination = math.Abs(discrimination)
+		if discrimination > 10 {
+			discrimination = 10
+		}
+		before := math.Max(-4, math.Min(4, theta))
+		got := IRTUpdateThetaCumulative(theta, int(prior), []IRTItem{{
+			Difficulty: difficulty, Discrimination: discrimination,
+		}}, []bool{response})
+		if math.IsNaN(got) || math.IsInf(got, 0) || got < -4 || got > 4 {
+			t.Fatalf("invalid posterior theta=%v from theta=%v item=(%v,%v)", got, theta, difficulty, discrimination)
+		}
+		if response && got < before-1e-12 {
+			t.Fatalf("correct response moved theta down: before=%v after=%v", before, got)
+		}
+		if !response && got > before+1e-12 {
+			t.Fatalf("incorrect response moved theta up: before=%v after=%v", before, got)
+		}
+	})
 }

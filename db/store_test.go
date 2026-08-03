@@ -2,7 +2,9 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -21,7 +23,7 @@ func TestConsumeAuthCode_WrongClientID(t *testing.T) {
 	}
 
 	expires := time.Now().Add(5 * time.Minute)
-	if err := store.CreateAuthCode(context.Background(), "code-1", "L1", "chal", "client-A", expires); err != nil {
+	if err := store.CreateAuthCodeWithBinding(context.Background(), "code-1", "L1", "chal", "", "client-A", "", expires); err != nil {
 		t.Fatalf("create code: %v", err)
 	}
 
@@ -57,7 +59,7 @@ func TestConsumeAuthCode_WrongClientID(t *testing.T) {
 func TestConsumeAuthCode_ConcurrentSingleWinner(t *testing.T) {
 	s := setupTestDB(t)
 	ctx := context.Background()
-	if err := s.CreateAuthCode(ctx, "code-race", "L1", "challenge", "client-A", time.Now().Add(time.Minute)); err != nil {
+	if err := s.CreateAuthCodeWithBinding(ctx, "code-race", "L1", "challenge", "", "client-A", "", time.Now().Add(time.Minute)); err != nil {
 		t.Fatalf("create code: %v", err)
 	}
 
@@ -89,6 +91,48 @@ func TestConsumeAuthCode_ConcurrentSingleWinner(t *testing.T) {
 	}
 }
 
+func TestExchangeAuthCodeForRefreshTokenRollsBackConsumeOnInsertFailure(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+	if err := s.CreateAuthCodeWithBinding(
+		ctx, "code-exchange-rollback", "L1", "challenge", "S256", "client-A",
+		"https://a.example/cb", time.Now().Add(time.Minute),
+	); err != nil {
+		t.Fatalf("create auth code: %v", err)
+	}
+	if s.dialect == DialectPostgres {
+		if _, err := s.root.Exec(`
+			CREATE FUNCTION fail_exchange_refresh_insert() RETURNS trigger
+			LANGUAGE plpgsql AS $$
+			BEGIN
+				RAISE EXCEPTION 'injected refresh insert failure';
+			END
+			$$`); err != nil {
+			t.Fatalf("create fault function: %v", err)
+		}
+		if _, err := s.root.Exec(`
+			CREATE TRIGGER fail_exchange_refresh
+			BEFORE INSERT ON refresh_tokens
+			FOR EACH ROW EXECUTE FUNCTION fail_exchange_refresh_insert()`); err != nil {
+			t.Fatalf("create fault trigger: %v", err)
+		}
+	} else if _, err := s.root.Exec(`
+		CREATE TRIGGER fail_exchange_refresh
+		BEFORE INSERT ON refresh_tokens
+		BEGIN
+			SELECT RAISE(ABORT, 'injected refresh insert failure');
+		END`); err != nil {
+		t.Fatalf("create fault trigger: %v", err)
+	}
+
+	if _, _, err := s.ExchangeAuthCodeForRefreshToken(ctx, "code-exchange-rollback", "client-A"); err == nil {
+		t.Fatal("exchange unexpectedly succeeded")
+	}
+	if _, err := s.ConsumeAuthCode(ctx, "code-exchange-rollback", "client-A"); err != nil {
+		t.Fatalf("authorization code was consumed despite rolled-back refresh insert: %v", err)
+	}
+}
+
 func TestRefreshToken_HashedAtRestAndDigestCannotAuthenticate(t *testing.T) {
 	s := setupTestDB(t)
 	ctx := context.Background()
@@ -115,7 +159,14 @@ func TestRefreshToken_HashedAtRestAndDigestCannotAuthenticate(t *testing.T) {
 	}
 }
 
-func TestRotateRefreshToken_LegacyPlaintextUpgradesToHash(t *testing.T) {
+func TestCreateRefreshTokenRequiresClientBinding(t *testing.T) {
+	s := setupTestDB(t)
+	if _, err := s.CreateRefreshToken(context.Background(), "L1", ""); err == nil {
+		t.Fatal("unbound refresh token was issued")
+	}
+}
+
+func TestRotateRefreshToken_RejectsAndRevokesUnboundLegacyToken(t *testing.T) {
 	s := setupTestDB(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -128,19 +179,47 @@ func TestRotateRefreshToken_LegacyPlaintextUpgradesToHash(t *testing.T) {
 		t.Fatalf("seed legacy token: %v", err)
 	}
 
-	successor, err := s.RotateRefreshToken(ctx, "legacy-token", "client-A")
-	if err != nil {
-		t.Fatalf("rotate legacy token: %v", err)
+	if _, err := s.RotateRefreshToken(ctx, "legacy-token", "client-A"); !errors.Is(err, storeport.ErrInvalidRefreshToken) {
+		t.Fatalf("rotate legacy token error = %v, want invalid refresh token", err)
 	}
 	if _, err := s.GetRefreshToken(ctx, "legacy-token"); err == nil {
 		t.Fatal("legacy plaintext token remained usable after rotation")
 	}
-	var stored string
-	if err := s.root.QueryRow(`SELECT token FROM refresh_tokens`).Scan(&stored); err != nil {
-		t.Fatalf("read successor: %v", err)
+	var revoked sql.NullTime
+	if err := s.root.QueryRow(`SELECT revoked_at FROM refresh_tokens WHERE token = 'legacy-token'`).Scan(&revoked); err != nil || !revoked.Valid {
+		t.Fatalf("legacy token was not revoked: revoked=%v err=%v", revoked, err)
 	}
-	if stored != refreshTokenHash(successor.Token) {
-		t.Fatalf("rotated token was not stored as a digest: %q", stored)
+	var count int
+	if err := s.root.QueryRow(`SELECT COUNT(*) FROM refresh_tokens`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("unexpected successor created: count=%d err=%v", count, err)
+	}
+}
+
+func TestRotateRefreshToken_RejectsClientBoundPlaintextLegacyToken(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	if _, err := s.root.Exec(rb(s,
+		`INSERT INTO refresh_tokens
+		 (token, learner_id, client_id, family_id, expires_at, created_at)
+		 VALUES ('legacy-bound-plaintext', 'L1', 'client-A', 'legacy-bound-family', ?, ?)`),
+		now.Add(time.Hour), now,
+	); err != nil {
+		t.Fatalf("seed legacy bound token: %v", err)
+	}
+
+	if _, err := s.RotateRefreshToken(ctx, "legacy-bound-plaintext", "client-A"); !errors.Is(err, storeport.ErrInvalidRefreshToken) {
+		t.Fatalf("rotate plaintext legacy token error = %v, want invalid refresh token", err)
+	}
+	if _, err := s.GetRefreshToken(ctx, "legacy-bound-plaintext"); err == nil {
+		t.Fatal("client-bound plaintext legacy bearer was accepted")
+	}
+	var used sql.NullTime
+	if err := s.root.QueryRow(`SELECT used_at FROM refresh_tokens WHERE token = 'legacy-bound-plaintext'`).Scan(&used); err != nil {
+		t.Fatal(err)
+	}
+	if used.Valid {
+		t.Fatal("rejected plaintext token was consumed")
 	}
 }
 
@@ -185,8 +264,8 @@ func TestRotateRefreshToken_ConcurrentReuseSingleWinner(t *testing.T) {
 			successor = result.token
 			continue
 		}
-		if !errors.Is(result.err, storeport.ErrInvalidRefreshToken) {
-			t.Fatalf("loser error = %v, want ErrInvalidRefreshToken", result.err)
+		if !errors.Is(result.err, storeport.ErrRefreshTokenReuse) {
+			t.Fatalf("loser error = %v, want ErrRefreshTokenReuse", result.err)
 		}
 	}
 	if successes != 1 {
@@ -195,15 +274,80 @@ func TestRotateRefreshToken_ConcurrentReuseSingleWinner(t *testing.T) {
 	if _, err := s.GetRefreshToken(ctx, rt.Token); err == nil {
 		t.Fatal("consumed refresh token remained usable")
 	}
-	if _, err := s.GetRefreshToken(ctx, successor); err != nil {
-		t.Fatalf("winning successor is not usable: %v", err)
+	if _, err := s.GetRefreshToken(ctx, successor); err == nil {
+		t.Fatal("family replay must revoke the winning successor")
 	}
-	var active int
-	if err := s.root.QueryRow(`SELECT COUNT(*) FROM refresh_tokens`).Scan(&active); err != nil {
-		t.Fatalf("count active refresh tokens: %v", err)
+	var rows, revoked int
+	if err := s.root.QueryRow(`SELECT COUNT(*), COUNT(revoked_at) FROM refresh_tokens`).Scan(&rows, &revoked); err != nil {
+		t.Fatalf("count refresh token family: %v", err)
 	}
-	if active != 1 {
-		t.Fatalf("active refresh token rows = %d, want 1", active)
+	if rows != 2 || revoked != 2 {
+		t.Fatalf("family rows=%d revoked=%d, want 2/2", rows, revoked)
+	}
+}
+
+func TestRotateRefreshToken_ReplayRevokesFamily(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+	root, err := s.CreateRefreshToken(ctx, "L1", "client-A")
+	if err != nil {
+		t.Fatalf("create refresh token: %v", err)
+	}
+	successor, err := s.RotateRefreshToken(ctx, root.Token, "client-A")
+	if err != nil {
+		t.Fatalf("first rotation: %v", err)
+	}
+	if _, err := s.GetRefreshToken(ctx, successor.Token); err != nil {
+		t.Fatalf("successor should be active before replay: %v", err)
+	}
+
+	if _, err := s.RotateRefreshToken(ctx, root.Token, "client-A"); !errors.Is(err, storeport.ErrRefreshTokenReuse) {
+		t.Fatalf("replay error = %v, want ErrRefreshTokenReuse", err)
+	}
+	if _, err := s.GetRefreshToken(ctx, successor.Token); err == nil {
+		t.Fatal("successor remained usable after ancestor replay")
+	}
+
+	var families, revoked int
+	if err := s.root.QueryRow(`SELECT COUNT(DISTINCT family_id), COUNT(revoked_at) FROM refresh_tokens`).Scan(&families, &revoked); err != nil {
+		t.Fatalf("inspect family: %v", err)
+	}
+	if families != 1 || revoked != 2 {
+		t.Fatalf("families=%d revoked=%d, want 1/2", families, revoked)
+	}
+}
+
+func TestCleanupExpiredRefreshTokens_RetainsAncestorsOfLiveFamily(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+	root, err := s.CreateRefreshToken(ctx, "L1", "client-A")
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	successor, err := s.RotateRefreshToken(ctx, root.Token, "client-A")
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if _, err := s.root.Exec(
+		rb(s, `UPDATE refresh_tokens SET expires_at = ? WHERE token = ?`),
+		time.Now().UTC().Add(-time.Hour), refreshTokenHash(root.Token),
+	); err != nil {
+		t.Fatalf("expire ancestor: %v", err)
+	}
+
+	deleted, err := s.CleanupExpiredRefreshTokens(ctx)
+	if err != nil {
+		t.Fatalf("cleanup with live descendant: %v", err)
+	}
+	if deleted != 0 {
+		t.Fatalf("deleted=%d, want 0 while descendant is live", deleted)
+	}
+	if _, err := s.GetRefreshToken(ctx, successor.Token); err != nil {
+		t.Fatalf("live descendant unavailable: %v", err)
+	}
+	var rows int
+	if err := s.root.QueryRow(`SELECT COUNT(*) FROM refresh_tokens`).Scan(&rows); err != nil || rows != 2 {
+		t.Fatalf("family rows=%d err=%v, want 2", rows, err)
 	}
 }
 
@@ -285,5 +429,45 @@ func TestCreateOAuthClientWithSecretCappedRejectsAtLimit(t *testing.T) {
 	}
 	if got != 1 {
 		t.Fatalf("count = %d, want 1", got)
+	}
+}
+
+func TestCreateOAuthClientWithSecretCappedConcurrent(t *testing.T) {
+	store := setupTestDB(t)
+	ctx := context.Background()
+	const contenders = 12
+	start := make(chan struct{})
+	results := make(chan error, contenders)
+	var wg sync.WaitGroup
+	for i := 0; i < contenders; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			results <- store.CreateOAuthClientWithSecretCapped(
+				ctx, fmt.Sprintf("concurrent-%d", i), "client", `["https://x.example/cb"]`, "", 1,
+			)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	winners := 0
+	for err := range results {
+		switch {
+		case err == nil:
+			winners++
+		case errors.Is(err, storeport.ErrOAuthClientLimitReached):
+		default:
+			t.Fatalf("unexpected capped registration error: %v", err)
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("registration winners = %d, want 1", winners)
+	}
+	count, err := store.CountOAuthClients(ctx)
+	if err != nil || count != 1 {
+		t.Fatalf("registered clients = %d, err=%v", count, err)
 	}
 }

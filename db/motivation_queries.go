@@ -137,9 +137,9 @@ func (s *Store) conceptMasteryDelta(ctx context.Context, learnerID, domainID str
 	return deltas, nil
 }
 
-// MilestonesInWindow returns concepts newly mastered in the window [since, now].
-// "Newly mastered" = current PMastery >= MasteryBKT() AND the most recent
-// interaction on that concept is after `since` (approximation).
+// MilestonesInWindow returns concepts whose model estimate is above the
+// routing threshold and has fresh successful evidence in [since, now]. It is
+// an estimate milestone for narrative routing, never demonstrated mastery.
 func (s *Store) MilestonesInWindow(ctx context.Context, learnerID string, domainConcepts []string, since time.Time) ([]string, error) {
 	return s.milestonesInWindow(ctx, learnerID, "", domainConcepts, since, false)
 }
@@ -164,7 +164,7 @@ func (s *Store) milestonesInWindow(ctx context.Context, learnerID, domainID stri
 		domainSet[c] = true
 	}
 
-	// Candidate concepts: in-domain AND currently above the mastery
+	// Candidate concepts: in-domain AND currently above the model routing
 	// threshold. The "recently active" check below is then resolved for
 	// all candidates in a single set-based query instead of one COUNT(*)
 	// per concept.
@@ -248,15 +248,16 @@ func (s *Store) CountInteractionsByConceptInDomain(ctx context.Context, learnerI
 	return count, nil
 }
 
-// CountSessionsOnConcept approximates the number of distinct study sessions the
-// learner has had on a concept. Uses distinct calendar dates with at least one
-// interaction on that concept (rough proxy — good enough for Hidi-Renninger phase
-// inference). The substr(created_at, 1, 10) works around modernc-sqlite's ISO 8601
-// serialization (the built-in DATE() doesn't parse the 'T' separator).
+// CountSessionsOnConcept counts durable session IDs. Rows created before
+// explicit sessions remain visible through a conservative per-calendar-day
+// legacy bucket; they are never merged with an explicit session.
 func (s *Store) CountSessionsOnConcept(ctx context.Context, learnerID, concept string) (int, error) {
 	var count int
 	err := s.queryRow(ctx,
-		`SELECT COUNT(DISTINCT `+s.utcDateExpr("created_at")+`) FROM interactions
+		`SELECT COUNT(DISTINCT CASE
+		     WHEN session_id IS NOT NULL THEN 'explicit:' || session_id
+		     ELSE 'legacy-day:' || `+s.utcDateExpr("created_at")+`
+		 END) FROM interactions
 		 WHERE learner_id = ? AND concept = ?`,
 		learnerID, concept,
 	).Scan(&count)
@@ -269,7 +270,10 @@ func (s *Store) CountSessionsOnConcept(ctx context.Context, learnerID, concept s
 func (s *Store) CountSessionsOnConceptInDomain(ctx context.Context, learnerID, domainID, concept string) (int, error) {
 	var count int
 	err := s.queryRow(ctx,
-		`SELECT COUNT(DISTINCT `+s.utcDateExpr("created_at")+`) FROM interactions
+		`SELECT COUNT(DISTINCT CASE
+		     WHEN session_id IS NOT NULL THEN 'explicit:' || session_id
+		     ELSE 'legacy-day:' || `+s.utcDateExpr("created_at")+`
+		 END) FROM interactions
 		 WHERE learner_id = ? AND domain_id = ? AND concept = ?`,
 		learnerID, domainID, concept,
 	).Scan(&count)

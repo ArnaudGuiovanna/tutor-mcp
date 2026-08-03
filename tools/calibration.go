@@ -16,6 +16,7 @@ import (
 )
 
 type CalibrationCheckParams struct {
+	IdempotentMutationParams
 	Concept          string  `json:"concept,omitempty" jsonschema:"the concept to assess; canonical key for concept-targeting tools; required unless concept_id is used"`
 	ConceptID        string  `json:"concept_id,omitempty" jsonschema:"deprecated compatibility alias for concept; prefer concept"`
 	PredictedMastery float64 `json:"predicted_mastery" jsonschema:"learner self-assessment on a 1..5 Likert scale (1=no mastery, 5=perfect mastery); stored internally as 0..1"`
@@ -110,6 +111,7 @@ func registerCalibrationCheck(server *mcp.Server, deps *Deps) {
 }
 
 type RecordCalibrationResultParams struct {
+	IdempotentMutationParams
 	PredictionID string  `json:"prediction_id" jsonschema:"prediction ID returned by calibration_check"`
 	ActualScore  float64 `json:"actual_score" jsonschema:"actual score as a 0..1 float (0=total failure, 1=perfect success)"`
 }
@@ -158,7 +160,16 @@ func registerRecordCalibrationResult(server *mcp.Server, deps *Deps) {
 
 		bias, err := deps.Store.GetCalibrationBiasInDomain(ctx, learnerID, record.DomainID, 20)
 		if err != nil {
-			r, _ := safeErrorResult(deps.Logger, "failed to read updated calibration bias", err)
+			// Completion is already durable and single-use. Returning an MCP
+			// application error here would release the idempotency key, then a
+			// retry would hit a state conflict after the successful mutation.
+			deps.Logger.Warn("record_calibration_result: updated bias readback degraded", "err", err, "learner", learnerID, "prediction", params.PredictionID)
+			r, _ := jsonResult(map[string]interface{}{
+				"delta":                    delta,
+				"domain_id":                record.DomainID,
+				"calibration_bias_updated": nil,
+				"degraded_components":      []string{"calibration_bias_readback"},
+			})
 			return r, nil, nil
 		}
 

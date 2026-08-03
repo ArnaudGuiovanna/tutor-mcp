@@ -60,7 +60,7 @@ The server sits between a learner and an LLM. It splits the job cleanly:
 
 Four loops run from the first session:
 
-- **Learning loop** — Before and after every exchange, the LLM calls `get_next_activity` and `record_interaction`. The runtime updates BKT mastery, FSRS recall, IRT ability, Rasch/Elo exercise calibration, transfer evidence and misconception status — in real time, on every interaction. The LLM never picks scheduling itself.
+- **Learning loop** — Before and after every exchange, the LLM calls `get_next_activity` and `record_interaction`. The runtime updates BKT mastery, FSRS recall, regularized cumulative IRT ability, transfer evidence and misconception status — in real time, on every interaction. The LLM never picks scheduling itself.
 - **Narrative memory loop** — `record_session_close` asks the LLM for a factual session trace; `update_learner_memory` stores stable memory, pending observations, concept notes, sessions and archives. The next `get_next_activity` call can use those traces to avoid a generic exercise.
 - **Metacognitive loop** — Affect check-ins (`record_affect`), calibration tracking (`calibration_check` / `record_calibration_result`) and an autonomy score observe the learner's relationship to the system. A factual mirror surfaces consolidated dependency patterns — the system aims to make itself progressively unnecessary.
 - **Motivation loop** — A brief engine selects one motivational angle per exercise (milestone, competence value, growth mindset, affect reframe, plateau recontext, utility value) and emits *signals + instruction* — never canned text. The LLM phrases it.
@@ -70,7 +70,7 @@ The pillars of an Intelligent Tutoring System map cleanly:
 | ITS pillar | Owner |
 |---|---|
 | **Domain model** (concept graph, prerequisites) | Tutor MCP runtime — KST-validated |
-| **Learner model** (mastery, ability, recall, transfer) | Tutor MCP runtime — BKT, IRT, Rasch/Elo, PFA |
+| **Learner model** (mastery, ability, recall, transfer) | Tutor MCP runtime — BKT, regularized online IRT, PFA |
 | **Pedagogical model** (scheduling, regulation, alerts) | Tutor MCP runtime — FSRS, evidence gates, orchestrator |
 | **Interface + content** | The LLM — Claude / ChatGPT / Le Chat / Gemini |
 
@@ -115,34 +115,48 @@ Add `https://your.domain/mcp` as a custom MCP connector. OAuth 2.1 + PKCE with d
 | **Gemini CLI** | [`geminicli.com/docs/tools/mcp-server/`](https://geminicli.com/docs/tools/mcp-server/) | Local CLI |
 | **Claude Code** (CLI, local) | `.mcp.json` with `"url": "http://localhost:3000/mcp"` | No HTTPS needed |
 
-## MCP tools (35)
+## MCP tools (45)
 
 Domain-scoped learning tools accept an optional `domain_id`; where documented, omitting it selects the most recently active non-archived domain. Learner-global and lifecycle tools intentionally have different contracts—use each tool's schema as the source of truth.
 
-### Core learning loop (7)
+Every mutation schema exposes an optional `idempotency_key` (the equivalent
+`_meta.idempotency_key` is also accepted). Reusing the same learner/tool/key
+with canonically equivalent arguments replays the first successful response; reusing
+it with different arguments is rejected. Hosts should generate a fresh key for
+each logical mutation and retain it across transport retries. If an operator
+opts into cached-response retention, an expired response produces an explicit
+already-completed error; the durable key and request hash remain, so the tool
+handler is never executed again for that key.
+
+### Core learning loop (11)
 
 | Tool | Purpose |
 |---|---|
+| `start_learning_session` | Idempotently open/resume the durable session ID shared by interactions, affect, transfer, intentions, assessments and summaries |
 | `get_learner_context` | Session-start context: active domain, concept states, recent history, active misconceptions |
 | `get_pending_alerts` | Learning + metacognitive alerts requiring action |
-| `get_next_activity` | Next optimal activity + episodic context + reasoning request + tutor mode + motivation brief + mastery uncertainty + transfer profile + Rasch/Elo calibration |
-| `record_interaction` | Persist outcome, update BKT/FSRS/IRT/Rasch-Elo; tracks hints, initiative, error type, misconception, rubric evidence, interpretation brief |
+| `get_next_activity` | Next optimal activity + episodic context + reasoning request + tutor mode + motivation brief + mastery uncertainty + transfer profile |
+| `prepare_assessment_attempt` / `submit_assessment_attempt` / `cancel_assessment_attempt` | Freeze task/rubric before the response, commit the response before evaluation, or explicitly cancel the attempt |
+| `record_interaction` | Persist an observation and update BKT/FSRS/IRT; unlinked practice stays explicitly unverified, while retention/demonstration/transfer evidence references a submitted/evaluated attempt |
 | `check_mastery` | Mastery-challenge readiness: BKT + evidence diversity + uncertainty + transfer status |
-| `get_olm_snapshot` | Open Learner Model: per-concept mastery, retention, fringe membership |
-| `get_dashboard_state` | Full dashboard: progress, retention, autonomy, calibration bias, affect history |
+| `get_olm_snapshot` | Open Learner Model: evidence-backed stages per concept — estimated, retained, demonstrated and transferred |
+| `get_dashboard_state` | Evidence-backed progress (estimated/retained/demonstrated/transferred), routing state, retention, autonomy, calibration bias and affect history |
 
-### Domain management (9)
+### Domain management (12)
 
 | Tool | Purpose |
 |---|---|
-| `init_domain` | Create domain with concept graph, prerequisites, personal goal |
-| `add_concepts` | Append concepts without resetting progress |
+| `init_domain` | Create domain with concept graph, prerequisites, personal goal, and immutable curriculum version 1 |
+| `add_concepts` | Append concepts with `expected_version` CAS; optional outcomes/level/criteria metadata; progress is not reset |
+| `get_curriculum_snapshot` | Read latest/historical immutable versions, stable concept IDs, outcomes, criteria, provenance and review state |
+| `publish_curriculum_revision` | CAS-protected rename, metadata update, split, merge, or safe removal with a complete audit envelope |
 | `validate_domain_graph` | Audit graph: cycles, orphans, depth, disconnections |
-| `archive_domain` / `unarchive_domain` / `delete_domain` | Lifecycle |
+| `archive_domain` / `unarchive_domain` / `delete_domain` | Lifecycle; deletion is a runtime-hidden tombstone that preserves curriculum and learning evidence |
 | `set_domain_priority` | Re-rank domains for scheduling weight |
+| `mark_domain_high_stakes` | One-way safety classification; demonstrated claims and intrusive suggestions then require trusted human-reviewed evaluation |
 | `set_goal_relevance` / `get_goal_relevance` | LLM-decomposed relevance vector over the concept graph (biases the concept selector) — gated by `REGULATION_GOAL` |
 
-### Metacognition (5)
+### Metacognition (6)
 
 | Tool | Purpose |
 |---|---|
@@ -164,27 +178,29 @@ Domain-scoped learning tools accept an optional `domain_id`; where documented, o
 
 | Tool | Purpose |
 |---|---|
-| `feynman_challenge` | Learner explains a mastered concept; LLM detects gaps for BKT injection |
-| `transfer_challenge` / `record_transfer_result` | Structured probe in `near`/`far`/`debugging`/`teaching`/`creative` |
+| `feynman_challenge` | Learner explains a high-estimate concept to deepen evidence; confirmed prerequisite gaps become versioned curriculum revisions |
+| `transfer_challenge` / `record_transfer_result` | Generate structured probes across `near`/`far`/`debugging`/`teaching`/`creative`; the direct recorder is legacy/unverified, while evidence-bearing probes use assessment attempts |
 | `learning_negotiation` | Expose system plan + tradeoffs; learner can propose alternatives |
 
-### Memory & session (5)
+### Memory & session (7)
 
 | Tool | Purpose |
 |---|---|
 | `update_learner_memory` / `read_raw_session` / `get_memory_state` | Markdown memory: sessions, concepts, stable memory, archives |
-| `record_session_close` | Recap brief + optional Gollwitzer if-then implementation intention |
+| `record_session_close` | Idempotently close the durable session + recap brief + optional Gollwitzer if-then implementation intention |
+| `list_implementation_intentions` / `update_implementation_intention` | Inspect and resolve commitments through pending/honored/missed/cancelled states |
 | `queue_webhook_message` | Queue a structured Discord nudge (`why_now`, `learning_gain`, `open_loop`, `next_action`) |
 
-### Availability (1)
+### Availability (2)
 
 | Tool | Purpose |
 |---|---|
-| `get_availability_model` | Learner's time windows and session frequency |
+| `get_availability_model` | Learner-owned IANA timezone, weekly local windows, DND, consent/frequency/cap, accessibility preferences and policy version |
+| `update_availability_model` | Optimistic, ownership-scoped replacement of availability/accessibility policy; concurrent stale writes are rejected |
 
 ### Alert engine
 
-The scheduler detects nine alert types — learning (`FORGETTING`, `PLATEAU`, `ZPD_DRIFT`, `OVERLOAD`, `MASTERY_READY`) and metacognitive (`DEPENDENCY_INCREASING`, `CALIBRATION_DIVERGING`, `AFFECT_NEGATIVE`, `TRANSFER_BLOCKED`). Daily dedup, per-day frequency cap; archived/deleted domains are filtered out of reads and webhooks.
+The scheduler detects nine alert types — learning (`FORGETTING`, `PLATEAU`, `ZPD_DRIFT`, `OVERLOAD`, `MASTERY_READY`) and metacognitive (`DEPENDENCY_INCREASING`, `CALIBRATION_DIVERGING`, `AFFECT_NEGATIVE`, `TRANSFER_BLOCKED`). `MASTERY_READY` means that attempt-linked retained, varied evidence is sufficient to *attempt* a challenge; it is not a demonstrated-mastery claim, and the same recent trusted transfer failure that blocks `check_mastery` suppresses the alert. Every delivery rechecks explicit consent, DND, the learner's DST-aware local window, frequency and local-day cap through an atomic reservation. Archived/deleted domains are filtered out. Unreviewed high-stakes domains cannot produce demonstrated claims or intrusive suggestions; only trusted `human_review` assessment evidence opens that gate, and the runtime does not invent an external reviewer.
 
 ## Cognitive science engine
 
@@ -194,8 +210,7 @@ Pure-function algorithms running on every interaction, composed by the regulatio
 |---|---|
 | **BKT** + individualized BKT | Estimates mastery confidence per concept, not just whether the learner answered right today; recent-history profile individualizes `P(Learn)`, `P(Slip)`, `P(Guess)` — never tuned by the LLM |
 | **FSRS** | Decides when to bring a concept back, using stability and difficulty curves |
-| **IRT** | Tracks learner ability θ from response patterns so activity difficulty is calibrated to the current learner |
-| **Rasch / Elo** | Keeps a deterministic learner-ability vs exercise-difficulty signal, exposed to the LLM and stored in snapshots |
+| **IRT** | Tracks learner ability θ with a regularized cumulative online update so one binary response cannot saturate the estimate |
 | **PFA** | Weighs wins and losses on each concept to predict how the next attempt is likely to go |
 | **KST** | Validates prerequisite graph; gates new concepts on mastery of ancestors |
 | **Structured transfer** | Checks whether knowledge moves beyond the training pattern across `near`/`far`/`debugging`/`teaching`/`creative` probes |
@@ -221,21 +236,31 @@ Environment variables read at boot:
 | `TRUSTED_PROXY_CIDRS` | — | Comma-separated CIDRs of trusted reverse-proxies. **Required behind a public proxy** — without it every IP-rate-limit collapses under the proxy's loopback bucket. |
 | `MCP_RATE_LIMIT_PER_MIN` | `60` | Per-IP and per-learner cap on `/mcp` |
 | `MCP_RATE_LIMIT_BURST` | `60` | Burst allowance |
-| `TUTOR_MCP_MEMORY_ENABLED` | `on` | Node-local Markdown learner memory. Experimental distributed mode requires `off` until a shared memory backend exists. |
+| `TUTOR_MCP_MEMORY_ENABLED` | `on` | Node-local Markdown learner memory. Runtime concept notes and sessions are domain-scoped; ambiguous legacy/global narratives are excluded from activity generation. Experimental distributed mode requires `off`. |
 | `TUTOR_MCP_MEMORY_ROOT` | `~/.tutor-mcp/` | Memory FS root |
 | `REGULATION_THRESHOLD` | `on` | `off` reverts to legacy split thresholds (BKT 0.85 / KST 0.70 / Mid 0.80) |
 | `REGULATION_GOAL` | `on` | `off` hides `set_goal_relevance` / `get_goal_relevance` and drops the goal-aware prompt section |
 | `REGULATION_ACTION` / `_CONCEPT` / `_GATE` | `on` | `off` drops the system-prompt appendix only — the selector / gate logic always runs |
-| `REGULATION_FADE` | **`off`** *(opt-in)* | Strict literal `on` enables the fade controller (verbosity reduction + webhook frequency + ZPD aggressiveness + proactive review). Any other value keeps it off. |
+| `REGULATION_FADE` | **`off`** *(opt-in)* | Strict literal `on` reduces motivational/hint verbosity and exposes advisory fade parameters. Scheduler frequency, ZPD target and proactive-review cadence are not yet wired to those advisory fields. |
 
 Auth endpoints are rate-limited at 10/min (`/authorize`, `/token`), 5/min (`/register`); the MCP endpoint applies the per-IP and per-learner caps configured above.
+OAuth access tokens expire after 30 minutes. Refresh tokens rotate as a family;
+replay of an already-used member revokes the family instead of issuing another
+access token.
+
+Data lifecycle cleanup is opt-in and runs through a separate dry-run-first
+maintenance command; it is never triggered by server startup. See
+[Data retention maintenance](./OPERATIONS.md#data-retention-maintenance) for
+safe defaults, policy variables, backup implications and `--apply` usage.
+The product-level evidence, curriculum, session and learner-control invariants
+are specified in the [learning integrity contract](./docs/learning-integrity.md).
 
 ## Architecture
 
 ```
 main.go              HTTP + MCP handler + OAuth + scheduler
 auth/                OAuth 2.1 + JWT + PKCE + rate limiter
-algorithms/          BKT / FSRS / IRT / Rasch-Elo / PFA / KST + thresholds
+algorithms/          BKT / FSRS / regularized IRT / PFA / KST + thresholds
 engine/              Orchestrator + phase FSM + selectors + gate + fade
                      + alert / motivation / mirror / replay / OLM
 models/              Typed structs (learner, domain, interactions, regulation, …)
@@ -278,7 +303,7 @@ Stands on the shoulders of: Corbett & Anderson (BKT, 1995), Open-Spaced-Repetiti
 - **Operations** — backup, restore, off-host copy, systemd-user setup: [OPERATIONS.md](./OPERATIONS.md).
 - **Security** — private disclosure channels and operator hardening checklist: [SECURITY.md](./SECURITY.md). Do not open public issues for vulnerabilities.
 - **Contributing** — fork, branch from `staging`, conventional commits, test plan in the PR: [CONTRIBUTING.md](./CONTRIBUTING.md). Single-author maintained; small focused changes land fastest.
-- **Roadmap** — tracked on the [issue tracker](https://github.com/ArnaudGuiovanna/tutor-mcp/issues) (`p0` urgent, `p1` sprint, `p2` when convenient). Deferred statistical refinements: [#48](https://github.com/ArnaudGuiovanna/tutor-mcp/issues/48) PFA fidelity, [#49](https://github.com/ArnaudGuiovanna/tutor-mcp/issues/49) IRT EAP/MAP prior, [#52](https://github.com/ArnaudGuiovanna/tutor-mcp/issues/52) FSRS sub-day intervals. Shipped log in [CHANGELOG.md](./CHANGELOG.md).
+- **Roadmap** — tracked on the [issue tracker](https://github.com/ArnaudGuiovanna/tutor-mcp/issues) (`p0` urgent, `p1` sprint, `p2` when convenient). Deferred statistical refinements: [#48](https://github.com/ArnaudGuiovanna/tutor-mcp/issues/48) PFA fidelity and [#52](https://github.com/ArnaudGuiovanna/tutor-mcp/issues/52) FSRS sub-day intervals. Shipped log in [CHANGELOG.md](./CHANGELOG.md).
 
 ## License
 

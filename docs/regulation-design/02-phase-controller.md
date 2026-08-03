@@ -77,10 +77,10 @@ risque d'intégration.
 | Source | Champ | Usage |
 |--------|-------|-------|
 | `domains` | `phase` (nouvelle colonne) | État FSM courant |
-| `domains` | `phase_changed_at` (nouvelle colonne) | Pour calculer `diagnostic_items_count` lazy |
+| `domains` | `phase_changed_at` (nouvelle colonne) | Borne temporelle de la couverture diagnostique qualifiée |
 | `domains` | `goal_relevance_json` | Critères INSTRUCTION→MAINTENANCE et MAINTENANCE→INSTRUCTION |
 | `concept_states` (par learner × domaine) | `PMastery`, `PSlip`, `PGuess`, `Stability`, `ElapsedDays`, `CardState` | Entropie, mastery, retention |
-| `interactions` | filtré par learner × domain × `created_at >= phase_changed_at` (lazy count) | `diagnostic_items_count` (rôle FSM) ; recent concepts (rôle Gate) |
+| `interactions` + `assessment_attempts` | learner × domain × fenêtre de phase, `DIAGNOSTIC_ASSESSMENT`, sans hint, tentative évaluée | `COUNT(DISTINCT concept)` (rôle FSM) ; recent concepts (rôle Gate) |
 | `interactions` | tag `misconception_type` | Map des misconceptions actives via `db.GetActiveMisconceptions` |
 | Alerts | `engine.ComputeAlerts(...)` (déjà appelé en aval de `get_next_activity`) | Pour `[3] Gate` (OVERLOAD, FORGETTING) |
 
@@ -120,7 +120,7 @@ runtime).
        ┌────────────┐
        │ DIAGNOSTIC │  initial pour nouveaux domaines (flag on)
        └─────┬──────┘
-             │ entropie < seuil  OR  n_items >= N_max
+             │ couverture qualifiée distincte >= min(|concepts|, 8)
              ▼
        ┌────────────┐
        │INSTRUCTION │ ◀──┐  défaut pour anciens domaines (NULL phase)
@@ -138,7 +138,7 @@ runtime).
 
 | From | To | Condition | Calcul |
 |------|----|-----------|--------|
-| DIAGNOSTIC | INSTRUCTION | `mean_H(P(L)) < ENTROPY_THRESHOLD` OR `diagnostic_items_count >= N_DIAG_MAX` | Entropie : voir OQ-2.2 ; count : `interactions WHERE domain_id=? AND created_at >= phase_changed_at` |
+| DIAGNOSTIC | INSTRUCTION | `qualified_distinct_concepts >= min(domain_concept_count, N_DIAG_MAX)` | JOIN interaction/tentative évaluée, sans hint; l'entropie est conservée pour l'audit |
 | INSTRUCTION | MAINTENANCE | `∀ c ∈ goal_relevant_concepts : PMastery(c) >= MasteryBKT()` | `goal_relevant` : voir OQ-2.7 |
 | MAINTENANCE | INSTRUCTION | `∃ c ∈ goal_relevant_concepts : Retrievability(c) < RETENTION_RECALL_THRESHOLD` | Retention : `algorithms.Retrievability` |
 
@@ -568,7 +568,7 @@ flag off.
   conceptuelle plus élevée.
 - **C.** JSONB column `phase_state` sur `domains`. Flexible, mais
   pas de typage et requêtes plus lourdes pour le calcul de
-  `diagnostic_items_count`.
+  la couverture diagnostique qualifiée.
 
 **Mon défaut** : **A**. SQLite n'a pas JSONB natif puissant ; deux
 colonnes typées sont plus simples à debug, à requêter, à migrer. Le
@@ -616,34 +616,27 @@ choix qu'on pourra ajuster avec l'eval. Justification :
 l'incertitude *globale* du domaine est le signal pertinent, pas
 l'incertitude max ou l'info-gain attendu.
 
-**Décision validée** : **A relative avec snapshot**. Le seuil
-absolu 0.5 est cassé : `H(P(L)=0.1) ≈ 0.469 bits` < seuil au
-moment de l'init, donc DIAGNOSTIC sortirait avant le moindre item
-(le `N_MAX=8` étant en OR, pas AND, ne sauve rien). Critère
-révisé :
+**Décision révisée (learning integrity)** : l'entropie reste un signal
+d'audit/calibration, mais ne peut plus terminer le diagnostic. Un événement ne
+compte que s'il s'agit d'un `DIAGNOSTIC_ASSESSMENT` sans hint, lié à une
+tentative soumise puis évaluée. Le compteur porte sur les concepts distincts :
 
 ```
 exit DIAGNOSTIC quand :
-  current_mean_H  <=  phase_entry_entropy - DeltaHThreshold
-  OR
-  diagnostic_items_count  >=  NDiagnosticMax
+  qualified_distinct_concepts >= min(domain_concept_count, NDiagnosticMax)
 ```
 
 Justification :
 
-1. **Capture la *réduction d'incertitude*, pas l'incertitude
-   absolue.** L'objectif du DIAGNOSTIC est d'apprendre. Le critère
-   doit refléter ce qui a été *appris*, indépendamment du point
-   de départ.
-2. **Le minimum d'observation est implicite.** Sans interaction,
-   P(L) ne bouge pas, donc `current_mean_H = phase_entry_entropy`,
-   réduction = 0 < 0.2 → critère ne fire pas. Pas besoin de N_MIN
-   explicite.
-3. **N_MAX reste un escape valide.** Si l'entropie ne réduit pas
-   après 8 items (cas pathologique : concepts saturés), on sort.
-4. **Stockage minimal.** Une colonne supplémentaire
-   `phase_entry_entropy REAL` sur `domains`, set au moment de la
-   transition vers DIAGNOSTIC ou à `init_domain` quand le flag est on.
+1. **Couverture réelle.** Huit répétitions sur un même concept ne peuvent pas
+   simuler la cartographie d'un domaine.
+2. **Protocole froid vérifiable.** Une observation libre, une introduction ou
+   une réponse aidée ne consomme pas la couverture.
+3. **Borne explicite.** Tous les concepts sont couverts jusqu'à huit; les
+   domaines plus larges exigent huit concepts distincts.
+4. **Entropie conservée pour l'audit.** La colonne
+   `phase_entry_entropy REAL` permet toujours de mesurer l'information gagnée
+   sans créer de raccourci d'intégrité.
 
 **Constantes par défaut** : `DeltaHThreshold = 0.2 bits`,
 `NDiagnosticMax = 8`.
@@ -652,8 +645,8 @@ Justification :
 - `add_concepts` mid-DIAGNOSTIC : nouveau concept à P(L)=0.1
   (entropie ≈ 0.47), proche du baseline → effet borné par le
   facteur 1/N. Acceptable, à observer dans l'artefact E2E.
-- `phase_entry_entropy IS NULL` : politique défensive — seul
-  `N_MAX` s'applique. Documenté dans le code.
+- `phase_entry_entropy IS NULL` : la couverture qualifiée reste suffisante;
+  seul le détail de rationale entropique est omis.
 
 ### OQ-2.3 — Stratégie de migration : flag global vs per-learner
 
@@ -758,8 +751,8 @@ fixtures pour le seuil voulu, pas l'inverse. Plus auditable.
 Pas pour ouvrir la modification runtime au MVP, mais pour
 permettre :
 1. **L'injection de configs alternatives en tests d'intégration**
-   (un test E2E peut utiliser un `NDiagnosticMax=3` pour valider
-   plus vite ; un test de calibration peut explorer plusieurs
+   (un test E2E peut utiliser un `NDiagnosticMax=3` pour borner la
+   couverture plus bas ; un test de calibration peut explorer plusieurs
    `DeltaHThreshold`).
 2. **Le logging de la config au démarrage du serveur** — un opérateur
    voit immédiatement les seuils actifs.
@@ -771,7 +764,7 @@ permettre :
 // engine/phase_config.go
 type PhaseConfig struct {
     DeltaHThreshold          float64 // OQ-2.2 : ex. 0.2 bits
-    NDiagnosticMax           int     // OQ-2.2 : ex. 8
+    NDiagnosticMax           int     // borne de couverture distincte, ex. 8
     RetentionRecallThreshold float64 // ex. 0.5
     GoalRelevantCutoff       float64 // OQ-2.7 : ex. 0.0 (>0 strict)
 }

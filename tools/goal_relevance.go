@@ -36,6 +36,7 @@ const (
 // ─── set_goal_relevance ──────────────────────────────────────────────────────
 
 type SetGoalRelevanceParams struct {
+	IdempotentMutationParams
 	DomainID  string             `json:"domain_id,omitempty" jsonschema:"target domain ID (optional; last active domain if absent)"`
 	Relevance map[string]float64 `json:"relevance" jsonschema:"map of concept -> relevance score as a 0..1 float. Unknown concepts produce an explicit error. Incremental semantics: only provided concepts are updated."`
 }
@@ -124,40 +125,52 @@ func registerSetGoalRelevance(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		// Compute uncovered against the graph captured at read time. If
-		// add_concepts ran between read and write, uncovered may include
-		// the freshly added concepts — that is the correct stale-after-set
-		// signal.
+		// Reload only to report a concurrent graph revision. The relevance
+		// merge above is already durable, so a failed readback is an optional
+		// enrichment failure rather than a failed mutation. Returning IsError
+		// here would release the idempotency key and invite a second merge.
 		fresh, err := deps.Store.GetDomainByID(ctx, domain.ID)
+		var degradedComponents []string
+		var staleAfterSet any
 		if err != nil {
-			r, _ := safeErrorResult(deps.Logger, "failed to reload updated domain", err)
-			return r, nil, nil
+			deps.Logger.Warn("set_goal_relevance: updated domain readback degraded", "err", err, "learner", learnerID, "domain", domain.ID)
+			degradedComponents = append(degradedComponents, "updated_domain_readback")
+			fresh = domain
+			staleAfterSet = nil
+		} else {
+			staleAfterSet = fresh.GraphVersion > merged.ForGraphVersion
 		}
-		var uncovered []string
-		var staleAfterSet bool
-		uncovered = fresh.UncoveredConcepts()
-		staleAfterSet = fresh.GraphVersion > merged.ForGraphVersion
+		uncovered := make([]string, 0)
+		for _, concept := range fresh.Graph.Concepts {
+			if _, covered := merged.Relevance[concept]; !covered {
+				uncovered = append(uncovered, concept)
+			}
+		}
 
 		deps.Logger.Info("goal_relevance updated",
 			"learner", learnerID,
 			"domain", domain.ID,
 			"concepts_updated", len(params.Relevance),
 			"covered_total", len(merged.Relevance),
-			"all_concepts", len(domain.Graph.Concepts),
+			"all_concepts", len(fresh.Graph.Concepts),
 			"uncovered", len(uncovered),
 			"version", merged.ForGraphVersion,
 			"stale_after_set", staleAfterSet,
 		)
-		r, _ := jsonResult(map[string]any{
+		payload := map[string]any{
 			"domain_id":              domain.ID,
 			"for_graph_version":      merged.ForGraphVersion,
 			"concepts_updated":       len(params.Relevance),
 			"concepts_clamped":       clamped,
 			"covered_concepts_count": len(merged.Relevance),
-			"all_concepts_count":     len(domain.Graph.Concepts),
+			"all_concepts_count":     len(fresh.Graph.Concepts),
 			"uncovered_concepts":     uncovered,
 			"stale_after_set":        staleAfterSet,
-		})
+		}
+		if len(degradedComponents) > 0 {
+			payload["degraded_components"] = degradedComponents
+		}
+		r, _ := jsonResult(payload)
 		return r, nil, nil
 	})
 }

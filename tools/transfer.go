@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"tutor-mcp/algorithms"
 	"tutor-mcp/engine"
@@ -26,7 +27,7 @@ type TransferChallengeParams struct {
 func registerTransferChallenge(server *mcp.Server, deps *Deps) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "transfer_challenge",
-		Description: "Generate a novel situation to test the transfer of a mastered concept outside its original context.",
+		Description: "Generate a novel situation to probe transfer outside the training context. A transferred mastery claim still requires frozen assessment evidence and a trusted evaluation across multiple dimensions.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params TransferChallengeParams) (*mcp.CallToolResult, any, error) {
 		learnerID, err := getLearnerID(ctx)
 		if err != nil {
@@ -96,9 +97,10 @@ func registerTransferChallenge(server *mcp.Server, deps *Deps) {
 		bktState := algorithms.BKTState{PMastery: cs.PMastery}
 		if !algorithms.BKTIsMastered(bktState) {
 			r, _ := jsonResult(map[string]interface{}{
-				"eligible": false,
-				"mastery":  cs.PMastery,
-				"message":  "Concept not yet mastered. The transfer challenge requires BKT >= 0.85.",
+				"eligible":         false,
+				"mastery_estimate": cs.PMastery,
+				"mastery":          cs.PMastery, // deprecated estimate alias
+				"message":          "The model estimate has not reached the transfer-probe routing threshold.",
 			})
 			return r, nil, nil
 		}
@@ -133,8 +135,11 @@ func registerTransferChallenge(server *mcp.Server, deps *Deps) {
 				"in a context of type '%s'. "+
 				"The situation must NOT resemble previous exercises. "+
 				"The goal: verify that the learner can apply this concept in a context they have never seen.\n\n"+
-				"After the learner's response, evaluate the transfer_score (0..1) and "+
-				"call record_transfer_result with the result.",
+				"Before showing it, freeze the task and rubric with prepare_assessment_attempt "+
+				"using activity_type=TRANSFER_PROBE. After the learner responds, call "+
+				"submit_assessment_attempt, then record_interaction with the attempt_id, "+
+				"criterion scores, transfer_dimension and transfer_score. A direct "+
+				"record_transfer_result call is only an unverified legacy observation.",
 			concept, contextType,
 		)
 
@@ -154,6 +159,7 @@ func registerTransferChallenge(server *mcp.Server, deps *Deps) {
 // ─── record_transfer_result ─────────────────────────────────────────────────
 
 type RecordTransferResultParams struct {
+	IdempotentMutationParams
 	Concept     string  `json:"concept,omitempty" jsonschema:"the concept being tested; canonical key for concept-targeting tools; required unless concept_id is used"`
 	ConceptID   string  `json:"concept_id,omitempty" jsonschema:"deprecated compatibility alias for concept; prefer concept"`
 	ContextType string  `json:"context_type" jsonschema:"challenge context type: near, far, real_world, interview, teaching, debugging, creative"`
@@ -174,7 +180,7 @@ var allowedTransferContextTypes = []string{
 func registerRecordTransferResult(server *mcp.Server, deps *Deps) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "record_transfer_result",
-		Description: "Record the result of a transfer challenge.",
+		Description: "Record a legacy, unverified transfer observation for adaptive routing. It cannot establish transferred mastery; use the assessment-attempt workflow for evidence-bearing transfer probes.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params RecordTransferResultParams) (*mcp.CallToolResult, any, error) {
 		learnerID, err := getLearnerID(ctx)
 		if err != nil {
@@ -251,6 +257,11 @@ func registerRecordTransferResult(server *mcp.Server, deps *Deps) {
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
 		}
+		learningSession, err := resolveOpenLearningSession(ctx, deps, learnerID, domain.ID, params.SessionID, time.Now().UTC())
+		if err != nil {
+			r, _ := errorResult(err.Error())
+			return r, nil, nil
+		}
 
 		record := &models.TransferRecord{
 			LearnerID:   learnerID,
@@ -258,7 +269,7 @@ func registerRecordTransferResult(server *mcp.Server, deps *Deps) {
 			ConceptID:   concept,
 			ContextType: params.ContextType,
 			Score:       params.Score,
-			SessionID:   params.SessionID,
+			SessionID:   learningSession.ID,
 		}
 
 		if err := deps.Store.CreateTransferRecord(ctx, record); err != nil {
@@ -268,17 +279,31 @@ func registerRecordTransferResult(server *mcp.Server, deps *Deps) {
 
 		updatedTransfers, err := deps.Store.GetTransferScoresInDomain(ctx, learnerID, domain.ID, concept)
 		if err != nil {
-			r, _ := safeErrorResult(deps.Logger, "failed to load updated transfer history", err)
+			// The transfer row is already committed. Treat readback as a degraded
+			// optional component so an idempotent retry cannot insert it twice.
+			deps.Logger.Warn("record_transfer_result: transfer profile readback degraded", "err", err, "learner", learnerID, "domain", domain.ID, "concept", concept)
+			r, _ := jsonResult(map[string]interface{}{
+				"recorded":            true,
+				"session_id":          learningSession.ID,
+				"transfer_score":      params.Score,
+				"transfer_dimension":  string(transferDimension),
+				"transfer_profile":    nil,
+				"blocked":             params.Score < engine.TransferFailureThreshold,
+				"evidence_trust":      "unverified_observation",
+				"degraded_components": []string{"transfer_profile_readback"},
+			})
 			return r, nil, nil
 		}
 		transferProfile := engine.BuildTransferProfile(concept, updatedTransfers)
 
 		r, _ := jsonResult(map[string]interface{}{
 			"recorded":           true,
+			"session_id":         learningSession.ID,
 			"transfer_score":     params.Score,
 			"transfer_dimension": string(transferDimension),
 			"transfer_profile":   transferProfile,
 			"blocked":            params.Score < engine.TransferFailureThreshold,
+			"evidence_trust":     "unverified_observation",
 		})
 		return r, nil, nil
 	})

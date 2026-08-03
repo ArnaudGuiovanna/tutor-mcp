@@ -201,7 +201,7 @@ func selectInstruction(
 		return Selection{
 			NoFringe:  true,
 			Phase:     models.PhaseInstruction,
-			Rationale: "outer fringe empty: everything mastered or prereqs missing",
+			Rationale: "outer fringe empty: every estimate is above threshold or prerequisites are missing",
 		}
 	}
 
@@ -240,7 +240,7 @@ func selectInstruction(
 		Concept: bestConcept,
 		Score:   bestScore,
 		Phase:   models.PhaseInstruction,
-		Rationale: fmt.Sprintf("argmax(rel=%.2f x (1-mastery)=%.2f) sur %d candidats eligibles",
+		Rationale: fmt.Sprintf("argmax(rel=%.2f x (1-model estimate)=%.2f) across %d eligible candidates",
 			bestRel, 1-bestMastery, candidatesEligible),
 	}
 }
@@ -250,8 +250,8 @@ func selectInstruction(
 //	urgency = 1 - retention      (OQ-4.5 = A)
 //	score   = urgency × goal_relevance
 //
-// over the mastered set (PMastery >= MasteryBKT()). Cards in
-// CardState=="new" get urgency=0 — they are mastered by BKT but
+// over the high-estimate set (PMastery >= MasteryBKT()). Cards in
+// CardState=="new" get urgency=0 — they are above the BKT routing threshold but
 // have no FSRS history yet.
 //
 // v2 note: the dervative form "elapsed_days/stability" would be more
@@ -281,9 +281,9 @@ func selectMaintenance(
 		}
 	}
 
-	// Collect mastered concepts; sort alphabetically for deterministic
+	// Collect high-estimate concepts; sort alphabetically for deterministic
 	// tie-break.
-	var mastered []*models.ConceptState
+	var highEstimate []*models.ConceptState
 	for _, cs := range states {
 		if cs == nil {
 			continue
@@ -299,17 +299,17 @@ func selectMaintenance(
 				continue
 			}
 		}
-		mastered = append(mastered, cs)
+		highEstimate = append(highEstimate, cs)
 	}
-	if len(mastered) == 0 {
+	if len(highEstimate) == 0 {
 		return Selection{
 			NoFringe:  true,
 			Phase:     models.PhaseMaintenance,
-			Rationale: "no mastered concept: MAINTENANCE not applicable",
+			Rationale: "no concept estimate above routing threshold: MAINTENANCE not applicable",
 		}
 	}
-	sort.Slice(mastered, func(i, j int) bool {
-		return mastered[i].Concept < mastered[j].Concept
+	sort.Slice(highEstimate, func(i, j int) bool {
+		return highEstimate[i].Concept < highEstimate[j].Concept
 	})
 
 	bestConcept := ""
@@ -317,7 +317,7 @@ func selectMaintenance(
 	bestUrgency := 0.0
 	bestRel := 0.0
 	candidatesEligible := 0
-	for _, cs := range mastered {
+	for _, cs := range highEstimate {
 		rel, eligible := resolveRelevance(goalRelevance, cs.Concept)
 		if !eligible {
 			continue // OQ-4.3 = B'
@@ -343,7 +343,7 @@ func selectMaintenance(
 		return Selection{
 			NoFringe:  true,
 			Phase:     models.PhaseMaintenance,
-			Rationale: "mastered concepts but none covered by goal_relevance - call set_goal_relevance",
+			Rationale: "high-estimate concepts exist but none are covered by goal_relevance - call set_goal_relevance",
 		}
 	}
 	return Selection{

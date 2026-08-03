@@ -75,7 +75,7 @@ func BuildOLMNudgeBrief(snap *OLMSnapshot) models.WebhookBrief {
 		LearningGain:      "Avoid vague review: you know what to revisit, why, and which action to start with.",
 		WhyNow:            whyNow,
 		Evidence:          evidence,
-		GoalLink:          goalLinkSentence(snap.PersonalGoal, snap.KSTProgress),
+		GoalLink:          goalLinkSentence(snap.PersonalGoal, snap.EvidenceProgress),
 		OpenLoop:          openLoop,
 		NextAction:        nextAction,
 		EstimatedMinutes:  8,
@@ -148,7 +148,7 @@ func metacognitiveBrief(_ *models.Learner, domain *models.Domain, alert models.A
 		brief.Trigger = "Transfer blocked"
 		brief.LearningGain = "Turn recognized knowledge into reusable competence in a new context."
 		brief.WhyNow = fmt.Sprintf("%s looks familiar, but transfer is still fragile: this is the right moment to change context.", concept)
-		brief.Evidence = []string{"High mastery detected", "At least two weak transfer contexts"}
+		brief.Evidence = []string{"High model estimate", "At least two weak transfer contexts"}
 		brief.OpenLoop = fmt.Sprintf("I kept a Feynman question on %s: it forces explanation, not just recognition.", concept)
 		brief.NextAction = fmt.Sprintf("Open Claude and start by explaining %s in your own words.", concept)
 	case models.AlertCalibrationDiverging:

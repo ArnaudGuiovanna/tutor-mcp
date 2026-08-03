@@ -54,7 +54,9 @@ func (t *LoginFailureTracker) SetBackend(backend LoginFailureBackend) {
 	if t == nil {
 		return
 	}
+	t.mu.Lock()
 	t.backend = backend
+	t.mu.Unlock()
 }
 
 // Allow returns true if the email is below the threshold of recent failures.
@@ -63,23 +65,25 @@ func (t *LoginFailureTracker) Allow(email string) bool {
 	if t == nil || t.threshold <= 0 {
 		return true
 	}
-	if t.backend != nil {
-		n, err := t.backend.CountInWindow(context.Background(), email, t.window, time.Now())
+	backend := t.getBackend()
+	if backend != nil {
+		n, err := backend.CountInWindow(context.Background(), email, t.window, time.Now())
 		if err != nil {
-			// Fail OPEN: a shared-store outage must not lock every account out
-			// of login. This is the safest sensible default — the per-IP rate
-			// limiter still throttles brute force at the network edge, and an
-			// availability failure here should degrade to "no extra lockout"
-			// rather than a fleet-wide denial of service against legitimate
-			// users. Logged so the outage is visible.
-			slog.Warn("login failure backend error on Allow, failing open", "err", err)
-			return true
+			// Degrade to the process-local account bucket. This cannot reproduce
+			// fleet-wide state, but it avoids both a global lockout and a complete
+			// bypass of per-account brute-force protection.
+			slog.Warn("login failure backend error on Allow, using local fallback", "err", err)
+			return t.allowLocal(email, time.Now())
 		}
 		return n < t.threshold
 	}
+	return t.allowLocal(email, time.Now())
+}
+
+func (t *LoginFailureTracker) allowLocal(email string, now time.Time) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.pruneLocked(email, time.Now())
+	t.pruneLocked(email, now)
 	return len(t.fails[email]) < t.threshold
 }
 
@@ -89,17 +93,21 @@ func (t *LoginFailureTracker) Record(email string) int {
 	if t == nil || t.threshold <= 0 {
 		return 0
 	}
-	if t.backend != nil {
-		n, err := t.backend.Record(context.Background(), email, time.Now())
+	backend := t.getBackend()
+	if backend != nil {
+		n, err := backend.Record(context.Background(), email, time.Now())
 		if err != nil {
-			slog.Warn("login failure backend error on Record", "err", err)
-			return 0
+			slog.Warn("login failure backend error on Record, using local fallback", "err", err)
+			return t.recordLocal(email, time.Now())
 		}
 		return n
 	}
+	return t.recordLocal(email, time.Now())
+}
+
+func (t *LoginFailureTracker) recordLocal(email string, now time.Time) int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	now := time.Now()
 	t.pruneLocked(email, now)
 	t.fails[email] = append(t.fails[email], now)
 	return len(t.fails[email])
@@ -111,15 +119,21 @@ func (t *LoginFailureTracker) Reset(email string) {
 	if t == nil {
 		return
 	}
-	if t.backend != nil {
-		if err := t.backend.Reset(context.Background(), email); err != nil {
+	backend := t.getBackend()
+	if backend != nil {
+		if err := backend.Reset(context.Background(), email); err != nil {
 			slog.Warn("login failure backend error on Reset", "err", err)
 		}
-		return
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	delete(t.fails, email)
+}
+
+func (t *LoginFailureTracker) getBackend() LoginFailureBackend {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.backend
 }
 
 func (t *LoginFailureTracker) pruneLocked(email string, now time.Time) {

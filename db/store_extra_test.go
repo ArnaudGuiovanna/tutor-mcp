@@ -23,14 +23,22 @@ func TestIsSafeWebhookURL(t *testing.T) {
 		{"https://discordapp.com/api/webhooks/x/y", true},
 		{"https://canary.discord.com/api/webhooks/x/y", true},
 		{"https://ptb.discordapp.com/api/webhooks/x/y", true},
+		{"https://discord.com:443/api/webhooks/123/abc?wait=true", true},
+		{"https://discord.com/api/webhooks/123/abc/slack", true},
 		{"http://discord.com/api/webhooks/123/abc", false},  // not https
 		{"https://example.com/api/webhooks/123/abc", false}, // wrong host
 		{"https://discord.com.evil.com/x", false},           // suffix trick
-		{"https://192.168.1.1/x", false},                    // IP literal
-		{"https://discord..com/x", false},                   // double-dot host
-		{"https://", false},                                 // empty host
-		{"::not a url::", false},                            // unparseable
-		{"", false},                                         // empty
+		{"https://untrusted.discord.com/api/webhooks/123/abc", false},
+		{"https://discord.com:8443/api/webhooks/123/abc", false},
+		{"https://user@discord.com/api/webhooks/123/abc", false},
+		{"https://discord.com/login", false},
+		{"https://discord.com/api/webhooks/123", false},
+		{"https://discord.com/api/webhooks/123/abc/redirect", false},
+		{"https://192.168.1.1/x", false},  // IP literal
+		{"https://discord..com/x", false}, // double-dot host
+		{"https://", false},               // empty host
+		{"::not a url::", false},          // unparseable
+		{"", false},                       // empty
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -102,7 +110,7 @@ func TestUpdateLastActive_AndProfile(t *testing.T) {
 		t.Errorf("last_active not set: %v", lastActive)
 	}
 
-	if err := store.UpdateLearnerProfile(context.Background(), "L1", `{"foo":"bar"}`); err != nil {
+	if err := store.UpdateLearnerProfile(context.Background(), "L1", `{"foo":"bar"}`, nil); err != nil {
 		t.Fatalf("UpdateLearnerProfile: %v", err)
 	}
 	got, err := store.GetLearnerByID(context.Background(), "L1")
@@ -248,10 +256,10 @@ func TestCleanupExpiredRefreshTokens(t *testing.T) {
 func TestCleanupExpiredCodes(t *testing.T) {
 	store := setupTestDB(t)
 	now := time.Now().UTC()
-	if err := store.CreateAuthCode(context.Background(), "c-old", "L1", "ch", "client-A", now.Add(-1*time.Hour)); err != nil {
+	if err := store.CreateAuthCodeWithBinding(context.Background(), "c-old", "L1", "ch", "", "client-A", "", now.Add(-1*time.Hour)); err != nil {
 		t.Fatalf("create old: %v", err)
 	}
-	if err := store.CreateAuthCode(context.Background(), "c-new", "L1", "ch", "client-A", now.Add(1*time.Hour)); err != nil {
+	if err := store.CreateAuthCodeWithBinding(context.Background(), "c-new", "L1", "ch", "", "client-A", "", now.Add(1*time.Hour)); err != nil {
 		t.Fatalf("create new: %v", err)
 	}
 	n, err := store.CleanupExpiredCodes(context.Background())
@@ -405,7 +413,7 @@ func TestDomainCRUDAndArchive(t *testing.T) {
 		t.Error("expected Goroutines NOT in set (its domain is archived)")
 	}
 
-	// Delete: actually removes the row.
+	// Delete: hides the tombstone from runtime readers.
 	if err := store.DeleteDomain(context.Background(), d2.ID, "L1"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -434,18 +442,34 @@ func TestDeleteDomainCleansAuxiliaryRowsAndKeepsPedagogicalHistory(t *testing.T)
 		t.Fatalf("create other domain: %v", err)
 	}
 
-	if _, err := store.InsertImplementationIntention(context.Background(), "L1", d.ID, "after coffee", "review goroutines", now); err != nil {
+	if _, err := store.InsertImplementationIntentionForSession(context.Background(), "L1", d.ID, "", "after coffee", "review goroutines", now); err != nil {
 		t.Fatalf("insert implementation intention: %v", err)
 	}
-	if _, err := store.InsertImplementationIntention(context.Background(), "L1", other.ID, "after lunch", "review borrowing", now); err != nil {
+	if _, err := store.InsertImplementationIntentionForSession(context.Background(), "L1", other.ID, "", "after lunch", "review borrowing", now); err != nil {
 		t.Fatalf("insert other implementation intention: %v", err)
 	}
-	if _, err := store.InsertImplementationIntention(context.Background(), "L2", d.ID, "after work", "foreign row", now); err != nil {
+	if _, err := store.InsertImplementationIntentionForSession(context.Background(), "L2", d.ID, "", "after work", "foreign row", now); err != nil {
 		t.Fatalf("insert foreign implementation intention: %v", err)
 	}
 
 	if _, err := store.EnqueueWebhookMessage(context.Background(), "L1", "olm:"+d.ID, "domain olm", now, time.Time{}, 0); err != nil {
 		t.Fatalf("enqueue domain olm: %v", err)
+	}
+	structured, err := models.EncodeWebhookBrief(models.WebhookBrief{
+		Kind:       models.WebhookKindDailyRecap,
+		DomainID:   d.ID,
+		WhyNow:     "domain-specific recap",
+		NextAction: "resume the domain",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	structuredID, err := store.EnqueueWebhookMessage(context.Background(), "L1", models.WebhookKindDailyRecap, structured, now, time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("enqueue structured domain webhook: %v", err)
+	}
+	if _, err := store.ClaimNextPendingWebhook(context.Background(), "L1", models.WebhookKindDailyRecap, now, time.Minute); err != nil {
+		t.Fatalf("claim structured domain webhook: %v", err)
 	}
 	if _, err := store.EnqueueWebhookMessage(context.Background(), "L1", "olm:"+other.ID, "other olm", now, time.Time{}, 0); err != nil {
 		t.Fatalf("enqueue other olm: %v", err)
@@ -505,14 +529,26 @@ func TestDeleteDomainCleansAuxiliaryRowsAndKeepsPedagogicalHistory(t *testing.T)
 		t.Fatalf("delete domain: %v", err)
 	}
 
-	if count(`SELECT COUNT(*) FROM domains WHERE id = ?`, d.ID) != 0 {
-		t.Fatal("domain row still exists")
+	if count(`SELECT COUNT(*) FROM domains WHERE id = ? AND deleted_at IS NOT NULL`, d.ID) != 1 {
+		t.Fatal("domain tombstone was not retained")
 	}
-	if count(`SELECT COUNT(*) FROM implementation_intentions WHERE learner_id = 'L1' AND domain_id = ?`, d.ID) != 0 {
-		t.Fatal("implementation intentions for deleted domain were not removed")
+	if _, err := store.GetDomainByID(context.Background(), d.ID); err == nil {
+		t.Fatal("tombstoned domain remained visible to runtime readers")
 	}
-	if count(`SELECT COUNT(*) FROM webhook_message_queue WHERE learner_id = 'L1' AND kind = ?`, "olm:"+d.ID) != 0 {
-		t.Fatal("webhook OLM rows for deleted domain were not removed")
+	if count(`SELECT COUNT(*) FROM implementation_intentions WHERE learner_id = 'L1' AND domain_id = ?`, d.ID) != 1 {
+		t.Fatal("implementation intention audit for deleted domain was not preserved")
+	}
+	if count(`SELECT COUNT(*) FROM implementation_intentions WHERE learner_id = 'L1' AND domain_id = ? AND status = 'cancelled'`, d.ID) != 1 {
+		t.Fatal("pending intention for deleted domain was not auditably cancelled")
+	}
+	if count(`SELECT COUNT(*) FROM webhook_message_queue WHERE learner_id = 'L1' AND kind = ? AND status = 'expired'`, "olm:"+d.ID) != 1 {
+		t.Fatal("webhook OLM row for deleted domain was not terminalized")
+	}
+	if count(`SELECT COUNT(*) FROM webhook_message_queue WHERE id = ? AND domain_id = ? AND status = 'expired'`, structuredID, d.ID) != 1 {
+		t.Fatal("claimed structured webhook for deleted domain was not terminalized")
+	}
+	if active, err := store.IsWebhookClaimActive(context.Background(), structuredID, "L1"); err != nil || active {
+		t.Fatalf("deleted-domain claim remained deliverable: active=%v err=%v", active, err)
 	}
 	if count(`SELECT COUNT(*) FROM implementation_intentions WHERE learner_id = 'L1' AND domain_id = ?`, other.ID) != 1 {
 		t.Fatal("implementation intentions for another domain were removed")
@@ -776,6 +812,28 @@ func TestGetSessionStart_Empty(t *testing.T) {
 	}
 }
 
+func TestCreateInteractionPreservesAuthoritativeTimestamp(t *testing.T) {
+	store := setupTestDB(t)
+	want := time.Date(2025, time.January, 2, 3, 4, 5, 0, time.UTC)
+	interaction := &models.Interaction{
+		LearnerID:    "L1",
+		Concept:      "C-timestamp",
+		ActivityType: string(models.ActivityRecall),
+		Success:      true,
+		CreatedAt:    want,
+	}
+	if err := store.CreateInteraction(context.Background(), interaction); err != nil {
+		t.Fatalf("create interaction: %v", err)
+	}
+	got, err := store.GetRecentInteractions(context.Background(), "L1", "C-timestamp", 1)
+	if err != nil {
+		t.Fatalf("get interaction: %v", err)
+	}
+	if len(got) != 1 || !got[0].CreatedAt.Equal(want) {
+		t.Fatalf("created_at = %v, want %v", got, want)
+	}
+}
+
 // ─── Availability ───────────────────────────────────────────────────────────
 
 func TestAvailability(t *testing.T) {
@@ -833,29 +891,7 @@ func TestScheduledAlerts(t *testing.T) {
 		t.Fatalf("create alert 2: %v", err)
 	}
 
-	got, err := store.GetUnsentAlerts(context.Background(), "L1")
-	if err != nil {
-		t.Fatalf("unsent: %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("expected 2, got %d", len(got))
-	}
-	for _, a := range got {
-		if a.Sent {
-			t.Errorf("expected unsent: %+v", a)
-		}
-	}
-
-	// Mark first as sent.
-	if err := store.MarkAlertSent(context.Background(), got[0].ID); err != nil {
-		t.Fatalf("mark sent: %v", err)
-	}
-	leftover, _ := store.GetUnsentAlerts(context.Background(), "L1")
-	if len(leftover) != 1 {
-		t.Errorf("expected 1 unsent, got %d", len(leftover))
-	}
-
-	// WasAlertSentToday: the alert was just created, so YES.
+	// Alert rows are daily delivery/reservation stamps.
 	sent, err := store.WasAlertSentToday(context.Background(), "L1", "FORGETTING")
 	if err != nil {
 		t.Fatalf("was sent: %v", err)
@@ -1046,13 +1082,13 @@ func TestCreateOAuthClientWithSecret(t *testing.T) {
 
 // ─── GetRecentLearnerEvents ─────────────────────────────────────────────────
 
-func TestGetRecentLearnerEvents_ReturnsMasteryThresholdAndStreakStart(t *testing.T) {
+func TestGetRecentLearnerEvents_ReturnsEstimateThresholdAndStreakStart(t *testing.T) {
 	store := setupTestDB(t)
 	now := time.Now().UTC()
 
 	// L1 is pre-created by setupTestDB; seed defensively (idempotent).
 	seedLearner(t, store, "L1")
-	// concept_state with p_mastery >= 0.70 today -> mastery_threshold event.
+	// concept_state with a high model estimate today -> estimate_threshold event.
 	// Insert listing the columns we explicitly want; rest take their DEFAULTs.
 	if _, err := store.root.Exec(
 		rb(store, `INSERT INTO concept_states (learner_id, concept, p_mastery, stability, difficulty, elapsed_days, reps, lapses, card_state, last_review, next_review, updated_at)
@@ -1079,8 +1115,8 @@ func TestGetRecentLearnerEvents_ReturnsMasteryThresholdAndStreakStart(t *testing
 	for _, e := range events {
 		kinds[e.Kind] = true
 	}
-	if !kinds["mastery_threshold"] {
-		t.Errorf("expected mastery_threshold event, got %v", events)
+	if !kinds["estimate_threshold"] {
+		t.Errorf("expected estimate_threshold event, got %v", events)
 	}
 	if !kinds["streak_start"] {
 		t.Errorf("expected streak_start event, got %v", events)

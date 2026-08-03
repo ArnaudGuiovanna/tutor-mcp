@@ -80,28 +80,6 @@ func individualBKTParamsSnapshot(params algorithms.IndividualBKTParameters) map[
 	}
 }
 
-func raschEloObservation(before, after algorithms.RaschEloState) map[string]any {
-	return map[string]any{
-		"ability_before":             before.Ability,
-		"difficulty_before":          before.Difficulty,
-		"success_probability_before": algorithms.RaschEloSuccessProbability(before),
-		"ability_after":              after.Ability,
-		"difficulty_after":           after.Difficulty,
-		"success_probability_after":  algorithms.RaschEloSuccessProbability(after),
-		"attempts":                   after.Attempts,
-		"successes":                  after.Successes,
-		"failures":                   after.Failures,
-	}
-}
-
-func raschEloStateSnapshot(state algorithms.RaschEloState) map[string]any {
-	return map[string]any{
-		"ability":             state.Ability,
-		"difficulty":          state.Difficulty,
-		"success_probability": algorithms.RaschEloSuccessProbability(state),
-	}
-}
-
 func mergeObservation(base map[string]any, extra map[string]any) map[string]any {
 	if len(extra) == 0 {
 		return base

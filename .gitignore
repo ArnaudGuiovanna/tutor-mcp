@@ -37,3 +37,4 @@ security-todo.md
 # Session reports — local artefacts only
 reports/
 dist/
+.tmp-project-state/

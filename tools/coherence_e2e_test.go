@@ -19,21 +19,21 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"tutor-mcp/engine"
+	"tutor-mcp/models"
 )
 
-// Scenario 5 — INSTRUCTION → MAINTENANCE transition for a single-concept
-// domain after sustained mastery. With one concept and 10 successful
-// interactions at high confidence, the BKT mastery passes MasteryBKT()
-// and the FSM transitions out of the initial DIAGNOSTIC phase. The
-// first get_next_activity after that mastery is allowed to land in
-// MAINTENANCE OR to surface an explicit pipeline-exhausted payload
-// (NoFringe persistant) when there is no spaced-repetition review due
-// — both are legitimate answers per docs/regulation-design (§4 of
-// 02-phase-controller). The load-bearing assertion is that the
-// orchestrator did not regress to staying in DIAGNOSTIC and that the
-// response is structured (no error, has an activity object).
+// Scenario 5 — DIAGNOSTIC → INSTRUCTION → MAINTENANCE for a
+// single-concept domain. Diagnostic exit is deliberately driven only by
+// cold DIAGNOSTIC_ASSESSMENT responses: unrelated practice must not consume
+// qualified diagnostic coverage. Once the one-concept target is reached, one routing
+// pass persists INSTRUCTION and the following pass can persist MAINTENANCE
+// because the successful observations put the sole concept above the BKT
+// routing threshold. MAINTENANCE may have no review due and return an explicit
+// pipeline-exhausted REST payload; the persisted phase remains authoritative.
 func TestCoherenceE2E_SingleConceptDomain_TransitionsToMaintenance(t *testing.T) {
-	_, deps := setupToolsTest(t)
+	store, deps := setupToolsTest(t)
 
 	if res := callTool(t, deps, registerInitDomain, "L_owner", "init_domain", map[string]any{
 		"name":          "single",
@@ -43,23 +43,72 @@ func TestCoherenceE2E_SingleConceptDomain_TransitionsToMaintenance(t *testing.T)
 		t.Fatalf("init_domain failed: %s", resultText(res))
 	}
 
-	for i := 0; i < 10; i++ {
+	diagnosticItems := engine.NewDefaultPhaseConfig().NDiagnosticMax
+	for i := 0; i < diagnosticItems; i++ {
+		prepared := callTool(t, deps, registerPrepareAssessmentAttempt, "L_owner", "prepare_assessment_attempt", map[string]any{
+			"concept":       "a",
+			"activity_type": "DIAGNOSTIC_ASSESSMENT",
+			"observable":    "Cold response without hints",
+			"task_text":     "Solve diagnostic item independently.",
+			"rubric_json":   `{"criteria":[{"id":"correctness","max_score":1}],"passing_score":0.6}`,
+		})
+		if prepared.IsError {
+			t.Fatalf("iter %d: prepare diagnostic errored: %s", i, resultText(prepared))
+		}
+		preparedOut := decodeResult(t, prepared)
+		attemptID, _ := preparedOut["attempt_id"].(string)
+		sessionID, _ := preparedOut["session_id"].(string)
+		submitted := callTool(t, deps, registerSubmitAssessmentAttempt, "L_owner", "submit_assessment_attempt", map[string]any{
+			"attempt_id": attemptID, "learner_response": "Independent correct response.",
+		})
+		if submitted.IsError {
+			t.Fatalf("iter %d: submit diagnostic errored: %s", i, resultText(submitted))
+		}
 		recRes := callTool(t, deps, registerRecordInteraction, "L_owner", "record_interaction", map[string]any{
 			"concept":               "a",
-			"activity_type":         "RECALL_EXERCISE",
+			"activity_type":         "DIAGNOSTIC_ASSESSMENT",
 			"success":               true,
 			"response_time_seconds": 4.0,
 			"confidence":            0.9,
 			"notes":                 "",
+			"session_id":            sessionID,
+			"attempt_id":            attemptID,
+			"evaluator_id":          "host-test-v1",
+			"evaluation_method":     "host_llm",
+			"rubric_score_json":     `{"criteria_scores":[{"id":"correctness","score":1}]}`,
 		})
 		if recRes.IsError {
 			t.Fatalf("iter %d: record_interaction errored: %s", i, resultText(recRes))
 		}
 	}
 
+	// The first orchestration pass evaluates the persisted DIAGNOSTIC phase and
+	// advances exactly one FSM edge.
+	firstRes := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{})
+	if firstRes.IsError {
+		t.Fatalf("first get_next_activity errored: %s", resultText(firstRes))
+	}
+	domain, err := store.GetDomainByLearner(context.Background(), "L_owner")
+	if err != nil {
+		t.Fatalf("load domain after diagnostic: %v", err)
+	}
+	if domain.Phase != models.PhaseInstruction {
+		t.Fatalf("phase after %d diagnostic assessments = %s, want INSTRUCTION", diagnosticItems, domain.Phase)
+	}
+
+	// The next pass evaluates the newly persisted INSTRUCTION phase. Since the
+	// sole goal-relevant concept is already above the routing threshold, it can
+	// now advance to MAINTENANCE.
 	actRes := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{})
 	if actRes.IsError {
-		t.Fatalf("get_next_activity errored: %s", resultText(actRes))
+		t.Fatalf("second get_next_activity errored: %s", resultText(actRes))
+	}
+	domain, err = store.GetDomainByLearner(context.Background(), "L_owner")
+	if err != nil {
+		t.Fatalf("load domain after instruction: %v", err)
+	}
+	if domain.Phase != models.PhaseMaintenance {
+		t.Fatalf("phase after instruction routing = %s, want MAINTENANCE", domain.Phase)
 	}
 	out := decodeResult(t, actRes)
 	activity, ok := out["activity"].(map[string]any)
@@ -72,22 +121,16 @@ func TestCoherenceE2E_SingleConceptDomain_TransitionsToMaintenance(t *testing.T)
 		t.Fatalf("activity is missing 'type' field: %v", activity)
 	}
 
-	// Rationale either carries the orchestrator phase prefix ("[phase=X]")
-	// for a real activity or an explicit pipeline-exhausted message when
-	// MAINTENANCE has nothing due. The acceptable outcomes after 10
-	// successful interactions are:
-	//   1. activity in MAINTENANCE / INSTRUCTION (i.e. moved past DIAGNOSTIC)
-	//   2. REST with rationale "pipeline_exhausted: NoFringe ..." — this
-	//      is the documented fall-through (orchestrator.go line 142-146).
-	// We must NOT see DIAGNOSTIC: that would indicate the FSM is stuck.
+	// A real maintenance activity carries the phase prefix; if no spaced review
+	// is due, the explicit NoFringe/pipeline-exhausted REST result is valid.
 	rationale, _ := activity["rationale"].(string)
 	if strings.Contains(rationale, "[phase=DIAGNOSTIC]") {
-		t.Fatalf("expected DIAGNOSTIC to have exited after 10 successes, rationale=%q", rationale)
+		t.Fatalf("expected DIAGNOSTIC to have exited after cold assessments, rationale=%q", rationale)
 	}
-	hasPhase := strings.Contains(rationale, "[phase=MAINTENANCE]") || strings.Contains(rationale, "[phase=INSTRUCTION]")
+	hasPhase := strings.Contains(rationale, "[phase=MAINTENANCE]")
 	hasNoFringe := strings.Contains(rationale, "pipeline_exhausted") || strings.Contains(rationale, "NoFringe")
 	if !hasPhase && !hasNoFringe {
-		t.Fatalf("unexpected rationale shape after mastery — want MAINTENANCE/INSTRUCTION phase or explicit NoFringe, got rationale=%q", rationale)
+		t.Fatalf("unexpected rationale after MAINTENANCE transition — want MAINTENANCE or explicit NoFringe, got %q", rationale)
 	}
 }
 
@@ -124,9 +167,10 @@ func TestCoherenceE2E_AddConceptsCycleRejected(t *testing.T) {
 	// Add concepts c, d with a 2-cycle in the new batch's prereqs:
 	//   c depends on d AND d depends on c.
 	res := callTool(t, deps, registerAddConcepts, "L_owner", "add_concepts", map[string]any{
-		"domain_id":     d.ID,
-		"concepts":      []string{"c", "d"},
-		"prerequisites": map[string][]string{"c": {"d"}, "d": {"c"}},
+		"domain_id":        d.ID,
+		"expected_version": 1,
+		"concepts":         []string{"c", "d"},
+		"prerequisites":    map[string][]string{"c": {"d"}, "d": {"c"}},
 	})
 	if !res.IsError {
 		t.Fatalf("expected cycle rejection, got success: %s", resultText(res))
@@ -267,8 +311,12 @@ func TestCoherenceE2E_AffectScaffolding_AdjustsDifficulty(t *testing.T) {
 
 	// Now record an anxious affect : confidence=1 → "scaffolding" per
 	// engine.ComputeTutorMode.
+	activeSession, err := deps.Store.GetActiveLearningSession(context.Background(), "L_owner")
+	if err != nil {
+		t.Fatalf("active learning session: %v", err)
+	}
 	if affRes := callTool(t, deps, registerRecordAffect, "L_owner", "record_affect", map[string]any{
-		"session_id": "s_scaffold",
+		"session_id": activeSession.ID,
 		"energy":     3,
 		"confidence": 1,
 	}); affRes.IsError {

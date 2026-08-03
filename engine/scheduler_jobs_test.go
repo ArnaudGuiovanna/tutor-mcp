@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"tutor-mcp/db"
+	"tutor-mcp/models"
 
 	_ "modernc.org/sqlite"
 )
@@ -47,8 +48,9 @@ func newJobsTestStore(t *testing.T, webhookURL string) (*db.Store, string) {
 	if err != nil {
 		t.Fatalf("insert learner: %v", err)
 	}
-
-	return db.NewStore(rawDB), learnerID
+	store := db.NewStore(rawDB)
+	optInSchedulerNotifications(t, store, learnerID)
+	return store, learnerID
 }
 
 // rawTestSetup returns the raw *sql.DB alongside the *db.Store, so tests can
@@ -76,7 +78,26 @@ func rawTestSetup(t *testing.T, webhookURL string) (*sql.DB, *db.Store, string) 
 	if err != nil {
 		t.Fatalf("insert learner: %v", err)
 	}
-	return rawDB, db.NewStore(rawDB), learnerID
+	store := db.NewStore(rawDB)
+	optInSchedulerNotifications(t, store, learnerID)
+	return rawDB, store, learnerID
+}
+
+func optInSchedulerNotifications(t *testing.T, store *db.Store, learnerID string) {
+	t.Helper()
+	if err := store.UpsertAvailability(context.Background(), &models.Availability{
+		LearnerID:              learnerID,
+		Timezone:               "UTC",
+		WindowsJSON:            "[]",
+		AvgDuration:            30,
+		SessionsWeek:           3,
+		NotificationConsent:    true,
+		NotificationFrequency:  models.NotificationFrequencyAsScheduled,
+		MaxNotificationsPerDay: 10,
+		AccessibilityJSON:      "{}",
+	}); err != nil {
+		t.Fatalf("opt in scheduler notifications: %v", err)
+	}
 }
 
 // schedulerForTest builds a Scheduler using the given store and an http client
@@ -284,13 +305,15 @@ func TestDispatchQueued_DedupSameDay(t *testing.T) {
 	}
 }
 
-func TestDispatchQueued_MarksFailedOnWebhookError(t *testing.T) {
+func TestDispatchQueued_RequeuesAfterWebhookError(t *testing.T) {
 	allowAnyURL(t)
 	withoutBackoff(t)
 
-	// Always-500 server. doWithRetry will exhaust and the queue item should be
-	// marked failed.
+	// Always-500 server. A durable claim performs exactly one HTTP request; the
+	// queue item then remains pending until its persisted backoff is due.
+	var hits int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	t.Cleanup(srv.Close)
@@ -305,13 +328,37 @@ func TestDispatchQueued_MarksFailedOnWebhookError(t *testing.T) {
 
 	s := schedulerForTest(store)
 	s.sendDailyMotivation()
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("HTTP attempts in one durable claim = %d, want 1", got)
+	}
 
-	var status string
-	if err := rawDB.QueryRow(`SELECT status FROM webhook_message_queue LIMIT 1`).Scan(&status); err != nil {
+	var (
+		status         string
+		attemptCount   int
+		nextAttemptAt  sql.NullTime
+		lastError      string
+		deadLetteredAt sql.NullTime
+	)
+	if err := rawDB.QueryRow(
+		`SELECT status, attempt_count, next_attempt_at, last_error, dead_lettered_at
+		 FROM webhook_message_queue LIMIT 1`,
+	).Scan(&status, &attemptCount, &nextAttemptAt, &lastError, &deadLetteredAt); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	if status != "failed" {
-		t.Errorf("queue status = %q, want 'failed'", status)
+	if status != models.WebhookStatusPending {
+		t.Errorf("queue status = %q, want %q", status, models.WebhookStatusPending)
+	}
+	if attemptCount != 1 {
+		t.Errorf("attempt_count = %d, want 1", attemptCount)
+	}
+	if !nextAttemptAt.Valid || !nextAttemptAt.Time.After(now) {
+		t.Errorf("next_attempt_at = %v, want a persisted retry after %v", nextAttemptAt, now)
+	}
+	if lastError != "delivery_failed" {
+		t.Errorf("last_error = %q, want delivery_failed", lastError)
+	}
+	if deadLetteredAt.Valid {
+		t.Errorf("dead_lettered_at = %v, want NULL before durable retry budget is exhausted", deadLetteredAt.Time)
 	}
 }
 

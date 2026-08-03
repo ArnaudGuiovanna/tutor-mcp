@@ -15,6 +15,7 @@
 #   3  pruning failed (backup itself succeeded)
 
 set -euo pipefail
+umask 077
 
 DB_PATH="${DB_PATH:-/home/ubuntu/mcp/data/runtime.db}"
 BACKUP_DIR="${1:-${BACKUP_DIR:-/home/ubuntu/backups/tutor-mcp}}"
@@ -26,6 +27,7 @@ if [ ! -r "$DB_PATH" ]; then
 fi
 
 mkdir -p "$BACKUP_DIR"
+chmod 0700 "$BACKUP_DIR"
 
 stamp="$(date -u +%Y-%m-%dT%H-%M-%SZ)"
 target="$BACKUP_DIR/runtime-$stamp.db"
@@ -39,6 +41,7 @@ if ! sqlite3 "$DB_PATH" ".backup '$tmp'"; then
   exit 2
 fi
 mv "$tmp" "$target"
+chmod 0600 "$target"
 echo "backup.sh: wrote $target ($(stat -c%s "$target") bytes)"
 
 # Prune old daily backups. -mtime +N means modified more than N*24h ago.

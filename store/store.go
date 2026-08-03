@@ -18,11 +18,52 @@ import (
 // when the per-deployment client cap is hit.
 var ErrOAuthClientLimitReached = errors.New("oauth client limit reached")
 
+// ErrInvalidAuthCode deliberately collapses unknown, expired, client-bound and
+// already-consumed authorization codes into OAuth's invalid_grant response.
+var ErrInvalidAuthCode = errors.New("invalid authorization code")
+
 // ErrInvalidRefreshToken deliberately covers unknown, expired, client-mismatched,
 // and already-rotated refresh tokens. OAuth callers must not reveal which case
 // occurred, but can distinguish the expected invalid_grant path from a storage
 // failure.
 var ErrInvalidRefreshToken = errors.New("invalid refresh token")
+
+// ErrRefreshTokenReuse marks a replay of an already-used or revoked refresh
+// token. OAuth responses deliberately collapse it to invalid_grant, while the
+// store keeps it distinct so the caller can audit suspected credential theft.
+// The whole token family is revoked before this error is returned.
+var ErrRefreshTokenReuse = errors.New("refresh token reuse detected")
+
+// ErrCurriculumVersionConflict is returned when a caller tries to publish a
+// curriculum revision from a version that is no longer current. Callers must
+// reload the latest immutable snapshot and intentionally rebase their change;
+// silently overwriting the winner would lose curriculum history.
+var ErrCurriculumVersionConflict = errors.New("curriculum version conflict")
+
+// ErrDomainPhaseConflict prevents two orchestration decisions computed from
+// the same phase snapshot from blindly overwriting one another. Callers must
+// reload the domain and recompute the next activity from current evidence.
+var ErrDomainPhaseConflict = errors.New("domain phase conflict")
+
+// ErrIdempotencyKeyConflict prevents a caller from reusing the same scoped key
+// for different arguments. Treating it as a replay would return a response for
+// an operation the caller did not request.
+var ErrIdempotencyKeyConflict = errors.New("idempotency key reused with different arguments")
+
+// ErrIdempotencyInProgress represents an already-owned mutation whose final
+// outcome is not yet cached. The reservation is deliberately not stolen: an
+// ambiguous crash must not duplicate learner-state writes.
+var ErrIdempotencyInProgress = errors.New("idempotent operation in progress")
+
+// ErrIdempotencyResponseExpired represents a mutation that completed
+// successfully but whose cached response was later removed by an explicit
+// retention policy. Callers must never interpret it as permission to execute
+// the mutation again.
+var ErrIdempotencyResponseExpired = errors.New("mutation already completed; cached response expired")
+
+// ErrAvailabilityVersionConflict prevents two clients from silently
+// overwriting learner-controlled notification or accessibility preferences.
+var ErrAvailabilityVersionConflict = errors.New("availability version conflict")
 
 // RateLimitBackend is the optional shared, fleet-wide store the auth
 // RateLimiter delegates token accounting to (opt-in via RATELIMIT_BACKEND).
@@ -56,7 +97,9 @@ type LearnerStore interface {
 	GetLearnerByEmail(ctx context.Context, email string) (*models.Learner, error)
 	UpdateLastActive(ctx context.Context, id string) error
 	GetActiveLearners(ctx context.Context) ([]*models.Learner, error)
-	UpdateLearnerProfile(ctx context.Context, learnerID, profileJSON string) error
+	// UpdateLearnerProfile atomically persists declared profile preferences and,
+	// when objective is non-nil, the canonical learner objective.
+	UpdateLearnerProfile(ctx context.Context, learnerID, profileJSON string, objective *string) error
 }
 
 // AuthStore manages OAuth2/refresh-token and auth-code state.
@@ -65,8 +108,10 @@ type AuthStore interface {
 	GetRefreshToken(ctx context.Context, token string) (*models.RefreshToken, error)
 	DeleteRefreshToken(ctx context.Context, token string) error
 	RotateRefreshToken(ctx context.Context, token, clientID string) (*models.RefreshToken, error)
-	CreateAuthCode(ctx context.Context, code, learnerID, codeChallenge, clientID string, expiresAt time.Time) error
+	CreateAuthCodeWithBinding(ctx context.Context, code, learnerID, codeChallenge, codeChallengeMethod, clientID, redirectURI string, expiresAt time.Time) error
+	GetAuthCode(ctx context.Context, code, clientID string) (*models.AuthCode, error)
 	ConsumeAuthCode(ctx context.Context, code, clientID string) (*models.AuthCode, error)
+	ExchangeAuthCodeForRefreshToken(ctx context.Context, code, clientID string) (*models.AuthCode, *models.RefreshToken, error)
 	CreateOAuthClient(ctx context.Context, clientID, clientName, redirectURIs string) error
 	CreateOAuthClientWithSecret(ctx context.Context, clientID, clientName, redirectURIs, secretHash string) error
 	CreateOAuthClientWithSecretCapped(ctx context.Context, clientID, clientName, redirectURIs, secretHash string, maxClients int) error
@@ -86,14 +131,20 @@ type DomainStore interface {
 	GetDomainByID(ctx context.Context, id string) (*models.Domain, error)
 	GetDomainsByLearner(ctx context.Context, learnerID string, includeArchived bool) ([]*models.Domain, error)
 	SetDomainPriority(ctx context.Context, domainID, learnerID string, rank int) error
+	MarkDomainHighStakes(ctx context.Context, domainID, learnerID string) error
 	UpdateDomainValueFramings(ctx context.Context, domainID, valueFramingsJSON string) error
 	UpdateDomainLastValueAxis(ctx context.Context, domainID, axis string) error
 	UpdateDomainGraph(ctx context.Context, domainID string, graph models.KnowledgeSpace) error
+	EnsureCurriculumBaseline(ctx context.Context, learnerID, domainID string) (*models.CurriculumSnapshot, error)
+	GetCurriculumSnapshot(ctx context.Context, learnerID, domainID string, version int) (*models.CurriculumSnapshot, error)
+	ListCurriculumSnapshots(ctx context.Context, learnerID, domainID string, limit int) ([]*models.CurriculumSnapshot, error)
+	CompareAndSwapCurriculum(ctx context.Context, learnerID, domainID string, expectedVersion int, snapshot *models.CurriculumSnapshot) error
 	ArchiveDomain(ctx context.Context, domainID, learnerID string) error
 	UnarchiveDomain(ctx context.Context, domainID, learnerID string) error
 	ActiveDomainConceptSet(ctx context.Context, learnerID string) (map[string]bool, error)
 	DeleteDomain(ctx context.Context, domainID, learnerID string) error
 	UpdateDomainPhase(ctx context.Context, domainID string, phase models.Phase, phaseEntryEntropy float64, now time.Time) error
+	CompareAndSwapDomainPhase(ctx context.Context, domainID string, expectedPhase, phase models.Phase, phaseEntryEntropy float64, now time.Time) error
 	MergeDomainGoalRelevance(ctx context.Context, domainID string, relevance map[string]float64) (*models.GoalRelevance, error)
 	GetDomainGoalRelevance(ctx context.Context, domainID string) (*models.GoalRelevance, error)
 }
@@ -132,15 +183,60 @@ type InteractionStore interface {
 	GetRecentInteractionsByDomain(ctx context.Context, learnerID, domainID string, limit int) ([]*models.Interaction, error)
 	GetSessionInteractions(ctx context.Context, learnerID string) ([]*models.Interaction, error)
 	GetSessionInteractionsInDomain(ctx context.Context, learnerID, domainID string) ([]*models.Interaction, error)
+	GetInteractionsBySession(ctx context.Context, learnerID, sessionID string) ([]*models.Interaction, error)
+	GetInteractionsBySessionInDomain(ctx context.Context, learnerID, sessionID, domainID string) ([]*models.Interaction, error)
 	GetInteractionsSince(ctx context.Context, learnerID string, since time.Time) ([]*models.Interaction, error)
 	GetInteractionsSinceInDomain(ctx context.Context, learnerID, domainID string, since time.Time) ([]*models.Interaction, error)
 	GetSessionStart(ctx context.Context, learnerID string) (time.Time, error)
 	GetActionHistoryForConcept(ctx context.Context, learnerID, concept string, recentLimit int) (models.ActionHistoryCounts, error)
 	GetActionHistoryForConceptInDomain(ctx context.Context, learnerID, domainID, concept string, recentLimit int) (models.ActionHistoryCounts, error)
 	CountInteractionsSince(ctx context.Context, learnerID string, since time.Time, domainConcepts []string) (int, error)
-	CountInteractionsSinceInDomain(ctx context.Context, learnerID, domainID string, since time.Time) (int, error)
+	// GetQualifiedDiagnosticConceptsSinceInDomain returns the distinct concept
+	// IDs observed through hint-free, submitted and evaluated diagnostics.
+	GetQualifiedDiagnosticConceptsSinceInDomain(ctx context.Context, learnerID, domainID string, since time.Time) ([]string, error)
 	GetRecentConceptsByDomain(ctx context.Context, learnerID string, domainConcepts []string, limit int) ([]string, error)
 	GetRecentConceptsInDomain(ctx context.Context, learnerID, domainID string, limit int) ([]string, error)
+}
+
+// AssessmentStore persists the pre-declared task/rubric and its subsequent
+// response/evaluation as an explicit state machine. TrustedEvaluation is
+// assigned by a server-side evaluator boundary, not by MCP callers.
+type AssessmentStore interface {
+	CreateAssessmentAttempt(ctx context.Context, attempt *models.AssessmentAttempt) error
+	GetAssessmentAttempt(ctx context.Context, learnerID, attemptID string) (*models.AssessmentAttempt, error)
+	GetAssessmentAttemptForUpdate(ctx context.Context, learnerID, attemptID string) (*models.AssessmentAttempt, error)
+	SubmitAssessmentAttempt(ctx context.Context, learnerID, attemptID, responseText, responseHash string, now time.Time) error
+	CompleteAssessmentEvaluation(ctx context.Context, learnerID, attemptID, rubricScoreJSON, evaluatorID string, method models.EvaluationMethod, provenanceJSON string, score float64, passed bool, now time.Time) error
+	CancelAssessmentAttempt(ctx context.Context, learnerID, attemptID string, now time.Time) error
+	// GetEvaluatedAssessmentAttemptsInDomain returns both passing and failing
+	// attempts. TrustedEvaluation is effective trust: the persistence boundary
+	// clears it for unsupported methods and, in high-stakes domains, for every
+	// method except human_review.
+	GetEvaluatedAssessmentAttemptsInDomain(ctx context.Context, learnerID, domainID, conceptID string, limit int) ([]*models.AssessmentAttempt, error)
+	GetTrustedPassedAssessmentAttemptsInDomain(ctx context.Context, learnerID, domainID, conceptID string, limit int) ([]*models.AssessmentAttempt, error)
+	HasHumanReviewedEvaluationInDomain(ctx context.Context, learnerID, domainID string) (bool, error)
+}
+
+// LearningSessionStore manages explicit, durable learning-session boundaries.
+// At most one session may be open for a learner. OpenLearningSession is
+// idempotent: concurrent callers receive the same active session.
+type LearningSessionStore interface {
+	OpenLearningSession(ctx context.Context, learnerID, domainID, requestedID string, now time.Time) (*models.LearningSession, error)
+	GetLearningSession(ctx context.Context, learnerID, sessionID string) (*models.LearningSession, error)
+	GetActiveLearningSession(ctx context.Context, learnerID string) (*models.LearningSession, error)
+	TouchLearningSession(ctx context.Context, learnerID, sessionID string, now time.Time) (*models.LearningSession, error)
+	CloseLearningSession(ctx context.Context, learnerID, sessionID string, now time.Time) (*models.LearningSession, error)
+}
+
+// IdempotencyStore protects retryable MCP mutations from duplicate side
+// effects. Keys are scoped by learner and tool; requestHash binds a key to one
+// canonical argument payload. Completed responses are replayed verbatim until
+// an opt-in retention policy expires only the cached payload; the reservation
+// remains completed and can never be acquired for execution again.
+type IdempotencyStore interface {
+	ClaimIdempotencyKey(ctx context.Context, learnerID, toolName, key, requestHash string, now time.Time) (cachedResponse string, execute bool, err error)
+	CompleteIdempotencyKey(ctx context.Context, learnerID, toolName, key, requestHash, responseText string, now time.Time) error
+	AbortIdempotencyKey(ctx context.Context, learnerID, toolName, key, requestHash string) error
 }
 
 // ActivityStatsStore provides aggregate activity and motivation statistics.
@@ -203,10 +299,11 @@ type MisconceptionStore interface {
 
 // IntentionStore manages implementation intentions and learning-negotiation overrides.
 type IntentionStore interface {
-	InsertImplementationIntention(ctx context.Context, learnerID, domainID, trigger, action string, scheduledFor time.Time) (int64, error)
+	InsertImplementationIntentionForSession(ctx context.Context, learnerID, domainID, sessionID, trigger, action string, scheduledFor time.Time) (int64, error)
 	HasRecentImplementationIntention(ctx context.Context, learnerID, domainID string, since time.Time) (bool, error)
 	GetRecentImplementationIntentions(ctx context.Context, learnerID string, since time.Time, limit int) ([]*models.ImplementationIntention, error)
-	MarkIntentionHonored(ctx context.Context, id int64, honored bool) error
+	GetImplementationIntention(ctx context.Context, learnerID string, id int64) (*models.ImplementationIntention, error)
+	UpdateImplementationIntentionStatus(ctx context.Context, learnerID string, id int64, status string, now time.Time) (*models.ImplementationIntention, error)
 	InsertLearningNegotiationOverridePayload(ctx context.Context, learnerID, domainID, payload string, expiresAt, now time.Time) (int64, error)
 	ConsumeLearningNegotiationOverridePayload(ctx context.Context, learnerID, domainID string, now time.Time) (*models.LearningNegotiationOverridePayloadResult, error)
 }
@@ -214,8 +311,6 @@ type IntentionStore interface {
 // AlertStore manages scheduled learner alerts.
 type AlertStore interface {
 	CreateScheduledAlert(ctx context.Context, learnerID, alertType, concept string, scheduledAt time.Time) error
-	GetUnsentAlerts(ctx context.Context, learnerID string) ([]*models.ScheduledAlert, error)
-	MarkAlertSent(ctx context.Context, id int64) error
 	WasAlertSentToday(ctx context.Context, learnerID, alertType string) (bool, error)
 }
 
@@ -223,28 +318,41 @@ type AlertStore interface {
 type AvailabilityStore interface {
 	GetAvailability(ctx context.Context, learnerID string) (*models.Availability, error)
 	UpsertAvailability(ctx context.Context, a *models.Availability) error
+	UpdateAvailability(ctx context.Context, a *models.Availability, expectedVersion int) (*models.Availability, error)
+	ReserveNotificationDelivery(ctx context.Context, learnerID, alertType, domainID string, intrusive bool, at time.Time) (int64, bool, error)
+	CompleteNotificationDelivery(ctx context.Context, reservationID int64, learnerID string) error
+	ReleaseNotificationDelivery(ctx context.Context, reservationID int64, learnerID string) error
 }
 
 // WebhookQueueStore manages the outbound webhook message queue.
 type WebhookQueueStore interface {
 	EnqueueWebhookMessage(ctx context.Context, learnerID, kind, content string, scheduledFor, expiresAt time.Time, priority int) (int64, error)
+	EnqueueWebhookMessageWithMaxAttempts(ctx context.Context, learnerID, kind, content string, scheduledFor, expiresAt time.Time, priority, maxAttempts int) (int64, error)
+	EnqueueWebhookMessageOncePerDay(ctx context.Context, learnerID, kind, alertType, content string, scheduledFor, expiresAt time.Time, priority int) (int64, bool, error)
 	CreateWebhookPushLog(ctx context.Context, learnerID string, queueID int64, brief *models.WebhookBrief, pushedAt time.Time) (int64, error)
 	GetLatestOpenWebhookPush(ctx context.Context, learnerID, domainID string, since time.Time) (*models.WebhookPushLog, error)
 	MarkWebhookPushSessionOpened(ctx context.Context, learnerID string, openedAt, since time.Time) error
 	MarkWebhookPushConceptAddressed(ctx context.Context, learnerID, domainID, concept string, addressedAt, since time.Time) error
-	DequeueNextPending(ctx context.Context, learnerID, kind string, now time.Time, window time.Duration) (*models.WebhookQueueItem, error)
+	ClaimNextPendingWebhook(ctx context.Context, learnerID, kind string, now time.Time, window time.Duration) (*models.WebhookQueueItem, error)
+	IsWebhookClaimActive(ctx context.Context, id int64, learnerID string) (bool, error)
 	MarkWebhookSent(ctx context.Context, id int64, learnerID string, now time.Time) error
 	MarkWebhookFailed(ctx context.Context, id int64, learnerID string) error
+	RecordWebhookFailure(ctx context.Context, id int64, learnerID, reason string, now time.Time) (deadLettered bool, err error)
+	ReleaseWebhookClaim(ctx context.Context, id int64, learnerID string) error
+	RequeueStaleWebhookClaims(ctx context.Context, cutoff, now time.Time) (int64, error)
 	ExpirePastWebhookMessages(ctx context.Context, now time.Time) (int64, error)
 	GetPendingWebhookMessages(ctx context.Context, learnerID string) ([]*models.WebhookQueueItem, error)
+	GetDeadLetterWebhookMessages(ctx context.Context, learnerID string, limit int) ([]*models.WebhookQueueItem, error)
 }
 
 // ConsolidationStore manages periodic consolidation records.
 type ConsolidationStore interface {
 	UpsertPendingConsolidation(ctx context.Context, learnerID, periodType, periodKey string, now time.Time) error
+	GetLearnerIDsForConsolidation(ctx context.Context) ([]string, error)
 	GetPendingConsolidations(ctx context.Context, learnerID string) ([]*models.PendingConsolidation, error)
+	ClaimPendingConsolidations(ctx context.Context, learnerID string, now time.Time) ([]*models.PendingConsolidation, error)
+	ReleaseConsolidationClaims(ctx context.Context, learnerID string, ids []int64) error
 	GetConsolidation(ctx context.Context, learnerID, periodType, periodKey string) (*models.PendingConsolidation, error)
-	MarkConsolidationsDelivered(ctx context.Context, learnerID string, ids []int64, now time.Time) error
 	MarkConsolidationCompleted(ctx context.Context, learnerID, periodType, periodKey string, now time.Time) error
 	RequeueStaleDeliveredConsolidations(ctx context.Context, cutoff time.Time) (int64, error)
 }
@@ -273,6 +381,9 @@ type Store interface {
 	DomainStore
 	ConceptStateStore
 	InteractionStore
+	AssessmentStore
+	LearningSessionStore
+	IdempotencyStore
 	ActivityStatsStore
 	MetacognitionStore
 	MisconceptionStore

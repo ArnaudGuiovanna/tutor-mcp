@@ -38,6 +38,9 @@ func TestBuildTransferProfile_NoTransfer(t *testing.T) {
 	if profile.ReadinessLabel != TransferReadinessUnobserved {
 		t.Fatalf("ReadinessLabel = %q, want %q", profile.ReadinessLabel, TransferReadinessUnobserved)
 	}
+	if profile.EvidenceTrust != TransferEvidenceUnverified {
+		t.Fatalf("EvidenceTrust = %q, want %q", profile.EvidenceTrust, TransferEvidenceUnverified)
+	}
 	if profile.Attempts != 0 || profile.GlobalScore != 0 || profile.ObservedScore != 0 || profile.Coverage != 0 {
 		t.Fatalf("unexpected empty profile metrics: %+v", profile)
 	}
@@ -45,6 +48,15 @@ func TestBuildTransferProfile_NoTransfer(t *testing.T) {
 	assertTransferDimensions(t, "weakest", profile.WeakestDimensions, nil)
 	if len(profile.DimensionSummaries) != len(TransferDimensions()) {
 		t.Fatalf("DimensionSummaries len = %d, want %d", len(profile.DimensionSummaries), len(TransferDimensions()))
+	}
+}
+
+func TestBuildTrustedTransferProfileMarksPrevalidatedEvidence(t *testing.T) {
+	profile := BuildTrustedTransferProfile("calc", []*models.TransferRecord{
+		{ConceptID: "calc", ContextType: "near", Score: 0.9},
+	})
+	if profile.EvidenceTrust != TransferEvidenceTrusted {
+		t.Fatalf("EvidenceTrust = %q, want %q", profile.EvidenceTrust, TransferEvidenceTrusted)
 	}
 }
 

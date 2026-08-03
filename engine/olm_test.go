@@ -129,7 +129,7 @@ func TestBuildOLMSnapshot_MasteryBuckets(t *testing.T) {
 		map[string][]string{"b": {"a"}, "c": {"b"}},
 		false,
 	)
-	seedConceptState(t, store, "L1", "a", 0.85, "review") // Solid
+	seedConceptState(t, store, "L1", "a", 0.85, "review") // Estimated only: retention now requires an observed delayed retrieval.
 	seedConceptState(t, store, "L1", "b", 0.50, "review") // InProgress
 	seedConceptState(t, store, "L1", "c", 0.10, "review") // Fragile
 	seedConceptState(t, store, "L1", "d", 0.0, "new")     // NotStarted
@@ -139,11 +139,14 @@ func TestBuildOLMSnapshot_MasteryBuckets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildOLMSnapshot: %v", err)
 	}
-	if snap.Solid != 1 {
-		t.Errorf("Solid=%d, want 1", snap.Solid)
+	if snap.Estimated != 1 || snap.Retained != 0 {
+		t.Errorf("Estimated/Retained=%d/%d, want 1/0 without delayed recall", snap.Estimated, snap.Retained)
 	}
-	if snap.InProgress != 1 {
-		t.Errorf("InProgress=%d, want 1", snap.InProgress)
+	if snap.Demonstrated != 0 || snap.Solid != 0 {
+		t.Errorf("Demonstrated/Solid=%d/%d, want 0/0 without strong evidence", snap.Demonstrated, snap.Solid)
+	}
+	if snap.InProgress != 2 {
+		t.Errorf("InProgress=%d, want 2", snap.InProgress)
 	}
 	if snap.Fragile != 1 {
 		t.Errorf("Fragile=%d, want 1", snap.Fragile)
@@ -253,7 +256,7 @@ func TestBuildOLMSnapshot_MetacognitiveSignals(t *testing.T) {
 	}
 }
 
-func TestBuildOLMSnapshot_KSTProgressAndActionable(t *testing.T) {
+func TestBuildOLMSnapshot_EvidenceProgressAndActionable(t *testing.T) {
 	store, raw := newOLMTestStore(t)
 	seedLearner(t, raw, "L1")
 	seedDomain(t, raw, "L1", "math",
@@ -261,7 +264,8 @@ func TestBuildOLMSnapshot_KSTProgressAndActionable(t *testing.T) {
 		map[string][]string{"b": {"a"}, "c": {"b"}, "d": {"c"}},
 		false,
 	)
-	// 2 mastered, 2 not started → KSTProgress = 2/4 = 0.5
+	// Two high BKT estimates without varied evidence are estimated, not
+	// demonstrated, so progress deliberately remains at zero.
 	seedConceptState(t, store, "L1", "a", 0.90, "review")
 	seedConceptState(t, store, "L1", "b", 0.85, "review")
 
@@ -269,8 +273,11 @@ func TestBuildOLMSnapshot_KSTProgressAndActionable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildOLMSnapshot: %v", err)
 	}
-	if snap.KSTProgress < 0.49 || snap.KSTProgress > 0.51 {
-		t.Errorf("KSTProgress=%f, want ~0.5", snap.KSTProgress)
+	if snap.EvidenceProgress != 0 || snap.KSTProgress != snap.EvidenceProgress {
+		t.Errorf("EvidenceProgress/KST alias=%f/%f, want 0/0 without demonstrated evidence", snap.EvidenceProgress, snap.KSTProgress)
+	}
+	if snap.Estimated != 2 || snap.Demonstrated != 0 {
+		t.Errorf("Estimated/Demonstrated=%d/%d, want 2/0", snap.Estimated, snap.Demonstrated)
 	}
 	if !snap.HasActionable {
 		t.Errorf("HasActionable=false, want true (frontier focus exists)")
@@ -302,18 +309,19 @@ func TestBuildOLMSnapshot_NotActionable_AllSolid(t *testing.T) {
 
 func TestFormatOLMEmbed_FocusWarning(t *testing.T) {
 	snap := &OLMSnapshot{
-		DomainID:      "d1",
-		DomainName:    "Python for bio-info",
-		PersonalGoal:  "analyse your garden data",
-		Solid:         3,
-		InProgress:    2,
-		Fragile:       1,
-		NotStarted:    2,
-		FocusConcept:  "loops",
-		FocusReason:   "retention 50%",
-		FocusUrgency:  models.UrgencyWarning,
-		KSTProgress:   0.50,
-		HasActionable: true,
+		DomainID:         "d1",
+		DomainName:       "Python for bio-info",
+		PersonalGoal:     "analyse your garden data",
+		Solid:            3,
+		InProgress:       2,
+		Fragile:          1,
+		NotStarted:       2,
+		FocusConcept:     "loops",
+		FocusReason:      "retention 50%",
+		FocusUrgency:     models.UrgencyWarning,
+		EvidenceProgress: 0.50,
+		KSTProgress:      0.50,
+		HasActionable:    true,
 	}
 	embed := FormatOLMEmbed(snap)
 	if embed.Title != "🧭 Current state" {
@@ -363,7 +371,7 @@ func TestNodeClassify(t *testing.T) {
 	}{
 		{"nil_state", nil, NodeNotStarted},
 		{"new_card", &models.ConceptState{CardState: "new", PMastery: 0.0}, NodeNotStarted},
-		{"solid", &models.ConceptState{CardState: "review", PMastery: 0.85, Stability: 5.0, ElapsedDays: 99, LastReview: ptrTime(now.Add(-24 * time.Hour))}, NodeSolid},
+		{"estimated", &models.ConceptState{CardState: "review", PMastery: 0.85, Stability: 5.0, ElapsedDays: 99, LastReview: ptrTime(now.Add(-24 * time.Hour))}, NodeEstimated},
 		{"in_progress", &models.ConceptState{CardState: "review", PMastery: 0.50, Stability: 5.0, ElapsedDays: 99, LastReview: ptrTime(now.Add(-24 * time.Hour))}, NodeInProgress},
 		{"fragile_low_mastery", &models.ConceptState{CardState: "review", PMastery: 0.20, Stability: 5.0, ElapsedDays: 0, LastReview: ptrTime(now.Add(-24 * time.Hour))}, NodeFragile},
 		{"fragile_low_retention", &models.ConceptState{CardState: "review", PMastery: 0.50, Stability: 1.0, ElapsedDays: 0, LastReview: ptrTime(now.Add(-30 * 24 * time.Hour))}, NodeFragile},
@@ -398,9 +406,13 @@ func TestNodeClassifyAt_IgnoresHistoricalElapsedDaysAfterRecentReview(t *testing
 }
 
 func TestMetacogLine_Exported(t *testing.T) {
-	got := MetacogLine(&OLMSnapshot{CalibrationBias: 2.0})
+	got := MetacogLine(&OLMSnapshot{CalibrationBias: 0.4, CalibrationSamples: calibrationMinimumSamples})
 	if got == "" || got[:3] != "You" {
 		t.Errorf("MetacogLine(over-confident) = %q, want non-empty starting with 'You'", got)
+	}
+	got = MetacogLine(&OLMSnapshot{CalibrationBias: 0.9, CalibrationSamples: calibrationMinimumSamples - 1})
+	if got != "" {
+		t.Errorf("MetacogLine(insufficient evidence) = %q, want empty", got)
 	}
 	got = MetacogLine(&OLMSnapshot{CalibrationBias: 0.0})
 	if got != "" {

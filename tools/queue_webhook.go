@@ -16,6 +16,7 @@ import (
 )
 
 type QueueWebhookMessageParams struct {
+	IdempotentMutationParams
 	Kind         string               `json:"kind" jsonschema:"nudge type: daily_motivation | daily_recap | reactivation | reminder | mirror_message | olm:<domain_id> (per-domain OLM snapshot)"`
 	ScheduledFor string               `json:"scheduled_for" jsonschema:"ISO 8601 UTC timestamp for the delivery window (e.g. 2026-04-13T08:00:00Z)"`
 	ExpiresAt    string               `json:"expires_at,omitempty" jsonschema:"ISO 8601 UTC timestamp after which the message must not be sent"`
@@ -24,7 +25,10 @@ type QueueWebhookMessageParams struct {
 	Priority     int                  `json:"priority,omitempty" jsonschema:"priority (higher = more important, default 0)"`
 }
 
-const maxWebhookContentLen = 1500
+const (
+	maxWebhookContentLen     = 1500
+	defaultWebhookMessageTTL = 7 * 24 * time.Hour
+)
 
 func registerQueueWebhookMessage(server *mcp.Server, deps *Deps) {
 	mcp.AddTool(server, &mcp.Tool{
@@ -85,6 +89,51 @@ func registerQueueWebhookMessage(server *mcp.Server, deps *Deps) {
 			}
 			expiresAt = parsed
 		}
+		if expiresAt.IsZero() {
+			expiresAt = scheduledFor.Add(defaultWebhookMessageTTL)
+		}
+		if !expiresAt.IsZero() && !expiresAt.After(scheduledFor) {
+			r, _ := errorResult("expires_at must be after scheduled_for")
+			return r, nil, nil
+		}
+
+		availability, err := deps.Store.GetAvailability(ctx, learnerID)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to load notification policy", err)
+			return r, nil, nil
+		}
+		allowed, err := availability.AllowsNotificationAt(scheduledFor)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "stored notification policy is invalid", err)
+			return r, nil, nil
+		}
+		if !allowed {
+			reason := "scheduled time is outside the learner's preferred weekly windows"
+			switch {
+			case !availability.NotificationConsent:
+				reason = "notification consent is required"
+			case availability.DoNotDisturb:
+				reason = "notifications are disabled by do_not_disturb"
+			}
+			r, _ := errorResult(reason)
+			return r, nil, nil
+		}
+
+		domainID := ""
+		if strings.HasPrefix(params.Kind, "olm:") {
+			domainID = strings.TrimPrefix(params.Kind, "olm:")
+		}
+		if params.Brief != nil && params.Brief.DomainID != "" {
+			if domainID != "" && domainID != strings.TrimSpace(params.Brief.DomainID) {
+				r, _ := errorResult("brief.domain_id must match the domain encoded in kind")
+				return r, nil, nil
+			}
+			domainID = strings.TrimSpace(params.Brief.DomainID)
+		}
+		if err := validateHighStakesSuggestion(ctx, deps, learnerID, domainID, models.IsIntrusiveWebhookKind(params.Kind)); err != nil {
+			r, _ := errorResult(err.Error())
+			return r, nil, nil
+		}
 
 		id, err := deps.Store.EnqueueWebhookMessage(ctx, learnerID, params.Kind, content, scheduledFor, expiresAt, params.Priority)
 		if err != nil {
@@ -96,9 +145,51 @@ func registerQueueWebhookMessage(server *mcp.Server, deps *Deps) {
 			"queue_id":      id,
 			"kind":          params.Kind,
 			"scheduled_for": scheduledFor.UTC().Format(time.RFC3339),
+			"expires_at":    expiresAt.UTC().Format(time.RFC3339),
 		})
 		return r, nil, nil
 	})
+}
+
+func validateHighStakesSuggestion(ctx context.Context, deps *Deps, learnerID, domainID string, intrusive bool) error {
+	if domainID != "" {
+		domain, err := resolveDomain(ctx, deps.Store, learnerID, domainID)
+		if err != nil || domain == nil {
+			return fmt.Errorf("domain not found")
+		}
+		if !intrusive || !domain.HighStakes {
+			return nil
+		}
+		reviewed, err := deps.Store.HasHumanReviewedEvaluationInDomain(ctx, learnerID, domain.ID)
+		if err != nil {
+			return fmt.Errorf("cannot verify high-stakes human review")
+		}
+		if !reviewed {
+			return fmt.Errorf("intrusive notifications for a high-stakes domain require a trusted human-reviewed evaluation")
+		}
+		return nil
+	}
+	if !intrusive {
+		return nil
+	}
+
+	domains, err := deps.Store.GetDomainsByLearner(ctx, learnerID, false)
+	if err != nil {
+		return fmt.Errorf("cannot verify high-stakes notification policy")
+	}
+	for _, domain := range domains {
+		if domain == nil || !domain.HighStakes {
+			continue
+		}
+		reviewed, err := deps.Store.HasHumanReviewedEvaluationInDomain(ctx, learnerID, domain.ID)
+		if err != nil {
+			return fmt.Errorf("cannot verify high-stakes human review")
+		}
+		if !reviewed {
+			return fmt.Errorf("domain_id is required for an intrusive notification while an unreviewed high-stakes domain is active")
+		}
+	}
+	return nil
 }
 
 func validWebhookKind(k string) bool {

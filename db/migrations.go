@@ -26,7 +26,13 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 	// silently overwrites the other on commit. modernc.org/sqlite
 	// ignores sql.TxOptions.Isolation, so the DSN flag is the supported
 	// way to control BEGIN mode (driver.go:73, conn.go:1033).
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)&_txlock=immediate")
+	dsn, err := sqliteFilesystemDSN(dbPath, "rwc", true,
+		"journal_mode(WAL)", "busy_timeout(5000)", "foreign_keys(ON)",
+	)
+	if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}

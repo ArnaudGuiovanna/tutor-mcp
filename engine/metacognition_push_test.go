@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -144,9 +145,8 @@ func TestSendMirrorMessages_DispatchesQueuedItem(t *testing.T) {
 		Message:      "All your sessions were triggered by a notification.",
 		OpenQuestion: "Do you prefer system reminders?",
 	}
-	// Emit, but bypass the helper's same-day alert record so the scheduler
-	// can actually dispatch (the in-session emit + scheduler tick are
-	// mutually deduped, and we want to exercise the dispatch path here).
+	// Direct queue insertion also remains supported for operator-authored
+	// messages; the scheduler records the daily reservation after delivery.
 	now := time.Now().UTC()
 	body, _ := json.Marshal(MirrorWebhookContent{
 		Pattern: mirror.Pattern, Message: mirror.Message, OpenQuestion: mirror.OpenQuestion,
@@ -228,10 +228,11 @@ func TestSendMirrorMessages_DedupSameDay(t *testing.T) {
 	}
 }
 
-// TestEnqueueMirrorWebhook_ThenSchedulerSeesDedup verifies the full loop:
-// an in-session emission records the alert, and the scheduler tick on the
-// same day is a no-op (does not re-post).
-func TestEnqueueMirrorWebhook_ThenSchedulerSeesDedup(t *testing.T) {
+// TestEnqueueMirrorWebhook_ThenConcurrentSchedulersPostExactlyOnce verifies
+// the official end-to-end path. The enqueue-time daily reservation prevents a
+// duplicate enqueue but does not masquerade as delivery: one scheduler claims
+// and posts the pending item, while a concurrent scheduler sees no claim.
+func TestEnqueueMirrorWebhook_ThenConcurrentSchedulersPostExactlyOnce(t *testing.T) {
 	allowAnyURL(t)
 	withoutBackoff(t)
 
@@ -253,14 +254,30 @@ func TestEnqueueMirrorWebhook_ThenSchedulerSeesDedup(t *testing.T) {
 		t.Fatalf("EnqueueMirrorWebhook: %v", err)
 	}
 
-	// In-session emission already recorded the alert. The scheduler tick
-	// should see WasAlertSentToday=true and skip dispatching, even though a
-	// pending queue row exists. The pending row is silently marked sent so
-	// it does not pile up.
 	s := schedulerForTest(store)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.sendMirrorMessages()
+		}()
+	}
+	wg.Wait()
+	// A later tick must remain a no-op after the processing -> sent transition.
 	s.sendMirrorMessages()
 
-	if got := atomic.LoadInt32(&hits); got != 0 {
-		t.Errorf("hits = %d, want 0 (in-session emit should dedup the scheduler tick)", got)
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("hits = %d, want exactly 1", got)
+	}
+	var status string
+	if err := store.RawDB().QueryRow(
+		`SELECT status FROM webhook_message_queue WHERE learner_id = ? AND kind = ?`,
+		learnerID, models.WebhookKindMirror,
+	).Scan(&status); err != nil {
+		t.Fatalf("scan queue status: %v", err)
+	}
+	if status != models.WebhookStatusSent {
+		t.Fatalf("queue status = %q, want %q", status, models.WebhookStatusSent)
 	}
 }

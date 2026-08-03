@@ -35,6 +35,7 @@ const (
 
 type WriteRequest struct {
 	LearnerID   string
+	DomainID    string
 	Scope       Scope
 	ConceptSlug string
 	Period      string
@@ -42,6 +43,20 @@ type WriteRequest struct {
 	Operation   Operation
 	Content     string
 	SectionKey  string
+}
+
+// CommittedWriteError reports a durability-sync problem discovered after the
+// target file was atomically replaced. The new content is already visible and
+// must not be appended/replayed by an idempotent caller; callers may surface a
+// degraded success and schedule an operator durability check instead.
+type CommittedWriteError struct{ Err error }
+
+func (e *CommittedWriteError) Error() string { return e.Err.Error() }
+func (e *CommittedWriteError) Unwrap() error { return e.Err }
+
+func IsCommittedWriteError(err error) bool {
+	var committed *CommittedWriteError
+	return errors.As(err, &committed)
 }
 
 const sessionFilenameLayout = "2006-01-02T15-04-05Z"
@@ -178,6 +193,29 @@ func Read(learnerID string, scope Scope, key string) (string, error) {
 	return string(data), nil
 }
 
+// ReadDomainConcept reads a concept narrative scoped to one curriculum
+// domain. New runtime routing never falls back to the legacy learner-global
+// concept file, because identical concept labels can exist in unrelated
+// domains.
+func ReadDomainConcept(learnerID, domainID, concept string) (string, error) {
+	if !Enabled() {
+		return "", nil
+	}
+	req := WriteRequest{LearnerID: learnerID, DomainID: domainID, Scope: ScopeConcept, ConceptSlug: concept}
+	path, err := pathFor(req)
+	if err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("memory: read domain concept: %w", err)
+	}
+	return string(data), nil
+}
+
 func ListSessions(learnerID string) ([]time.Time, error) {
 	base, err := learnerDir(learnerID)
 	if err != nil {
@@ -231,6 +269,12 @@ func PathForRead(learnerID string, scope Scope, key string) (string, error) {
 	return pathFor(req)
 }
 
+func PathForDomainConcept(learnerID, domainID, concept string) (string, error) {
+	return pathFor(WriteRequest{
+		LearnerID: learnerID, DomainID: domainID, Scope: ScopeConcept, ConceptSlug: concept,
+	})
+}
+
 func defaultOperation(scope Scope) Operation {
 	switch scope {
 	case ScopeMemoryPending:
@@ -260,6 +304,9 @@ func pathFor(req WriteRequest) (string, error) {
 	case ScopeConcept:
 		if req.ConceptSlug == "" {
 			return "", errors.New("memory: concept_slug is required for concept scope")
+		}
+		if req.DomainID != "" {
+			return filepath.Join(base, "domains", safeSegment(req.DomainID), "concepts", safeSegment(req.ConceptSlug)+".md"), nil
 		}
 		return filepath.Join(base, "concepts", safeSegment(req.ConceptSlug)+".md"), nil
 	case ScopeArchive:
@@ -373,14 +420,14 @@ func atomicWrite(path, content string) error {
 	}
 	parent, err := os.Open(filepath.Dir(path))
 	if err != nil {
-		return fmt.Errorf("memory: open parent for sync: %w", err)
+		return &CommittedWriteError{Err: fmt.Errorf("memory: open parent for sync: %w", err)}
 	}
 	if err := parent.Sync(); err != nil {
 		_ = parent.Close()
-		return fmt.Errorf("memory: sync parent: %w", err)
+		return &CommittedWriteError{Err: fmt.Errorf("memory: sync parent: %w", err)}
 	}
 	if err := parent.Close(); err != nil {
-		return fmt.Errorf("memory: close parent: %w", err)
+		return &CommittedWriteError{Err: fmt.Errorf("memory: close parent: %w", err)}
 	}
 	return nil
 }

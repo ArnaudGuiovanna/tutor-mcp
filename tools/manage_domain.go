@@ -12,6 +12,7 @@ import (
 )
 
 type ArchiveDomainParams struct {
+	IdempotentMutationParams
 	DomainID string `json:"domain_id" jsonschema:"id of the domain to archive"`
 }
 
@@ -47,7 +48,7 @@ func registerArchiveDomain(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		deps.Logger.Info("archive_domain: success", "domain", params.DomainID, "name", domain.Name, "learner", learnerID)
+		deps.Logger.Info("archive_domain: success", "domain", params.DomainID, "learner", learnerID)
 		r, _ := jsonResult(map[string]interface{}{
 			"archived":    true,
 			"domain_id":   domain.ID,
@@ -59,6 +60,7 @@ func registerArchiveDomain(server *mcp.Server, deps *Deps) {
 }
 
 type UnarchiveDomainParams struct {
+	IdempotentMutationParams
 	DomainID string `json:"domain_id" jsonschema:"id of the domain to reactivate"`
 }
 
@@ -93,7 +95,7 @@ func registerUnarchiveDomain(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		deps.Logger.Info("unarchive_domain: success", "domain", params.DomainID, "name", domain.Name, "learner", learnerID)
+		deps.Logger.Info("unarchive_domain: success", "domain", params.DomainID, "learner", learnerID)
 		r, _ := jsonResult(map[string]interface{}{
 			"archived":    false,
 			"domain_id":   domain.ID,
@@ -105,14 +107,15 @@ func registerUnarchiveDomain(server *mcp.Server, deps *Deps) {
 }
 
 type DeleteDomainParams struct {
-	DomainID string `json:"domain_id" jsonschema:"id of the domain to permanently delete"`
+	IdempotentMutationParams
+	DomainID string `json:"domain_id" jsonschema:"id of the domain to remove from active runtime views"`
 	Confirm  bool   `json:"confirm" jsonschema:"must be true to confirm deletion"`
 }
 
 func registerDeleteDomain(server *mcp.Server, deps *Deps) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "delete_domain",
-		Description: "Permanently delete a domain. The concept_states and interactions are preserved. Requires confirm=true.",
+		Description: "Remove a domain from runtime views using an auditable tombstone. Curriculum versions and all learning evidence are preserved. Requires confirm=true.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params DeleteDomainParams) (*mcp.CallToolResult, any, error) {
 		learnerID, err := getLearnerID(ctx)
 		if err != nil {
@@ -125,7 +128,7 @@ func registerDeleteDomain(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 		if !params.Confirm {
-			r, _ := errorResult("confirm must be true to delete a domain. This action is irreversible.")
+			r, _ := errorResult("confirm must be true to remove a domain from runtime views.")
 			return r, nil, nil
 		}
 
@@ -144,12 +147,12 @@ func registerDeleteDomain(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		deps.Logger.Info("delete_domain: success", "domain", params.DomainID, "name", domain.Name, "learner", learnerID)
+		deps.Logger.Info("delete_domain: success", "domain", params.DomainID, "learner", learnerID)
 		r, _ := jsonResult(map[string]interface{}{
 			"deleted":     true,
 			"domain_id":   domain.ID,
 			"domain_name": domain.Name,
-			"message":     fmt.Sprintf("Domain %q was permanently deleted. concept_states and interaction history were preserved.", domain.Name),
+			"message":     fmt.Sprintf("Domain %q was removed from runtime views. Curriculum versions and all learning evidence were preserved for audit.", domain.Name),
 		})
 		return r, nil, nil
 	})

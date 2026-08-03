@@ -7,7 +7,28 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"tutor-mcp/models"
 )
+
+func optInQueueNotifications(t *testing.T, store interface {
+	UpsertAvailability(context.Context, *models.Availability) error
+}) {
+	t.Helper()
+	if err := store.UpsertAvailability(context.Background(), &models.Availability{
+		LearnerID:              "L_owner",
+		Timezone:               "UTC",
+		WindowsJSON:            "[]",
+		AvgDuration:            30,
+		SessionsWeek:           3,
+		NotificationConsent:    true,
+		NotificationFrequency:  models.NotificationFrequencyAsScheduled,
+		MaxNotificationsPerDay: 10,
+		AccessibilityJSON:      "{}",
+	}); err != nil {
+		t.Fatalf("opt in notifications: %v", err)
+	}
+}
 
 func TestQueueWebhookMessage_NoAuth(t *testing.T) {
 	_, deps := setupToolsTest(t)
@@ -97,6 +118,7 @@ func TestQueueWebhookMessage_BadExpiresFormat(t *testing.T) {
 
 func TestQueueWebhookMessage_HappyPath(t *testing.T) {
 	store, deps := setupToolsTest(t)
+	optInQueueNotifications(t, store)
 	res := callTool(t, deps, registerQueueWebhookMessage, "L_owner", "queue_webhook_message", map[string]any{
 		"kind":          "daily_motivation",
 		"scheduled_for": "2026-05-03T08:00:00Z",
@@ -131,13 +153,116 @@ func TestQueueWebhookMessage_HappyPath(t *testing.T) {
 	}
 }
 
+func TestQueueWebhookMessageEnforcesConsentAndWeeklyWindow(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	args := map[string]any{
+		"kind":          "daily_recap",
+		"scheduled_for": "2026-05-04T09:30:00Z", // Monday
+		"content":       "Short recap",
+	}
+	res := callTool(t, deps, registerQueueWebhookMessage, "L_owner", "queue_webhook_message", args)
+	if !res.IsError || !strings.Contains(resultText(res), "consent") {
+		t.Fatalf("no-consent response: %q", resultText(res))
+	}
+	a := &models.Availability{
+		LearnerID:              "L_owner",
+		Timezone:               "UTC",
+		WindowsJSON:            `[{"day":"monday","start":"10:00","end":"11:00"}]`,
+		AvgDuration:            30,
+		SessionsWeek:           3,
+		NotificationConsent:    true,
+		NotificationFrequency:  models.NotificationFrequencyAsScheduled,
+		MaxNotificationsPerDay: 2,
+		AccessibilityJSON:      "{}",
+	}
+	if err := store.UpsertAvailability(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	res = callTool(t, deps, registerQueueWebhookMessage, "L_owner", "queue_webhook_message", args)
+	if !res.IsError || !strings.Contains(resultText(res), "outside") {
+		t.Fatalf("outside-window response: %q", resultText(res))
+	}
+	a.DoNotDisturb = true
+	if err := store.UpsertAvailability(context.Background(), a); err != nil {
+		t.Fatal(err)
+	}
+	args["scheduled_for"] = "2026-05-04T10:30:00Z"
+	res = callTool(t, deps, registerQueueWebhookMessage, "L_owner", "queue_webhook_message", args)
+	if !res.IsError || !strings.Contains(resultText(res), "do_not_disturb") {
+		t.Fatalf("DND response: %q", resultText(res))
+	}
+}
+
+func TestQueueWebhookMessageBlocksUnreviewedHighStakesSuggestion(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	optInQueueNotifications(t, store)
+	domain, err := store.CreateDomain(context.Background(), "L_owner", "Clinical", "", models.KnowledgeSpace{
+		Concepts: []string{"triage"}, Prerequisites: map[string][]string{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkDomainHighStakes(context.Background(), domain.ID, "L_owner"); err != nil {
+		t.Fatal(err)
+	}
+	res := callTool(t, deps, registerQueueWebhookMessage, "L_owner", "queue_webhook_message", map[string]any{
+		"kind":          "reminder",
+		"scheduled_for": "2026-05-04T10:30:00Z",
+		"brief": map[string]any{
+			"domain_id":     domain.ID,
+			"why_now":       "A safety topic is ready.",
+			"learning_gain": "Review the decision process.",
+			"open_loop":     "A case remains to inspect.",
+			"next_action":   "Open the tutor when you choose.",
+		},
+	})
+	if !res.IsError || !strings.Contains(resultText(res), "human-reviewed") {
+		t.Fatalf("high-stakes response: %q", resultText(res))
+	}
+}
+
+func TestQueueWebhookMessageRejectsForeignDomainEvenForNonIntrusiveRecap(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	optInQueueNotifications(t, store)
+	if _, err := store.CreateDomain(context.Background(), "L_attacker", "Other", "", models.KnowledgeSpace{
+		Concepts: []string{"private"}, Prerequisites: map[string][]string{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	foreign, err := store.GetDomainByLearner(context.Background(), "L_attacker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := callTool(t, deps, registerQueueWebhookMessage, "L_owner", "queue_webhook_message", map[string]any{
+		"kind":          "daily_recap",
+		"scheduled_for": "2026-05-04T10:30:00Z",
+		"brief": map[string]any{
+			"domain_id":     foreign.ID,
+			"why_now":       "A recap is ready.",
+			"open_loop":     "Review the day.",
+			"next_action":   "Open the tutor.",
+			"learning_gain": "Consolidate learning.",
+		},
+	})
+	if !res.IsError || !strings.Contains(resultText(res), "domain not found") {
+		t.Fatalf("foreign-domain response: %q", resultText(res))
+	}
+}
+
 func TestQueueWebhookMessage_StructuredBrief(t *testing.T) {
 	store, deps := setupToolsTest(t)
+	optInQueueNotifications(t, store)
+	domain, err := store.CreateDomain(context.Background(), "L_owner", "Python", "", models.KnowledgeSpace{
+		Concepts: []string{"loops"}, Prerequisites: map[string][]string{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	res := callTool(t, deps, registerQueueWebhookMessage, "L_owner", "queue_webhook_message", map[string]any{
-		"kind":          "olm:d1",
+		"kind":          "olm:" + domain.ID,
 		"scheduled_for": "2026-05-03T13:00:00Z",
 		"brief": map[string]any{
-			"domain_id":         "d1",
+			"domain_id":         domain.ID,
 			"domain_name":       "Python",
 			"concept":           "loops",
 			"why_now":           "Retention is dropping on loops, so a short review is more valuable now.",

@@ -162,7 +162,8 @@ func TestRecordTransferResult_HappyPath(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	// makeOwnerDomain creates a domain with concepts ["a","b"]; the
 	// transfer concept must be in the active domain (issue #96).
-	makeOwnerDomain(t, store, "L_owner", "math")
+	domain := makeOwnerDomain(t, store, "L_owner", "math")
+	openTestLearningSession(t, store, "L_owner", "s1", domain.ID)
 	res := callTool(t, deps, registerRecordTransferResult, "L_owner", "record_transfer_result", map[string]any{
 		"concept":      "a",
 		"context_type": "real_world",

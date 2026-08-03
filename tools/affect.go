@@ -15,6 +15,7 @@ import (
 )
 
 type RecordAffectParams struct {
+	IdempotentMutationParams
 	SessionID           string `json:"session_id" jsonschema:"unique session identifier"`
 	Energy              int    `json:"energy,omitempty" jsonschema:"available energy: 1=tired, 2=neutral, 3=motivated, 4=on fire"`
 	Confidence          int    `json:"confidence,omitempty" jsonschema:"subject confidence: 1=anxious, 2=foggy, 3=ok, 4=confident"`
@@ -45,6 +46,15 @@ func registerRecordAffect(server *mcp.Server, deps *Deps) {
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
 		}
+		learningSession, err := deps.Store.GetLearningSession(ctx, learnerID, params.SessionID)
+		if err != nil {
+			r, _ := errorResult("learning session not found")
+			return r, nil, nil
+		}
+		if learningSession.Status != models.LearningSessionStatusOpen {
+			r, _ := errorResult("learning session is closed")
+			return r, nil, nil
+		}
 
 		// Likert-scale guards (1..4 per AffectState model docs). Each field
 		// uses omitempty so 0 means "not provided" and is allowed through;
@@ -64,6 +74,10 @@ func registerRecordAffect(server *mcp.Server, deps *Deps) {
 				r, _ := errorResult(err.Error())
 				return r, nil, nil
 			}
+		}
+		if _, err := deps.Store.TouchLearningSession(ctx, learnerID, params.SessionID, time.Now().UTC()); err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to update learning session", err)
+			return r, nil, nil
 		}
 
 		affect := &models.AffectState{
@@ -107,7 +121,7 @@ func registerRecordAffect(server *mcp.Server, deps *Deps) {
 		// End-of-session: compute calibration_bias_delta
 		if params.Satisfaction > 0 && params.PerceivedDifficulty > 0 {
 			perceivedAbility := float64(params.PerceivedDifficulty) / 4.0
-			sessionInteractions, sessionErr := deps.Store.GetSessionInteractions(ctx, learnerID)
+			sessionInteractions, sessionErr := deps.Store.GetInteractionsBySession(ctx, learnerID, params.SessionID)
 			if sessionErr != nil {
 				markDegraded("calibration_delta", sessionErr)
 			} else if len(sessionInteractions) > 0 {

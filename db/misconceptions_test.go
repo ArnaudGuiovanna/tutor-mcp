@@ -5,15 +5,23 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// testDBCounter makes in-memory DSNs unique. Atomic because parallel tests
-// (e.g. the store conformance subtests) call setupTestDB concurrently.
+// testDBCounter makes migration-test DSNs and PostgreSQL schemas unique.
+// Atomic because conformance subtests can provision databases concurrently.
 var testDBCounter atomic.Int64
+
+var sqliteTestDBTemplate struct {
+	sync.Once
+	data []byte
+	err  error
+}
 
 // rb rebinds a '?'-placeholder query string for the store's dialect, so raw
 // store.root.Exec/Query/QueryRow calls in tests work on both SQLite and
@@ -37,33 +45,68 @@ func seedLearner(t *testing.T, s *Store, id string) {
 }
 
 // setupTestDB returns a fresh, migrated Store seeded with learner 'L1'. By
-// default it uses an isolated in-memory SQLite database. If TUTOR_TEST_PG_DSN
-// is set, it instead provisions an isolated PostgreSQL schema and returns a
-// Postgres-dialect Store — this is how the full db suite is replayed against a
-// real Postgres to verify cross-dialect equivalence (Phase 2).
+// default it copies a closed SQLite template so each test remains isolated
+// without replaying every migration under the race detector. Dedicated
+// migration tests still build their own databases. If TUTOR_TEST_PG_DSN is
+// set, this instead provisions an isolated PostgreSQL schema and returns a
+// Postgres-dialect Store for cross-dialect equivalence.
 func setupTestDB(t *testing.T) *Store {
 	t.Helper()
 	if pgDSN := os.Getenv("TUTOR_TEST_PG_DSN"); pgDSN != "" {
 		return setupTestPG(t, pgDSN)
 	}
-	n := testDBCounter.Add(1)
-	dsn := fmt.Sprintf("file:memdb_%s_%d?mode=memory&cache=shared", t.Name(), n)
-	db, err := sql.Open("sqlite", dsn)
+	template, err := sqliteTestDBTemplateBytes()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("build sqlite test database template: %v", err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "db-test.db")
+	if err := os.WriteFile(dbPath, template, 0o600); err != nil {
+		t.Fatalf("copy sqlite test database template: %v", err)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite test database: %v", err)
 	}
 	// Mirror production OpenDB: a single connection serializes writers so
 	// concurrent BEGIN IMMEDIATE transactions queue instead of deadlocking.
 	db.SetMaxOpenConns(1)
-	if err := Migrate(db); err != nil {
-		t.Fatal(err)
-	}
-	_, err = db.Exec(`INSERT INTO learners (id, email, password_hash, objective, created_at) VALUES ('L1', 'test@test.com', 'hash', 'test', ?)`, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
 	t.Cleanup(func() { db.Close() })
 	return NewStore(db)
+}
+
+func sqliteTestDBTemplateBytes() ([]byte, error) {
+	sqliteTestDBTemplate.Do(func() {
+		dir, err := os.MkdirTemp("", "tutor-mcp-db-test-template-")
+		if err != nil {
+			sqliteTestDBTemplate.err = err
+			return
+		}
+		defer os.RemoveAll(dir)
+
+		path := filepath.Join(dir, "template.db")
+		raw, err := sql.Open("sqlite", path)
+		if err != nil {
+			sqliteTestDBTemplate.err = err
+			return
+		}
+		if err := Migrate(raw); err != nil {
+			_ = raw.Close()
+			sqliteTestDBTemplate.err = err
+			return
+		}
+		if _, err := raw.Exec(`INSERT INTO learners (id, email, password_hash, objective, created_at)
+			VALUES ('L1', 'test@test.com', 'hash', 'test', ?)`, time.Now().UTC()); err != nil {
+			_ = raw.Close()
+			sqliteTestDBTemplate.err = err
+			return
+		}
+		if err := raw.Close(); err != nil {
+			sqliteTestDBTemplate.err = err
+			return
+		}
+		sqliteTestDBTemplate.data, sqliteTestDBTemplate.err = os.ReadFile(path)
+	})
+	return sqliteTestDBTemplate.data, sqliteTestDBTemplate.err
 }
 
 // setupTestPG provisions a uniquely-named Postgres schema, migrates it, seeds

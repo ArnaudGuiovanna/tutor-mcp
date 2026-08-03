@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"tutor-mcp/models"
 )
 
 // TestGetRecentImplementationIntentions_OrderingAndLimit inserts three intentions
@@ -16,13 +18,13 @@ func TestGetRecentImplementationIntentions_OrderingAndLimit(t *testing.T) {
 
 	// Insert three intentions; we'll back-date by hand because the helper
 	// records created_at = NOW().
-	if _, err := store.InsertImplementationIntention(context.Background(), "L1", "D1", "t1", "a1", time.Time{}); err != nil {
+	if _, err := store.InsertImplementationIntentionForSession(context.Background(), "L1", "D1", "", "t1", "a1", time.Time{}); err != nil {
 		t.Fatalf("insert i1: %v", err)
 	}
-	if _, err := store.InsertImplementationIntention(context.Background(), "L1", "D1", "t2", "a2", now.Add(2*time.Hour)); err != nil {
+	if _, err := store.InsertImplementationIntentionForSession(context.Background(), "L1", "D1", "", "t2", "a2", now.Add(2*time.Hour)); err != nil {
 		t.Fatalf("insert i2: %v", err)
 	}
-	if _, err := store.InsertImplementationIntention(context.Background(), "L1", "D1", "t3", "a3", time.Time{}); err != nil {
+	if _, err := store.InsertImplementationIntentionForSession(context.Background(), "L1", "D1", "", "t3", "a3", time.Time{}); err != nil {
 		t.Fatalf("insert i3: %v", err)
 	}
 
@@ -86,34 +88,34 @@ func TestGetRecentImplementationIntentions_OrderingAndLimit(t *testing.T) {
 	}
 }
 
-// TestMarkIntentionHonored covers both the honored=true and honored=false branches
-// and asserts the row's `honored` column reflects the persisted value.
-func TestMarkIntentionHonored(t *testing.T) {
+// TestUpdateImplementationIntentionStatus covers both terminal outcomes and
+// asserts that ownership-aware lifecycle updates persist their compatibility flag.
+func TestUpdateImplementationIntentionStatus_Outcomes(t *testing.T) {
 	store := setupTestDB(t)
 
-	id1, err := store.InsertImplementationIntention(context.Background(), "L1", "D1", "t1", "a1", time.Time{})
+	id1, err := store.InsertImplementationIntentionForSession(context.Background(), "L1", "D1", "", "t1", "a1", time.Time{})
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	id2, err := store.InsertImplementationIntention(context.Background(), "L1", "D1", "t2", "a2", time.Time{})
+	id2, err := store.InsertImplementationIntentionForSession(context.Background(), "L1", "D1", "", "t2", "a2", time.Time{})
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
 	cases := []struct {
-		name    string
-		id      int64
-		honored bool
-		want    int
+		name   string
+		id     int64
+		status string
+		want   int
 	}{
-		{"mark honored", id1, true, 1},
-		{"mark missed", id2, false, 0},
+		{"mark honored", id1, models.IntentionStatusHonored, 1},
+		{"mark missed", id2, models.IntentionStatusMissed, 0},
 	}
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			if err := store.MarkIntentionHonored(context.Background(), tc.id, tc.honored); err != nil {
-				t.Fatalf("MarkIntentionHonored: %v", err)
+			if _, err := store.UpdateImplementationIntentionStatus(context.Background(), "L1", tc.id, tc.status, time.Now().UTC()); err != nil {
+				t.Fatalf("UpdateImplementationIntentionStatus: %v", err)
 			}
 			var v int
 			if err := store.root.QueryRow(
@@ -148,7 +150,7 @@ func TestInsertImplementationIntention_ScheduledFor(t *testing.T) {
 	store := setupTestDB(t)
 	when := time.Now().UTC().Add(48 * time.Hour).Truncate(time.Second)
 
-	id, err := store.InsertImplementationIntention(context.Background(), "L1", "D1", "trig", "act", when)
+	id, err := store.InsertImplementationIntentionForSession(context.Background(), "L1", "D1", "", "trig", "act", when)
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}

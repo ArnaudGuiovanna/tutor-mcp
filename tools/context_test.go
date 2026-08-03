@@ -5,6 +5,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -16,6 +17,60 @@ func TestGetLearnerContext_NoAuth(t *testing.T) {
 	res := callTool(t, deps, registerGetLearnerContext, "", "get_learner_context", map[string]any{})
 	if !res.IsError {
 		t.Fatalf("expected auth error")
+	}
+}
+
+func TestGetLearnerContext_ExposesCanonicalProfileAndObjective(t *testing.T) {
+	_, deps := setupToolsTest(t)
+	updated := callTool(t, deps, registerUpdateLearnerProfile, "L_owner", "update_learner_profile", map[string]any{
+		"objective": "speak Spanish at work",
+		"language":  "es",
+		"device":    "phone",
+	})
+	if updated.IsError {
+		t.Fatalf("update profile: %q", resultText(updated))
+	}
+
+	res := callTool(t, deps, registerGetLearnerContext, "L_owner", "get_learner_context", map[string]any{})
+	if res.IsError {
+		t.Fatalf("get context: %q", resultText(res))
+	}
+	out := decodeResult(t, res)
+	if out["objective"] != "speak Spanish at work" {
+		t.Fatalf("objective = %v", out["objective"])
+	}
+	profile, ok := out["profile"].(map[string]any)
+	if !ok {
+		t.Fatalf("profile type = %T, value=%v", out["profile"], out["profile"])
+	}
+	if profile["language"] != "es" || profile["device"] != "phone" {
+		t.Fatalf("profile = %v", profile)
+	}
+}
+
+func TestGetLearnerContext_InteractionsTodayUsesCalendarDay(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	domain := makeOwnerDomain(t, store, "L_owner", "math")
+	now := time.Now().UTC()
+	for _, createdAt := range []time.Time{now.Add(-48 * time.Hour), now.Add(-time.Minute)} {
+		if _, err := store.RawDB().ExecContext(context.Background(), `
+			INSERT INTO interactions
+			(learner_id, domain_id, concept, activity_type, success, created_at)
+			VALUES (?, ?, ?, 'PRACTICE', 1, ?)`, "L_owner", domain.ID, "a", createdAt); err != nil {
+			t.Fatalf("insert interaction at %s: %v", createdAt, err)
+		}
+	}
+
+	res := callTool(t, deps, registerGetLearnerContext, "L_owner", "get_learner_context", map[string]any{
+		"domain_id": domain.ID,
+	})
+	if res.IsError {
+		t.Fatalf("get context: %q", resultText(res))
+	}
+	out := decodeResult(t, res)
+	if out["interactions_today"] != float64(1) {
+		encoded, _ := json.Marshal(out)
+		t.Fatalf("interactions_today = %v, context=%s", out["interactions_today"], encoded)
 	}
 }
 

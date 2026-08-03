@@ -71,7 +71,12 @@ func (s *Scheduler) dispatchMetacognitiveAlerts() {
 			s.logger.Error("scheduler: metacog availability", "err", err, "learner", learner.ID)
 			continue
 		}
-		if avail != nil && avail.DoNotDisturb {
+		allowed, err := avail.AllowsNotificationAt(now)
+		if err != nil {
+			s.logger.Error("scheduler: metacog invalid notification policy", "err", err, "learner", learner.ID)
+			continue
+		}
+		if !allowed {
 			continue
 		}
 
@@ -102,6 +107,11 @@ func (s *Scheduler) dispatchMetacognitiveAlerts() {
 			s.logger.Error("scheduler: metacog calibration", "err", err, "learner", learner.ID)
 			continue
 		}
+		calibHistory, err := s.store.GetCalibrationBiasHistory(ctx, learner.ID, 20)
+		if err != nil {
+			s.logger.Error("scheduler: metacog calibration evidence", "err", err, "learner", learner.ID)
+			continue
+		}
 		transfers, err := s.store.GetTransferRecordsByLearner(ctx, learner.ID)
 		if err != nil {
 			s.logger.Error("scheduler: metacog transfers", "err", err, "learner", learner.ID)
@@ -114,6 +124,7 @@ func (s *Scheduler) dispatchMetacognitiveAlerts() {
 			affects,
 			interactions,
 			WithTransferData(states, transfers),
+			WithCalibrationEvidence(len(calibHistory)),
 		)
 
 		domains, err := s.store.GetDomainsByLearner(ctx, learner.ID, false)
@@ -123,6 +134,9 @@ func (s *Scheduler) dispatchMetacognitiveAlerts() {
 		}
 		candidates := BuildMetacognitiveNudgeCandidates(learner, domains, alerts)
 		for _, candidate := range candidates {
+			if !metacognitiveHighStakesAllowed(ctx, s, learner.ID, domains, candidate.Brief.DomainID) {
+				continue
+			}
 			// One metacognitive push per tick is intentional: Discord should
 			// surface the highest-learning-value next action, not a bundle of
 			// weak observations.
@@ -160,4 +174,30 @@ func (s *Scheduler) dispatchMetacognitiveAlerts() {
 	for kind := range enqueuedKinds {
 		s.dispatchQueued(kind, kind, nil)
 	}
+}
+
+func metacognitiveHighStakesAllowed(ctx context.Context, scheduler *Scheduler, learnerID string, domains []*models.Domain, domainID string) bool {
+	if domainID == "" {
+		allowed, err := allHighStakesDomainsHumanReviewed(ctx, scheduler.store, learnerID)
+		if err != nil {
+			scheduler.logger.Error("scheduler: metacog high-stakes review", "err", err, "learner", learnerID)
+			return false
+		}
+		return allowed
+	}
+	for _, domain := range domains {
+		if domain == nil || domain.ID != domainID {
+			continue
+		}
+		if !domain.HighStakes {
+			return true
+		}
+		reviewed, err := scheduler.store.HasHumanReviewedEvaluationInDomain(ctx, learnerID, domainID)
+		if err != nil {
+			scheduler.logger.Error("scheduler: metacog high-stakes review", "err", err, "learner", learnerID, "domain", domainID)
+			return false
+		}
+		return reviewed
+	}
+	return false
 }

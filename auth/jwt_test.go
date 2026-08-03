@@ -38,6 +38,29 @@ func TestVerifyJWT_AcceptsValidIssuerAndAudience(t *testing.T) {
 	}
 }
 
+func TestGenerateJWTUsesShortAccessTokenTTL(t *testing.T) {
+	setTestSecret(t)
+	before := time.Now()
+	tok, err := GenerateJWT("https://issuer.example", "learner-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := jwt.ParseWithClaims(tok, &Claims{}, func(token *jwt.Token) (any, error) {
+		return jwtSecret, nil
+	}, jwt.WithAudience(JWTAudience), jwt.WithIssuer("https://issuer.example"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, ok := parsed.Claims.(*Claims)
+	if !ok || claims.ExpiresAt == nil || claims.IssuedAt == nil {
+		t.Fatalf("missing temporal claims: %#v", parsed.Claims)
+	}
+	wantExpiry := before.Add(AccessTokenTTL)
+	if claims.ExpiresAt.Time.Before(wantExpiry.Add(-time.Second)) || claims.ExpiresAt.Time.After(wantExpiry.Add(2*time.Second)) {
+		t.Fatalf("expiry=%v, want approximately %v", claims.ExpiresAt.Time, wantExpiry)
+	}
+}
+
 func TestVerifyJWT_RejectsWrongIssuer(t *testing.T) {
 	setTestSecret(t)
 	tok, _ := GenerateJWT("https://issuer.example", "learner-1")

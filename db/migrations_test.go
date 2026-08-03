@@ -7,6 +7,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"tutor-mcp/models"
 )
 
 // TestMigrate_Idempotent runs Migrate twice on a fresh in-memory database;
@@ -43,10 +46,14 @@ func TestMigrate_Idempotent(t *testing.T) {
 		"calibration_records",
 		"transfer_records",
 		"implementation_intentions",
+		"learning_sessions",
 		"webhook_message_queue",
 		"webhook_push_log",
 		"pedagogical_snapshots",
 		"learner_approved_clients",
+		"curriculum_versions",
+		"curriculum_concepts",
+		"curriculum_metadata_ids",
 	}
 	for _, table := range expectedTables {
 		var name string
@@ -71,11 +78,25 @@ func TestMigrate_Idempotent(t *testing.T) {
 		"idx_interactions_self_initiated",
 		"idx_interactions_misconception",
 		"idx_impl_intent_learner",
+		"idx_learning_sessions_one_open",
+		"idx_learning_sessions_learner_started",
+		"idx_interactions_learner_session",
+		"idx_impl_intent_learner_status",
+		"idx_impl_intent_session",
+		"idx_impl_intent_one_per_session",
+		"idx_domains_learner_high_stakes",
+		"idx_assessment_attempts_human_review",
 		"idx_wmq_dispatch",
+		"idx_wmq_retry_dispatch",
+		"idx_wmq_domain_active",
 		"idx_webhook_push_log_open",
 		"idx_pedagogical_snapshots_learner_created",
 		"idx_pedagogical_snapshots_domain_concept",
 		"idx_learners_email_lower",
+		"idx_domains_learner_deleted",
+		"idx_curriculum_versions_learner_domain",
+		"idx_curriculum_concepts_learner_domain",
+		"idx_curriculum_metadata_learner_domain",
 	}
 	for _, idx := range expectedIndexes {
 		var name string
@@ -113,6 +134,302 @@ func TestMigrate_Idempotent(t *testing.T) {
 		`INSERT INTO domains (id, learner_id, name, graph_json, personal_goal, archived, value_framings_json, last_value_axis) VALUES ('d1','m1','dn','{}','goal',0,'','')`,
 	); err != nil {
 		t.Fatalf("insert with domain framing columns: %v", err)
+	}
+}
+
+func TestMigrationRevokesRefreshTokensWithoutClientOrFamilyBinding(t *testing.T) {
+	n := testDBCounter.Add(1)
+	dsn := fmt.Sprintf("file:migrate_unbound_refresh_%d?mode=memory&cache=shared", n+15000)
+	raw, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { raw.Close() })
+	if err := ensureSchemaMigrationsTable(raw); err != nil {
+		t.Fatal(err)
+	}
+
+	var revokeMigration migration
+	for _, m := range buildMigrations() {
+		if m.Version == "0029_revoke_unbound_refresh_tokens" {
+			revokeMigration = m
+			break
+		}
+		if err := applyMigration(raw, m); err != nil {
+			t.Fatalf("apply %s: %v", m.Version, err)
+		}
+	}
+	if revokeMigration.Version == "" {
+		t.Fatal("refresh-token revocation migration not found")
+	}
+
+	now := time.Now().UTC()
+	if _, err := raw.Exec(
+		`INSERT INTO learners (id, email, password_hash, objective) VALUES ('legacy-refresh','legacy-refresh@test','h','o')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []struct {
+		token, clientID, familyID string
+	}{
+		{token: "sha256:missing-client", familyID: "compromised-client-family"},
+		{token: "sha256:adopted-descendant", clientID: "client-A", familyID: "compromised-client-family"},
+		{token: "sha256:missing-family", clientID: "client-A"},
+		{token: "legacy-plaintext", clientID: "client-A", familyID: "compromised-plaintext-family"},
+		{token: "sha256:plaintext-descendant", clientID: "client-A", familyID: "compromised-plaintext-family"},
+		{token: "sha256:fully-bound", clientID: "client-A", familyID: "fully-bound"},
+	} {
+		if _, err := raw.Exec(
+			`INSERT INTO refresh_tokens
+			 (token, learner_id, client_id, family_id, expires_at, created_at)
+			 VALUES (?, 'legacy-refresh', ?, ?, ?, ?)`,
+			row.token, row.clientID, row.familyID, now.Add(time.Hour), now,
+		); err != nil {
+			t.Fatalf("seed %s: %v", row.token, err)
+		}
+	}
+	if err := applyMigration(raw, revokeMigration); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, token := range []string{
+		"sha256:missing-client", "sha256:adopted-descendant", "sha256:missing-family",
+		"legacy-plaintext", "sha256:plaintext-descendant",
+	} {
+		var revoked sql.NullTime
+		if err := raw.QueryRow(`SELECT revoked_at FROM refresh_tokens WHERE token = ?`, token).Scan(&revoked); err != nil || !revoked.Valid {
+			t.Fatalf("token %s was not revoked: revoked=%v err=%v", token, revoked, err)
+		}
+	}
+	var validRevoked sql.NullTime
+	if err := raw.QueryRow(`SELECT revoked_at FROM refresh_tokens WHERE token = 'sha256:fully-bound'`).Scan(&validRevoked); err != nil {
+		t.Fatal(err)
+	}
+	if validRevoked.Valid {
+		t.Fatal("fully bound refresh token was revoked")
+	}
+}
+
+func TestMigrationPurgesAuthorizationCodesWithoutExactS256Binding(t *testing.T) {
+	n := testDBCounter.Add(1)
+	dsn := fmt.Sprintf("file:migrate_unbound_codes_%d?mode=memory&cache=shared", n+16000)
+	raw, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { raw.Close() })
+	if err := ensureSchemaMigrationsTable(raw); err != nil {
+		t.Fatal(err)
+	}
+
+	var purge migration
+	for _, m := range buildMigrations() {
+		if m.Version == "0031_purge_unbound_oauth_codes" {
+			purge = m
+			break
+		}
+		if err := applyMigration(raw, m); err != nil {
+			t.Fatalf("apply %s: %v", m.Version, err)
+		}
+	}
+	if purge.Version == "" {
+		t.Fatal("authorization-code purge migration not found")
+	}
+
+	if _, err := raw.Exec(
+		`INSERT INTO learners (id, email, password_hash, objective) VALUES ('legacy-code','legacy-code@test','h','o')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	expires := time.Now().UTC().Add(time.Hour)
+	rows := []struct {
+		code, challenge, method, clientID, redirectURI string
+	}{
+		{"valid", "challenge", "S256", "client-A", "https://client.test/callback"},
+		{"missing-client", "challenge", "S256", "", "https://client.test/callback"},
+		{"missing-redirect", "challenge", "S256", "client-A", ""},
+		{"plain-pkce", "challenge", "plain", "client-A", "https://client.test/callback"},
+		{"missing-challenge", "", "S256", "client-A", "https://client.test/callback"},
+	}
+	for _, row := range rows {
+		if _, err := raw.Exec(
+			`INSERT INTO oauth_codes
+			 (code, learner_id, code_challenge, code_challenge_method, client_id, redirect_uri, expires_at)
+			 VALUES (?, 'legacy-code', ?, ?, ?, ?, ?)`,
+			row.code, row.challenge, row.method, row.clientID, row.redirectURI, expires,
+		); err != nil {
+			t.Fatalf("seed %s: %v", row.code, err)
+		}
+	}
+	if err := applyMigration(raw, purge); err != nil {
+		t.Fatal(err)
+	}
+
+	var remaining []string
+	codeRows, err := raw.Query(`SELECT code FROM oauth_codes ORDER BY code`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer codeRows.Close()
+	for codeRows.Next() {
+		var code string
+		if err := codeRows.Scan(&code); err != nil {
+			t.Fatal(err)
+		}
+		remaining = append(remaining, code)
+	}
+	if len(remaining) != 1 || remaining[0] != "valid" {
+		t.Fatalf("authorization codes remaining after migration = %v, want [valid]", remaining)
+	}
+}
+
+func TestMigrationBackfillsStructuredWebhookDomainScope(t *testing.T) {
+	n := testDBCounter.Add(1)
+	dsn := fmt.Sprintf("file:migrate_webhook_domain_%d?mode=memory&cache=shared", n+17000)
+	raw, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { raw.Close() })
+	if err := ensureSchemaMigrationsTable(raw); err != nil {
+		t.Fatal(err)
+	}
+
+	var scopeMigration migration
+	for _, m := range buildMigrations() {
+		if m.Version == "0030_webhook_domain_scope" {
+			scopeMigration = m
+			break
+		}
+		if err := applyMigration(raw, m); err != nil {
+			t.Fatalf("apply %s: %v", m.Version, err)
+		}
+	}
+	if scopeMigration.Version == "" {
+		t.Fatal("webhook domain migration not found")
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO learners (id, email, password_hash, objective) VALUES ('legacy-webhook','legacy-webhook@test','h','o')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for _, row := range []struct{ kind, content string }{
+		{models.WebhookKindDailyRecap, `{"domain_id":"structured-domain","why_now":"review"}`},
+		{"olm:kind-domain", "legacy raw OLM"},
+		{"daily_motivation", "not JSON"},
+	} {
+		if _, err := raw.Exec(
+			`INSERT INTO webhook_message_queue
+			 (learner_id, kind, scheduled_for, content, status, created_at, max_attempts, next_attempt_at)
+			 VALUES ('legacy-webhook', ?, ?, ?, 'pending', ?, 5, ?)`,
+			row.kind, now, row.content, now, now,
+		); err != nil {
+			t.Fatalf("seed %s: %v", row.kind, err)
+		}
+	}
+	if err := applyMigration(raw, scopeMigration); err != nil {
+		t.Fatal(err)
+	}
+	for kind, want := range map[string]string{
+		models.WebhookKindDailyRecap: "structured-domain",
+		"olm:kind-domain":            "kind-domain",
+		"daily_motivation":           "",
+	} {
+		var got string
+		if err := raw.QueryRow(`SELECT domain_id FROM webhook_message_queue WHERE kind = ?`, kind).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("domain_id for %s = %q, want %q", kind, got, want)
+		}
+	}
+}
+
+func TestSessionMigrations_PreserveLegacyRowsWithoutInventingAssociations(t *testing.T) {
+	n := testDBCounter.Add(1)
+	dsn := fmt.Sprintf("file:migrate_sessions_legacy_%d?mode=memory&cache=shared", n+20000)
+	raw, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { raw.Close() })
+	if err := ensureSchemaMigrationsTable(raw); err != nil {
+		t.Fatal(err)
+	}
+
+	migrations := buildMigrations()
+	for _, migration := range migrations {
+		if migration.Version == "0019_link_interactions_to_sessions" {
+			break
+		}
+		if err := applyMigration(raw, migration); err != nil {
+			t.Fatalf("apply %s: %v", migration.Version, err)
+		}
+	}
+	now := time.Now().UTC()
+	if _, err := raw.Exec(`INSERT INTO learners (id, email, password_hash, objective, created_at)
+		VALUES ('legacy-session-learner','legacy-session@test','h','o',?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`INSERT INTO interactions
+		(learner_id, concept, activity_type, success, created_at)
+		VALUES ('legacy-session-learner','c','PRACTICE',1,?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []struct {
+		trigger string
+		honored any
+	}{
+		{"pending", nil},
+		{"honored", 1},
+		{"missed", 0},
+	} {
+		if _, err := raw.Exec(`INSERT INTO implementation_intentions
+			(learner_id, domain_id, trigger_text, action_text, honored, created_at)
+			VALUES ('legacy-session-learner','',?,'practice',?,?)`, row.trigger, row.honored, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, migration := range migrations {
+		if migration.Version != "0019_link_interactions_to_sessions" &&
+			migration.Version != "0020_intention_lifecycle_and_session" {
+			continue
+		}
+		if err := applyMigration(raw, migration); err != nil {
+			t.Fatalf("apply %s: %v", migration.Version, err)
+		}
+	}
+	var sessionID sql.NullString
+	if err := raw.QueryRow(`SELECT session_id FROM interactions WHERE learner_id = 'legacy-session-learner'`).Scan(&sessionID); err != nil {
+		t.Fatal(err)
+	}
+	if sessionID.Valid {
+		t.Fatalf("migration invented a session association: %q", sessionID.String)
+	}
+	rows, err := raw.Query(`SELECT trigger_text, status, session_id, resolved_at, updated_at
+		FROM implementation_intentions WHERE learner_id = 'legacy-session-learner' ORDER BY trigger_text`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	want := map[string]string{"pending": "pending", "honored": "honored", "missed": "missed"}
+	for rows.Next() {
+		var trigger, status string
+		var linked sql.NullString
+		var resolved, updated sql.NullTime
+		if err := rows.Scan(&trigger, &status, &linked, &resolved, &updated); err != nil {
+			t.Fatal(err)
+		}
+		if status != want[trigger] || linked.Valid || !updated.Valid {
+			t.Fatalf("legacy intention backfill trigger=%s status=%s linked=%v updated=%v", trigger, status, linked, updated)
+		}
+		if (status == "pending") == resolved.Valid {
+			t.Fatalf("resolved_at mismatch for %s: %v", status, resolved)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -659,5 +976,25 @@ func TestMigrate_DetectsChecksumDrift(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "checksum mismatch") {
 		t.Fatalf("error %q does not contain 'checksum mismatch'", err.Error())
+	}
+}
+
+func TestSplitSQLStatementsPreservesQuotedFunctionBody(t *testing.T) {
+	sqlText := `CREATE FUNCTION f() RETURNS trigger LANGUAGE plpgsql AS $body$
+BEGIN
+  RAISE EXCEPTION 'immutable; still one statement';
+  RETURN NULL;
+END;
+$body$;
+CREATE TRIGGER t BEFORE UPDATE ON x FOR EACH STATEMENT EXECUTE FUNCTION f();`
+	statements := splitSQLStatements(sqlText)
+	if len(statements) != 2 {
+		t.Fatalf("statement count = %d, want 2: %#v", len(statements), statements)
+	}
+	if !strings.Contains(statements[0], "RAISE EXCEPTION") || !strings.Contains(statements[0], "RETURN NULL;") {
+		t.Fatalf("function body was split: %q", statements[0])
+	}
+	if !strings.HasPrefix(statements[1], "CREATE TRIGGER") {
+		t.Fatalf("second statement = %q", statements[1])
 	}
 }

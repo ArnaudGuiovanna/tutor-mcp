@@ -57,6 +57,39 @@ Session body ` + ts.Format(time.RFC3339)
 	}
 }
 
+func TestLoadContextForDomainExcludesHomonymousLegacyAndForeignNarratives(t *testing.T) {
+	t.Setenv("TUTOR_MCP_MEMORY_ROOT", t.TempDir())
+	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := Write(WriteRequest{LearnerID: "L1", Scope: ScopeConcept, ConceptSlug: "loops", Operation: OpReplaceFile, Content: "legacy global note"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(WriteRequest{LearnerID: "L1", DomainID: "D1", Scope: ScopeConcept, ConceptSlug: "loops", Operation: OpReplaceFile, Content: "domain one note"}); err != nil {
+		t.Fatal(err)
+	}
+	for i, row := range []struct{ domain, body string }{{"D2", "foreign session"}, {"D1", "matching session"}, {"", "legacy session"}} {
+		ts := now.Add(time.Duration(i) * time.Second)
+		content := "---\ndomain_id: " + row.domain + "\ntimestamp: " + ts.Format(time.RFC3339) + "\n---\n" + row.body
+		if err := Write(WriteRequest{LearnerID: "L1", Scope: ScopeSession, Timestamp: ts, Operation: OpReplaceFile, Content: content}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ec, err := LoadContextForDomain("L1", "D1", "loops", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ec.ConceptNotes != "domain one note" {
+		t.Fatalf("domain concept notes = %q", ec.ConceptNotes)
+	}
+	if len(ec.RecentSessions) != 1 || !strings.Contains(ec.RecentSessions[0].Body, "matching session") {
+		t.Fatalf("domain sessions leaked or were lost: %+v", ec.RecentSessions)
+	}
+	if ec.LearnerMemory != "" || ec.PendingMemory != "" || len(ec.RecentArchives) != 0 {
+		t.Fatalf("learner-global narrative leaked into scoped context: %+v", ec)
+	}
+}
+
 func TestDetectOLMInconsistenciesMultipleCriticalUnsorted(t *testing.T) {
 	got := DetectOLMInconsistencies(&OLMView{
 		FocusConcept: "less_urgent",

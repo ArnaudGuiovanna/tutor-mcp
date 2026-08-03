@@ -92,22 +92,6 @@ func validateLikertFloat(field string, v, min, max float64) error {
 	return nil
 }
 
-// validateBoundedFinite rejects NaN/Inf and any value outside [min, max].
-// Used for signed scores like calibration_bias whose legitimate range
-// straddles zero ([-1, 1]) — validateUnitInterval would wrongly reject
-// negative values, and validateLikertFloat is for ordinal Likert scales.
-// Issue #85: chat-side LLM was free to push +Inf into profile_json, which
-// marshals to the literal `+Inf` and breaks every downstream consumer.
-func validateBoundedFinite(field string, v, min, max float64) error {
-	if math.IsNaN(v) || math.IsInf(v, 0) {
-		return fmt.Errorf("%s must be a finite number in [%v, %v] (got non-finite value)", field, min, max)
-	}
-	if v < min || v > max {
-		return fmt.Errorf("%s must be in [%v, %v] (got %v)", field, min, max, v)
-	}
-	return nil
-}
-
 // validateNonNegativeDuration rejects NaN/Inf, negative values, and
 // values exceeding maxSeconds. Used for response_time_seconds where
 // negative or absurdly large values were silently feeding the FSRS
@@ -183,6 +167,7 @@ var allowedActivityTypes = []string{
 	string(models.ActivityDebugMisconception),
 	string(models.ActivityFeynmanPrompt), // FEYNMAN_PROMPT
 	string(models.ActivityTransferProbe), // TRANSFER_PROBE
+	string(models.ActivityDiagnosticAssessment),
 }
 
 // allowedErrorTypes is the vocabulary the BKT heuristic

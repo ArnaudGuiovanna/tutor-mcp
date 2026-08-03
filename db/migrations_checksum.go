@@ -41,13 +41,6 @@ type migrationTx interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-// ensureSchemaMigrationsTable creates the bookkeeping table used by Migrate to
-// track which migrations have been applied and the checksum they were applied
-// with. Called unconditionally before any other migration runs.
-func ensureSchemaMigrationsTable(db *sql.DB) error {
-	return ensureSchemaMigrationsTableInTx(context.Background(), db)
-}
-
 func ensureSchemaMigrationsTableInTx(ctx context.Context, tx migrationTx) error {
 	_, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
     version    TEXT PRIMARY KEY,
@@ -60,29 +53,8 @@ func ensureSchemaMigrationsTableInTx(ctx context.Context, tx migrationTx) error 
 	return nil
 }
 
-// applyMigration executes one migration if it has not been applied yet, or
-// verifies its stored checksum if it has. A mismatch returns an error
-// containing "checksum mismatch" so callers (and tests) can detect drift.
-//
-// Issue #118: the body Exec and the bookkeeping INSERT are wrapped in a
-// single transaction so a crash (or any error) between them cannot leave the
-// schema mutated but unrecorded. Issue #126: Migrate calls applyMigrationInTx
-// while holding a BEGIN EXCLUSIVE transaction, serialising the check-then-
-// insert path across processes.
-func applyMigration(db *sql.DB, m migration) error {
-	ctx := context.Background()
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin migration tx %q: %w", m.Version, err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if err := applyMigrationInTx(ctx, tx, m); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
+// applyMigrationInTx applies one immutable migration or verifies the checksum
+// recorded by a previous run. The caller owns the surrounding transaction.
 func applyMigrationInTx(ctx context.Context, tx migrationTx, m migration) error {
 	var storedChecksum string
 	row := tx.QueryRowContext(ctx, `SELECT checksum FROM schema_migrations WHERE version = ?`, m.Version)
@@ -406,6 +378,351 @@ WHERE domain_id = ''
       WHERE d.learner_id = transfer_records.learner_id
         AND concept_json.value = transfer_records.concept_id
   )`,
+	})
+	// Webhook delivery claims must survive beyond the short transaction that
+	// selects a queue row.  A dedicated timestamp lets the hourly cleanup
+	// recover workers that crashed after claiming but before completing the
+	// outbound HTTP request.
+	out = append(out, migration{
+		Version: "0014_webhook_queue_processing_claim",
+		Body:    `ALTER TABLE webhook_message_queue ADD COLUMN claimed_at DATETIME`,
+	})
+	// Refresh-token rotation must retain the consumed credential so a replay
+	// can identify and revoke its still-active descendant. Existing rows become
+	// one-token families and remain usable until their first rotation.
+	out = append(out, migration{
+		Version: "0015_refresh_token_families",
+		Body: `ALTER TABLE refresh_tokens ADD COLUMN family_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE refresh_tokens ADD COLUMN used_at DATETIME;
+ALTER TABLE refresh_tokens ADD COLUMN revoked_at DATETIME;
+UPDATE refresh_tokens SET family_id = token WHERE family_id = '';
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_family ON refresh_tokens(family_id)`,
+	})
+	// Bind newly-issued authorization codes to the exact redirect URI and PKCE
+	// method. Empty defaults preserve redemption of codes minted before upgrade.
+	out = append(out, migration{
+		Version: "0016_bind_oauth_codes_redirect_pkce",
+		Body: `ALTER TABLE oauth_codes ADD COLUMN code_challenge_method TEXT NOT NULL DEFAULT '';
+ALTER TABLE oauth_codes ADD COLUMN redirect_uri TEXT NOT NULL DEFAULT ''`,
+	})
+	// Global TTL cleanup queries do not filter by account/bucket first, so they
+	// need timestamp-leading indexes rather than the account-scoped read index.
+	out = append(out, migration{
+		Version: "0017_index_security_state_ttl",
+		Body: `CREATE INDEX IF NOT EXISTS idx_rate_limit_buckets_updated_at ON rate_limit_buckets(updated_at);
+CREATE INDEX IF NOT EXISTS idx_login_failures_attempted_at ON login_failures(attempted_at)`,
+	})
+	// A learning episode is an explicit durable entity. The partial unique
+	// index is the concurrency guard that makes open/resume converge on one
+	// canonical row per learner. Historical events are not guessed into
+	// sessions: their correlation remains NULL/legacy unless it was explicit.
+	out = append(out, migration{
+		Version: "0018_create_learning_sessions",
+		Body: `CREATE TABLE learning_sessions (
+    id             TEXT PRIMARY KEY,
+    learner_id     TEXT NOT NULL REFERENCES learners(id),
+    domain_id      TEXT REFERENCES domains(id) ON DELETE SET NULL,
+    status         TEXT NOT NULL CHECK (status IN ('open','closed')) DEFAULT 'open',
+    started_at     DATETIME NOT NULL,
+    last_active_at DATETIME NOT NULL,
+    closed_at      DATETIME,
+    CHECK ((status = 'open' AND closed_at IS NULL) OR
+           (status = 'closed' AND closed_at IS NOT NULL))
+);
+CREATE UNIQUE INDEX idx_learning_sessions_one_open
+    ON learning_sessions(learner_id) WHERE status = 'open';
+CREATE INDEX idx_learning_sessions_learner_started
+    ON learning_sessions(learner_id, started_at DESC)`,
+	})
+	out = append(out, migration{
+		Version: "0019_link_interactions_to_sessions",
+		Body: `ALTER TABLE interactions
+    ADD COLUMN session_id TEXT REFERENCES learning_sessions(id);
+CREATE INDEX idx_interactions_learner_session
+    ON interactions(learner_id, session_id, created_at)`,
+	})
+	// Preserve the nullable honored flag for old API readers while making the
+	// lifecycle explicit and one-way for new flows. A legacy false is a missed
+	// commitment, true is honored, and NULL remains pending. session_id stays
+	// NULL where the historical association cannot be proven.
+	out = append(out, migration{
+		Version: "0020_intention_lifecycle_and_session",
+		Body: `ALTER TABLE implementation_intentions
+    ADD COLUMN session_id TEXT REFERENCES learning_sessions(id);
+ALTER TABLE implementation_intentions
+    ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending','honored','missed','cancelled'));
+ALTER TABLE implementation_intentions ADD COLUMN resolved_at DATETIME;
+ALTER TABLE implementation_intentions ADD COLUMN updated_at DATETIME;
+UPDATE implementation_intentions
+SET status = CASE
+        WHEN honored = 1 THEN 'honored'
+        WHEN honored = 0 THEN 'missed'
+        ELSE 'pending'
+    END,
+    resolved_at = CASE WHEN honored IS NOT NULL THEN created_at ELSE NULL END,
+    updated_at = created_at;
+CREATE INDEX idx_impl_intent_learner_status
+    ON implementation_intentions(learner_id, status, created_at DESC);
+CREATE INDEX idx_impl_intent_session
+    ON implementation_intentions(session_id)`,
+	})
+	// Assessment evidence is a three-stage state machine: immutable task/rubric,
+	// committed learner response, then derived evaluation. Host-reported legacy
+	// interactions remain readable but carry no assessment_attempt_id and cannot
+	// independently establish demonstrated mastery.
+	out = append(out, migration{
+		Version: "0021_create_assessment_attempts",
+		Body: `CREATE TABLE assessment_attempts (
+    id                         TEXT PRIMARY KEY,
+    learner_id                 TEXT NOT NULL REFERENCES learners(id),
+    domain_id                  TEXT NOT NULL REFERENCES domains(id),
+    concept_id                 TEXT NOT NULL,
+    session_id                 TEXT REFERENCES learning_sessions(id),
+    activity_id                TEXT NOT NULL,
+    activity_version           INTEGER NOT NULL CHECK (activity_version >= 1),
+    activity_type              TEXT NOT NULL,
+    observable                 TEXT NOT NULL,
+    task_text                  TEXT,
+    task_content_hash          TEXT NOT NULL,
+    response_text              TEXT,
+    response_content_hash      TEXT NOT NULL DEFAULT '',
+    rubric_json                TEXT NOT NULL,
+    passing_score              REAL NOT NULL CHECK (passing_score > 0),
+    status                     TEXT NOT NULL CHECK (status IN ('prepared','submitted','evaluated','cancelled')),
+    rubric_score_json          TEXT,
+    score                      REAL NOT NULL DEFAULT 0,
+    passed                     INTEGER NOT NULL DEFAULT 0 CHECK (passed IN (0,1)),
+    evaluator_id               TEXT,
+    evaluation_method          TEXT CHECK (evaluation_method IS NULL OR evaluation_method IN ('host_llm','external_service','human_review','deterministic')),
+    evaluation_provenance_json TEXT,
+    trusted_evaluation         INTEGER NOT NULL DEFAULT 0 CHECK (trusted_evaluation IN (0,1)),
+    created_at                 DATETIME NOT NULL,
+    submitted_at               DATETIME,
+    evaluated_at               DATETIME,
+    cancelled_at               DATETIME,
+    CHECK (task_text IS NOT NULL OR task_content_hash <> ''),
+    CHECK (status <> 'submitted' OR submitted_at IS NOT NULL),
+    CHECK (status <> 'evaluated' OR (submitted_at IS NOT NULL AND evaluated_at IS NOT NULL)),
+    CHECK (status <> 'cancelled' OR cancelled_at IS NOT NULL)
+);
+CREATE INDEX idx_assessment_attempts_learning_evidence
+    ON assessment_attempts(learner_id, domain_id, concept_id, trusted_evaluation, passed, evaluated_at DESC);
+CREATE INDEX idx_assessment_attempts_session
+    ON assessment_attempts(learner_id, session_id, created_at);
+ALTER TABLE interactions
+    ADD COLUMN assessment_attempt_id TEXT REFERENCES assessment_attempts(id);
+CREATE UNIQUE INDEX idx_interactions_assessment_attempt
+    ON interactions(assessment_attempt_id) WHERE assessment_attempt_id IS NOT NULL;
+ALTER TABLE transfer_records
+    ADD COLUMN assessment_attempt_id TEXT REFERENCES assessment_attempts(id);
+CREATE INDEX idx_transfer_records_assessment_attempt
+    ON transfer_records(assessment_attempt_id)`,
+	})
+	// A close retry must not duplicate the if-then commitment captured for the
+	// same durable episode. Legacy rows remain unconstrained because their
+	// session_id is NULL.
+	out = append(out, migration{
+		Version: "0022_one_intention_per_session",
+		Body: `CREATE UNIQUE INDEX idx_impl_intent_one_per_session
+    ON implementation_intentions(session_id)
+    WHERE session_id IS NOT NULL`,
+	})
+	// Learner-controlled delivery policy. Existing rows deliberately default to
+	// no notification consent: a historical webhook URL is not proof of opt-in.
+	// High-stakes classification is one-way on the public MCP surface and gates
+	// demonstrated claims/proactive suggestions on trusted human review.
+	out = append(out, migration{
+		Version: "0023_availability_accessibility_high_stakes",
+		Body: `ALTER TABLE availability ADD COLUMN timezone TEXT NOT NULL DEFAULT 'UTC';
+ALTER TABLE availability ADD COLUMN notification_consent INTEGER NOT NULL DEFAULT 0 CHECK (notification_consent IN (0,1));
+ALTER TABLE availability ADD COLUMN notification_frequency TEXT NOT NULL DEFAULT 'daily' CHECK (notification_frequency IN ('as_scheduled','daily','weekly'));
+ALTER TABLE availability ADD COLUMN max_notifications_per_day INTEGER NOT NULL DEFAULT 1 CHECK (max_notifications_per_day BETWEEN 1 AND 10);
+ALTER TABLE availability ADD COLUMN accessibility_json TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE availability ADD COLUMN version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1);
+ALTER TABLE availability ADD COLUMN updated_at DATETIME;
+ALTER TABLE domains ADD COLUMN high_stakes INTEGER NOT NULL DEFAULT 0 CHECK (high_stakes IN (0,1));
+CREATE INDEX idx_domains_learner_high_stakes ON domains(learner_id, high_stakes);
+CREATE INDEX idx_assessment_attempts_human_review ON assessment_attempts(learner_id, domain_id, evaluation_method, trusted_evaluation, status)`,
+	})
+	// Domain deletion is a logical tombstone. Physical deletion is incompatible
+	// with immutable curriculum/audit rows and with assessment evidence that
+	// references the domain. Readers hide tombstoned rows while their identity
+	// remains available to historical foreign keys.
+	out = append(out, migration{
+		Version: "0024_tombstone_domains",
+		Body: `ALTER TABLE domains ADD COLUMN deleted_at DATETIME;
+CREATE INDEX idx_domains_learner_deleted ON domains(learner_id, deleted_at)`,
+	})
+	// A curriculum version is a complete append-only snapshot. Concept IDs and
+	// stable keys live in their own immutable registry; labels and metadata can
+	// change only by publishing a new snapshot. No FK points from these tables
+	// to domains so tombstoned domain history remains independently auditable.
+	out = append(out, migration{
+		Version: "0025_create_immutable_curriculum",
+		Body: `CREATE TABLE curriculum_versions (
+    domain_id       TEXT NOT NULL,
+    learner_id      TEXT NOT NULL,
+    version         INTEGER NOT NULL CHECK (version >= 1),
+    parent_version  INTEGER,
+    snapshot_json   TEXT NOT NULL CHECK (json_valid(snapshot_json)),
+    operation_type  TEXT NOT NULL CHECK (operation_type IN ('create','baseline_import','add','rename','update_metadata','split','merge','remove','legacy_graph_update')),
+    operation_json  TEXT NOT NULL CHECK (json_valid(operation_json)),
+    provenance_json TEXT NOT NULL CHECK (json_valid(provenance_json)),
+    review_json     TEXT NOT NULL CHECK (json_valid(review_json)),
+    created_by      TEXT NOT NULL,
+    created_at      DATETIME NOT NULL,
+    PRIMARY KEY (domain_id, version),
+    FOREIGN KEY (domain_id, parent_version)
+        REFERENCES curriculum_versions(domain_id, version)
+);
+CREATE TABLE curriculum_concepts (
+    id         TEXT PRIMARY KEY,
+    domain_id  TEXT NOT NULL,
+    learner_id TEXT NOT NULL,
+    stable_key TEXT NOT NULL,
+    created_at DATETIME NOT NULL,
+    UNIQUE (domain_id, stable_key)
+);
+CREATE TABLE curriculum_metadata_ids (
+    id         TEXT PRIMARY KEY,
+    concept_id TEXT NOT NULL REFERENCES curriculum_concepts(id),
+    domain_id  TEXT NOT NULL,
+    learner_id TEXT NOT NULL,
+    kind       TEXT NOT NULL CHECK (kind IN ('outcome','criterion')),
+    created_at DATETIME NOT NULL
+);
+CREATE INDEX idx_curriculum_versions_learner_domain
+    ON curriculum_versions(learner_id, domain_id, version DESC);
+CREATE INDEX idx_curriculum_concepts_learner_domain
+    ON curriculum_concepts(learner_id, domain_id);
+CREATE INDEX idx_curriculum_metadata_learner_domain
+    ON curriculum_metadata_ids(learner_id, domain_id);
+CREATE TRIGGER curriculum_versions_no_update
+BEFORE UPDATE ON curriculum_versions
+BEGIN SELECT RAISE(ABORT, 'curriculum versions are immutable'); END;
+CREATE TRIGGER curriculum_versions_no_delete
+BEFORE DELETE ON curriculum_versions
+BEGIN SELECT RAISE(ABORT, 'curriculum versions are immutable'); END;
+CREATE TRIGGER curriculum_concepts_no_update
+BEFORE UPDATE ON curriculum_concepts
+BEGIN SELECT RAISE(ABORT, 'curriculum concept identities are immutable'); END;
+CREATE TRIGGER curriculum_concepts_no_delete
+BEFORE DELETE ON curriculum_concepts
+BEGIN SELECT RAISE(ABORT, 'curriculum concept identities are immutable'); END;
+CREATE TRIGGER curriculum_metadata_ids_no_update
+BEFORE UPDATE ON curriculum_metadata_ids
+BEGIN SELECT RAISE(ABORT, 'curriculum metadata identities are immutable'); END;
+CREATE TRIGGER curriculum_metadata_ids_no_delete
+BEFORE DELETE ON curriculum_metadata_ids
+BEGIN SELECT RAISE(ABORT, 'curriculum metadata identities are immutable'); END`,
+	})
+	// Every retryable mutation can reserve a learner-scoped key before applying
+	// side effects. Completed responses are replayed byte-for-byte; an ambiguous
+	// in-flight reservation is deliberately retained so a disconnect cannot
+	// silently duplicate educational state.
+	out = append(out, migration{
+		Version: "0026_tool_call_idempotency",
+		Body: `CREATE TABLE tool_call_idempotency (
+    learner_id      TEXT NOT NULL REFERENCES learners(id),
+    tool_name       TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    request_hash    TEXT NOT NULL,
+    status          TEXT NOT NULL CHECK (status IN ('processing','completed')),
+    response_text   TEXT NOT NULL DEFAULT '',
+    created_at      DATETIME NOT NULL,
+    updated_at      DATETIME NOT NULL,
+    completed_at    DATETIME,
+    PRIMARY KEY (learner_id, tool_name, idempotency_key),
+    CHECK ((status = 'processing' AND completed_at IS NULL) OR
+           (status = 'completed' AND completed_at IS NOT NULL))
+);
+CREATE INDEX idx_tool_call_idempotency_updated
+    ON tool_call_idempotency(updated_at)`,
+	})
+	// Delivery attempts survive process restarts. A claim increments the durable
+	// counter; transport failure or stale-claim recovery schedules the next
+	// attempt, and the existing terminal `failed` state acts as the dead-letter
+	// queue once max_attempts is reached.
+	out = append(out, migration{
+		Version: "0027_webhook_retry_state",
+		Body: `ALTER TABLE webhook_message_queue
+    ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0);
+ALTER TABLE webhook_message_queue
+    ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 5 CHECK (max_attempts BETWEEN 1 AND 100);
+ALTER TABLE webhook_message_queue
+    ADD COLUMN next_attempt_at DATETIME;
+ALTER TABLE webhook_message_queue
+    ADD COLUMN last_error TEXT NOT NULL DEFAULT '';
+ALTER TABLE webhook_message_queue
+    ADD COLUMN dead_lettered_at DATETIME;
+UPDATE webhook_message_queue
+SET next_attempt_at = scheduled_for
+WHERE status = 'pending' AND next_attempt_at IS NULL;
+UPDATE webhook_message_queue
+SET attempt_count = 1
+WHERE status = 'processing' AND attempt_count = 0;
+CREATE INDEX idx_wmq_retry_dispatch
+    ON webhook_message_queue(learner_id, kind, status, next_attempt_at, scheduled_for)`,
+	})
+	// Cached mutation responses may contain learner plaintext. Retention can
+	// redact that response while this marker preserves an unambiguous completed
+	// tombstone: the same key can never acquire a new execution reservation.
+	out = append(out, migration{
+		Version: "0028_idempotency_response_expiry",
+		Body: `ALTER TABLE tool_call_idempotency
+    ADD COLUMN response_expired_at DATETIME;
+CREATE INDEX idx_tool_call_idempotency_completed
+    ON tool_call_idempotency(status, completed_at)`,
+	})
+	// Tokens issued before client binding and token-family replay detection were
+	// introduced cannot be safely adopted by a newly registered client. Revoke
+	// them proactively instead of waiting for a rotation attempt to discover the
+	// missing provenance.
+	out = append(out, migration{
+		Version: "0029_revoke_unbound_refresh_tokens",
+		Body: `WITH unsafe_families AS (
+    SELECT DISTINCT family_id
+    FROM refresh_tokens
+    WHERE family_id <> ''
+      AND (TRIM(COALESCE(client_id, '')) = ''
+        OR token NOT LIKE 'sha256:%')
+)
+UPDATE refresh_tokens
+SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP)
+WHERE family_id IN (SELECT family_id FROM unsafe_families)
+   OR TRIM(COALESCE(client_id, '')) = ''
+   OR TRIM(COALESCE(family_id, '')) = ''
+   OR token NOT LIKE 'sha256:%'`,
+	})
+	// Normalize the optional domain association carried by structured webhook
+	// payloads. Lifecycle operations can now cancel all unsent work for an
+	// archived/deleted domain without parsing learner-authored JSON in a query.
+	out = append(out, migration{
+		Version: "0030_webhook_domain_scope",
+		Body: `ALTER TABLE webhook_message_queue
+    ADD COLUMN domain_id TEXT NOT NULL DEFAULT '';
+UPDATE webhook_message_queue
+SET domain_id = SUBSTR(kind, 5)
+WHERE domain_id = '' AND kind LIKE 'olm:%';
+UPDATE webhook_message_queue
+SET domain_id = COALESCE(json_extract(content, '$.domain_id'), '')
+WHERE domain_id = ''
+  AND json_valid(content)
+  AND json_type(content, '$.domain_id') = 'text';
+CREATE INDEX idx_wmq_domain_active
+    ON webhook_message_queue(learner_id, domain_id, status)`,
+	})
+	// Authorization codes minted before exact redirect and S256 PKCE binding
+	// cannot prove the authorization request they belong to. Remove them rather
+	// than granting a one-time compatibility redemption after upgrade.
+	out = append(out, migration{
+		Version: "0031_purge_unbound_oauth_codes",
+		Body: `DELETE FROM oauth_codes
+WHERE TRIM(COALESCE(client_id, '')) = ''
+   OR TRIM(COALESCE(redirect_uri, '')) = ''
+   OR code_challenge_method <> 'S256'
+   OR TRIM(COALESCE(code_challenge, '')) = ''`,
 	})
 	return out
 }

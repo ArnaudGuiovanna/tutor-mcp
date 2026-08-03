@@ -15,6 +15,11 @@ import (
 
 var jwtSecret []byte
 
+// AccessTokenTTL bounds exposure of a leaked bearer. Long-lived access is
+// provided through rotating refresh-token families, not a day-long stateless
+// credential that the server cannot revoke retroactively.
+const AccessTokenTTL = 30 * time.Minute
+
 func LoadJWTSecret() error {
 	secret := os.Getenv("JWT_SECRET")
 	if secret == "" {
@@ -47,7 +52,7 @@ func GenerateJWT(issuer, learnerID string) (string, error) {
 			Subject:   learnerID,
 			Issuer:    issuer,
 			Audience:  jwt.ClaimStrings{JWTAudience},
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(AccessTokenTTL)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 		},
 		Scope: "learner",

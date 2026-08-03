@@ -6,6 +6,7 @@ package db
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"tutor-mcp/models"
@@ -94,6 +95,60 @@ func TestMergeDomainGoalRelevance_IncrementsVersion(t *testing.T) {
 		if fresh.GoalRelevanceVersion != i {
 			t.Errorf("after set %d: GoalRelevanceVersion want %d, got %d", i, i, fresh.GoalRelevanceVersion)
 		}
+	}
+}
+
+func TestConcurrentGraphAndGoalRelevanceMutationsPreserveBothWriters(t *testing.T) {
+	store := setupTestDB(t)
+	d := mkDomain(t, store, []string{"A"})
+	graph := models.KnowledgeSpace{
+		Concepts:      []string{"A", "B"},
+		Prerequisites: map[string][]string{"B": {"A"}},
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		errs <- store.UpdateDomainGraph(context.Background(), d.ID, graph)
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		_, err := store.MergeDomainGoalRelevance(context.Background(), d.ID, map[string]float64{"A": 0.9})
+		errs <- err
+	}()
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent mutation failed: %v", err)
+		}
+	}
+
+	fresh, err := store.GetDomainByID(context.Background(), d.ID)
+	if err != nil {
+		t.Fatalf("get domain: %v", err)
+	}
+	if fresh.GraphVersion != 2 || len(fresh.Graph.Concepts) != 2 || fresh.Graph.Concepts[0] != "A" || fresh.Graph.Concepts[1] != "B" {
+		t.Fatalf("graph writer was lost: %+v", fresh)
+	}
+	relevance, err := store.GetDomainGoalRelevance(context.Background(), d.ID)
+	if err != nil {
+		t.Fatalf("get goal relevance: %v", err)
+	}
+	if relevance == nil || relevance.Relevance["A"] != 0.9 {
+		t.Fatalf("goal-relevance writer was lost: %+v", relevance)
+	}
+	if relevance.ForGraphVersion != 1 && relevance.ForGraphVersion != 2 {
+		t.Fatalf("goal relevance references impossible graph version: %+v", relevance)
+	}
+	if relevance.ForGraphVersion == 1 && !fresh.IsGoalRelevanceStale() {
+		t.Fatalf("concurrent graph winner was not exposed as stale: domain=%+v relevance=%+v", fresh, relevance)
 	}
 }
 

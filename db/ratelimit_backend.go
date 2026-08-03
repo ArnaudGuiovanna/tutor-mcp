@@ -53,6 +53,19 @@ func (s *Store) rateLimitAllow(ctx context.Context, key string, rate float64, bu
 	now = now.UTC()
 	allowed := false
 	err := s.inTx(ctx, txOptionsForDialect(s.dialect), func(txs *Store) error {
+		// Materialize the row before locking it. ON CONFLICT DO NOTHING is the
+		// first-key concurrency boundary on PostgreSQL: a concurrent inserter
+		// waits for the winner and then observes its spent token count instead
+		// of both callers resetting the bucket to burst-1.
+		if _, err := txs.exec(ctx,
+			`INSERT INTO rate_limit_buckets (bucket_key, tokens, updated_at)
+			 VALUES (?, ?, ?)
+			 ON CONFLICT (bucket_key) DO NOTHING`,
+			key, float64(burst), now,
+		); err != nil {
+			return fmt.Errorf("rate limit allow: materialize: %w", err)
+		}
+
 		query := `SELECT tokens, updated_at FROM rate_limit_buckets WHERE bucket_key = ?`
 		if txs.dialect == DialectPostgres {
 			query += ` FOR UPDATE`
@@ -60,20 +73,7 @@ func (s *Store) rateLimitAllow(ctx context.Context, key string, rate float64, bu
 		var tokens float64
 		var updatedAt flexTime
 		err := txs.queryRow(ctx, query, key).Scan(&tokens, &updatedAt)
-		switch {
-		case err == sql.ErrNoRows:
-			// First request for this key: start full, spend one.
-			tokens = float64(burst) - 1
-			if _, err := txs.exec(ctx,
-				`INSERT INTO rate_limit_buckets (bucket_key, tokens, updated_at) VALUES (?, ?, ?)
-				 ON CONFLICT (bucket_key) DO UPDATE SET tokens = excluded.tokens, updated_at = excluded.updated_at`,
-				key, tokens, now,
-			); err != nil {
-				return fmt.Errorf("rate limit allow: insert: %w", err)
-			}
-			allowed = true
-			return nil
-		case err != nil:
+		if err != nil {
 			return fmt.Errorf("rate limit allow: select: %w", err)
 		}
 
@@ -168,6 +168,44 @@ func (s *Store) resetLoginFailures(ctx context.Context, key string) error {
 		return fmt.Errorf("reset login failures: %w", err)
 	}
 	return nil
+}
+
+// CleanupRateLimitState deletes stale shared buckets and login-failure stamps.
+// It is intentionally a DB method rather than a scheduler dependency so an
+// operator or future maintenance loop can invoke it without coupling auth
+// state to webhook scheduling.
+func (s *Store) CleanupRateLimitState(ctx context.Context, bucketCutoff, failureCutoff time.Time) (int64, int64, error) {
+	var bucketsDeleted, failuresDeleted int64
+	err := s.inTx(ctx, nil, func(txs *Store) error {
+		bucketResult, err := txs.exec(ctx,
+			`DELETE FROM rate_limit_buckets WHERE updated_at < ?`,
+			bucketCutoff.UTC(),
+		)
+		if err != nil {
+			return fmt.Errorf("cleanup rate-limit buckets: %w", err)
+		}
+		bucketsDeleted, err = bucketResult.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("cleanup rate-limit buckets count: %w", err)
+		}
+
+		failureResult, err := txs.exec(ctx,
+			`DELETE FROM login_failures WHERE attempted_at < ?`,
+			failureCutoff.UTC(),
+		)
+		if err != nil {
+			return fmt.Errorf("cleanup login failures: %w", err)
+		}
+		failuresDeleted, err = failureResult.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("cleanup login failures count: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	return bucketsDeleted, failuresDeleted, nil
 }
 
 // txOptionsForDialect mirrors WithTx's isolation choice: SERIALIZABLE

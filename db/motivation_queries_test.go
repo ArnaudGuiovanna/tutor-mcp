@@ -40,7 +40,7 @@ func insertSimpleInteraction(t *testing.T, store *Store, concept string, success
 func TestImplementationIntentionsInsertAndRecent(t *testing.T) {
 	store := setupTestDB(t)
 
-	_, err := store.InsertImplementationIntention(context.Background(), "L1", "D1", "demain matin", "ferai 1 exercice", time.Time{})
+	_, err := store.InsertImplementationIntentionForSession(context.Background(), "L1", "D1", "", "demain matin", "ferai 1 exercice", time.Time{})
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestImplementationIntentionsInsertAndRecent(t *testing.T) {
 func TestImplementationIntentionsDomainScope(t *testing.T) {
 	store := setupTestDB(t)
 
-	_, err := store.InsertImplementationIntention(context.Background(), "L1", "D1", "t", "a", time.Time{})
+	_, err := store.InsertImplementationIntentionForSession(context.Background(), "L1", "D1", "", "t", "a", time.Time{})
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -84,9 +84,9 @@ func TestImplementationIntentionsDomainScope(t *testing.T) {
 	}
 }
 
-// TestWebhookQueueEnqueueDequeueLifecycle covers enqueue, dequeue within the
+// TestWebhookQueueEnqueueClaimLifecycle covers enqueue, claim within the
 // scheduling window, and the mark-sent transition (which should prevent redelivery).
-func TestWebhookQueueEnqueueDequeueLifecycle(t *testing.T) {
+func TestWebhookQueueEnqueueClaimLifecycle(t *testing.T) {
 	store := setupTestDB(t)
 
 	now := time.Now().UTC()
@@ -99,10 +99,10 @@ func TestWebhookQueueEnqueueDequeueLifecycle(t *testing.T) {
 		t.Fatal("expected non-zero id")
 	}
 
-	// Dequeue with 30min window.
-	item, err := store.DequeueNextPending(context.Background(), "L1", "daily_motivation", now, 30*time.Minute)
+	// Claim with 30min window.
+	item, err := store.ClaimNextPendingWebhook(context.Background(), "L1", "daily_motivation", now, 30*time.Minute)
 	if err != nil {
-		t.Fatalf("dequeue: %v", err)
+		t.Fatalf("claim: %v", err)
 	}
 	if item == nil {
 		t.Fatal("expected a queued item, got nil")
@@ -116,8 +116,8 @@ func TestWebhookQueueEnqueueDequeueLifecycle(t *testing.T) {
 		t.Fatalf("mark sent: %v", err)
 	}
 
-	// Next dequeue should find nothing.
-	item2, _ := store.DequeueNextPending(context.Background(), "L1", "daily_motivation", now, 30*time.Minute)
+	// Next claim should find nothing.
+	item2, _ := store.ClaimNextPendingWebhook(context.Background(), "L1", "daily_motivation", now, 30*time.Minute)
 	if item2 != nil {
 		t.Errorf("expected nil after mark sent, got id=%d", item2.ID)
 	}
@@ -134,14 +134,14 @@ func TestWebhookQueuePriorityOrdering(t *testing.T) {
 	// Higher priority
 	_, _ = store.EnqueueWebhookMessage(context.Background(), "L1", "daily_motivation", "high", now, time.Time{}, 5)
 
-	item, _ := store.DequeueNextPending(context.Background(), "L1", "daily_motivation", now, 30*time.Minute)
+	item, _ := store.ClaimNextPendingWebhook(context.Background(), "L1", "daily_motivation", now, 30*time.Minute)
 	if item == nil || item.Content != "high" {
 		t.Errorf("expected 'high', got %+v", item)
 	}
 }
 
 // TestWebhookQueueExpiry checks that a message whose expires_at is in the past
-// is filtered out by dequeue, and ExpirePastWebhookMessages transitions it.
+// is filtered out by claim, and ExpirePastWebhookMessages transitions it.
 func TestWebhookQueueExpiry(t *testing.T) {
 	store := setupTestDB(t)
 	now := time.Now().UTC()
@@ -153,7 +153,7 @@ func TestWebhookQueueExpiry(t *testing.T) {
 		t.Fatalf("enqueue: %v", err)
 	}
 
-	item, _ := store.DequeueNextPending(context.Background(), "L1", "daily_recap", now, 30*time.Minute)
+	item, _ := store.ClaimNextPendingWebhook(context.Background(), "L1", "daily_recap", now, 30*time.Minute)
 	if item != nil {
 		t.Errorf("expected nil for expired item, got id=%d", item.ID)
 	}
@@ -190,21 +190,21 @@ func TestConceptMasteryDelta(t *testing.T) {
 	}
 }
 
-// TestMilestonesInWindow — concept crossed mastery threshold AND has recent
-// successful interactions → appears; concept that's mastered but inactive → skipped.
+// TestMilestonesInWindow — concept estimate crossed the routing threshold AND
+// has recent successful interactions → appears; an inactive estimate is skipped.
 func TestMilestonesInWindow(t *testing.T) {
 	store := setupTestDB(t)
 	since := time.Now().UTC().Add(-7 * 24 * time.Hour)
 
-	// Active concept — mastered, has recent success
+	// Active concept — high estimate, has recent success
 	seedConceptState(t, store, "Goroutines", 0.9)
 	insertSimpleInteraction(t, store, "Goroutines", true, time.Now().UTC().Add(-1*time.Hour))
 
-	// Inactive concept — mastered but last interaction was before window
+	// Inactive concept — high estimate but last interaction was before window
 	seedConceptState(t, store, "Interfaces", 0.9)
 	insertSimpleInteraction(t, store, "Interfaces", true, since.Add(-5*24*time.Hour))
 
-	// Unmastered concept — should not appear
+	// Low-estimate concept — should not appear
 	seedConceptState(t, store, "Channels", 0.3)
 	insertSimpleInteraction(t, store, "Channels", true, time.Now().UTC().Add(-1*time.Hour))
 

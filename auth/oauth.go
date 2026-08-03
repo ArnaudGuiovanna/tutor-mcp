@@ -17,8 +17,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/mail"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -54,8 +56,11 @@ const (
 )
 
 const (
+	authorizeBodyLimitBytes          int64 = 16 << 10
+	tokenBodyLimitBytes              int64 = 16 << 10
 	registerBodyLimitBytes           int64 = 16 << 10
 	defaultMaxRegisteredOAuthClients       = 10_000
+	emailMaxLen                            = 254
 	// clientNameMaxLen caps the byte-length of an attacker-controlled
 	// client_name on /register. The value is echoed on the consent screen
 	// and into the registration response; a multi-KB phishing string would
@@ -63,6 +68,45 @@ const (
 	// product name while making the consent UI usable.
 	clientNameMaxLen = 120
 )
+
+func validateEmail(email string) error {
+	if email == "" {
+		return fmt.Errorf("email is required")
+	}
+	if len(email) > emailMaxLen {
+		return fmt.Errorf("email must be at most %d bytes", emailMaxLen)
+	}
+	if !utf8.ValidString(email) || strings.ContainsAny(email, "<>\r\n\t ") {
+		return fmt.Errorf("email is invalid")
+	}
+	at := strings.LastIndexByte(email, '@')
+	if at <= 0 || at == len(email)-1 || at > 64 || len(email)-at-1 > 253 {
+		return fmt.Errorf("email is invalid")
+	}
+	addr, err := mail.ParseAddress(email)
+	if err != nil || addr.Address != email {
+		return fmt.Errorf("email is invalid")
+	}
+	return nil
+}
+
+func parseLimitedForm(w http.ResponseWriter, r *http.Request, limit int64) bool {
+	if r.ContentLength > limit {
+		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+		return false
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	if err := r.ParseForm(); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return false
+		}
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return false
+	}
+	return true
+}
 
 // oauthStore is the persistence surface the OAuth server needs.
 type oauthStore interface {
@@ -77,6 +121,9 @@ type OAuthServer struct {
 	logger               *slog.Logger
 	loginFailures        *LoginFailureTracker
 	maxRegisteredClients int
+	csrfMu               sync.Mutex
+	usedCSRF             map[string]time.Time
+	lastCSRFPrune        time.Time
 }
 
 // NewOAuthServer creates a new OAuthServer. The login-failure tracker locks
@@ -88,7 +135,46 @@ func NewOAuthServer(store oauthStore, baseURL string, logger *slog.Logger) *OAut
 		logger:               logger,
 		loginFailures:        NewLoginFailureTracker(5, 10*time.Minute),
 		maxRegisteredClients: defaultMaxRegisteredOAuthClients,
+		usedCSRF:             make(map[string]time.Time),
 	}
+}
+
+func setAuthorizeCSRFCookie(w http.ResponseWriter, value string, maxAge int) {
+	cookie := &http.Cookie{
+		Name:     "csrf_token",
+		Value:    value,
+		Path:     "/authorize",
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+	}
+	if maxAge < 0 {
+		cookie.Expires = time.Unix(1, 0).UTC()
+	}
+	http.SetCookie(w, cookie)
+}
+
+// consumeCSRF makes a valid double-submit token single-use within this server
+// process. Cookie rotation protects normal browser retries; the replay cache
+// additionally rejects an exact HTTP replay carrying the old Cookie header.
+func (s *OAuthServer) consumeCSRF(token string) bool {
+	now := time.Now().UTC()
+	s.csrfMu.Lock()
+	defer s.csrfMu.Unlock()
+	if s.lastCSRFPrune.IsZero() || now.Sub(s.lastCSRFPrune) >= time.Minute {
+		for used, expiresAt := range s.usedCSRF {
+			if !expiresAt.After(now) {
+				delete(s.usedCSRF, used)
+			}
+		}
+		s.lastCSRFPrune = now
+	}
+	if _, replayed := s.usedCSRF[token]; replayed {
+		return false
+	}
+	s.usedCSRF[token] = now.Add(time.Hour)
+	return true
 }
 
 // SetLoginFailureBackend installs a shared, fleet-wide store for per-account
@@ -206,15 +292,7 @@ func (s *OAuthServer) HandleAuthorizeGet(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     "csrf_token",
-		Value:    csrfToken,
-		Path:     "/authorize",
-		MaxAge:   3600,
-		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteStrictMode,
-	})
+	setAuthorizeCSRFCookie(w, csrfToken, 3600)
 
 	data := authPageData{
 		ClientID:            clientID,
@@ -241,11 +319,14 @@ func (s *OAuthServer) requirePKCEForPublicClient(ctx context.Context, clientID, 
 	if err != nil {
 		return fmt.Errorf("unknown client")
 	}
-	if client.ClientSecretHash != "" {
-		// Confidential client: PKCE optional.
-		return nil
-	}
 	if codeChallenge == "" {
+		if method != "" {
+			return fmt.Errorf("code_challenge_method requires code_challenge")
+		}
+		if client.ClientSecretHash != "" {
+			// Confidential client: PKCE optional.
+			return nil
+		}
 		return fmt.Errorf("code_challenge required for public clients")
 	}
 	if method != "S256" {
@@ -256,8 +337,7 @@ func (s *OAuthServer) requirePKCEForPublicClient(ctx context.Context, clientID, 
 
 func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+	if !parseLimitedForm(w, r, authorizeBodyLimitBytes) {
 		return
 	}
 
@@ -268,6 +348,20 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 		http.Error(w, "forbidden: csrf check failed", http.StatusForbidden)
 		return
 	}
+	if !s.consumeCSRF(formCSRF) {
+		http.Error(w, "forbidden: csrf token already used", http.StatusForbidden)
+		return
+	}
+	// Every accepted POST gets a fresh retry token before any credential or
+	// consent validation. Error pages embed it and the browser receives the
+	// matching cookie; successful redirects clear it below.
+	nextCSRF, err := generateCSRFToken()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	formCSRF = nextCSRF
+	setAuthorizeCSRFCookie(w, nextCSRF, 3600)
 
 	clientID := r.FormValue("client_id")
 	redirectURI := r.FormValue("redirect_uri")
@@ -319,6 +413,10 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 
 	if email == "" || password == "" {
 		renderAuthPage(w, data, "Email and password are required.", mode)
+		return
+	}
+	if err := validateEmail(email); err != nil {
+		renderAuthPage(w, data, "Please enter a valid email address.", mode)
 		return
 	}
 
@@ -435,7 +533,10 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := s.store.CreateAuthCode(ctx, code, learnerID, codeChallenge, clientID, time.Now().Add(5*time.Minute)); err != nil {
+	if err := s.store.CreateAuthCodeWithBinding(
+		ctx, code, learnerID, codeChallenge, codeChallengeMethod,
+		clientID, redirectURI, time.Now().Add(5*time.Minute),
+	); err != nil {
 		s.logger.Error("create auth code failed", "err", err)
 		renderAuthPage(w, data, "Internal error. Please try again.", mode)
 		return
@@ -456,6 +557,7 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 	qv.Set("iss", s.baseURL)
 	u.RawQuery = qv.Encode()
 	s.logger.Info("authorize POST redirect", "state_len", len(state), "redirect_host", u.Host)
+	setAuthorizeCSRFCookie(w, "", -1)
 	http.Redirect(w, r, u.String(), http.StatusFound)
 }
 
@@ -486,8 +588,7 @@ func verifyClientAuth(client *models.OAuthClient, suppliedSecret string) error {
 }
 
 func (s *OAuthServer) HandleToken(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+	if !parseLimitedForm(w, r, tokenBodyLimitBytes) {
 		return
 	}
 
@@ -507,6 +608,7 @@ func (s *OAuthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *htt
 	ctx := r.Context()
 	code := r.FormValue("code")
 	codeVerifier := r.FormValue("code_verifier")
+	redirectURI := r.FormValue("redirect_uri")
 	clientID, clientSecret := extractClientCredentials(r)
 
 	s.logger.Debug("token exchange attempt", "code_len", len(code), "verifier_len", len(codeVerifier), "client_id", clientID)
@@ -534,9 +636,17 @@ func (s *OAuthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *htt
 		return
 	}
 
-	authCode, err := s.store.ConsumeAuthCode(ctx, code, clientID)
-	if err != nil || time.Now().After(authCode.ExpiresAt) {
+	authCode, err := s.store.GetAuthCode(ctx, code, clientID)
+	if err != nil {
 		s.logger.Debug("token exchange: code not found or expired", "err", err)
+		writeTokenError(w, "invalid_grant", http.StatusBadRequest)
+		return
+	}
+	// RFC 6749 §4.1.3: when redirect_uri was present in the authorization
+	// request, the token request must carry the identical value. Empty binding
+	// denotes a pre-upgrade code and is accepted once for compatibility.
+	if authCode.RedirectURI != "" && redirectURI != authCode.RedirectURI {
+		s.logger.Debug("token exchange: redirect_uri mismatch", "client_id", clientID)
 		writeTokenError(w, "invalid_grant", http.StatusBadRequest)
 		return
 	}
@@ -556,9 +666,27 @@ func (s *OAuthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *htt
 			writeTokenError(w, "invalid_grant", http.StatusBadRequest)
 			return
 		}
+		if codeVerifier != "" {
+			// RFC 9700 §2.1.1 downgrade guard: a verifier cannot appear at
+			// the token endpoint unless its challenge was bound to the code.
+			s.logger.Debug("token exchange: unexpected code_verifier without challenge", "client_id", clientID)
+			writeTokenError(w, "invalid_grant", http.StatusBadRequest)
+			return
+		}
 		// Confidential client that opted out of PKCE — accept. Its identity
 		// was already verified by verifyClientAuth above.
 	} else {
+		method := authCode.CodeChallengeMethod
+		if method == "" {
+			// Codes created before method persistence were S256 in every
+			// supported public-client flow.
+			method = "S256"
+		}
+		if method != "S256" {
+			s.logger.Warn("token exchange: unsupported stored PKCE method", "client_id", clientID, "method", method)
+			writeTokenError(w, "invalid_grant", http.StatusBadRequest)
+			return
+		}
 		if codeVerifier == "" {
 			s.logger.Debug("token exchange: code_verifier required but missing")
 			writeTokenError(w, "invalid_request", http.StatusBadRequest)
@@ -573,6 +701,8 @@ func (s *OAuthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *htt
 		}
 	}
 
+	// Sign before mutating persistence. Configuration/signing failures must not
+	// consume a valid one-time code.
 	accessToken, err := GenerateJWT(s.baseURL, authCode.LearnerID)
 	if err != nil {
 		s.logger.Error("generate jwt failed", "err", err)
@@ -580,11 +710,16 @@ func (s *OAuthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *htt
 		return
 	}
 
-	// Bind the refresh token to the authenticated client (issue #30 part 2)
-	// so a stolen token redeemed by a different client is rejected later.
-	rt, err := s.store.CreateRefreshToken(ctx, authCode.LearnerID, clientID)
+	// Consume the code and bind the refresh token atomically. Concurrent valid
+	// exchanges still have one winner; an insert failure rolls the consume back.
+	authCode, rt, err := s.store.ExchangeAuthCodeForRefreshToken(ctx, code, clientID)
 	if err != nil {
-		s.logger.Error("create refresh token failed", "err", err)
+		if errors.Is(err, storeport.ErrInvalidAuthCode) {
+			s.logger.Debug("token exchange: code already consumed", "err", err)
+			writeTokenError(w, "invalid_grant", http.StatusBadRequest)
+			return
+		}
+		s.logger.Error("token exchange: create refresh credential", "err", err)
 		writeTokenError(w, "server_error", http.StatusInternalServerError)
 		return
 	}
@@ -619,39 +754,29 @@ func (s *OAuthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	rt, err := s.store.GetRefreshToken(ctx, refreshToken)
-	if err != nil {
-		writeTokenError(w, "invalid_grant", http.StatusBadRequest)
-		return
-	}
-
-	// Client binding (issue #30 part 2): a refresh token issued to client A
-	// cannot be redeemed by client B. NULL client_id is a pre-issue-#30
-	// legacy row — accept it once, then the rotated token gets bound below.
-	if rt.ClientID != "" && rt.ClientID != clientID {
-		s.logger.Warn("refresh_token client mismatch — possible token theft", "rt_client", rt.ClientID, "auth_client", clientID)
-		writeTokenError(w, "invalid_grant", http.StatusBadRequest)
-		return
-	}
-
-	accessToken, err := GenerateJWT(s.baseURL, rt.LearnerID)
-	if err != nil {
-		s.logger.Error("generate jwt failed", "err", err)
-		writeTokenError(w, "server_error", http.StatusInternalServerError)
-		return
-	}
-
 	// Rotation is one DB transaction. The store rechecks validity and client
-	// binding while atomically consuming the row, so concurrent reuse has one
-	// winner and one invalid_grant instead of minting sibling descendants.
+	// binding while atomically consuming the row. A replay of any retained
+	// ancestor revokes the whole family before returning invalid_grant.
 	newRT, err := s.store.RotateRefreshToken(ctx, refreshToken, clientID)
 	if err != nil {
+		if errors.Is(err, storeport.ErrRefreshTokenReuse) {
+			s.logger.Warn("refresh token reuse detected; family revoked", "client_id", clientID)
+			writeTokenError(w, "invalid_grant", http.StatusBadRequest)
+			return
+		}
 		if errors.Is(err, storeport.ErrInvalidRefreshToken) {
 			s.logger.Warn("refresh token rejected (expired, mismatched, or already rotated)", "client_id", clientID)
 			writeTokenError(w, "invalid_grant", http.StatusBadRequest)
 			return
 		}
 		s.logger.Error("rotate refresh token failed", "err", err)
+		writeTokenError(w, "server_error", http.StatusInternalServerError)
+		return
+	}
+
+	accessToken, err := GenerateJWT(s.baseURL, newRT.LearnerID)
+	if err != nil {
+		s.logger.Error("generate jwt failed after refresh rotation", "err", err)
 		writeTokenError(w, "server_error", http.StatusInternalServerError)
 		return
 	}
@@ -666,7 +791,7 @@ func writeTokenResponse(w http.ResponseWriter, accessToken, refreshToken string)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"access_token":  accessToken,
 		"token_type":    "bearer",
-		"expires_in":    86400,
+		"expires_in":    int(AccessTokenTTL.Seconds()),
 		"refresh_token": refreshToken,
 		"scope":         "learner",
 	})
@@ -807,7 +932,7 @@ func (s *OAuthServer) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	confidential := authMethod == "client_secret_basic" || authMethod == "client_secret_post"
 
-	s.logger.Info("dynamic client registration request", "client_name", clientName, "auth_method", authMethod, "raw_keys", mapKeys(req))
+	s.logger.Info("dynamic client registration request", "auth_method", authMethod, "metadata_key_count", len(req))
 
 	var uris []string
 	if raw, ok := req["redirect_uris"]; ok {
@@ -825,7 +950,9 @@ func (s *OAuthServer) HandleRegister(w http.ResponseWriter, r *http.Request) {
 			uris = append(uris, uri)
 		}
 	}
-	s.logger.Info("registration redirect_uris", "uris", uris)
+	// Redirect URIs may contain fixed query parameters. Treat the full values
+	// as credential-adjacent input and never copy them into logs.
+	s.logger.Info("registration redirect URIs parsed", "count", len(uris))
 	if len(uris) == 0 {
 		writeRegistrationError(w, "invalid_redirect_uri", "at least one redirect_uri required")
 		return
@@ -928,14 +1055,6 @@ func (s *OAuthServer) requireRegistrationCapacity(w http.ResponseWriter) error {
 		return fmt.Errorf("oauth client cap reached")
 	}
 	return nil
-}
-
-func mapKeys(m map[string]interface{}) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	return out
 }
 
 func writeRegistrationError(w http.ResponseWriter, errCode, desc string) {

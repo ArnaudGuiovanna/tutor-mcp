@@ -6,10 +6,13 @@ package db
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 )
 
 // ─── UpdateDomainPhase ─────────────────────────────────────────────────────
@@ -108,6 +111,69 @@ func TestUpdateDomainPhase_Idempotent(t *testing.T) {
 	got, _ := store.GetDomainByID(context.Background(), d.ID)
 	if !got.PhaseChangedAt.Equal(t2) {
 		t.Errorf("phase_changed_at: want updated to %v, got %v", t2, got.PhaseChangedAt)
+	}
+}
+
+func TestCompareAndSwapDomainPhase_DivergentWritersSingleWinner(t *testing.T) {
+	store := setupTestDB(t)
+	domain := mkDomain(t, store, []string{"A"})
+	if err := store.UpdateDomainPhase(context.Background(), domain.ID, models.PhaseInstruction, 0, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	results := make(chan struct {
+		phase models.Phase
+		err   error
+	}, 2)
+	var wg sync.WaitGroup
+	for _, next := range []models.Phase{models.PhaseDiagnostic, models.PhaseMaintenance} {
+		next := next
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			err := store.CompareAndSwapDomainPhase(
+				context.Background(), domain.ID, models.PhaseInstruction, next, 0.42, time.Now().UTC(),
+			)
+			results <- struct {
+				phase models.Phase
+				err   error
+			}{phase: next, err: err}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	successes, conflicts := 0, 0
+	var winner models.Phase
+	for result := range results {
+		switch {
+		case result.err == nil:
+			successes++
+			winner = result.phase
+		case errors.Is(result.err, storeport.ErrDomainPhaseConflict):
+			conflicts++
+		default:
+			t.Fatalf("unexpected CAS error: %v", result.err)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("CAS results: successes=%d conflicts=%d", successes, conflicts)
+	}
+	stored, err := store.GetDomainByID(context.Background(), domain.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Phase != winner {
+		t.Fatalf("stored phase=%q, winner=%q", stored.Phase, winner)
+	}
+	if winner == models.PhaseDiagnostic && stored.PhaseEntryEntropy != 0.42 {
+		t.Fatalf("diagnostic winner entropy=%v, want 0.42", stored.PhaseEntryEntropy)
+	}
+	if winner != models.PhaseDiagnostic && stored.PhaseEntryEntropy != 0 {
+		t.Fatalf("non-diagnostic winner retained entropy %v", stored.PhaseEntryEntropy)
 	}
 }
 

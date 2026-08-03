@@ -23,23 +23,30 @@ type GetDashboardStateParams struct {
 }
 
 type conceptProgress struct {
-	Concept   string  `json:"concept"`
-	Mastery   float64 `json:"mastery" jsonschema:"BKT mastery probability as a 0..1 float"`
-	Retention float64 `json:"retention" jsonschema:"memory retention probability as a 0..1 float"`
-	Status    string  `json:"status"`
-	CardState string  `json:"card_state"`
+	Concept       string               `json:"concept"`
+	Mastery       float64              `json:"mastery" jsonschema:"BKT mastery probability as a 0..1 estimate"`
+	Retention     float64              `json:"retention" jsonschema:"current FSRS retrievability estimate as a 0..1 float"`
+	Status        engine.MasteryStage  `json:"status" jsonschema:"authoritative evidence stage"`
+	MasteryStatus engine.MasteryStatus `json:"mastery_status"`
+	RoutingStatus string               `json:"routing_status" jsonschema:"KST routing state; never a demonstrated-learning claim"`
+	CardState     string               `json:"card_state"`
 }
 
 type domainDashboard struct {
-	DomainID        string                   `json:"domain_id"`
-	Name            string                   `json:"name"`
-	Archived        bool                     `json:"archived"`
-	TotalConcepts   int                      `json:"total_concepts"`
-	MasteredCount   int                      `json:"mastered_count"`
-	ProgressPct     float64                  `json:"progress_percent" jsonschema:"domain progress as a 0..100 percentage"`
-	Concepts        []conceptProgress        `json:"concepts"`
-	RetentionAlerts []map[string]interface{} `json:"retention_alerts"`
-	NextAction      string                   `json:"next_action"`
+	DomainID             string                   `json:"domain_id"`
+	Name                 string                   `json:"name"`
+	Archived             bool                     `json:"archived"`
+	TotalConcepts        int                      `json:"total_concepts"`
+	EstimatedCount       int                      `json:"estimated_count"`
+	RetainedCount        int                      `json:"retained_count"`
+	DemonstratedCount    int                      `json:"demonstrated_count"`
+	TransferredCount     int                      `json:"transferred_count"`
+	MasteredCount        int                      `json:"mastered_count" jsonschema:"deprecated alias for demonstrated_count"`
+	ProgressPct          float64                  `json:"progress_percent" jsonschema:"percentage of active concepts with evidence-backed demonstrated status"`
+	EstimatedProgressPct float64                  `json:"estimated_progress_percent" jsonschema:"percentage whose model estimate crossed the routing threshold"`
+	Concepts             []conceptProgress        `json:"concepts"`
+	RetentionAlerts      []map[string]interface{} `json:"retention_alerts"`
+	NextAction           string                   `json:"next_action"`
 }
 
 func registerGetDashboardState(server *mcp.Server, deps *Deps) {
@@ -89,7 +96,10 @@ func registerGetDashboardState(server *mcp.Server, deps *Deps) {
 		}
 
 		var domainDashboards []domainDashboard
-		totalMastered := 0
+		totalEstimated := 0
+		totalRetained := 0
+		totalDemonstrated := 0
+		totalTransferred := 0
 		totalConcepts := 0
 		now := time.Now().UTC()
 		var alerts []models.Alert
@@ -116,7 +126,12 @@ func registerGetDashboardState(server *mcp.Server, deps *Deps) {
 			}
 			states = append(states, domainStates...)
 			interactions = append(interactions, domainInteractions...)
-			domainAlerts := engine.ComputeAlerts(domainStates, domainInteractions, sessionStart)
+			alertEvidence, err := engine.LoadMasteryAlertEvidence(ctx, deps.Store, learnerID, domain.ID, domainStates)
+			if err != nil {
+				r, _ := safeErrorResult(deps.Logger, "failed to load dashboard alert evidence", err)
+				return r, nil, nil
+			}
+			domainAlerts := engine.ComputeAlertsWithEvidenceAt(domainStates, domainInteractions, alertEvidence, sessionStart, now)
 			for i := range domainAlerts {
 				domainAlerts[i].DomainID = domain.ID
 			}
@@ -135,17 +150,41 @@ func registerGetDashboardState(server *mcp.Server, deps *Deps) {
 			}
 
 			var concepts []conceptProgress
-			masteredCount := 0
+			estimatedCount := 0
+			retainedCount := 0
+			demonstratedCount := 0
+			transferredCount := 0
 			for _, concept := range domain.Graph.Concepts {
-				status := algorithms.ConceptStatus(graph, mastery, concept)
+				routingStatus := algorithms.ConceptStatus(graph, mastery, concept)
 				cs := stateMap[concept]
+				conceptInteractions := make([]*models.Interaction, 0)
+				for _, interaction := range domainInteractions {
+					if interaction.Concept == concept {
+						conceptInteractions = append(conceptInteractions, interaction)
+					}
+				}
+				transferRecords, err := deps.Store.GetTransferScoresInDomain(ctx, learnerID, domain.ID, concept)
+				if err != nil {
+					r, _ := safeErrorResult(deps.Logger, "failed to load dashboard transfer evidence", err)
+					return r, nil, nil
+				}
+				assessments, err := deps.Store.GetEvaluatedAssessmentAttemptsInDomain(ctx, learnerID, domain.ID, concept, 100)
+				if err != nil {
+					r, _ := safeErrorResult(deps.Logger, "failed to load dashboard assessment evidence", err)
+					return r, nil, nil
+				}
+				masteryStatus := engine.AssessMasteryStatus(
+					learnerID, concept, cs, conceptInteractions, transferRecords, assessments, now,
+				)
 
 				cp := conceptProgress{
-					Concept:   concept,
-					Mastery:   mastery[concept],
-					Retention: 1.0,
-					Status:    status,
-					CardState: "new",
+					Concept:       concept,
+					Mastery:       mastery[concept],
+					Retention:     masteryStatus.RetentionEstimate,
+					Status:        masteryStatus.Stage,
+					MasteryStatus: masteryStatus,
+					RoutingStatus: routingStatus,
+					CardState:     "new",
 				}
 
 				if cs != nil {
@@ -153,8 +192,17 @@ func registerGetDashboardState(server *mcp.Server, deps *Deps) {
 					cp.Retention = algorithms.CurrentRetrievability(now, cs.LastReview, cs.Stability)
 				}
 
-				if status == "done" {
-					masteredCount++
+				if masteryStatus.Estimated {
+					estimatedCount++
+				}
+				if masteryStatus.Retained {
+					retainedCount++
+				}
+				if masteryStatus.Demonstrated {
+					demonstratedCount++
+				}
+				if masteryStatus.Transferred {
+					transferredCount++
 				}
 				concepts = append(concepts, cp)
 			}
@@ -184,23 +232,33 @@ func registerGetDashboardState(server *mcp.Server, deps *Deps) {
 			}
 
 			progressPct := 0.0
+			estimatedProgressPct := 0.0
 			if len(domain.Graph.Concepts) > 0 {
-				progressPct = float64(masteredCount) / float64(len(domain.Graph.Concepts)) * 100
+				progressPct = float64(demonstratedCount) / float64(len(domain.Graph.Concepts)) * 100
+				estimatedProgressPct = float64(estimatedCount) / float64(len(domain.Graph.Concepts)) * 100
 			}
 
 			domainDashboards = append(domainDashboards, domainDashboard{
-				DomainID:        domain.ID,
-				Name:            domain.Name,
-				Archived:        domain.Archived,
-				TotalConcepts:   len(domain.Graph.Concepts),
-				MasteredCount:   masteredCount,
-				ProgressPct:     progressPct,
-				Concepts:        concepts,
-				RetentionAlerts: retentionAlerts,
-				NextAction:      nextAction,
+				DomainID:             domain.ID,
+				Name:                 domain.Name,
+				Archived:             domain.Archived,
+				TotalConcepts:        len(domain.Graph.Concepts),
+				EstimatedCount:       estimatedCount,
+				RetainedCount:        retainedCount,
+				DemonstratedCount:    demonstratedCount,
+				TransferredCount:     transferredCount,
+				MasteredCount:        demonstratedCount,
+				ProgressPct:          progressPct,
+				EstimatedProgressPct: estimatedProgressPct,
+				Concepts:             concepts,
+				RetentionAlerts:      retentionAlerts,
+				NextAction:           nextAction,
 			})
 
-			totalMastered += masteredCount
+			totalEstimated += estimatedCount
+			totalRetained += retainedCount
+			totalDemonstrated += demonstratedCount
+			totalTransferred += transferredCount
 			totalConcepts += len(domain.Graph.Concepts)
 		}
 
@@ -232,8 +290,10 @@ func registerGetDashboardState(server *mcp.Server, deps *Deps) {
 		}
 
 		globalProgress := 0.0
+		globalEstimatedProgress := 0.0
 		if totalConcepts > 0 {
-			globalProgress = float64(totalMastered) / float64(totalConcepts) * 100
+			globalProgress = float64(totalDemonstrated) / float64(totalConcepts) * 100
+			globalEstimatedProgress = float64(totalEstimated) / float64(totalConcepts) * 100
 		}
 
 		since := time.Now().UTC().Add(-30 * 24 * time.Hour)
@@ -282,16 +342,21 @@ func registerGetDashboardState(server *mcp.Server, deps *Deps) {
 		dependencyTrend := autonomy.Trend
 
 		r, _ := jsonResult(map[string]interface{}{
-			"domains":                 domainDashboards,
-			"total_concepts":          totalConcepts,
-			"total_mastered":          totalMastered,
-			"global_progress_percent": globalProgress,
-			"alerts":                  alerts,
-			"signal":                  signal,
-			"autonomy_score":          autonomy.Score,
-			"calibration_bias":        calibBias,
-			"affect_last_n":           affectLastN,
-			"dependency_trend":        dependencyTrend,
+			"domains":                           domainDashboards,
+			"total_concepts":                    totalConcepts,
+			"total_estimated":                   totalEstimated,
+			"total_retained":                    totalRetained,
+			"total_demonstrated":                totalDemonstrated,
+			"total_transferred":                 totalTransferred,
+			"total_mastered":                    totalDemonstrated,
+			"global_progress_percent":           globalProgress,
+			"global_estimated_progress_percent": globalEstimatedProgress,
+			"alerts":                            alerts,
+			"signal":                            signal,
+			"autonomy_score":                    autonomy.Score,
+			"calibration_bias":                  calibBias,
+			"affect_last_n":                     affectLastN,
+			"dependency_trend":                  dependencyTrend,
 		})
 		return r, nil, nil
 	})
