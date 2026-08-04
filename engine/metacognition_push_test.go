@@ -28,7 +28,10 @@ func TestEnqueueMirrorWebhook_PersistsAndDedups(t *testing.T) {
 		Message:      "You often ask for hints on concepts you have mastered.",
 		OpenQuestion: "Reflex or unclear?",
 	}
-	now := time.Now().UTC()
+	// Keep both emissions inside one UTC civil day regardless of when the test
+	// runner happens to execute. Using time.Now().Add(2h) made this test fail
+	// after 22:00 UTC even though the production deduplication was correct.
+	now := time.Date(2026, time.January, 15, 12, 0, 0, 0, time.UTC)
 
 	// First emission: row should land in webhook_message_queue.
 	id, enqueued, err := EnqueueMirrorWebhook(context.Background(), store, learnerID, mirror, now)

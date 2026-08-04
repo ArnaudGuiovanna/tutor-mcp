@@ -712,7 +712,7 @@ func (s *OAuthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *htt
 
 	// Consume the code and bind the refresh token atomically. Concurrent valid
 	// exchanges still have one winner; an insert failure rolls the consume back.
-	authCode, rt, err := s.store.ExchangeAuthCodeForRefreshToken(ctx, code, clientID)
+	_, rt, err := s.store.ExchangeAuthCodeForRefreshToken(ctx, code, clientID)
 	if err != nil {
 		if errors.Is(err, storeport.ErrInvalidAuthCode) {
 			s.logger.Debug("token exchange: code already consumed", "err", err)
