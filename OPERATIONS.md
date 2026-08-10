@@ -6,7 +6,44 @@ Practical recipes for running the server. Companion to the README, which describ
 
 The supported MVP profile stores the relational state (interactions, OLM, BKT/FSRS/IRT state, refresh tokens, calibration history) in a single SQLite file at `${DB_PATH:-./data/runtime.db}` and runs one server process. Narrative memory is stored separately under `${TUTOR_MCP_MEMORY_ROOT:-~/.tutor-mcp}`. Back up both locations if narrative memory is enabled.
 
-An **experimental PostgreSQL** backend is available with `DB_DRIVER=postgres` and `DATABASE_URL=postgres://user:pass@host:5432/db?sslmode=require`. It is exercised in CI for backend conformance. The original consolidated schema is frozen behind its checksum; ordered, immutable incremental migrations upgrade existing databases under the same advisory lock. Edit neither an applied migration nor `schema_pg.sql`: checksum drift intentionally stops startup for operator intervention. Tune the pool with `DB_MAX_CONNS` (default 10).
+An **experimental PostgreSQL** backend is available with `DB_DRIVER=postgres`; production uses a `DATABASE_URL` with verified TLS as described below. It is exercised in CI for backend conformance. The original consolidated schema is frozen behind its checksum; ordered, immutable incremental migrations upgrade existing databases under the same advisory lock. Edit neither an applied migration nor `schema_pg.sql`: checksum drift intentionally stops startup for operator intervention. Tune the pool with `DB_MAX_CONNS` (default 10).
+
+## Production security profile
+
+Set `DEPLOYMENT_PROFILE=production` to turn deployment assumptions into boot
+checks. Startup then requires an HTTPS `BASE_URL`, PostgreSQL, shared database
+rate limits, a `DATABASE_URL` with `sslmode=verify-full` and explicit
+`sslrootcert`, valid non-catch-all `TRUSTED_PROXY_CIDRS`, STARTTLS SMTP, and the
+integration-secret keyring. A missing or downgraded control stops the process;
+it is never reduced to a warning in this profile.
+
+Account verification and recovery require `SMTP_ADDR` and `SMTP_FROM`.
+`SMTP_SERVER_NAME` defaults to the host in `SMTP_ADDR`; optional credentials
+are `SMTP_USERNAME` and `SMTP_PASSWORD`. The client refuses SMTP servers that
+do not advertise STARTTLS and uses TLS 1.2 or newer. Verification/reset links
+are bearer credentials: never paste them into tickets or logs.
+
+Discord webhook URLs contain credentials. Configure a versioned keyring such
+as `INTEGRATION_SECRET_KEYS=v1:<base64-key>` and
+`INTEGRATION_SECRET_CURRENT_KEY_ID=v1`; source the values from the deployment
+secret manager, not a checked-in environment file. The database stores only
+AES-256-GCM envelopes bound to the learner row. At startup, plaintext legacy
+rows and envelopes using a retained old key are re-encrypted with the current
+key before traffic is accepted.
+
+### Key rotation and rollback
+
+1. Add the new key while retaining the old one, and select the new key ID.
+2. Roll out the binary/configuration; readiness begins only after re-encryption.
+3. Verify no row uses the old prefix (`webhook_url LIKE 'enc:v1:old-id:%'`).
+4. Remove the old key only after every instance uses the new configuration and
+   backups containing old envelopes remain covered by the documented key
+   retention policy.
+
+To roll back, restore both key IDs, select the former ID, restart and let the
+same rotation pass re-encrypt the rows. Never restore an older database backup
+without also restoring the keyring versions needed by that backup. The
+database restore procedure below remains the data rollback path.
 
 ### Experimental multi-node profile
 

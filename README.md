@@ -93,16 +93,26 @@ go build -o tutor-mcp
 ```bash
 export JWT_SECRET="$(openssl rand -base64 32)"   # required — must be base64
 export BASE_URL=https://your.domain              # public origin, no trailing slash
+export SMTP_ADDR=smtp.example.com:587            # STARTTLS is mandatory
+export SMTP_FROM=tutor@your.domain
+export INTEGRATION_SECRET_KEYS="v1:$(openssl rand -base64 32)"
+export INTEGRATION_SECRET_CURRENT_KEY_ID=v1
 ./tutor-mcp                                       # listens on :3000 by default
 ```
 
-Verify: `curl $BASE_URL/health` → `{"status":"ok"}`.
+Verify liveness with `curl $BASE_URL/live`; use `$BASE_URL/ready` for the
+load-balancer readiness probe (it includes a bounded database check).
 
 For real use, put the runtime behind a public reverse proxy with TLS — see [OPERATIONS.md](./OPERATIONS.md). Web clients (Claude.ai, ChatGPT, Le Chat) require a public HTTPS endpoint; `http://localhost` is rejected by their cloud connectors.
 
 ### 3. Connect a client
 
-Add `https://your.domain/mcp` as a custom MCP connector. OAuth 2.1 + PKCE with dynamic client registration: no client ID or secret to copy by hand. On the first connection the client opens `/authorize` — register (email + password) or log in. Subsequent launches reuse refresh tokens silently.
+Add `https://your.domain/mcp` as a custom MCP connector. OAuth 2.1 + PKCE with
+CIMD first and bounded dynamic registration as a compatibility fallback means
+there is no client ID or secret to copy by hand. On first connection, the
+client opens `/authorize`: register, verify the short-lived email link, then
+return automatically to the client. Subsequent launches rotate refresh tokens
+silently.
 
 <a id="setup"></a>
 
@@ -224,10 +234,11 @@ Environment variables read at boot:
 | Variable | Default | Effect |
 |---|---|---|
 | `JWT_SECRET` | — *(required)* | HS256 secret. Must be valid base64 (plain strings rejected at boot). Use `openssl rand -base64 32` — 32+ decoded bytes recommended for HS256. |
+| `DEPLOYMENT_PROFILE` | `development` | `production` fails closed unless the public origin is HTTPS, PostgreSQL uses verified TLS with an explicit CA, shared rate limits, SMTP, integration-secret encryption and trusted proxy CIDRs are configured. |
 | `PORT` | `3000` | HTTP listen port |
 | `DB_DRIVER` | `sqlite` | `sqlite` (recommended MVP profile, embedded) or `postgres` (experimental). |
 | `DB_PATH` | `./data/runtime.db` | SQLite path (ignored when `DB_DRIVER=postgres`) |
-| `DATABASE_URL` | — | Postgres DSN, **required** when `DB_DRIVER=postgres` (e.g. `postgres://user:pass@host:5432/db?sslmode=require`). |
+| `DATABASE_URL` | — | Postgres DSN, **required** when `DB_DRIVER=postgres`. Production requires `sslmode=verify-full` and an explicit `sslrootcert` CA. |
 | `DB_MAX_CONNS` | `10` | Postgres connection-pool size per instance (ignored on SQLite). Keep `DB_MAX_CONNS × instances < Postgres max_connections`. |
 | `SCHEDULER_MODE` | `inprocess` | `inprocess` (recommended) or experimental `distributed` (one lease winner per run slot; not crash-safe exactly-once). Distributed mode requires PostgreSQL, PostgreSQL rate limits, and local narrative memory disabled. Unknown values fail at boot. |
 | `RATELIMIT_BACKEND` | `memory` | `memory` (per-instance, default) or `postgres`/`db` (shared rate-limit + login-failure store). The PostgreSQL backend requires `DB_DRIVER=postgres`; unknown values fail at boot. |
@@ -236,14 +247,28 @@ Environment variables read at boot:
 | `TRUSTED_PROXY_CIDRS` | — | Comma-separated CIDRs of trusted reverse-proxies. **Required behind a public proxy** — without it every IP-rate-limit collapses under the proxy's loopback bucket. |
 | `MCP_RATE_LIMIT_PER_MIN` | `60` | Per-IP and per-learner cap on `/mcp` |
 | `MCP_RATE_LIMIT_BURST` | `60` | Burst allowance |
+| `MCP_MAX_REQUEST_BODY_BYTES` | `1048576` (1 MiB) | Maximum POST body accepted by `/mcp`; values from 1 byte through 64 MiB are accepted. Oversized declared or chunked bodies receive HTTP 413. |
+| `MCP_MAX_CONCURRENT` | `128` | Maximum in-flight authenticated MCP calls per process; overflow is rejected immediately. |
+| `MCP_MAX_CONCURRENT_PER_LEARNER` | `8` | Maximum in-flight MCP calls for one learner; cannot exceed the global limit. |
+| `MCP_TOOL_CALL_TIMEOUT_SECONDS` | `30` | Cooperative server deadline applied only to `tools/call` (1–600 seconds); discovery and long-lived transport responses are unaffected. |
+| `SMTP_ADDR` / `SMTP_FROM` | — | SMTP endpoint and sender for verification/recovery. Delivery requires STARTTLS (TLS 1.2+); public account flows cannot complete when absent. Optional `SMTP_SERVER_NAME`, `SMTP_USERNAME`, `SMTP_PASSWORD`. |
+| `INTEGRATION_SECRET_KEYS` | — | Comma-separated `key_id:base64-32-byte-key` keyring used to encrypt Discord webhook credentials at rest. Supply old and new keys during rotation. |
+| `INTEGRATION_SECRET_CURRENT_KEY_ID` | — | Key ID used for new envelopes; startup atomically re-encrypts legacy/old-key records. Required with `INTEGRATION_SECRET_KEYS`. |
 | `TUTOR_MCP_MEMORY_ENABLED` | `on` | Node-local Markdown learner memory. Runtime concept notes and sessions are domain-scoped; ambiguous legacy/global narratives are excluded from activity generation. Experimental distributed mode requires `off`. |
 | `TUTOR_MCP_MEMORY_ROOT` | `~/.tutor-mcp/` | Memory FS root |
+| `TUTOR_MCP_MEMORY_MAX_WRITE_BYTES` | `262144` | Maximum content supplied to one narrative-memory write. |
+| `TUTOR_MCP_MEMORY_MAX_FILE_BYTES` | `1048576` | Maximum size of one narrative Markdown file, on reads and writes. |
+| `TUTOR_MCP_MEMORY_MAX_LEARNER_BYTES` | `16777216` | Cumulative narrative-memory quota per learner. |
+| `TUTOR_MCP_MEMORY_MAX_FILES_PER_LEARNER` | `2048` | Maximum Markdown files per learner. |
+| `TUTOR_MCP_MEMORY_MAX_CONCURRENT_WRITES` | `32` | Maximum concurrent narrative writes per process; overflow receives backpressure. |
 | `REGULATION_THRESHOLD` | `on` | `off` reverts to legacy split thresholds (BKT 0.85 / KST 0.70 / Mid 0.80) |
 | `REGULATION_GOAL` | `on` | `off` hides `set_goal_relevance` / `get_goal_relevance` and drops the goal-aware prompt section |
 | `REGULATION_ACTION` / `_CONCEPT` / `_GATE` | `on` | `off` drops the system-prompt appendix only — the selector / gate logic always runs |
 | `REGULATION_FADE` | **`off`** *(opt-in)* | Strict literal `on` reduces motivational/hint verbosity and exposes advisory fade parameters. Scheduler frequency, ZPD target and proactive-review cadence are not yet wired to those advisory fields. |
 
-Auth endpoints are rate-limited at 10/min (`/authorize`, `/token`), 5/min (`/register`); the MCP endpoint applies the per-IP and per-learner caps configured above.
+Credential checks, registration, verification and recovery have distinct
+rate-limit buckets. The MCP endpoint applies both per-IP/per-learner rates and
+the in-flight concurrency ceilings configured above.
 OAuth access tokens expire after 30 minutes. Refresh tokens rotate as a family;
 replay of an already-used member revokes the family instead of issuing another
 access token.

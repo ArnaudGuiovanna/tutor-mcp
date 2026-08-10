@@ -8,16 +8,22 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
+	"errors"
 	"fmt"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 //go:embed schema.sql
 var schemaSQL string
 
 func OpenDB(dbPath string) (*sql.DB, error) {
+	if err := PrepareSQLitePath(dbPath); err != nil {
+		return nil, err
+	}
+
 	// _txlock=immediate: every BEGIN issued by database/sql uses BEGIN
 	// IMMEDIATE, which acquires the writer lock at tx start instead of
 	// at first write. Required for read-modify-write patterns (see
@@ -54,7 +60,12 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 	db.SetConnMaxLifetime(time.Hour)
 
 	if err := db.Ping(); err != nil {
+		_ = db.Close()
 		return nil, fmt.Errorf("ping db: %w", err)
+	}
+	if err := SecureSQLiteFiles(dbPath); err != nil {
+		_ = db.Close()
+		return nil, err
 	}
 	return db, nil
 }
@@ -287,6 +298,11 @@ var idempotentMigrations = []string{
 	`CREATE INDEX IF NOT EXISTS idx_login_failures_account_time ON login_failures(account_key, attempted_at)`,
 }
 
+const (
+	sqliteMigrationLockTimeout = time.Minute
+	sqliteMigrationRetryDelay  = 50 * time.Millisecond
+)
+
 // Migrate brings the database schema up to the version expected by this build.
 //
 // It runs under a single SQLite BEGIN EXCLUSIVE transaction on one reserved
@@ -304,17 +320,45 @@ var idempotentMigrations = []string{
 // statement is either idempotent (CREATE TABLE/INDEX IF NOT EXISTS, the data
 // UPDATEs) or is marked IgnoreExecErrors so a "duplicate column" from an ALTER
 // that already ran does not abort startup; only the final INSERT into
-// schema_migrations is required to succeed.
+// schema_migrations is required to succeed. Migration lock contention is
+// retried for a bounded minute; callers with a lifecycle context should use
+// MigrateContext.
 func Migrate(db *sql.DB) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), sqliteMigrationLockTimeout)
+	defer cancel()
+	return MigrateContext(ctx, db)
+}
+
+// MigrateContext is Migrate with caller-controlled cancellation. SQLite's
+// busy_timeout is intentionally only five seconds for ordinary OLTP calls;
+// schema migration is different because another healthy process may hold the
+// exclusive lock for longer under cold-start or race-detector load. Retrying
+// only SQLITE_BUSY/SQLITE_LOCKED keeps startup bounded without making every
+// application query wait for a minute.
+func MigrateContext(ctx context.Context, db *sql.DB) error {
+	if ctx == nil {
+		return fmt.Errorf("migrate: nil context")
+	}
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("migrate: reserve connection: %w", err)
 	}
 	defer conn.Close()
 
-	if _, err := conn.ExecContext(ctx, `BEGIN EXCLUSIVE`); err != nil {
-		return fmt.Errorf("migrate: begin exclusive transaction: %w", err)
+	for {
+		if _, err = conn.ExecContext(ctx, `BEGIN EXCLUSIVE`); err == nil {
+			break
+		}
+		if !isSQLiteLockContention(err) {
+			return fmt.Errorf("migrate: begin exclusive transaction: %w", err)
+		}
+		timer := time.NewTimer(sqliteMigrationRetryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("migrate: wait for exclusive transaction: %w", ctx.Err())
+		case <-timer.C:
+		}
 	}
 	committed := false
 	defer func() {
@@ -336,4 +380,13 @@ func Migrate(db *sql.DB) error {
 	}
 	committed = true
 	return nil
+}
+
+func isSQLiteLockContention(err error) bool {
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	primaryCode := sqliteErr.Code() & 0xff
+	return primaryCode == sqlite3.SQLITE_BUSY || primaryCode == sqlite3.SQLITE_LOCKED
 }

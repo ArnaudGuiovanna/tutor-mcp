@@ -28,37 +28,6 @@ import (
 func futureTime() time.Time { return time.Now().Add(time.Hour) }
 func pastTime() time.Time   { return time.Now().Add(-time.Hour) }
 
-// ─── RegisterRoutes ─────────────────────────────────────────────────────────
-
-func TestRegisterRoutes_AllEndpointsWired(t *testing.T) {
-	s, _ := newTestServer(t)
-	mux := http.NewServeMux()
-	s.RegisterRoutes(mux)
-
-	cases := []struct {
-		method string
-		path   string
-	}{
-		{"GET", "/.well-known/oauth-authorization-server"},
-		{"GET", "/.well-known/oauth-protected-resource"},
-		{"GET", "/authorize"},
-		{"POST", "/authorize"},
-		{"POST", "/token"},
-		{"POST", "/register"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
-			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(""))
-			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-			rec := httptest.NewRecorder()
-			mux.ServeHTTP(rec, req)
-			if rec.Code == http.StatusNotFound {
-				t.Fatalf("%s %s returned 404 — route not wired", tc.method, tc.path)
-			}
-		})
-	}
-}
-
 // ─── Metadata endpoints ─────────────────────────────────────────────────────
 
 func TestHandleAuthServerMetadata(t *testing.T) {
@@ -88,6 +57,9 @@ func TestHandleAuthServerMetadata(t *testing.T) {
 	}
 	if meta["registration_endpoint"] != "https://test.example/register" {
 		t.Fatalf("registration endpoint mismatch: %v", meta["registration_endpoint"])
+	}
+	if meta["client_id_metadata_document_supported"] != true {
+		t.Fatalf("CIMD support not advertised: %v", meta["client_id_metadata_document_supported"])
 	}
 	if meta["authorization_response_iss_parameter_supported"] != true {
 		t.Fatalf("iss parameter support flag missing or false: %v", meta["authorization_response_iss_parameter_supported"])
@@ -173,12 +145,13 @@ func TestHandleToken_AuthorizationCode_Success(t *testing.T) {
 	h := sha256.Sum256([]byte(verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(h[:])
 
-	if err := store.CreateAuthCodeWithBinding(context.Background(), "the-code", learnerID, challenge, "", "cid", "", futureTime()); err != nil {
+	if err := store.CreateAuthCodeWithBinding(context.Background(), "the-code", learnerID, challenge, "", "cid", "", testOAuthResource, futureTime()); err != nil {
 		t.Fatalf("seed code: %v", err)
 	}
 
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
+	form.Set("resource", testOAuthResource)
 	form.Set("code", "the-code")
 	form.Set("code_verifier", verifier)
 	form.Set("client_id", "cid")
@@ -218,6 +191,99 @@ func TestHandleToken_AuthorizationCode_Success(t *testing.T) {
 	if resp["expires_in"].(float64) != AccessTokenTTL.Seconds() {
 		t.Fatalf("expires_in = %v", resp["expires_in"])
 	}
+	claims, err := VerifyJWTClaims(resp["access_token"].(string), "https://test.example")
+	if err != nil {
+		t.Fatalf("verify access token: %v", err)
+	}
+	if len(claims.Audience) != 1 || claims.Audience[0] != testOAuthResource {
+		t.Fatalf("access token audience = %v, want [%s]", claims.Audience, testOAuthResource)
+	}
+}
+
+func TestHandleAuthorizeRequiresExactResource(t *testing.T) {
+	s, store := newTestServer(t)
+	seedClient(t, store, "cid-resource", "https://good.example/cb")
+
+	base := url.Values{
+		"client_id":             {"cid-resource"},
+		"redirect_uri":          {"https://good.example/cb"},
+		"response_type":         {"code"},
+		"code_challenge":        {"challenge"},
+		"code_challenge_method": {"S256"},
+	}
+	for _, tc := range []struct {
+		name, resource string
+		want           int
+	}{
+		{name: "missing", want: http.StatusBadRequest},
+		{name: "wrong endpoint", resource: "https://test.example/other", want: http.StatusBadRequest},
+		{name: "wrong origin", resource: "https://other.example/mcp", want: http.StatusBadRequest},
+		{name: "canonical", resource: testOAuthResource, want: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := url.Values{}
+			for key, values := range base {
+				q[key] = append([]string(nil), values...)
+			}
+			if tc.resource != "" {
+				q.Set("resource", tc.resource)
+			}
+			req := httptest.NewRequest(http.MethodGet, "/authorize?"+q.Encode(), nil)
+			rec := httptest.NewRecorder()
+			s.HandleAuthorizeGet(rec, req)
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d; body=%q", rec.Code, tc.want, rec.Body.String())
+			}
+			if tc.want == http.StatusOK && (!strings.Contains(rec.Body.String(), `name="resource"`) ||
+				!strings.Contains(rec.Body.String(), `value="`+testOAuthResource+`"`)) {
+				t.Fatalf("authorization form did not preserve exact resource")
+			}
+		})
+	}
+}
+
+func TestAuthorizationCodeGrantRequiresMatchingResourceWithoutConsumingCode(t *testing.T) {
+	setTestSecret(t)
+	s, store := newTestServer(t)
+	seedClient(t, store, "cid-resource-code", "https://good.example/cb")
+	learnerID := seedLearner(t, store, "resource-code@example.com", "pw123")
+	verifier := "resource-bound-verifier"
+	hash := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(hash[:])
+	if err := store.CreateAuthCodeWithBinding(
+		context.Background(), "resource-code", learnerID, challenge, "S256",
+		"cid-resource-code", "https://good.example/cb", testOAuthResource, futureTime(),
+	); err != nil {
+		t.Fatalf("seed code: %v", err)
+	}
+
+	exchange := func(resource string, include bool) *httptest.ResponseRecorder {
+		form := url.Values{
+			"grant_type":    {"authorization_code"},
+			"code":          {"resource-code"},
+			"code_verifier": {verifier},
+			"client_id":     {"cid-resource-code"},
+			"redirect_uri":  {"https://good.example/cb"},
+		}
+		if include {
+			form.Set("resource", resource)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		s.HandleToken(rec, req)
+		return rec
+	}
+
+	if rec := exchange("", false); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid_request") {
+		t.Fatalf("missing resource = %d %q", rec.Code, rec.Body.String())
+	}
+	if rec := exchange("https://other.example/mcp", true); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid_grant") {
+		t.Fatalf("wrong resource = %d %q", rec.Code, rec.Body.String())
+	}
+	if rec := exchange(testOAuthResource, true); rec.Code != http.StatusOK {
+		t.Fatalf("canonical resource after rejected attempts = %d %q", rec.Code, rec.Body.String())
+	}
 }
 
 func TestHandleToken_AuthorizationCode_MissingCode(t *testing.T) {
@@ -226,6 +292,7 @@ func TestHandleToken_AuthorizationCode_MissingCode(t *testing.T) {
 
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
+	form.Set("resource", testOAuthResource)
 	req := httptest.NewRequest("POST", "/token", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
@@ -245,6 +312,7 @@ func TestHandleToken_AuthorizationCode_UnknownClient(t *testing.T) {
 
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
+	form.Set("resource", testOAuthResource)
 	form.Set("code", "xyz")
 	form.Set("code_verifier", "v")
 	form.Set("client_id", "no-such-client")
@@ -271,6 +339,7 @@ func TestHandleToken_AuthorizationCode_ConfidentialClient_BadSecret(t *testing.T
 
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
+	form.Set("resource", testOAuthResource)
 	form.Set("code", "x")
 	form.Set("code_verifier", "v")
 	form.Set("client_id", "cid-conf")
@@ -300,12 +369,13 @@ func TestHandleToken_AuthorizationCode_ConfidentialClient_BasicAuthOK(t *testing
 	verifier := "verifier-string"
 	h := sha256.Sum256([]byte(verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(h[:])
-	if err := store.CreateAuthCodeWithBinding(context.Background(), "conf-code", learner, challenge, "", "cid-conf", "", futureTime()); err != nil {
+	if err := store.CreateAuthCodeWithBinding(context.Background(), "conf-code", learner, challenge, "", "cid-conf", "", testOAuthResource, futureTime()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
+	form.Set("resource", testOAuthResource)
 	form.Set("code", "conf-code")
 	form.Set("code_verifier", verifier)
 	req := httptest.NewRequest("POST", "/token", strings.NewReader(form.Encode()))
@@ -326,6 +396,7 @@ func TestHandleToken_AuthorizationCode_InvalidGrantUnknownCode(t *testing.T) {
 
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
+	form.Set("resource", testOAuthResource)
 	form.Set("code", "nope")
 	form.Set("code_verifier", "v")
 	form.Set("client_id", "cid")
@@ -351,12 +422,13 @@ func TestHandleToken_AuthorizationCode_ExpiredCode(t *testing.T) {
 	verifier := "v"
 	h := sha256.Sum256([]byte(verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(h[:])
-	if err := store.CreateAuthCodeWithBinding(context.Background(), "exp-code", learner, challenge, "", "cid", "", pastTime()); err != nil {
+	if err := store.CreateAuthCodeWithBinding(context.Background(), "exp-code", learner, challenge, "", "cid", "", testOAuthResource, pastTime()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
+	form.Set("resource", testOAuthResource)
 	form.Set("code", "exp-code")
 	form.Set("code_verifier", verifier)
 	form.Set("client_id", "cid")
@@ -379,12 +451,13 @@ func TestHandleToken_AuthorizationCode_PKCEMismatch(t *testing.T) {
 	seedClient(t, store, "cid", "https://good.example/cb")
 	learner := seedLearner(t, store, "u-pkce@e.com", "pw")
 
-	if err := store.CreateAuthCodeWithBinding(context.Background(), "pkce-code", learner, "wrong-challenge", "", "cid", "", futureTime()); err != nil {
+	if err := store.CreateAuthCodeWithBinding(context.Background(), "pkce-code", learner, "wrong-challenge", "", "cid", "", testOAuthResource, futureTime()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
+	form.Set("resource", testOAuthResource)
 	form.Set("code", "pkce-code")
 	form.Set("code_verifier", "real-verifier")
 	form.Set("client_id", "cid")
@@ -416,7 +489,7 @@ func TestHandleToken_AuthorizationCode_RedirectMismatchDoesNotConsume(t *testing
 	challenge := base64.RawURLEncoding.EncodeToString(h[:])
 	if err := store.CreateAuthCodeWithBinding(
 		context.Background(), "redirect-bound-code", learner, challenge, "S256",
-		"cid", redirectURI, futureTime(),
+		"cid", redirectURI, testOAuthResource, futureTime(),
 	); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
@@ -424,6 +497,7 @@ func TestHandleToken_AuthorizationCode_RedirectMismatchDoesNotConsume(t *testing
 	request := func(redirect string) *httptest.ResponseRecorder {
 		form := url.Values{}
 		form.Set("grant_type", "authorization_code")
+		form.Set("resource", testOAuthResource)
 		form.Set("code", "redirect-bound-code")
 		form.Set("code_verifier", verifier)
 		form.Set("client_id", "cid")
@@ -454,12 +528,13 @@ func TestHandleToken_ConfidentialClientRejectsPKCEDowngrade(t *testing.T) {
 		t.Fatalf("create confidential client: %v", err)
 	}
 	learner := seedLearner(t, store, "u-conf-down@e.com", "pw")
-	if err := store.CreateAuthCodeWithBinding(context.Background(), "conf-down-code", learner, "", "", "cid-conf-down", "", futureTime()); err != nil {
+	if err := store.CreateAuthCodeWithBinding(context.Background(), "conf-down-code", learner, "", "", "cid-conf-down", "", testOAuthResource, futureTime()); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
+	form.Set("resource", testOAuthResource)
 	form.Set("code", "conf-down-code")
 	form.Set("code_verifier", strings.Repeat("v", 43))
 	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
@@ -484,6 +559,7 @@ func TestHandleToken_RefreshToken_MissingToken(t *testing.T) {
 
 	form := url.Values{}
 	form.Set("grant_type", "refresh_token")
+	form.Set("resource", testOAuthResource)
 	req := httptest.NewRequest("POST", "/token", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
@@ -506,6 +582,7 @@ func TestHandleToken_RefreshToken_UnknownToken(t *testing.T) {
 
 	form := url.Values{}
 	form.Set("grant_type", "refresh_token")
+	form.Set("resource", testOAuthResource)
 	form.Set("refresh_token", "no-such-token")
 	form.Set("client_id", "cid-pub")
 	req := httptest.NewRequest("POST", "/token", strings.NewReader(form.Encode()))
@@ -528,13 +605,14 @@ func TestHandleToken_RefreshToken_Success(t *testing.T) {
 	// always authenticates the client (issue #30).
 	seedClient(t, store, "cid-pub", "https://app.example/cb")
 	learner := seedLearner(t, store, "u-rt@e.com", "pw")
-	rt, err := store.CreateRefreshToken(context.Background(), learner, "cid-pub")
+	rt, err := store.CreateRefreshToken(context.Background(), learner, "cid-pub", testOAuthResource)
 	if err != nil {
 		t.Fatalf("seed rt: %v", err)
 	}
 
 	form := url.Values{}
 	form.Set("grant_type", "refresh_token")
+	form.Set("resource", testOAuthResource)
 	form.Set("refresh_token", rt.Token)
 	form.Set("client_id", "cid-pub")
 	req := httptest.NewRequest("POST", "/token", strings.NewReader(form.Encode()))
@@ -558,12 +636,49 @@ func TestHandleToken_RefreshToken_Success(t *testing.T) {
 	}
 }
 
+func TestRefreshGrantRequiresMatchingResourceWithoutRotating(t *testing.T) {
+	setTestSecret(t)
+	s, store := newTestServer(t)
+	seedClient(t, store, "cid-resource-refresh", "https://app.example/cb")
+	learner := seedLearner(t, store, "resource-refresh@example.com", "pw")
+	rt, err := store.CreateRefreshToken(context.Background(), learner, "cid-resource-refresh", testOAuthResource)
+	if err != nil {
+		t.Fatalf("seed refresh token: %v", err)
+	}
+
+	refresh := func(resource string, include bool) *httptest.ResponseRecorder {
+		form := url.Values{
+			"grant_type":    {"refresh_token"},
+			"refresh_token": {rt.Token},
+			"client_id":     {"cid-resource-refresh"},
+		}
+		if include {
+			form.Set("resource", resource)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		s.HandleToken(rec, req)
+		return rec
+	}
+
+	if rec := refresh("", false); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid_request") {
+		t.Fatalf("missing resource = %d %q", rec.Code, rec.Body.String())
+	}
+	if rec := refresh("https://other.example/mcp", true); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid_grant") {
+		t.Fatalf("wrong resource = %d %q", rec.Code, rec.Body.String())
+	}
+	if rec := refresh(testOAuthResource, true); rec.Code != http.StatusOK {
+		t.Fatalf("canonical resource after rejected attempts = %d %q", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHandleToken_RefreshTokenReuseRevokesSuccessor(t *testing.T) {
 	setTestSecret(t)
 	s, store := newTestServer(t)
 	seedClient(t, store, "cid-pub", "https://app.example/cb")
 	learner := seedLearner(t, store, "u-rt-reuse@e.com", "pw")
-	root, err := store.CreateRefreshToken(context.Background(), learner, "cid-pub")
+	root, err := store.CreateRefreshToken(context.Background(), learner, "cid-pub", testOAuthResource)
 	if err != nil {
 		t.Fatalf("seed rt: %v", err)
 	}
@@ -571,6 +686,7 @@ func TestHandleToken_RefreshTokenReuseRevokesSuccessor(t *testing.T) {
 	refresh := func(token string) *httptest.ResponseRecorder {
 		form := url.Values{}
 		form.Set("grant_type", "refresh_token")
+		form.Set("resource", testOAuthResource)
 		form.Set("refresh_token", token)
 		form.Set("client_id", "cid-pub")
 		req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
@@ -606,7 +722,7 @@ func TestHandleToken_RefreshTokenConcurrentReuseSingleSuccess(t *testing.T) {
 	s, store := newTestServer(t)
 	seedClient(t, store, "cid-pub", "https://app.example/cb")
 	learner := seedLearner(t, store, "u-rt-race@e.com", "pw")
-	rt, err := store.CreateRefreshToken(context.Background(), learner, "cid-pub")
+	rt, err := store.CreateRefreshToken(context.Background(), learner, "cid-pub", testOAuthResource)
 	if err != nil {
 		t.Fatalf("seed rt: %v", err)
 	}
@@ -626,6 +742,7 @@ func TestHandleToken_RefreshTokenConcurrentReuseSingleSuccess(t *testing.T) {
 			<-start
 			form := url.Values{}
 			form.Set("grant_type", "refresh_token")
+			form.Set("resource", testOAuthResource)
 			form.Set("refresh_token", rt.Token)
 			form.Set("client_id", "cid-pub")
 			req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
@@ -663,13 +780,14 @@ func TestHandleToken_RefreshToken_ConfidentialClientUnknown(t *testing.T) {
 	setTestSecret(t)
 	s, store := newTestServer(t)
 	learner := seedLearner(t, store, "u-rt2@e.com", "pw")
-	rt, err := store.CreateRefreshToken(context.Background(), learner, "ghost-client")
+	rt, err := store.CreateRefreshToken(context.Background(), learner, "ghost-client", testOAuthResource)
 	if err != nil {
 		t.Fatalf("seed rt: %v", err)
 	}
 
 	form := url.Values{}
 	form.Set("grant_type", "refresh_token")
+	form.Set("resource", testOAuthResource)
 	form.Set("refresh_token", rt.Token)
 	form.Set("client_id", "ghost-client")
 	form.Set("client_secret", "x")
@@ -694,13 +812,14 @@ func TestHandleToken_RefreshToken_ConfidentialClientBadSecret(t *testing.T) {
 		t.Fatalf("create confidential client: %v", err)
 	}
 	learner := seedLearner(t, store, "u-rt3@e.com", "pw")
-	rt, err := store.CreateRefreshToken(context.Background(), learner, "cid-c2")
+	rt, err := store.CreateRefreshToken(context.Background(), learner, "cid-c2", testOAuthResource)
 	if err != nil {
 		t.Fatalf("seed rt: %v", err)
 	}
 
 	form := url.Values{}
 	form.Set("grant_type", "refresh_token")
+	form.Set("resource", testOAuthResource)
 	form.Set("refresh_token", rt.Token)
 	form.Set("client_id", "cid-c2")
 	form.Set("client_secret", "wrong-secret")
@@ -747,11 +866,20 @@ func TestHandleRegister_PublicClient(t *testing.T) {
 	if resp["token_endpoint_auth_method"] != "none" {
 		t.Fatalf("auth_method = %v, want 'none' for public client", resp["token_endpoint_auth_method"])
 	}
+	if resp["application_type"] != "web" {
+		t.Fatalf("application_type = %v, want web default", resp["application_type"])
+	}
+	if expires, ok := resp["client_id_expires_at"].(float64); !ok || expires <= float64(time.Now().Unix()) {
+		t.Fatalf("client_id_expires_at = %v, want future timestamp", resp["client_id_expires_at"])
+	}
 	if _, ok := resp["client_secret"]; ok {
 		t.Fatal("public client must NOT get a client_secret")
 	}
-	if _, ok := resp["registration_access_token"].(string); !ok {
-		t.Fatal("RFC 7592 registration_access_token missing")
+	if _, ok := resp["registration_access_token"]; ok {
+		t.Fatal("response advertises an unimplemented RFC 7592 credential")
+	}
+	if _, ok := resp["registration_client_uri"]; ok {
+		t.Fatal("response advertises an unimplemented RFC 7592 management endpoint")
 	}
 }
 
@@ -1111,6 +1239,7 @@ func TestAuthorizePost_LoginRequiresClientApproval(t *testing.T) {
 	form.Set("client_id", "cid")
 	form.Set("redirect_uri", "https://attacker.example/cb")
 	form.Set("response_type", "code")
+	form.Set("resource", testOAuthResource)
 	form.Set("code_challenge", "ch")
 	form.Set("code_challenge_method", "S256")
 	form.Set("email", "victim@example.com")
@@ -1144,6 +1273,7 @@ func TestAuthorizePost_LoginSuccess_Redirects302WithCodeAndIss(t *testing.T) {
 	form.Set("client_id", "cid")
 	form.Set("redirect_uri", "https://good.example/cb")
 	form.Set("response_type", "code")
+	form.Set("resource", testOAuthResource)
 	form.Set("state", "the-state")
 	form.Set("code_challenge", "ch")
 	form.Set("code_challenge_method", "S256")
@@ -1195,6 +1325,7 @@ func TestAuthorizePost_LoginSuccess_NoState_OmitsStateParam(t *testing.T) {
 	form.Set("client_id", "cid")
 	form.Set("redirect_uri", "https://good.example/cb")
 	form.Set("response_type", "code")
+	form.Set("resource", testOAuthResource)
 	form.Set("code_challenge", "ch")
 	form.Set("code_challenge_method", "S256")
 	form.Set("email", "okns@e.com")
@@ -1219,7 +1350,7 @@ func TestAuthorizePost_LoginSuccess_NoState_OmitsStateParam(t *testing.T) {
 	}
 }
 
-func TestAuthorizePost_RegisterSuccess_CreatesAndRedirects(t *testing.T) {
+func TestAuthorizePost_RegisterRequiresEmailVerificationBeforeRedirect(t *testing.T) {
 	s, store := newTestServer(t)
 	seedClient(t, store, "cid", "https://good.example/cb")
 
@@ -1229,6 +1360,7 @@ func TestAuthorizePost_RegisterSuccess_CreatesAndRedirects(t *testing.T) {
 	form.Set("client_id", "cid")
 	form.Set("redirect_uri", "https://good.example/cb")
 	form.Set("response_type", "code")
+	form.Set("resource", testOAuthResource)
 	form.Set("code_challenge", "ch")
 	form.Set("code_challenge_method", "S256")
 	form.Set("email", "newuser@e.com")
@@ -1242,11 +1374,65 @@ func TestAuthorizePost_RegisterSuccess_CreatesAndRedirects(t *testing.T) {
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
 
-	if rec.Code != http.StatusFound {
-		t.Fatalf("status = %d, want 302; body=%q", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body=%q", rec.Code, rec.Body.String())
 	}
-	if learner, err := store.GetLearnerByEmail(context.Background(), "newuser@e.com"); err != nil || learner == nil {
+	learner, err := store.GetLearnerByEmail(context.Background(), "newuser@e.com")
+	if err != nil || learner == nil {
 		t.Fatalf("learner not created: err=%v learner=%v", err, learner)
+	}
+	if learner.EmailVerifiedAt != nil {
+		t.Fatal("registration activated identity before mailbox proof")
+	}
+	if bcrypt.CompareHashAndPassword([]byte(learner.PasswordHash), []byte("password-1234")) == nil {
+		t.Fatal("registration initiator chose a usable pending credential")
+	}
+	if approved, err := store.IsClientApproved(context.Background(), learner.ID, "cid", "https://good.example/cb"); err != nil || approved {
+		t.Fatalf("registration persisted consent before mailbox proof: approved=%v err=%v", approved, err)
+	}
+	sender := s.emailSender.(*testEmailSender)
+	if len(sender.verificationLinks) != 1 || sender.verificationTo[0] != "newuser@e.com" {
+		t.Fatalf("verification deliveries = %+v / %+v", sender.verificationTo, sender.verificationLinks)
+	}
+	verificationURL, err := url.Parse(sender.verificationLinks[0])
+	if err != nil {
+		t.Fatalf("parse verification URL: %v", err)
+	}
+	rawToken := verificationURL.Query().Get("token")
+	getRec := httptest.NewRecorder()
+	s.HandleVerifyEmailGet(getRec, httptest.NewRequest(http.MethodGet, verificationURL.String(), nil))
+	if getRec.Code != http.StatusOK || len(getRec.Result().Cookies()) == 0 {
+		t.Fatalf("verification confirmation status=%d", getRec.Code)
+	}
+	if body := getRec.Body.String(); !strings.Contains(body, "Test Client") ||
+		!strings.Contains(body, "https://good.example") ||
+		!strings.Contains(body, `name="password"`) ||
+		!strings.Contains(body, `name="approve_client"`) {
+		t.Fatalf("verification page does not disclose the credential/consent boundary: %q", body)
+	}
+	csrf := getRec.Result().Cookies()[0].Value
+	verifyForm := url.Values{
+		"token": {rawToken}, "csrf_token": {csrf},
+		"password": {"owner-password-123"}, "password_confirm": {"owner-password-123"},
+		"approve_client": {"yes"},
+	}
+	verifyReq := httptest.NewRequest(http.MethodPost, "/verify-email", strings.NewReader(verifyForm.Encode()))
+	verifyReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	verifyReq.AddCookie(&http.Cookie{Name: accountCSRFCookieName, Value: csrf})
+	verifyRec := httptest.NewRecorder()
+	s.HandleVerifyEmailPost(verifyRec, verifyReq)
+	if verifyRec.Code != http.StatusFound {
+		t.Fatalf("verification status=%d body=%q", verifyRec.Code, verifyRec.Body.String())
+	}
+	callback, err := url.Parse(verifyRec.Header().Get("Location"))
+	if err != nil || callback.Query().Get("code") == "" {
+		t.Fatalf("verification callback=%q err=%v", verifyRec.Header().Get("Location"), err)
+	}
+	learner, err = store.GetLearnerByEmail(context.Background(), "newuser@e.com")
+	if err != nil || learner.EmailVerifiedAt == nil ||
+		bcrypt.CompareHashAndPassword([]byte(learner.PasswordHash), []byte("owner-password-123")) != nil ||
+		bcrypt.CompareHashAndPassword([]byte(learner.PasswordHash), []byte("password-1234")) == nil {
+		t.Fatalf("mailbox owner did not replace the pending credential: learner=%+v err=%v", learner, err)
 	}
 }
 
@@ -1272,6 +1458,7 @@ func TestAuthorizePost_MissingEmail_RendersForm(t *testing.T) {
 	form.Set("client_id", "cid")
 	form.Set("redirect_uri", "https://good.example/cb")
 	form.Set("response_type", "code")
+	form.Set("resource", testOAuthResource)
 	form.Set("code_challenge", "ch")
 	form.Set("code_challenge_method", "S256")
 
@@ -1284,12 +1471,12 @@ func TestAuthorizePost_MissingEmail_RendersForm(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401 (renderAuthPage with errMsg)", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "Email and password are required.") {
+	if !strings.Contains(rec.Body.String(), "Email is required.") {
 		t.Fatalf("expected error message, got %q", rec.Body.String())
 	}
 }
 
-func TestAuthorizePost_RegisterPasswordMismatch(t *testing.T) {
+func TestAuthorizePost_RegisterDoesNotAcceptInitiatorCredential(t *testing.T) {
 	s, store := newTestServer(t)
 	seedClient(t, store, "cid", "https://good.example/cb")
 
@@ -1299,11 +1486,13 @@ func TestAuthorizePost_RegisterPasswordMismatch(t *testing.T) {
 	form.Set("client_id", "cid")
 	form.Set("redirect_uri", "https://good.example/cb")
 	form.Set("response_type", "code")
+	form.Set("resource", testOAuthResource)
 	form.Set("code_challenge", "ch")
 	form.Set("code_challenge_method", "S256")
 	form.Set("email", "x@e.com")
-	form.Set("password", "passw0rd")
-	form.Set("password_confirm", "different")
+	form.Set("password", "attacker-password")
+	form.Set("password_confirm", "attacker-password")
+	form.Set("approve_client", "yes")
 
 	req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -1311,15 +1500,23 @@ func TestAuthorizePost_RegisterPasswordMismatch(t *testing.T) {
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
 
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", rec.Code)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "Passwords do not match.") {
-		t.Fatalf("expected mismatch message; got %q", rec.Body.String())
+	learner, err := store.GetLearnerByEmail(context.Background(), "x@e.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bcrypt.CompareHashAndPassword([]byte(learner.PasswordHash), []byte("attacker-password")) == nil {
+		t.Fatal("unauthenticated registration password became usable")
+	}
+	approved, err := store.IsClientApproved(context.Background(), learner.ID, "cid", "https://good.example/cb")
+	if err != nil || approved {
+		t.Fatalf("unauthenticated registration consent persisted: approved=%v err=%v", approved, err)
 	}
 }
 
-func TestAuthorizePost_RegisterPasswordTooShort(t *testing.T) {
+func TestAuthorizePost_RegisterNeedsOnlyEmail(t *testing.T) {
 	s, store := newTestServer(t)
 	seedClient(t, store, "cid", "https://good.example/cb")
 
@@ -1329,11 +1526,10 @@ func TestAuthorizePost_RegisterPasswordTooShort(t *testing.T) {
 	form.Set("client_id", "cid")
 	form.Set("redirect_uri", "https://good.example/cb")
 	form.Set("response_type", "code")
+	form.Set("resource", testOAuthResource)
 	form.Set("code_challenge", "ch")
 	form.Set("code_challenge_method", "S256")
 	form.Set("email", "x@e.com")
-	form.Set("password", "abc")
-	form.Set("password_confirm", "abc")
 
 	req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -1341,11 +1537,11 @@ func TestAuthorizePost_RegisterPasswordTooShort(t *testing.T) {
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
 
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", rec.Code)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202; body=%q", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "Password must be at least 12 characters.") {
-		t.Fatalf("expected too-short message; got %q", rec.Body.String())
+	if _, err := store.GetLearnerByEmail(context.Background(), "x@e.com"); err != nil {
+		t.Fatalf("email-only pending registration failed: %v", err)
 	}
 }
 
@@ -1360,6 +1556,7 @@ func TestAuthorizePost_RegisterDuplicateEmail(t *testing.T) {
 	form.Set("client_id", "cid")
 	form.Set("redirect_uri", "https://good.example/cb")
 	form.Set("response_type", "code")
+	form.Set("resource", testOAuthResource)
 	form.Set("code_challenge", "ch")
 	form.Set("code_challenge_method", "S256")
 	form.Set("email", "dup@e.com")
@@ -1372,11 +1569,14 @@ func TestAuthorizePost_RegisterDuplicateEmail(t *testing.T) {
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
 
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", rec.Code)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", rec.Code)
 	}
-	if !strings.Contains(rec.Body.String(), "An account with this email already exists.") {
-		t.Fatalf("expected duplicate-email message; got %q", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "Check your email") {
+		t.Fatalf("expected non-enumerating registration message; got %q", rec.Body.String())
+	}
+	if len(s.emailSender.(*testEmailSender).verificationLinks) != 0 {
+		t.Fatal("duplicate registration must not spam the existing account")
 	}
 }
 
@@ -1390,6 +1590,7 @@ func TestAuthorizePost_LoginUnknownEmail(t *testing.T) {
 	form.Set("client_id", "cid")
 	form.Set("redirect_uri", "https://good.example/cb")
 	form.Set("response_type", "code")
+	form.Set("resource", testOAuthResource)
 	form.Set("code_challenge", "ch")
 	form.Set("code_challenge_method", "S256")
 	form.Set("email", "ghost@e.com")
@@ -1549,6 +1750,7 @@ func loginRequest(t *testing.T, clientID, redirectURI, email, password string, a
 	form.Set("client_id", clientID)
 	form.Set("redirect_uri", redirectURI)
 	form.Set("response_type", "code")
+	form.Set("resource", testOAuthResource)
 	form.Set("code_challenge", "ch")
 	form.Set("code_challenge_method", "S256")
 	form.Set("email", email)
@@ -1636,6 +1838,7 @@ func TestAuthorizePost_LoginEmailIsCaseInsensitive(t *testing.T) {
 	form.Set("client_id", "cid")
 	form.Set("redirect_uri", "https://good.example/cb")
 	form.Set("response_type", "code")
+	form.Set("resource", testOAuthResource)
 	form.Set("code_challenge", "ch")
 	form.Set("code_challenge_method", "S256")
 	form.Set("email", "Bob@x.com") // uppercase first letter
@@ -1656,11 +1859,9 @@ func TestAuthorizePost_LoginEmailIsCaseInsensitive(t *testing.T) {
 	}
 }
 
-// TestAuthorizePost_LoginFailureBucketSharedAcrossEmailCases verifies that
-// the per-account lockout cannot be bypassed by toggling email case. R002:
-// without normalisation an attacker rotates Bob/BOB/bOB permutations and
-// each gets its own 5-failure budget under `loginFailures`.
-func TestAuthorizePost_LoginFailureBucketSharedAcrossEmailCases(t *testing.T) {
+// Failure accounting is case-normalized, but reaching the threshold must not
+// let an attacker lock the rightful owner out: correct credentials still win.
+func TestAuthorizePost_LoginFailureThresholdDoesNotLockOutOwner(t *testing.T) {
 	s, store := newTestServer(t)
 	seedClient(t, store, "cid", "https://good.example/cb")
 	seedLearner(t, store, "bob@x.com", "correct-password")
@@ -1672,6 +1873,7 @@ func TestAuthorizePost_LoginFailureBucketSharedAcrossEmailCases(t *testing.T) {
 		form.Set("client_id", "cid")
 		form.Set("redirect_uri", "https://good.example/cb")
 		form.Set("response_type", "code")
+		form.Set("resource", testOAuthResource)
 		form.Set("code_challenge", "ch")
 		form.Set("code_challenge_method", "S256")
 		form.Set("email", email)
@@ -1704,17 +1906,18 @@ func TestAuthorizePost_LoginFailureBucketSharedAcrossEmailCases(t *testing.T) {
 		}
 	}
 
-	// A sixth attempt under a DIFFERENT case with the CORRECT password must
-	// be rejected by the failure tracker — proving the bucket is shared.
+	// A sixth attempt under a different case with the correct password must
+	// succeed and reset the shared failure bucket.
 	rec := postLogin(mkForm("BOB@x.com", "correct-password"))
-	if !strings.Contains(rec.Body.String(), "Too many failed attempts") {
-		t.Fatalf("expected per-account lockout to cover case-variant; status=%d, body=%q", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusFound {
+		t.Fatalf("correct owner credentials were locked out; status=%d, body=%q", rec.Code, rec.Body.String())
 	}
 }
 
 // TestAuthorizePost_RegisterRejectsCaseDuplicate verifies R002 register-side:
-// once "alice@x.com" exists, "Alice@x.com" must also be refused, not silently
-// accepted as a second account. Without normalisation the duplicate-check at
+// once "alice@x.com" exists, "Alice@x.com" must not create a second account.
+// The public response is intentionally identical to a pending registration.
+// Without normalisation the duplicate-check at
 // HandleAuthorizePost runs under BINARY collation and lets the second row in.
 func TestAuthorizePost_RegisterRejectsCaseDuplicate(t *testing.T) {
 	s, store := newTestServer(t)
@@ -1727,6 +1930,7 @@ func TestAuthorizePost_RegisterRejectsCaseDuplicate(t *testing.T) {
 	form.Set("client_id", "cid")
 	form.Set("redirect_uri", "https://good.example/cb")
 	form.Set("response_type", "code")
+	form.Set("resource", testOAuthResource)
 	form.Set("code_challenge", "ch")
 	form.Set("code_challenge_method", "S256")
 	form.Set("email", "Alice@x.com") // case-variant of an existing learner
@@ -1740,8 +1944,12 @@ func TestAuthorizePost_RegisterRejectsCaseDuplicate(t *testing.T) {
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
 
-	if !strings.Contains(rec.Body.String(), "account with this email already exists") {
-		t.Fatalf("register accepted a case-variant duplicate; status=%d, body=%q", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusAccepted || !strings.Contains(rec.Body.String(), "Check your email") {
+		t.Fatalf("case-variant response status=%d, body=%q", rec.Code, rec.Body.String())
+	}
+	var count int
+	if err := store.RawDB().QueryRow(`SELECT COUNT(*) FROM learners WHERE email = 'alice@x.com'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("canonical learner count=%d err=%v", count, err)
 	}
 }
 

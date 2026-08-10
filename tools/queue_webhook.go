@@ -31,7 +31,7 @@ const (
 )
 
 func registerQueueWebhookMessage(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "queue_webhook_message",
 		Description: "Queue a nudge message that the scheduler will post to the learner's Discord webhook at the desired window. The LLM composes the text (warm, no raw KPIs); the scheduler dispatches.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params QueueWebhookMessageParams) (*mcp.CallToolResult, any, error) {

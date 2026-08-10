@@ -30,7 +30,7 @@ type RecordSessionCloseParams struct {
 }
 
 func registerRecordSessionClose(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "record_session_close",
 		Description: "Idempotently close the durable learning session, optionally record its implementation intention (if-then), and return structured recap and summary signals.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params RecordSessionCloseParams) (*mcp.CallToolResult, any, error) {

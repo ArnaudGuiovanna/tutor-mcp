@@ -20,7 +20,7 @@ type StartLearningSessionParams struct {
 }
 
 func registerStartLearningSession(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "start_learning_session",
 		Description: "Open or resume the learner's durable learning session. The operation is idempotent and returns the canonical session_id used by interactions, affect, assessment attempts, transfer evidence, intentions and summaries.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params StartLearningSessionParams) (*mcp.CallToolResult, any, error) {
@@ -88,7 +88,7 @@ type ListImplementationIntentionsParams struct {
 }
 
 func registerListImplementationIntentions(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "list_implementation_intentions",
 		Description: "List the learner's if-then practice commitments with their explicit pending, honored, missed or cancelled lifecycle state.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params ListImplementationIntentionsParams) (*mcp.CallToolResult, any, error) {
@@ -155,7 +155,7 @@ type UpdateImplementationIntentionParams struct {
 }
 
 func registerUpdateImplementationIntention(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "update_implementation_intention",
 		Description: "Resolve one pending practice commitment as honored, missed or cancelled. Ownership and one-way lifecycle transitions are enforced by storage.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params UpdateImplementationIntentionParams) (*mcp.CallToolResult, any, error) {

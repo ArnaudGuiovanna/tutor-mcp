@@ -23,7 +23,7 @@ type GetLearnerContextParams struct {
 }
 
 func registerGetLearnerContext(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "get_learner_context",
 		Description: "Retrieve the full learner context for session start. When priority_concept is set, priority_concept_domain_id identifies the domain clients should pass when following it.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params GetLearnerContextParams) (*mcp.CallToolResult, any, error) {

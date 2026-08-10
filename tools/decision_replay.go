@@ -25,7 +25,7 @@ type GetDecisionReplaySummaryParams struct {
 }
 
 func registerGetDecisionReplaySummary(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "get_decision_replay_summary",
 		Description: "Build an offline replay summary from stored pedagogical snapshots: model-estimate deltas, suspicious jumps, missing rubric evidence, transfer-after-estimate gaps, and malformed snapshot JSON.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params GetDecisionReplaySummaryParams) (*mcp.CallToolResult, any, error) {

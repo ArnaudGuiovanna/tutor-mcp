@@ -24,7 +24,7 @@ type CalibrationCheckParams struct {
 }
 
 func registerCalibrationCheck(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "calibration_check",
 		Description: "Record the learner's self-assessment on a concept before an exercise. Returns a prediction_id for post-exercise comparison.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params CalibrationCheckParams) (*mcp.CallToolResult, any, error) {
@@ -117,7 +117,7 @@ type RecordCalibrationResultParams struct {
 }
 
 func registerRecordCalibrationResult(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "record_calibration_result",
 		Description: "Compare the learner's prediction with the actual result. Updates the calibration bias.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params RecordCalibrationResultParams) (*mcp.CallToolResult, any, error) {

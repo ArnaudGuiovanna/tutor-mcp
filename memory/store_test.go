@@ -4,7 +4,9 @@
 package memory
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -43,6 +45,95 @@ func TestWriteReadAndReplaceSection(t *testing.T) {
 	}
 	if !strings.Contains(got, "Second version.") || strings.Contains(got, "First version.") {
 		t.Fatalf("section was not replaced:\n%s", got)
+	}
+}
+
+func configureTestLimits(t *testing.T, limits Limits) {
+	t.Helper()
+	previous, _ := configuredLimits()
+	if err := ConfigureLimits(limits); err != nil {
+		t.Fatalf("configure limits: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := ConfigureLimits(previous); err != nil {
+			t.Fatalf("restore limits: %v", err)
+		}
+	})
+}
+
+func TestWriteEnforcesPayloadFileLearnerAndFileCountQuotas(t *testing.T) {
+	t.Setenv("TUTOR_MCP_MEMORY_ROOT", t.TempDir())
+	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
+	configureTestLimits(t, Limits{
+		MaxWriteBytes: 32, MaxFileBytes: 48, MaxLearnerBytes: 64,
+		MaxFilesPerLearner: 2, MaxConcurrentWrites: 2,
+	})
+
+	if err := Write(WriteRequest{LearnerID: "payload", Scope: ScopeMemory, Operation: OpReplaceFile, Content: strings.Repeat("x", 33)}); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("oversized payload error=%v", err)
+	}
+	if err := Write(WriteRequest{LearnerID: "file", Scope: ScopeMemoryPending, Operation: OpAppend, Content: strings.Repeat("a", 30)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(WriteRequest{LearnerID: "file", Scope: ScopeMemoryPending, Operation: OpAppend, Content: strings.Repeat("b", 20)}); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("oversized file error=%v", err)
+	}
+	if err := Write(WriteRequest{LearnerID: "learner", Scope: ScopeMemory, Operation: OpReplaceFile, Content: strings.Repeat("a", 32)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(WriteRequest{LearnerID: "learner", Scope: ScopeMemoryPending, Operation: OpReplaceFile, Content: strings.Repeat("b", 32)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(WriteRequest{LearnerID: "learner", Scope: ScopeSession, Timestamp: time.Now(), Operation: OpReplaceFile, Content: "third"}); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("file-count error=%v", err)
+	}
+	if err := Write(WriteRequest{LearnerID: "learner-bytes", Scope: ScopeMemory, Operation: OpReplaceFile, Content: strings.Repeat("a", 32)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(WriteRequest{LearnerID: "learner-bytes", Scope: ScopeMemoryPending, Operation: OpReplaceFile, Content: strings.Repeat("b", 32)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(WriteRequest{LearnerID: "learner-bytes", Scope: ScopeMemory, Operation: OpAppend, Content: "x"}); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("learner-byte error=%v", err)
+	}
+}
+
+func TestReadRejectsExternallyOversizedNarrativeFile(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("TUTOR_MCP_MEMORY_ROOT", root)
+	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
+	configureTestLimits(t, Limits{
+		MaxWriteBytes: 16, MaxFileBytes: 16, MaxLearnerBytes: 64,
+		MaxFilesPerLearner: 4, MaxConcurrentWrites: 2,
+	})
+	path, err := PathForRead("L1", ScopeMemory, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", 17)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Read("L1", ScopeMemory, ""); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("oversized read error=%v", err)
+	}
+}
+
+func TestWriteRejectsWhenConcurrentBudgetIsFull(t *testing.T) {
+	t.Setenv("TUTOR_MCP_MEMORY_ROOT", t.TempDir())
+	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
+	configureTestLimits(t, Limits{
+		MaxWriteBytes: 16, MaxFileBytes: 16, MaxLearnerBytes: 64,
+		MaxFilesPerLearner: 4, MaxConcurrentWrites: 1,
+	})
+	_, sem := configuredLimits()
+	sem <- struct{}{}
+	err := Write(WriteRequest{LearnerID: "L1", Scope: ScopeMemory, Operation: OpReplaceFile, Content: "bounded"})
+	<-sem
+	if !errors.Is(err, ErrQuotaExceeded) || !strings.Contains(err.Error(), "concurrent") {
+		t.Fatalf("concurrency error=%v", err)
 	}
 }
 
@@ -170,6 +261,9 @@ func TestConcurrentAppendDoesNotLoseNarrativeMemory(t *testing.T) {
 	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
 
 	const writers = 64
+	limits := defaultLimits
+	limits.MaxConcurrentWrites = writers
+	configureTestLimits(t, limits)
 	start := make(chan struct{})
 	errs := make(chan error, writers)
 	var wg sync.WaitGroup

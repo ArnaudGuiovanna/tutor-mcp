@@ -722,7 +722,50 @@ CREATE INDEX idx_wmq_domain_active
 WHERE TRIM(COALESCE(client_id, '')) = ''
    OR TRIM(COALESCE(redirect_uri, '')) = ''
    OR code_challenge_method <> 'S256'
-   OR TRIM(COALESCE(code_challenge, '')) = ''`,
+	   OR TRIM(COALESCE(code_challenge, '')) = ''`,
+	})
+	// RFC 8707 resource indicators must survive the complete authorization-code
+	// and refresh-token lifecycle. Pre-upgrade credentials have no trustworthy
+	// resource binding, so purge short-lived codes and revoke refresh families.
+	out = append(out, migration{
+		Version: "0032_bind_oauth_credentials_to_resource",
+		Body: `ALTER TABLE oauth_codes ADD COLUMN resource TEXT NOT NULL DEFAULT '';
+ALTER TABLE refresh_tokens ADD COLUMN resource TEXT NOT NULL DEFAULT '';
+DELETE FROM oauth_codes WHERE TRIM(resource) = '';
+UPDATE refresh_tokens
+SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP)
+WHERE TRIM(resource) = '';
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_client_resource
+    ON refresh_tokens(client_id, resource)`,
+	})
+	out = append(out, migration{
+		Version: "0033_expire_dynamic_oauth_clients",
+		Body: `ALTER TABLE oauth_clients ADD COLUMN expires_at DATETIME;
+CREATE INDEX IF NOT EXISTS idx_oauth_clients_expires_at
+    ON oauth_clients(expires_at)`,
+	})
+	out = append(out, migration{
+		Version: "0034_verified_email_and_account_tokens",
+		Body: `ALTER TABLE learners ADD COLUMN email_verified_at DATETIME;
+UPDATE learners SET email_verified_at = COALESCE(created_at, CURRENT_TIMESTAMP)
+WHERE email_verified_at IS NULL;
+CREATE TABLE account_tokens (
+    token_hash            TEXT PRIMARY KEY,
+    learner_id            TEXT NOT NULL REFERENCES learners(id),
+    purpose               TEXT NOT NULL CHECK (purpose IN ('email_verification','password_reset')),
+    client_id             TEXT NOT NULL DEFAULT '',
+    redirect_uri          TEXT NOT NULL DEFAULT '',
+    resource              TEXT NOT NULL DEFAULT '',
+    state                 TEXT NOT NULL DEFAULT '',
+    scope                 TEXT NOT NULL DEFAULT '',
+    code_challenge        TEXT NOT NULL DEFAULT '',
+    code_challenge_method TEXT NOT NULL DEFAULT '',
+    expires_at            DATETIME NOT NULL,
+    created_at            DATETIME NOT NULL,
+    consumed_at           DATETIME
+);
+CREATE INDEX idx_account_tokens_learner_purpose
+    ON account_tokens(learner_id, purpose, expires_at)`,
 	})
 	return out
 }

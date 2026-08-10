@@ -24,7 +24,7 @@ type GetPedagogicalSnapshotsParams struct {
 }
 
 func registerGetPedagogicalSnapshots(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "get_pedagogical_snapshots",
 		Description: "Read stored pedagogical decision snapshots for the authenticated learner, optionally filtered by domain and concept.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params GetPedagogicalSnapshotsParams) (*mcp.CallToolResult, any, error) {

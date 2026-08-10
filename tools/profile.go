@@ -26,7 +26,7 @@ type UpdateLearnerProfileParams struct {
 }
 
 func registerUpdateLearnerProfile(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "update_learner_profile",
 		Description: "Update learner-declared preferences (device, objective, language and affect baseline). Evidence-derived calibration and autonomy cannot be overwritten.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params UpdateLearnerProfileParams) (*mcp.CallToolResult, any, error) {

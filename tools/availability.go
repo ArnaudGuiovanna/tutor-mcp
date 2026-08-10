@@ -33,7 +33,7 @@ type UpdateAvailabilityModelParams struct {
 }
 
 func registerGetAvailabilityModel(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "get_availability_model",
 		Description: "Retrieve learner-owned availability, IANA timezone, weekly local-time windows, DND, notification consent/frequency/cap, accessibility accommodations and optimistic version.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params GetAvailabilityModelParams) (*mcp.CallToolResult, any, error) {
@@ -80,7 +80,7 @@ func registerGetAvailabilityModel(server *mcp.Server, deps *Deps) {
 }
 
 func registerUpdateAvailabilityModel(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "update_availability_model",
 		Description: "Replace the authenticated learner's availability and accessibility policy. Uses expected_version to reject concurrent lost updates. Notification consent is explicit; DND and local weekly windows are enforced again at delivery time.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params UpdateAvailabilityModelParams) (*mcp.CallToolResult, any, error) {

@@ -40,7 +40,7 @@ type tradeoff struct {
 }
 
 func registerLearningNegotiation(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "learning_negotiation",
 		Description: "Expose the session plan with rationale. The learner can propose an alternative - the system accepts or explains the trade-offs.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params LearningNegotiationParams) (*mcp.CallToolResult, any, error) {

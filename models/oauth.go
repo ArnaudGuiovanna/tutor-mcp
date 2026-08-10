@@ -14,6 +14,7 @@ type AuthCode struct {
 	CodeChallengeMethod string
 	ClientID            string
 	RedirectURI         string
+	Resource            string
 	ExpiresAt           time.Time
 }
 
@@ -26,4 +27,24 @@ type OAuthClient struct {
 	ClientName       string
 	RedirectURIs     string
 	ClientSecretHash string
+	ExpiresAt        *time.Time // nil for preregistered/CIMD clients
+}
+
+// AccountToken is a hashed, single-use email verification or password-reset
+// capability. OAuth continuation fields are populated for email verification
+// so the browser can resume the exact request after proving mailbox control.
+type AccountToken struct {
+	TokenHash           string
+	LearnerID           string
+	Purpose             string
+	ClientID            string
+	RedirectURI         string
+	Resource            string
+	State               string
+	Scope               string
+	CodeChallenge       string
+	CodeChallengeMethod string
+	ExpiresAt           time.Time
+	CreatedAt           time.Time
+	ConsumedAt          *time.Time
 }

@@ -7,6 +7,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -128,5 +129,18 @@ func TestLoginFailureTracker_BackendFailureUsesLocalAccountBucket(t *testing.T) 
 	tk.Reset("learner@example.test")
 	if !tk.Allow("learner@example.test") {
 		t.Fatal("reset should clear the local fallback state")
+	}
+}
+
+func TestLoginFailureTrackerBoundsUniqueAccountState(t *testing.T) {
+	tk := NewLoginFailureTracker(5, time.Hour)
+	for i := 0; i < maxLoginFailureBuckets+500; i++ {
+		tk.Record(fmt.Sprintf("account-%d@example.test", i))
+	}
+	if got := len(tk.fails); got != maxLoginFailureBuckets {
+		t.Fatalf("failure buckets=%d, want cap %d", got, maxLoginFailureBuckets)
+	}
+	if tk.lru.Len() != maxLoginFailureBuckets {
+		t.Fatalf("LRU entries=%d, want cap %d", tk.lru.Len(), maxLoginFailureBuckets)
 	}
 }

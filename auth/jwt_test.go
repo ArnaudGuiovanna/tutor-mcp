@@ -47,7 +47,7 @@ func TestGenerateJWTUsesShortAccessTokenTTL(t *testing.T) {
 	}
 	parsed, err := jwt.ParseWithClaims(tok, &Claims{}, func(token *jwt.Token) (any, error) {
 		return jwtSecret, nil
-	}, jwt.WithAudience(JWTAudience), jwt.WithIssuer("https://issuer.example"))
+	}, jwt.WithAudience(MCPResource("https://issuer.example")), jwt.WithIssuer("https://issuer.example"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,6 +89,46 @@ func TestVerifyJWT_RejectsMissingAudience(t *testing.T) {
 	}
 }
 
+func TestVerifyJWTClaims_RejectsMissingExpiration(t *testing.T) {
+	setTestSecret(t)
+	claims := Claims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:  "learner-1",
+			Issuer:   "https://issuer.example",
+			Audience: jwt.ClaimStrings{MCPResource("https://issuer.example")},
+			IssuedAt: jwt.NewNumericDate(time.Now()),
+		},
+		Scope: "learner",
+	}
+	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(jwtSecret)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	if _, err := VerifyJWTClaims(token, "https://issuer.example"); err == nil {
+		t.Fatal("expected error for missing expiration")
+	}
+}
+
+func TestVerifyJWTClaims_RejectsMissingSubject(t *testing.T) {
+	setTestSecret(t)
+	claims := Claims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    "https://issuer.example",
+			Audience:  jwt.ClaimStrings{MCPResource("https://issuer.example")},
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+		Scope: "learner",
+	}
+	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(jwtSecret)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	if _, err := VerifyJWTClaims(token, "https://issuer.example"); err == nil {
+		t.Fatal("expected error for missing subject")
+	}
+}
+
 func TestVerifyJWT_RejectsAlgNone(t *testing.T) {
 	// alg=none token, hand-crafted: header.payload.
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
@@ -98,6 +138,27 @@ func TestVerifyJWT_RejectsAlgNone(t *testing.T) {
 	setTestSecret(t)
 	if _, err := VerifyJWT(tok, "https://issuer.example"); err == nil {
 		t.Fatal("alg=none must be rejected")
+	}
+}
+
+func TestVerifyJWTRejectsLegacyLogicalAudience(t *testing.T) {
+	setTestSecret(t)
+	claims := Claims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   "learner-1",
+			Issuer:    "https://issuer.example",
+			Audience:  jwt.ClaimStrings{"tutor-mcp/mcp"},
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+		Scope: "learner",
+	}
+	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(jwtSecret)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	if _, err := VerifyJWT(token, "https://issuer.example"); err == nil {
+		t.Fatal("legacy logical audience must be rejected")
 	}
 }
 

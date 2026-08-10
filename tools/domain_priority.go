@@ -18,7 +18,7 @@ type SetDomainPriorityParams struct {
 }
 
 func registerSetDomainPriority(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name: "set_domain_priority",
 		Description: "Set the learner-controlled priority for an active domain. " +
 			"Use rank 1 for the preferred domain; lower numbers win. Domains with any explicit rank are routed before domains with no rank. " +

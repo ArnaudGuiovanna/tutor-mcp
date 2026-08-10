@@ -54,6 +54,34 @@ func TestIdempotencyMiddlewareReplaysSuccessfulMutation(t *testing.T) {
 	}
 }
 
+func TestLearningNegotiationParticipatesInIdempotencyPolicy(t *testing.T) {
+	_, deps := setupToolsTest(t)
+	ctx := context.WithValue(context.Background(), auth.LearnerIDKey, "L_owner")
+	var executions atomic.Int32
+	handler := idempotencyMiddleware(deps)(func(context.Context, string, mcp.Request) (mcp.Result, error) {
+		executions.Add(1)
+		return jsonResult(map[string]any{"accepted": true})
+	})
+	request := func() *mcp.CallToolRequest {
+		return idempotencyToolRequest(t, "learning_negotiation", "negotiation-retry-1", map[string]any{
+			"session_id": "session-1",
+			"concept":    "fractions",
+		})
+	}
+
+	first, err := handler(ctx, "tools/call", request())
+	if err != nil || first.(*mcp.CallToolResult).IsError {
+		t.Fatalf("first negotiation: result=%#v err=%v", first, err)
+	}
+	replay, err := handler(ctx, "tools/call", request())
+	if err != nil || replay.(*mcp.CallToolResult).IsError {
+		t.Fatalf("negotiation replay: result=%#v err=%v", replay, err)
+	}
+	if executions.Load() != 1 {
+		t.Fatalf("negotiation executions=%d, want 1", executions.Load())
+	}
+}
+
 func TestIdempotencyMiddlewareExpiredResponseNeverReexecutes(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	ctx := context.WithValue(context.Background(), auth.LearnerIDKey, "L_owner")

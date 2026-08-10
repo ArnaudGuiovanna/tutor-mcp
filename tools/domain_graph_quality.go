@@ -16,7 +16,7 @@ type ValidateDomainGraphParams struct {
 }
 
 func registerValidateDomainGraph(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "validate_domain_graph",
 		Description: "Audit the active domain graph deterministically and return structural quality issues plus a prompt the LLM can use to propose graph repairs.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params ValidateDomainGraphParams) (*mcp.CallToolResult, any, error) {

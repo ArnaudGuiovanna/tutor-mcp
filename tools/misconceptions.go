@@ -19,7 +19,7 @@ type GetMisconceptionsParams struct {
 }
 
 func registerGetMisconceptions(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "get_misconceptions",
 		Description: "List misconceptions detected per concept, with their status (active/resolved) and frequency. Enables tracking of the learner's recurring confusions.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params GetMisconceptionsParams) (*mcp.CallToolResult, any, error) {

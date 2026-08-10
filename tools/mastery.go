@@ -22,7 +22,7 @@ type CheckMasteryParams struct {
 }
 
 func registerCheckMastery(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "check_mastery",
 		Description: "Check whether a concept is ready for the mastery challenge using BKT plus evidence diversity and uncertainty.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params CheckMasteryParams) (*mcp.CallToolResult, any, error) {

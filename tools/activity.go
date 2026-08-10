@@ -26,7 +26,7 @@ type GetNextActivityParams struct {
 }
 
 func registerGetNextActivity(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name: "get_next_activity",
 		Description: "Determine the next optimal activity for the learner and aggregate all routing context: metacognitive_mirror, tutor_mode, motivation_brief, active misconceptions. Accounts for the current session to avoid repeating the same concept. " +
 			"When to call: this is the main tool of the learning cycle; it already includes alert-aware routing, metacognitive_mirror, tutor_mode and motivation_brief. " +
@@ -139,11 +139,14 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 
 		// Compute alerts from the same attempt-linked retention and trusted
 		// transfer evidence used by check_mastery.
-		alertEvidence, err := engine.LoadMasteryAlertEvidence(ctx, deps.Store, learnerID, domain.ID, domainStates)
+		evidenceSnapshot, err := engine.LoadEvidenceSnapshot(
+			ctx, deps.Store, learnerID, domain.ID, domain.Graph.Concepts,
+		)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to load mastery alert evidence", err)
 			return r, nil, nil
 		}
+		alertEvidence := evidenceSnapshot.ForMasteryAlerts(domainStates)
 		alerts := engine.ComputeAlertsWithEvidenceAt(domainStates, domainInteractions, alertEvidence, sessionStart, now)
 
 		// Build set of concepts already practiced in this session
@@ -171,12 +174,13 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 		intentStatus := "auto"
 		route := "orchestrator"
 		input := engine.OrchestratorInput{
-			LearnerID:    learnerID,
-			DomainID:     domain.ID,
-			Now:          now,
-			SessionStart: sessionStart,
-			Config:       engine.NewDefaultPhaseConfig(),
-			Logger:       deps.Logger,
+			LearnerID:        learnerID,
+			DomainID:         domain.ID,
+			Now:              now,
+			SessionStart:     sessionStart,
+			Config:           engine.NewDefaultPhaseConfig(),
+			Logger:           deps.Logger,
+			EvidenceSnapshot: evidenceSnapshot,
 		}
 		if intent == activityIntentReview {
 			input.ReviewOnly = true
@@ -441,12 +445,9 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 				uncertainty = engine.ComputeMasteryUncertainty(selectedState, conceptInteractions, engine.MasteryEvidenceProfile{Now: now})
 				masteryUncertainty = uncertainty
 			}
-			if transferRecords, err := deps.Store.GetTransferScoresInDomain(ctx, learnerID, domain.ID, activity.Concept); err != nil {
-				markDegraded("transfer_diagnostics", err)
-			} else {
-				typedTransferProfile = engine.BuildTransferProfile(activity.Concept, transferRecords)
-				transferProfile = typedTransferProfile
-			}
+			conceptEvidence := evidenceSnapshot.ForConcept(activity.Concept)
+			typedTransferProfile = engine.BuildTransferProfile(activity.Concept, conceptEvidence.Transfers)
+			transferProfile = typedTransferProfile
 		}
 		if decision := engine.ApplyEvidenceController(engine.EvidenceControllerInput{
 			Activity:           activity,
@@ -481,7 +482,9 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 			extra["degraded_components"] = degradedComponents
 		}
 		goalRelevanceStatus := buildGoalRelevanceStatus(domain)
-		episodicContext, olmSnapshot := loadEpisodicContextForActivity(ctx, deps, learnerID, domain, domainStates, activity.Concept, alerts, now)
+		episodicContext, olmSnapshot := loadEpisodicContextForActivity(
+			ctx, deps, learnerID, domain, domainStates, activity.Concept, alerts, now, evidenceSnapshot,
+		)
 		contract := buildPedagogicalContract(activity, intent, evidenceQuality, uncertainty, typedTransferProfile, goalRelevanceStatus, extra["fade_params"], episodicContext, activeMisconceptionCount, olmSnapshot)
 
 		out := map[string]any{
@@ -587,12 +590,15 @@ func loadEpisodicContextForActivity(
 	focusConcept string,
 	alerts []models.Alert,
 	now time.Time,
+	evidenceSnapshot *engine.EvidenceSnapshot,
 ) (*memory.EpisodicContext, *engine.OLMSnapshot) {
 	if !memory.Enabled() {
 		return nil, nil
 	}
 	var olmSnapshot *engine.OLMSnapshot
-	if snap, err := engine.BuildOLMSnapshotAt(ctx, deps.Store, learnerID, domain.ID, now); err == nil {
+	if snap, err := engine.BuildOLMSnapshotAtWithEvidence(
+		ctx, deps.Store, learnerID, domain.ID, now, evidenceSnapshot,
+	); err == nil {
 		olmSnapshot = snap
 	} else if deps.Logger != nil {
 		deps.Logger.Warn("get_next_activity: OLM snapshot for memory context failed", "err", err, "learner", learnerID, "domain", domain.ID)

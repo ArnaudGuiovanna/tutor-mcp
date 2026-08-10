@@ -16,7 +16,7 @@ type MarkDomainHighStakesParams struct {
 }
 
 func registerMarkDomainHighStakes(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "mark_domain_high_stakes",
 		Description: "Apply the one-way high-stakes safety classification to an owned active domain. Demonstrated claims and intrusive suggestions then require a trusted human-reviewed evaluation; no external evaluator is created or assumed.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params MarkDomainHighStakesParams) (*mcp.CallToolResult, any, error) {

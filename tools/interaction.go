@@ -48,7 +48,7 @@ type RecordInteractionParams struct {
 }
 
 func registerRecordInteraction(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "record_interaction",
 		Description: "Record an observed result and update the learner model. For assessment evidence, pass a submitted attempt_id: the server loads its pre-frozen rubric, derives success from criterion scores, and completes the evaluation atomically with the interaction. Calls without attempt_id remain explicit unverified routing observations and cannot establish retained, demonstrated, or transferred evidence.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params RecordInteractionParams) (*mcp.CallToolResult, any, error) {

@@ -6,10 +6,12 @@ package memory
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -67,6 +69,101 @@ const sessionFilenameLayout = "2006-01-02T15-04-05Z"
 // Multi-node deployments must still disable this node-local backend.
 var writeLocks [64]sync.Mutex
 
+var ErrQuotaExceeded = errors.New("memory: quota exceeded")
+
+type Limits struct {
+	MaxWriteBytes       int64
+	MaxFileBytes        int64
+	MaxLearnerBytes     int64
+	MaxFilesPerLearner  int
+	MaxConcurrentWrites int
+}
+
+var defaultLimits = Limits{
+	MaxWriteBytes:       256 << 10,
+	MaxFileBytes:        1 << 20,
+	MaxLearnerBytes:     16 << 20,
+	MaxFilesPerLearner:  2048,
+	MaxConcurrentWrites: 32,
+}
+
+var limitsState = struct {
+	sync.RWMutex
+	limits Limits
+	sem    chan struct{}
+}{limits: defaultLimits, sem: make(chan struct{}, defaultLimits.MaxConcurrentWrites)}
+
+func LimitsFromEnv() (Limits, error) {
+	limits := defaultLimits
+	var err error
+	if limits.MaxWriteBytes, err = memoryLimitEnv("TUTOR_MCP_MEMORY_MAX_WRITE_BYTES", limits.MaxWriteBytes, 1, 64<<20); err != nil {
+		return Limits{}, err
+	}
+	if limits.MaxFileBytes, err = memoryLimitEnv("TUTOR_MCP_MEMORY_MAX_FILE_BYTES", limits.MaxFileBytes, 1, 256<<20); err != nil {
+		return Limits{}, err
+	}
+	if limits.MaxLearnerBytes, err = memoryLimitEnv("TUTOR_MCP_MEMORY_MAX_LEARNER_BYTES", limits.MaxLearnerBytes, 1, 4<<30); err != nil {
+		return Limits{}, err
+	}
+	maxFiles, err := memoryLimitEnv("TUTOR_MCP_MEMORY_MAX_FILES_PER_LEARNER", int64(limits.MaxFilesPerLearner), 1, 100_000)
+	if err != nil {
+		return Limits{}, err
+	}
+	maxConcurrent, err := memoryLimitEnv("TUTOR_MCP_MEMORY_MAX_CONCURRENT_WRITES", int64(limits.MaxConcurrentWrites), 1, 1024)
+	if err != nil {
+		return Limits{}, err
+	}
+	limits.MaxFilesPerLearner = int(maxFiles)
+	limits.MaxConcurrentWrites = int(maxConcurrent)
+	if err := validateLimits(limits); err != nil {
+		return Limits{}, err
+	}
+	return limits, nil
+}
+
+func memoryLimitEnv(name string, fallback, min, max int64) (int64, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value < min || value > max {
+		return 0, fmt.Errorf("memory: %s must be an integer between %d and %d", name, min, max)
+	}
+	return value, nil
+}
+
+func validateLimits(limits Limits) error {
+	if limits.MaxWriteBytes <= 0 || limits.MaxFileBytes <= 0 || limits.MaxLearnerBytes <= 0 ||
+		limits.MaxFilesPerLearner <= 0 || limits.MaxConcurrentWrites <= 0 {
+		return fmt.Errorf("memory: all quota limits must be positive")
+	}
+	if limits.MaxWriteBytes > limits.MaxFileBytes {
+		return fmt.Errorf("memory: maximum write size must not exceed maximum file size")
+	}
+	if limits.MaxFileBytes > limits.MaxLearnerBytes {
+		return fmt.Errorf("memory: maximum file size must not exceed learner quota")
+	}
+	return nil
+}
+
+func ConfigureLimits(limits Limits) error {
+	if err := validateLimits(limits); err != nil {
+		return err
+	}
+	limitsState.Lock()
+	defer limitsState.Unlock()
+	limitsState.limits = limits
+	limitsState.sem = make(chan struct{}, limits.MaxConcurrentWrites)
+	return nil
+}
+
+func configuredLimits() (Limits, chan struct{}) {
+	limitsState.RLock()
+	defer limitsState.RUnlock()
+	return limitsState.limits, limitsState.sem
+}
+
 func Enabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("TUTOR_MCP_MEMORY_ENABLED"))) {
 	case "0", "false", "off", "no":
@@ -112,6 +209,16 @@ func Write(req WriteRequest) error {
 	if req.LearnerID == "" {
 		return errors.New("memory: learner_id is required")
 	}
+	limits, sem := configuredLimits()
+	if int64(len(req.Content)) > limits.MaxWriteBytes {
+		return fmt.Errorf("%w: write payload exceeds %d bytes", ErrQuotaExceeded, limits.MaxWriteBytes)
+	}
+	select {
+	case sem <- struct{}{}:
+		defer func() { <-sem }()
+	default:
+		return fmt.Errorf("%w: too many concurrent writes", ErrQuotaExceeded)
+	}
 	if req.Operation == "" {
 		req.Operation = defaultOperation(req.Scope)
 	}
@@ -126,19 +233,26 @@ func Write(req WriteRequest) error {
 		return fmt.Errorf("memory: create parent: %w", err)
 	}
 
-	lock := memoryWriteLock(path)
+	base, err := learnerDir(req.LearnerID)
+	if err != nil {
+		return err
+	}
+	// Learner-wide serialization makes cumulative quota checks atomic across
+	// different files belonging to the same learner.
+	lock := memoryWriteLock(base)
 	lock.Lock()
 	defer lock.Unlock()
 
+	var next string
 	switch req.Operation {
 	case OpReplaceFile:
-		return atomicWrite(path, req.Content)
+		next = req.Content
 	case OpAppend:
-		current, err := os.ReadFile(path)
+		current, err := readNarrativeFile(path, limits.MaxFileBytes)
 		if err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("memory: read for append: %w", err)
 		}
-		next := string(current)
+		next = string(current)
 		if next != "" && !strings.HasSuffix(next, "\n") {
 			next += "\n"
 		}
@@ -146,20 +260,76 @@ func Write(req WriteRequest) error {
 		if !strings.HasSuffix(next, "\n") {
 			next += "\n"
 		}
-		return atomicWrite(path, next)
 	case OpReplaceSection:
 		if strings.TrimSpace(req.SectionKey) == "" {
 			return errors.New("memory: section_key is required for replace_section")
 		}
-		currentBytes, err := os.ReadFile(path)
+		currentBytes, err := readNarrativeFile(path, limits.MaxFileBytes)
 		if err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("memory: read for replace_section: %w", err)
 		}
-		next := replaceMarkdownSection(string(currentBytes), req.SectionKey, req.Content)
-		return atomicWrite(path, next)
+		next = replaceMarkdownSection(string(currentBytes), req.SectionKey, req.Content)
 	default:
 		return fmt.Errorf("memory: unsupported operation %q", req.Operation)
 	}
+	if err := enforceWriteQuota(base, path, int64(len(next)), limits); err != nil {
+		return err
+	}
+	return atomicWrite(path, next)
+}
+
+func enforceWriteQuota(base, target string, nextSize int64, limits Limits) error {
+	if nextSize > limits.MaxFileBytes {
+		return fmt.Errorf("%w: file exceeds %d bytes", ErrQuotaExceeded, limits.MaxFileBytes)
+	}
+	var totalBytes, oldSize int64
+	fileCount := 0
+	targetExists := false
+	err := filepath.WalkDir(base, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".md" {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		fileCount++
+		totalBytes += info.Size()
+		if path == target {
+			targetExists = true
+			oldSize = info.Size()
+		}
+		if fileCount > limits.MaxFilesPerLearner {
+			return ErrQuotaExceeded
+		}
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, ErrQuotaExceeded) {
+			return fmt.Errorf("%w: existing learner memory is already over quota", ErrQuotaExceeded)
+		}
+		return fmt.Errorf("memory: inspect learner quota: %w", err)
+	}
+	prospectiveFiles := fileCount
+	if !targetExists {
+		prospectiveFiles++
+	}
+	if prospectiveFiles > limits.MaxFilesPerLearner {
+		return fmt.Errorf("%w: learner file count exceeds %d", ErrQuotaExceeded, limits.MaxFilesPerLearner)
+	}
+	if prospectiveBytes := totalBytes - oldSize + nextSize; prospectiveBytes > limits.MaxLearnerBytes {
+		return fmt.Errorf("%w: learner memory exceeds %d bytes", ErrQuotaExceeded, limits.MaxLearnerBytes)
+	}
+	return nil
 }
 
 func Read(learnerID string, scope Scope, key string) (string, error) {
@@ -183,7 +353,8 @@ func Read(learnerID string, scope Scope, key string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	data, err := os.ReadFile(path)
+	limits, _ := configuredLimits()
+	data, err := readNarrativeFile(path, limits.MaxFileBytes)
 	if os.IsNotExist(err) {
 		return "", nil
 	}
@@ -206,7 +377,8 @@ func ReadDomainConcept(learnerID, domainID, concept string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	data, err := os.ReadFile(path)
+	limits, _ := configuredLimits()
+	data, err := readNarrativeFile(path, limits.MaxFileBytes)
 	if os.IsNotExist(err) {
 		return "", nil
 	}
@@ -214,6 +386,32 @@ func ReadDomainConcept(learnerID, domainID, concept string) (string, error) {
 		return "", fmt.Errorf("memory: read domain concept: %w", err)
 	}
 	return string(data), nil
+}
+
+func readNarrativeFile(path string, maxBytes int64) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("memory: narrative path is not a regular file")
+	}
+	if info.Size() > maxBytes {
+		return nil, fmt.Errorf("%w: file exceeds %d bytes", ErrQuotaExceeded, maxBytes)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("%w: file exceeds %d bytes", ErrQuotaExceeded, maxBytes)
+	}
+	return data, nil
 }
 
 func ListSessions(learnerID string) ([]time.Time, error) {

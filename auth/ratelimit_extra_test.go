@@ -7,6 +7,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -24,6 +25,13 @@ func (b *recordingRateLimitBackend) Allow(_ context.Context, key string, _ float
 type failingRateLimitBackend struct{}
 
 func (failingRateLimitBackend) Allow(context.Context, string, float64, int, time.Time) (bool, error) {
+	return false, errors.New("backend unavailable")
+}
+
+type deadlineRateLimitBackend struct{ deadline bool }
+
+func (b *deadlineRateLimitBackend) Allow(ctx context.Context, _ string, _ float64, _ int, _ time.Time) (bool, error) {
+	_, b.deadline = ctx.Deadline()
 	return false, errors.New("backend unavailable")
 }
 
@@ -79,9 +87,35 @@ func TestRateLimiter_BackendFailureUsesBoundedLocalFallback(t *testing.T) {
 	}
 }
 
+func TestRateLimiterBackendCallHasDeadline(t *testing.T) {
+	backend := &deadlineRateLimitBackend{}
+	rl := NewRateLimiter(1, 1)
+	defer rl.Stop()
+	rl.SetBackend(backend)
+	_ = rl.Allow("caller")
+	if !backend.deadline {
+		t.Fatal("shared rate-limit backend call had no deadline")
+	}
+}
+
+func TestRateLimiterBoundsUniqueLocalBuckets(t *testing.T) {
+	rl := NewRateLimiter(0, 1)
+	defer rl.Stop()
+	for i := 0; i < maxLocalRateLimitBuckets+500; i++ {
+		rl.Allow(fmt.Sprintf("198.51.100.%d", i))
+	}
+	if got := len(rl.buckets); got != maxLocalRateLimitBuckets {
+		t.Fatalf("buckets=%d, want cap %d", got, maxLocalRateLimitBuckets)
+	}
+	if got := rl.lru.Len(); got != maxLocalRateLimitBuckets {
+		t.Fatalf("LRU entries=%d, want cap %d", got, maxLocalRateLimitBuckets)
+	}
+}
+
 func TestRateLimiter_Stop_ClosesChannel(t *testing.T) {
 	rl := NewRateLimiter(1, 1)
 	rl.Stop()
+	rl.Stop() // idempotent lifecycle cleanup
 	// Reading from a closed channel returns immediately with zero value.
 	select {
 	case _, ok := <-rl.stop:

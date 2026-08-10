@@ -413,7 +413,62 @@ CREATE INDEX IF NOT EXISTS idx_wmq_domain_active
 WHERE BTRIM(COALESCE(client_id, '')) = ''
    OR BTRIM(COALESCE(redirect_uri, '')) = ''
    OR code_challenge_method <> 'S256'
-   OR BTRIM(COALESCE(code_challenge, '')) = ''`,
+	   OR BTRIM(COALESCE(code_challenge, '')) = ''`,
+	},
+	{
+		Version: "postgres_0022_bind_oauth_credentials_to_resource",
+		Body: `ALTER TABLE oauth_codes
+    ADD COLUMN IF NOT EXISTS resource TEXT NOT NULL DEFAULT '';
+ALTER TABLE refresh_tokens
+    ADD COLUMN IF NOT EXISTS resource TEXT NOT NULL DEFAULT '';
+DELETE FROM oauth_codes WHERE BTRIM(resource) = '';
+UPDATE refresh_tokens
+SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP)
+WHERE BTRIM(resource) = '';
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_client_resource
+    ON refresh_tokens(client_id, resource)`,
+	},
+	{
+		Version: "postgres_0023_expire_dynamic_oauth_clients",
+		Body: `ALTER TABLE oauth_clients
+    ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_oauth_clients_expires_at
+    ON oauth_clients(expires_at)`,
+	},
+	{
+		Version: "postgres_0024_verified_email_and_account_tokens",
+		Body: `ALTER TABLE learners
+    ADD COLUMN IF NOT EXISTS email_verified_at TIMESTAMPTZ;
+UPDATE learners SET email_verified_at = COALESCE(created_at, CURRENT_TIMESTAMP)
+WHERE email_verified_at IS NULL;
+ALTER TABLE learners ALTER COLUMN email_verified_at DROP NOT NULL;
+CREATE TABLE IF NOT EXISTS account_tokens (
+    token_hash            TEXT PRIMARY KEY,
+    learner_id            TEXT NOT NULL REFERENCES learners(id),
+    purpose               TEXT NOT NULL CHECK (purpose IN ('email_verification','password_reset')),
+    client_id             TEXT NOT NULL DEFAULT '',
+    redirect_uri          TEXT NOT NULL DEFAULT '',
+    resource              TEXT NOT NULL DEFAULT '',
+    state                 TEXT NOT NULL DEFAULT '',
+    scope                 TEXT NOT NULL DEFAULT '',
+    code_challenge        TEXT NOT NULL DEFAULT '',
+    code_challenge_method TEXT NOT NULL DEFAULT '',
+    expires_at            TIMESTAMPTZ NOT NULL,
+    created_at            TIMESTAMPTZ NOT NULL,
+    consumed_at           TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_account_tokens_learner_purpose
+    ON account_tokens(learner_id, purpose, expires_at)`,
+	},
+	{
+		Version: "postgres_0025_learning_read_hot_paths",
+		Body: `CREATE INDEX IF NOT EXISTS idx_assessment_attempts_evaluated_recent
+    ON assessment_attempts(learner_id, domain_id, concept_id, evaluated_at DESC)
+    WHERE status = 'evaluated'
+      AND submitted_at IS NOT NULL
+      AND evaluated_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_interactions_domain_recent
+    ON interactions(learner_id, domain_id, created_at DESC)`,
 	},
 }
 

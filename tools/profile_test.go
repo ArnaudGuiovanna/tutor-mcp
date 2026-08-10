@@ -140,14 +140,14 @@ func TestUpdateLearnerProfile_CorruptStoredProfileIsNotOverwritten(t *testing.T)
 func TestUpdateLearnerProfile_DroppedFieldsRejected(t *testing.T) {
 	_, deps := setupToolsTest(t)
 	for _, key := range []string{"level", "background", "learning_style", "calibration_bias", "autonomy_score"} {
-		_, err := callToolRaw(t, deps, registerUpdateLearnerProfile, "L_owner", "update_learner_profile", map[string]any{
+		res, err := callToolRaw(t, deps, registerUpdateLearnerProfile, "L_owner", "update_learner_profile", map[string]any{
 			key: "x",
 		})
-		if err == nil {
-			t.Fatalf("posting deprecated key %q should be rejected by JSON-schema validator, got nil error", key)
+		if err != nil {
+			t.Fatalf("posting deprecated key %q returned transport error: %v", key, err)
 		}
-		if !strings.Contains(err.Error(), "additional properties") {
-			t.Errorf("posting deprecated key %q: expected 'additional properties' rejection, got %v", key, err)
+		if res == nil || !res.IsError || !strings.Contains(resultText(res), "additional properties") {
+			t.Errorf("posting deprecated key %q: expected additional-properties tool error, got %+v", key, res)
 		}
 	}
 }

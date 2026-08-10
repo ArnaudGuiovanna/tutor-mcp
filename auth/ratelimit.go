@@ -5,6 +5,7 @@
 package auth
 
 import (
+	"container/list"
 	"context"
 	"log/slog"
 	"net"
@@ -31,16 +32,23 @@ type RateLimitBackend = storeport.RateLimitBackend
 type bucket struct {
 	tokens   float64
 	lastTime time.Time
+	elem     *list.Element
 }
+
+const authBackendTimeout = 2 * time.Second
+
+const maxLocalRateLimitBuckets = 10_000
 
 // RateLimiter implements a token bucket rate limiter keyed by caller identity.
 type RateLimiter struct {
 	mu        sync.Mutex
 	buckets   map[string]*bucket
+	lru       *list.List
 	rate      float64 // tokens per second
 	burst     int     // max tokens
 	namespace string  // separates policies sharing one persistent backend
 	stop      chan struct{}
+	stopOnce  sync.Once
 	backend   RateLimitBackend // optional shared store; nil = in-memory only
 }
 
@@ -60,6 +68,7 @@ func NewRateLimiterWithNamespace(namespace string, rate float64, burst int) *Rat
 	}
 	rl := &RateLimiter{
 		buckets:   make(map[string]*bucket),
+		lru:       list.New(),
 		rate:      rate,
 		burst:     burst,
 		namespace: namespace,
@@ -84,7 +93,9 @@ func (rl *RateLimiter) Allow(key string) bool {
 	rl.mu.Unlock()
 	if backend != nil {
 		backendKey := rl.namespace + ":" + key
-		allowed, err := backend.Allow(context.Background(), backendKey, rl.rate, rl.burst, time.Now())
+		ctx, cancel := context.WithTimeout(context.Background(), authBackendTimeout)
+		allowed, err := backend.Allow(ctx, backendKey, rl.rate, rl.burst, time.Now())
+		cancel()
 		if err != nil {
 			// Preserve availability without turning a shared-store outage into
 			// an unthrottled authentication endpoint. The local bucket is weaker
@@ -104,9 +115,18 @@ func (rl *RateLimiter) allowLocal(key string, now time.Time) bool {
 
 	b, ok := rl.buckets[key]
 	if !ok {
-		rl.buckets[key] = &bucket{tokens: float64(rl.burst) - 1, lastTime: now}
+		if len(rl.buckets) >= maxLocalRateLimitBuckets {
+			if oldest := rl.lru.Back(); oldest != nil {
+				oldestKey, _ := oldest.Value.(string)
+				delete(rl.buckets, oldestKey)
+				rl.lru.Remove(oldest)
+			}
+		}
+		elem := rl.lru.PushFront(key)
+		rl.buckets[key] = &bucket{tokens: float64(rl.burst) - 1, lastTime: now, elem: elem}
 		return true
 	}
+	rl.lru.MoveToFront(b.elem)
 
 	// Refill tokens based on elapsed time
 	elapsed := now.Sub(b.lastTime).Seconds()
@@ -125,7 +145,7 @@ func (rl *RateLimiter) allowLocal(key string, now time.Time) bool {
 
 // Stop shuts down the background cleanup goroutine.
 func (rl *RateLimiter) Stop() {
-	close(rl.stop)
+	rl.stopOnce.Do(func() { close(rl.stop) })
 }
 
 func (rl *RateLimiter) cleanup() {
@@ -139,6 +159,7 @@ func (rl *RateLimiter) cleanup() {
 			for key, b := range rl.buckets {
 				if b.lastTime.Before(cutoff) {
 					delete(rl.buckets, key)
+					rl.lru.Remove(b.elem)
 				}
 			}
 			rl.mu.Unlock()

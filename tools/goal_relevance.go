@@ -45,7 +45,7 @@ func registerSetGoalRelevance(server *mcp.Server, deps *Deps) {
 	if !regulationGoalEnabled() {
 		return
 	}
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name: "set_goal_relevance",
 		Description: "Decompose the learner's personal_goal against the domain's concepts. " +
 			"For each concept, provide a score in 0..1: 1.0 = central to the goal, " +
@@ -185,7 +185,7 @@ func registerGetGoalRelevance(server *mcp.Server, deps *Deps) {
 	if !regulationGoalEnabled() {
 		return
 	}
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name: "get_goal_relevance",
 		Description: "Read the stored relevance vector for a domain and the list of concepts not yet covered. " +
 			"Observation tool: use to decide whether to complete with set_goal_relevance (e.g. after add_concepts).",

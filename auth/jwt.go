@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -36,10 +37,12 @@ func LoadJWTSecret() error {
 	return nil
 }
 
-// JWTAudience is the resource identifier embedded in the aud claim and
-// required by VerifyJWT. Keeping it stable (independent of BASE_URL) means
-// tokens stay valid if the public hostname changes.
-const JWTAudience = "tutor-mcp/mcp"
+// MCPResource returns the canonical protected-resource identifier advertised
+// by OAuth metadata. Access tokens are deliberately tied to this exact URI so
+// a token minted for another deployment or endpoint cannot be replayed here.
+func MCPResource(baseURL string) string {
+	return strings.TrimRight(baseURL, "/") + "/mcp"
+}
 
 type Claims struct {
 	jwt.RegisteredClaims
@@ -47,11 +50,20 @@ type Claims struct {
 }
 
 func GenerateJWT(issuer, learnerID string) (string, error) {
+	return GenerateJWTForResource(issuer, MCPResource(issuer), learnerID)
+}
+
+// GenerateJWTForResource signs an access token for an explicitly authorized
+// RFC 8707 resource. Only this server's canonical /mcp URI is issuable.
+func GenerateJWTForResource(issuer, resource, learnerID string) (string, error) {
+	if resource == "" || resource != MCPResource(issuer) {
+		return "", fmt.Errorf("resource must equal the canonical MCP resource")
+	}
 	claims := Claims{
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   learnerID,
 			Issuer:    issuer,
-			Audience:  jwt.ClaimStrings{JWTAudience},
+			Audience:  jwt.ClaimStrings{resource},
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(AccessTokenTTL)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 		},
@@ -61,7 +73,20 @@ func GenerateJWT(issuer, learnerID string) (string, error) {
 	return token.SignedString(jwtSecret)
 }
 
-func VerifyJWT(tokenString, expectedIssuer string) (string, error) {
+// VerifyJWTClaims validates an access token and returns the claims needed by
+// HTTP authentication middleware. In particular, callers must use the actual
+// expiry carried by the token rather than manufacturing a new lifetime after
+// validation.
+func VerifyJWTClaims(tokenString, expectedIssuer string) (*Claims, error) {
+	return VerifyJWTClaimsForResource(tokenString, expectedIssuer, MCPResource(expectedIssuer))
+}
+
+// VerifyJWTClaimsForResource validates issuer and the exact protected-resource
+// audience. A legacy logical audience such as "tutor-mcp/mcp" is rejected.
+func VerifyJWTClaimsForResource(tokenString, expectedIssuer, expectedResource string) (*Claims, error) {
+	if expectedResource == "" || expectedResource != MCPResource(expectedIssuer) {
+		return nil, fmt.Errorf("invalid expected resource")
+	}
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("invalid token")
@@ -69,15 +94,32 @@ func VerifyJWT(tokenString, expectedIssuer string) (string, error) {
 		return jwtSecret, nil
 	},
 		jwt.WithIssuer(expectedIssuer),
-		jwt.WithAudience(JWTAudience),
+		jwt.WithAudience(expectedResource),
 		jwt.WithValidMethods([]string{"HS256"}),
+		jwt.WithExpirationRequired(),
 	)
 	if err != nil {
-		return "", fmt.Errorf("invalid token: %w", err)
+		return nil, fmt.Errorf("invalid token: %w", err)
 	}
 	claims, ok := token.Claims.(*Claims)
 	if !ok || !token.Valid {
-		return "", fmt.Errorf("invalid claims")
+		return nil, fmt.Errorf("invalid claims")
+	}
+	if claims.Subject == "" {
+		return nil, fmt.Errorf("invalid claims: subject is required")
+	}
+	if claims.ExpiresAt == nil {
+		return nil, fmt.Errorf("invalid claims: expiration is required")
+	}
+	return claims, nil
+}
+
+// VerifyJWT is the compatibility wrapper used by callers that only need the
+// authenticated learner identifier.
+func VerifyJWT(tokenString, expectedIssuer string) (string, error) {
+	claims, err := VerifyJWTClaims(tokenString, expectedIssuer)
+	if err != nil {
+		return "", err
 	}
 	return claims.Subject, nil
 }

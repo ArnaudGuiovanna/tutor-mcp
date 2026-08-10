@@ -48,9 +48,10 @@ const (
 )
 
 type Store struct {
-	db      sqlExecutor // *sql.DB normally; *sql.Tx inside WithTx — query methods use this unchanged
-	root    *sql.DB     // the real pool. For WithTx/Ping/Close/Migrate + internal BeginTx. nil in a tx-scoped Store.
-	dialect Dialect     // SQL flavor; propagated into tx-scoped Stores by WithTx.
+	db            sqlExecutor // *sql.DB normally; *sql.Tx inside WithTx — query methods use this unchanged
+	root          *sql.DB     // the real pool. For WithTx/Ping/Close/Migrate + internal BeginTx. nil in a tx-scoped Store.
+	dialect       Dialect     // SQL flavor; propagated into tx-scoped Stores by WithTx.
+	secretKeyring *IntegrationSecretKeyring
 }
 
 // RawDB returns the underlying *sql.DB. Intended for tests that need
@@ -75,7 +76,7 @@ func (s *Store) Ping(ctx context.Context) error { return s.root.PingContext(ctx)
 func (s *Store) Close() error { return s.root.Close() }
 
 // Migrate runs the schema migrations. (Wraps the package-level Migrate.)
-func (s *Store) Migrate(ctx context.Context) error { return Migrate(s.root) }
+func (s *Store) Migrate(ctx context.Context) error { return MigrateContext(ctx, s.root) }
 
 // rebind converts '?' placeholders to PostgreSQL's $1,$2,... when the dialect
 // is Postgres. For SQLite it returns the query unchanged. (Queries never embed
@@ -222,8 +223,11 @@ func (s *Store) WithTx(ctx context.Context, fn func(s store.Store) error) error 
 	if err != nil {
 		return err
 	}
-	if err := fn(&Store{db: tx, root: nil, dialect: s.dialect}); err != nil {
-		_ = tx.Rollback()
+	// Rollback is intentionally deferred immediately after BeginTx so the
+	// connection and any locks are released even when fn panics. Rollback is
+	// harmless after a successful Commit (it returns sql.ErrTxDone).
+	defer func() { _ = tx.Rollback() }()
+	if err := fn(&Store{db: tx, root: nil, dialect: s.dialect, secretKeyring: s.secretKeyring}); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -244,9 +248,11 @@ func (s *Store) inTx(ctx context.Context, opts *sql.TxOptions, fn func(txs *Stor
 	if err != nil {
 		return err
 	}
-	txs := &Store{db: tx, dialect: s.dialect}
+	// Keep the transaction cleanup panic-safe for every internal transaction,
+	// just as WithTx does for caller-provided callbacks.
+	defer func() { _ = tx.Rollback() }()
+	txs := &Store{db: tx, dialect: s.dialect, secretKeyring: s.secretKeyring}
 	if err := fn(txs); err != nil {
-		_ = tx.Rollback()
 		return err
 	}
 	return tx.Commit()
@@ -348,6 +354,15 @@ func boolToInt(b bool) int {
 // ─── Learners ────────────────────────────────────────────────────────────────
 
 func (s *Store) CreateLearner(ctx context.Context, email, passwordHash, objective, webhookURL string) (*models.Learner, error) {
+	now := time.Now().UTC()
+	return s.createLearner(ctx, email, passwordHash, objective, webhookURL, &now)
+}
+
+func (s *Store) CreateUnverifiedLearner(ctx context.Context, email, passwordHash, objective, webhookURL string) (*models.Learner, error) {
+	return s.createLearner(ctx, email, passwordHash, objective, webhookURL, nil)
+}
+
+func (s *Store) createLearner(ctx context.Context, email, passwordHash, objective, webhookURL string, verifiedAt *time.Time) (*models.Learner, error) {
 	if webhookURL != "" && !webhookurl.IsSafeWebhookURL(webhookURL) {
 		return nil, fmt.Errorf("invalid webhook_url: must use an allowed Discord HTTPS endpoint")
 	}
@@ -356,46 +371,52 @@ func (s *Store) CreateLearner(ctx context.Context, email, passwordHash, objectiv
 		return nil, err
 	}
 	now := time.Now().UTC()
+	storedWebhookURL, err := s.encryptIntegrationSecret(id, webhookURL)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt webhook URL: %w", err)
+	}
 	_, err = s.exec(ctx,
-		`INSERT INTO learners (id, email, password_hash, objective, webhook_url, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		id, email, passwordHash, objective, webhookURL, now,
+		`INSERT INTO learners (id, email, password_hash, objective, webhook_url, created_at, email_verified_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		id, email, passwordHash, objective, storedWebhookURL, now, verifiedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create learner: %w", err)
 	}
 	return &models.Learner{
-		ID:           id,
-		Email:        email,
-		PasswordHash: passwordHash,
-		Objective:    objective,
-		WebhookURL:   webhookURL,
-		CreatedAt:    now,
+		ID:              id,
+		Email:           email,
+		PasswordHash:    passwordHash,
+		Objective:       objective,
+		WebhookURL:      webhookURL,
+		CreatedAt:       now,
+		EmailVerifiedAt: verifiedAt,
 	}, nil
 }
 
 func (s *Store) GetLearnerByID(ctx context.Context, id string) (*models.Learner, error) {
 	row := s.queryRow(ctx,
-		`SELECT id, email, password_hash, objective, webhook_url, profile_json, created_at, last_active
+		`SELECT id, email, password_hash, objective, webhook_url, profile_json, created_at, last_active, email_verified_at
 		 FROM learners WHERE id = ?`, id,
 	)
-	return scanLearner(row)
+	return s.scanLearner(row)
 }
 
 func (s *Store) GetLearnerByEmail(ctx context.Context, email string) (*models.Learner, error) {
 	row := s.queryRow(ctx,
-		`SELECT id, email, password_hash, objective, webhook_url, profile_json, created_at, last_active
+		`SELECT id, email, password_hash, objective, webhook_url, profile_json, created_at, last_active, email_verified_at
 		 FROM learners WHERE email = ?`, email,
 	)
-	return scanLearner(row)
+	return s.scanLearner(row)
 }
 
-func scanLearner(row *sql.Row) (*models.Learner, error) {
+func (s *Store) scanLearner(row *sql.Row) (*models.Learner, error) {
 	l := &models.Learner{}
 	var lastActive sql.NullTime
+	var emailVerifiedAt sql.NullTime
 	var profileJSON sql.NullString
 	err := row.Scan(
-		&l.ID, &l.Email, &l.PasswordHash, &l.Objective, &l.WebhookURL, &profileJSON, &l.CreatedAt, &lastActive,
+		&l.ID, &l.Email, &l.PasswordHash, &l.Objective, &l.WebhookURL, &profileJSON, &l.CreatedAt, &lastActive, &emailVerifiedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("scan learner: %w", err)
@@ -403,11 +424,20 @@ func scanLearner(row *sql.Row) (*models.Learner, error) {
 	if lastActive.Valid {
 		l.LastActive = lastActive.Time
 	}
+	if emailVerifiedAt.Valid {
+		ts := emailVerifiedAt.Time
+		l.EmailVerifiedAt = &ts
+	}
 	if profileJSON.Valid {
 		l.ProfileJSON = profileJSON.String
 	} else {
 		l.ProfileJSON = "{}"
 	}
+	webhookURL, err := s.decryptIntegrationSecret(l.ID, l.WebhookURL)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt learner integration secret: %w", err)
+	}
+	l.WebhookURL = webhookURL
 	return l, nil
 }
 
@@ -424,7 +454,7 @@ func (s *Store) UpdateLastActive(ctx context.Context, id string) error {
 
 func (s *Store) GetActiveLearners(ctx context.Context) ([]*models.Learner, error) {
 	rows, err := s.query(ctx,
-		`SELECT id, email, password_hash, objective, webhook_url, profile_json, created_at, last_active
+		`SELECT id, email, password_hash, objective, webhook_url, profile_json, created_at, last_active, email_verified_at
 		 FROM learners WHERE webhook_url != ''`,
 	)
 	if err != nil {
@@ -436,20 +466,30 @@ func (s *Store) GetActiveLearners(ctx context.Context) ([]*models.Learner, error
 	for rows.Next() {
 		l := &models.Learner{}
 		var lastActive sql.NullTime
+		var emailVerifiedAt sql.NullTime
 		var profileJSON sql.NullString
 		if err := rows.Scan(
-			&l.ID, &l.Email, &l.PasswordHash, &l.Objective, &l.WebhookURL, &profileJSON, &l.CreatedAt, &lastActive,
+			&l.ID, &l.Email, &l.PasswordHash, &l.Objective, &l.WebhookURL, &profileJSON, &l.CreatedAt, &lastActive, &emailVerifiedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan learner row: %w", err)
 		}
 		if lastActive.Valid {
 			l.LastActive = lastActive.Time
 		}
+		if emailVerifiedAt.Valid {
+			ts := emailVerifiedAt.Time
+			l.EmailVerifiedAt = &ts
+		}
 		if profileJSON.Valid {
 			l.ProfileJSON = profileJSON.String
 		} else {
 			l.ProfileJSON = "{}"
 		}
+		webhookURL, err := s.decryptIntegrationSecret(l.ID, l.WebhookURL)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt learner integration secret: %w", err)
+		}
+		l.WebhookURL = webhookURL
 		learners = append(learners, l)
 	}
 	return learners, rows.Err()
@@ -476,7 +516,7 @@ func (s *Store) UpdateLearnerProfile(ctx context.Context, learnerID, profileJSON
 
 const refreshTokenHashPrefix = "sha256:"
 
-func newRefreshToken(learnerID, clientID, familyID string) (*models.RefreshToken, error) {
+func newRefreshToken(learnerID, clientID, resource, familyID string) (*models.RefreshToken, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return nil, fmt.Errorf("generate token: %w", err)
@@ -493,6 +533,7 @@ func newRefreshToken(learnerID, clientID, familyID string) (*models.RefreshToken
 		Token:     base64.RawURLEncoding.EncodeToString(b),
 		LearnerID: learnerID,
 		ClientID:  clientID,
+		Resource:  resource,
 		FamilyID:  familyID,
 		ExpiresAt: now.Add(30 * 24 * time.Hour),
 		CreatedAt: now,
@@ -510,25 +551,29 @@ func refreshTokenHash(token string) string {
 const refreshTokenInspectionPredicate = `(token = ? OR (token = ? AND token NOT LIKE 'sha256:%'))`
 
 func (s *Store) insertRefreshToken(ctx context.Context, rt *models.RefreshToken) error {
+	if strings.TrimSpace(rt.ClientID) == "" || strings.TrimSpace(rt.Resource) == "" {
+		return fmt.Errorf("refresh token client_id and resource are required")
+	}
 	_, err := s.exec(ctx,
 		`INSERT INTO refresh_tokens
-		    (token, learner_id, client_id, family_id, expires_at, created_at, used_at, revoked_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		refreshTokenHash(rt.Token), rt.LearnerID, nullString(rt.ClientID), rt.FamilyID,
+		    (token, learner_id, client_id, resource, family_id, expires_at, created_at, used_at, revoked_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		refreshTokenHash(rt.Token), rt.LearnerID, nullString(rt.ClientID), rt.Resource, rt.FamilyID,
 		rt.ExpiresAt, rt.CreatedAt, rt.UsedAt, rt.RevokedAt,
 	)
 	return err
 }
 
-// CreateRefreshToken issues a refresh token bound to (learnerID, clientID).
+// CreateRefreshToken issues a refresh token bound to
+// (learnerID, clientID, resource).
 // Unbound refresh tokens are never issued: allowing a NULL client to be
 // adopted during rotation lets any newly registered client redeem a stolen
 // pre-upgrade credential.
-func (s *Store) CreateRefreshToken(ctx context.Context, learnerID, clientID string) (*models.RefreshToken, error) {
-	if strings.TrimSpace(clientID) == "" {
-		return nil, fmt.Errorf("create refresh token: client_id is required")
+func (s *Store) CreateRefreshToken(ctx context.Context, learnerID, clientID, resource string) (*models.RefreshToken, error) {
+	if strings.TrimSpace(clientID) == "" || strings.TrimSpace(resource) == "" {
+		return nil, fmt.Errorf("create refresh token: client_id and resource are required")
 	}
-	rt, err := newRefreshToken(learnerID, clientID, "")
+	rt, err := newRefreshToken(learnerID, clientID, resource, "")
 	if err != nil {
 		return nil, err
 	}
@@ -543,12 +588,12 @@ func (s *Store) GetRefreshToken(ctx context.Context, token string) (*models.Refr
 	var clientID sql.NullString
 	var usedAt, revokedAt sql.NullTime
 	err := s.queryRow(ctx,
-		`SELECT learner_id, client_id, family_id, expires_at, created_at, used_at, revoked_at
+		`SELECT learner_id, client_id, resource, family_id, expires_at, created_at, used_at, revoked_at
 		 FROM refresh_tokens
 		 WHERE token = ?
 		   AND expires_at > ? AND used_at IS NULL AND revoked_at IS NULL`,
 		refreshTokenHash(token), time.Now().UTC(),
-	).Scan(&rt.LearnerID, &clientID, &rt.FamilyID, &rt.ExpiresAt, &rt.CreatedAt, &usedAt, &revokedAt)
+	).Scan(&rt.LearnerID, &clientID, &rt.Resource, &rt.FamilyID, &rt.ExpiresAt, &rt.CreatedAt, &usedAt, &revokedAt)
 	if err != nil {
 		return nil, fmt.Errorf("get refresh token: %w", err)
 	}
@@ -583,11 +628,11 @@ func (s *Store) DeleteRefreshToken(ctx context.Context, token string) error {
 // concurrency boundary: under PostgreSQL two simultaneous uses serialize on
 // the row; under SQLite BEGIN IMMEDIATE provides the same ordering. If
 // successor insertion fails, rollback restores the old token to active state.
-func (s *Store) RotateRefreshToken(ctx context.Context, token, clientID string) (*models.RefreshToken, error) {
-	if strings.TrimSpace(clientID) == "" {
+func (s *Store) RotateRefreshToken(ctx context.Context, token, clientID, resource string) (*models.RefreshToken, error) {
+	if strings.TrimSpace(clientID) == "" || strings.TrimSpace(resource) == "" {
 		return nil, fmt.Errorf("rotate refresh token: %w", store.ErrInvalidRefreshToken)
 	}
-	successor, err := newRefreshToken("", clientID, "")
+	successor, err := newRefreshToken("", clientID, resource, "")
 	if err != nil {
 		return nil, err
 	}
@@ -597,6 +642,7 @@ func (s *Store) RotateRefreshToken(ctx context.Context, token, clientID string) 
 	legacyRejected := false
 	err = s.inTx(ctx, nil, func(txs *Store) error {
 		var storedClientID sql.NullString
+		var storedResource string
 		err := txs.queryRow(ctx,
 			`UPDATE refresh_tokens
 			 SET used_at = ?,
@@ -606,25 +652,27 @@ func (s *Store) RotateRefreshToken(ctx context.Context, token, clientID string) 
 			   AND used_at IS NULL
 			   AND revoked_at IS NULL
 			   AND client_id = ?
-			 RETURNING learner_id, client_id, family_id`,
-			now, successor.FamilyID, refreshTokenHash(token), now, clientID,
-		).Scan(&successor.LearnerID, &storedClientID, &successor.FamilyID)
+			   AND resource = ?
+			 RETURNING learner_id, client_id, resource, family_id`,
+			now, successor.FamilyID, refreshTokenHash(token), now, clientID, resource,
+		).Scan(&successor.LearnerID, &storedClientID, &storedResource, &successor.FamilyID)
 		if errors.Is(err, sql.ErrNoRows) {
 			var familyID string
 			var existingClientID sql.NullString
+			var existingResource string
 			var usedAt, revokedAt sql.NullTime
 			lookupErr := txs.queryRow(ctx,
-				`SELECT family_id, client_id, used_at, revoked_at
+				`SELECT family_id, client_id, resource, used_at, revoked_at
 				 FROM refresh_tokens WHERE `+refreshTokenInspectionPredicate,
 				refreshTokenHash(token), token,
-			).Scan(&familyID, &existingClientID, &usedAt, &revokedAt)
+			).Scan(&familyID, &existingClientID, &existingResource, &usedAt, &revokedAt)
 			if errors.Is(lookupErr, sql.ErrNoRows) {
 				return store.ErrInvalidRefreshToken
 			}
 			if lookupErr != nil {
 				return fmt.Errorf("inspect rejected refresh token: %w", lookupErr)
 			}
-			if !existingClientID.Valid || existingClientID.String == "" {
+			if !existingClientID.Valid || existingClientID.String == "" || strings.TrimSpace(existingResource) == "" {
 				// Pre-binding tokens cannot prove which OAuth client originally
 				// received them. Revoke rather than assigning attacker-selected
 				// ownership on first use.
@@ -645,6 +693,9 @@ func (s *Store) RotateRefreshToken(ctx context.Context, token, clientID string) 
 				return nil
 			}
 			if existingClientID.Valid && existingClientID.String != "" && existingClientID.String != clientID {
+				return store.ErrInvalidRefreshToken
+			}
+			if existingResource != resource {
 				return store.ErrInvalidRefreshToken
 			}
 			if !usedAt.Valid && !revokedAt.Valid {
@@ -1893,12 +1944,15 @@ func (s *Store) getConceptsDueForReview(ctx context.Context, learnerID, domainID
 // CreateAuthCodeWithBinding persists the redirect URI and PKCE method used at
 // authorization time. Empty method/redirect values are accepted only so tests
 // can exercise rows created before those columns existed.
-func (s *Store) CreateAuthCodeWithBinding(ctx context.Context, code, learnerID, codeChallenge, codeChallengeMethod, clientID, redirectURI string, expiresAt time.Time) error {
+func (s *Store) CreateAuthCodeWithBinding(ctx context.Context, code, learnerID, codeChallenge, codeChallengeMethod, clientID, redirectURI, resource string, expiresAt time.Time) error {
+	if strings.TrimSpace(resource) == "" {
+		return fmt.Errorf("create auth code: resource is required")
+	}
 	_, err := s.exec(ctx,
 		`INSERT INTO oauth_codes
-		    (code, learner_id, code_challenge, code_challenge_method, client_id, redirect_uri, expires_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		code, learnerID, codeChallenge, codeChallengeMethod, clientID, redirectURI, expiresAt,
+		    (code, learner_id, code_challenge, code_challenge_method, client_id, redirect_uri, resource, expires_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		code, learnerID, codeChallenge, codeChallengeMethod, clientID, redirectURI, resource, expiresAt,
 	)
 	if err != nil {
 		return fmt.Errorf("create auth code: %w", err)
@@ -1912,11 +1966,16 @@ func (s *Store) CreateAuthCodeWithBinding(ctx context.Context, code, learnerID, 
 func (s *Store) GetAuthCode(ctx context.Context, code, clientID string) (*models.AuthCode, error) {
 	ac := &models.AuthCode{}
 	err := s.queryRow(ctx,
-		`SELECT code, learner_id, code_challenge, code_challenge_method, client_id, redirect_uri, expires_at
+		`SELECT code, learner_id, code_challenge, code_challenge_method, client_id, redirect_uri, resource, expires_at
 		 FROM oauth_codes
-		 WHERE code = ? AND client_id = ? AND expires_at > ?`,
+		 WHERE code = ? AND client_id = ? AND expires_at > ?
+		   AND EXISTS (
+		       SELECT 1 FROM learners
+		       WHERE learners.id = oauth_codes.learner_id
+		         AND learners.email_verified_at IS NOT NULL
+		   )`,
 		code, clientID, time.Now().UTC(),
-	).Scan(&ac.Code, &ac.LearnerID, &ac.CodeChallenge, &ac.CodeChallengeMethod, &ac.ClientID, &ac.RedirectURI, &ac.ExpiresAt)
+	).Scan(&ac.Code, &ac.LearnerID, &ac.CodeChallenge, &ac.CodeChallengeMethod, &ac.ClientID, &ac.RedirectURI, &ac.Resource, &ac.ExpiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("get auth code: %w", store.ErrInvalidAuthCode)
 	}
@@ -1935,9 +1994,14 @@ func (s *Store) ConsumeAuthCode(ctx context.Context, code, clientID string) (*mo
 	err := s.queryRow(ctx,
 		`DELETE FROM oauth_codes
 		 WHERE code = ? AND client_id = ? AND expires_at > ?
-		 RETURNING code, learner_id, code_challenge, code_challenge_method, client_id, redirect_uri, expires_at`,
+		   AND EXISTS (
+		       SELECT 1 FROM learners
+		       WHERE learners.id = oauth_codes.learner_id
+		         AND learners.email_verified_at IS NOT NULL
+		   )
+		 RETURNING code, learner_id, code_challenge, code_challenge_method, client_id, redirect_uri, resource, expires_at`,
 		code, clientID, time.Now().UTC(),
-	).Scan(&ac.Code, &ac.LearnerID, &ac.CodeChallenge, &ac.CodeChallengeMethod, &ac.ClientID, &ac.RedirectURI, &ac.ExpiresAt)
+	).Scan(&ac.Code, &ac.LearnerID, &ac.CodeChallenge, &ac.CodeChallengeMethod, &ac.ClientID, &ac.RedirectURI, &ac.Resource, &ac.ExpiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("consume auth code: %w", store.ErrInvalidAuthCode)
 	}
@@ -1955,7 +2019,7 @@ func (s *Store) ExchangeAuthCodeForRefreshToken(ctx context.Context, code, clien
 	if strings.TrimSpace(clientID) == "" {
 		return nil, nil, fmt.Errorf("exchange auth code: client_id is required")
 	}
-	rt, err := newRefreshToken("", clientID, "")
+	rt, err := newRefreshToken("", clientID, "", "")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1967,6 +2031,7 @@ func (s *Store) ExchangeAuthCodeForRefreshToken(ctx context.Context, code, clien
 			return consumeErr
 		}
 		rt.LearnerID = authCode.LearnerID
+		rt.Resource = authCode.Resource
 		if err := txs.insertRefreshToken(ctx, rt); err != nil {
 			return fmt.Errorf("create refresh token: %w", err)
 		}
@@ -1998,8 +2063,24 @@ func (s *Store) CreateOAuthClientWithSecret(ctx context.Context, clientID, clien
 // CreateOAuthClientWithSecretCapped persists a client only if the current row
 // count is still below maxClients. maxClients <= 0 disables the cap.
 func (s *Store) CreateOAuthClientWithSecretCapped(ctx context.Context, clientID, clientName, redirectURIs, secretHash string, maxClients int) error {
+	return s.createOAuthClientWithSecretCapped(ctx, clientID, clientName, redirectURIs, secretHash, maxClients, nil)
+}
+
+func (s *Store) CreateOAuthClientWithSecretCappedTTL(ctx context.Context, clientID, clientName, redirectURIs, secretHash string, maxClients int, expiresAt time.Time) error {
+	if expiresAt.IsZero() {
+		return fmt.Errorf("create oauth client: expires_at is required")
+	}
+	return s.createOAuthClientWithSecretCapped(ctx, clientID, clientName, redirectURIs, secretHash, maxClients, &expiresAt)
+}
+
+func (s *Store) createOAuthClientWithSecretCapped(ctx context.Context, clientID, clientName, redirectURIs, secretHash string, maxClients int, expiresAt *time.Time) error {
 	if maxClients <= 0 {
-		return s.CreateOAuthClientWithSecret(ctx, clientID, clientName, redirectURIs, secretHash)
+		_, err := s.exec(ctx,
+			`INSERT INTO oauth_clients (client_id, client_name, redirect_uris, client_secret_hash, expires_at)
+			 VALUES (?, ?, ?, ?, ?)`,
+			clientID, clientName, redirectURIs, secretHash, expiresAt,
+		)
+		return err
 	}
 	return s.inTx(ctx, txOptionsForDialect(s.dialect), func(txs *Store) error {
 		if txs.dialect == DialectPostgres {
@@ -2011,10 +2092,10 @@ func (s *Store) CreateOAuthClientWithSecretCapped(ctx context.Context, clientID,
 			}
 		}
 		result, err := txs.exec(ctx,
-			`INSERT INTO oauth_clients (client_id, client_name, redirect_uris, client_secret_hash)
-			 SELECT ?, ?, ?, ?
+			`INSERT INTO oauth_clients (client_id, client_name, redirect_uris, client_secret_hash, expires_at)
+			 SELECT ?, ?, ?, ?, ?
 			 WHERE (SELECT COUNT(*) FROM oauth_clients) < ?`,
-			clientID, clientName, redirectURIs, secretHash, maxClients,
+			clientID, clientName, redirectURIs, secretHash, expiresAt, maxClients,
 		)
 		if err != nil {
 			return fmt.Errorf("create oauth client: %w", err)
@@ -2041,17 +2122,60 @@ func (s *Store) CountOAuthClients(ctx context.Context) (int, error) {
 func (s *Store) GetOAuthClient(ctx context.Context, clientID string) (*models.OAuthClient, error) {
 	c := &models.OAuthClient{}
 	var secretHash sql.NullString
+	var expiresAt sql.NullTime
 	err := s.queryRow(ctx,
-		`SELECT client_id, client_name, redirect_uris, client_secret_hash FROM oauth_clients WHERE client_id = ?`,
-		clientID,
-	).Scan(&c.ClientID, &c.ClientName, &c.RedirectURIs, &secretHash)
+		`SELECT client_id, client_name, redirect_uris, client_secret_hash, expires_at
+		 FROM oauth_clients
+		 WHERE client_id = ? AND (expires_at IS NULL OR expires_at > ?)`,
+		clientID, time.Now().UTC(),
+	).Scan(&c.ClientID, &c.ClientName, &c.RedirectURIs, &secretHash, &expiresAt)
 	if err != nil {
 		return nil, fmt.Errorf("get oauth client: %w", err)
 	}
 	if secretHash.Valid {
 		c.ClientSecretHash = secretHash.String
 	}
+	if expiresAt.Valid {
+		ts := expiresAt.Time
+		c.ExpiresAt = &ts
+	}
 	return c, nil
+}
+
+// CleanupExpiredOAuthClients removes only ephemeral DCR clients. Long-lived
+// preregistered clients have NULL expires_at and are never selected. Related
+// credentials are invalidated first so no orphan can remain redeemable.
+func (s *Store) CleanupExpiredOAuthClients(ctx context.Context) (int64, error) {
+	var removed int64
+	now := time.Now().UTC()
+	err := s.inTx(ctx, nil, func(txs *Store) error {
+		if _, err := txs.exec(ctx,
+			`UPDATE refresh_tokens SET revoked_at = COALESCE(revoked_at, ?)
+			 WHERE client_id IN (SELECT client_id FROM oauth_clients WHERE expires_at IS NOT NULL AND expires_at <= ?)`,
+			now, now,
+		); err != nil {
+			return err
+		}
+		for _, table := range []string{"oauth_codes", "learner_approved_clients"} {
+			if _, err := txs.exec(ctx,
+				`DELETE FROM `+table+` WHERE client_id IN
+				 (SELECT client_id FROM oauth_clients WHERE expires_at IS NOT NULL AND expires_at <= ?)`,
+				now,
+			); err != nil {
+				return err
+			}
+		}
+		result, err := txs.exec(ctx, `DELETE FROM oauth_clients WHERE expires_at IS NOT NULL AND expires_at <= ?`, now)
+		if err != nil {
+			return err
+		}
+		removed, err = result.RowsAffected()
+		return err
+	})
+	if err != nil {
+		return 0, fmt.Errorf("cleanup expired oauth clients: %w", err)
+	}
+	return removed, nil
 }
 
 // IsClientApproved reports whether the learner has previously consented to the

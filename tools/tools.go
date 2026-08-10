@@ -24,6 +24,82 @@ type Deps struct {
 	BaseURL string
 }
 
+var readOnlyTools = map[string]bool{
+	"get_pending_alerts":             true,
+	"check_mastery":                  true,
+	"get_learner_context":            true,
+	"get_availability_model":         true,
+	"get_olm_snapshot":               true,
+	"get_pedagogical_snapshots":      true,
+	"get_decision_replay_summary":    true,
+	"validate_domain_graph":          true,
+	"get_autonomy_metrics":           true,
+	"feynman_challenge":              true,
+	"transfer_challenge":             true,
+	"read_raw_session":               true,
+	"get_misconceptions":             true,
+	"list_implementation_intentions": true,
+	"get_dashboard_state":            true,
+	"get_goal_relevance":             true,
+}
+
+// additiveWriteTools contains mutations that create or append state without
+// replacing/removing existing learner state. All other writes are marked
+// destructive conservatively so hosts can put an approval boundary around
+// overwrites, lifecycle transitions, and deletions.
+var additiveWriteTools = map[string]bool{
+	"start_learning_session":     true,
+	"get_next_activity":          true,
+	"record_interaction":         true,
+	"prepare_assessment_attempt": true,
+	"init_domain":                true,
+	"add_concepts":               true,
+	"record_affect":              true,
+	"calibration_check":          true,
+	"record_calibration_result":  true,
+	"record_transfer_result":     true,
+	"unarchive_domain":           true,
+	"get_metacognitive_mirror":   true,
+}
+
+// openWorldTools includes tools that directly enqueue work intended for an
+// external webhook destination, even when the network dispatch itself happens
+// asynchronously in the scheduler.
+var openWorldTools = map[string]bool{
+	"get_next_activity":        true,
+	"get_metacognitive_mirror": true,
+	"queue_webhook_message":    true,
+}
+
+func boolHint(v bool) *bool { return &v }
+
+// addTool is the single registration boundary for authorization and safety
+// metadata. ChatGPT consumes the securitySchemes compatibility entry from
+// _meta, while standard MCP clients consume ToolAnnotations.
+func addTool[In, Out any](server *mcp.Server, tool *mcp.Tool, handler mcp.ToolHandlerFor[In, Out]) {
+	readOnly := readOnlyTools[tool.Name]
+	destructive := !readOnly && !additiveWriteTools[tool.Name]
+	openWorld := openWorldTools[tool.Name]
+	tool.Annotations = &mcp.ToolAnnotations{
+		ReadOnlyHint:    readOnly,
+		DestructiveHint: boolHint(destructive),
+		// MCP defines this hint as an unconditional guarantee for repeated calls
+		// with identical arguments. Our replay protection is conditional on an
+		// optional idempotency_key, so advertising true would make keyless retries
+		// look safe when several mutations can still duplicate durable effects.
+		IdempotentHint: false,
+		OpenWorldHint:  boolHint(openWorld),
+	}
+	if tool.Meta == nil {
+		tool.Meta = mcp.Meta{}
+	}
+	tool.Meta["securitySchemes"] = []map[string]any{{
+		"type":   "oauth2",
+		"scopes": []string{"learner"},
+	}}
+	mcp.AddTool(server, tool, handler)
+}
+
 func getLearnerID(ctx context.Context) (string, error) {
 	id := auth.GetLearnerID(ctx)
 	if id == "" {

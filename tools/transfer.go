@@ -25,7 +25,7 @@ type TransferChallengeParams struct {
 }
 
 func registerTransferChallenge(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "transfer_challenge",
 		Description: "Generate a novel situation to probe transfer outside the training context. A transferred mastery claim still requires frozen assessment evidence and a trusted evaluation across multiple dimensions.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params TransferChallengeParams) (*mcp.CallToolResult, any, error) {
@@ -178,7 +178,7 @@ var allowedTransferContextTypes = []string{
 }
 
 func registerRecordTransferResult(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "record_transfer_result",
 		Description: "Record a legacy, unverified transfer observation for adaptive routing. It cannot establish transferred mastery; use the assessment-attempt workflow for evidence-bearing transfer probes.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params RecordTransferResultParams) (*mcp.CallToolResult, any, error) {

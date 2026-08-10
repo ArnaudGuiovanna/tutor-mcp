@@ -71,6 +71,10 @@ type OrchestratorInput struct {
 	// Logger receives FSM and persistence diagnostics. Nil disables
 	// orchestrator logging for callers that have not opted in.
 	Logger *slog.Logger
+	// EvidenceSnapshot lets a request that already loaded domain evidence reuse
+	// the same two-query snapshot across alerting and downstream enrichment.
+	// Nil preserves the standalone Orchestrate behaviour.
+	EvidenceSnapshot *EvidenceSnapshot
 }
 
 // orchestratorMaxRetries is the upper bound on FSM-driven pipeline
@@ -317,10 +321,13 @@ func fetchPipelineFixtures(ctx context.Context, store storeport.Store, domain *m
 			return nil, fmt.Errorf("get session start: %w", sessionErr)
 		}
 	}
-	alertEvidence, err := LoadMasteryAlertEvidence(ctx, store, input.LearnerID, domain.ID, domainStates)
+	evidenceSnapshot, err := ensureEvidenceSnapshot(
+		ctx, store, input.LearnerID, domain.ID, domain.Graph.Concepts, input.EvidenceSnapshot,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("load alert evidence: %w", err)
 	}
+	alertEvidence := evidenceSnapshot.ForMasteryAlerts(domainStates)
 	alerts := ComputeAlertsWithEvidenceAt(domainStates, domainInteractions, alertEvidence, sessionStart, input.Now)
 
 	return &pipelineFixtures{

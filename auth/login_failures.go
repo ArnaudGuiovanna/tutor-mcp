@@ -5,6 +5,7 @@
 package auth
 
 import (
+	"container/list"
 	"context"
 	"log/slog"
 	"sync"
@@ -32,17 +33,27 @@ type LoginFailureBackend = storeport.LoginFailureBackend
 // Reset to clear the history.
 type LoginFailureTracker struct {
 	mu        sync.Mutex
-	fails     map[string][]time.Time
+	fails     map[string]*loginFailureBucket
+	lru       *list.List
+	lastPrune time.Time
 	threshold int
 	window    time.Duration
 	backend   LoginFailureBackend // optional shared store; nil = in-memory only
 }
 
+type loginFailureBucket struct {
+	stamps []time.Time
+	elem   *list.Element
+}
+
+const maxLoginFailureBuckets = 10_000
+
 // NewLoginFailureTracker constructs a tracker with the given threshold and
 // rolling window. Threshold ≤ 0 disables the tracker (Allow always true).
 func NewLoginFailureTracker(threshold int, window time.Duration) *LoginFailureTracker {
 	return &LoginFailureTracker{
-		fails:     make(map[string][]time.Time),
+		fails:     make(map[string]*loginFailureBucket),
+		lru:       list.New(),
 		threshold: threshold,
 		window:    window,
 	}
@@ -67,7 +78,9 @@ func (t *LoginFailureTracker) Allow(email string) bool {
 	}
 	backend := t.getBackend()
 	if backend != nil {
-		n, err := backend.CountInWindow(context.Background(), email, t.window, time.Now())
+		ctx, cancel := context.WithTimeout(context.Background(), authBackendTimeout)
+		n, err := backend.CountInWindow(ctx, email, t.window, time.Now())
+		cancel()
 		if err != nil {
 			// Degrade to the process-local account bucket. This cannot reproduce
 			// fleet-wide state, but it avoids both a global lockout and a complete
@@ -83,8 +96,14 @@ func (t *LoginFailureTracker) Allow(email string) bool {
 func (t *LoginFailureTracker) allowLocal(email string, now time.Time) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.pruneAllLocked(now)
 	t.pruneLocked(email, now)
-	return len(t.fails[email]) < t.threshold
+	bucket := t.fails[email]
+	if bucket == nil {
+		return true
+	}
+	t.lru.MoveToFront(bucket.elem)
+	return len(bucket.stamps) < t.threshold
 }
 
 // Record stamps a new failure for the email and returns the resulting count
@@ -95,7 +114,9 @@ func (t *LoginFailureTracker) Record(email string) int {
 	}
 	backend := t.getBackend()
 	if backend != nil {
-		n, err := backend.Record(context.Background(), email, time.Now())
+		ctx, cancel := context.WithTimeout(context.Background(), authBackendTimeout)
+		n, err := backend.Record(ctx, email, time.Now())
+		cancel()
 		if err != nil {
 			slog.Warn("login failure backend error on Record, using local fallback", "err", err)
 			return t.recordLocal(email, time.Now())
@@ -108,9 +129,21 @@ func (t *LoginFailureTracker) Record(email string) int {
 func (t *LoginFailureTracker) recordLocal(email string, now time.Time) int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.pruneAllLocked(now)
 	t.pruneLocked(email, now)
-	t.fails[email] = append(t.fails[email], now)
-	return len(t.fails[email])
+	bucket := t.fails[email]
+	if bucket == nil {
+		if len(t.fails) >= maxLoginFailureBuckets {
+			t.removeOldestLocked()
+		}
+		bucket = &loginFailureBucket{}
+		bucket.elem = t.lru.PushFront(email)
+		t.fails[email] = bucket
+	} else {
+		t.lru.MoveToFront(bucket.elem)
+	}
+	bucket.stamps = append(bucket.stamps, now)
+	return len(bucket.stamps)
 }
 
 // Reset clears the failure history for an email — call on a successful login
@@ -121,13 +154,16 @@ func (t *LoginFailureTracker) Reset(email string) {
 	}
 	backend := t.getBackend()
 	if backend != nil {
-		if err := backend.Reset(context.Background(), email); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), authBackendTimeout)
+		err := backend.Reset(ctx, email)
+		cancel()
+		if err != nil {
 			slog.Warn("login failure backend error on Reset", "err", err)
 		}
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	delete(t.fails, email)
+	t.removeBucketLocked(email)
 }
 
 func (t *LoginFailureTracker) getBackend() LoginFailureBackend {
@@ -138,7 +174,11 @@ func (t *LoginFailureTracker) getBackend() LoginFailureBackend {
 
 func (t *LoginFailureTracker) pruneLocked(email string, now time.Time) {
 	cutoff := now.Add(-t.window)
-	stamps := t.fails[email]
+	bucket := t.fails[email]
+	if bucket == nil {
+		return
+	}
+	stamps := bucket.stamps
 	fresh := stamps[:0]
 	for _, ts := range stamps {
 		if ts.After(cutoff) {
@@ -146,8 +186,32 @@ func (t *LoginFailureTracker) pruneLocked(email string, now time.Time) {
 		}
 	}
 	if len(fresh) == 0 {
-		delete(t.fails, email)
+		t.removeBucketLocked(email)
 		return
 	}
-	t.fails[email] = fresh
+	bucket.stamps = fresh
+}
+
+func (t *LoginFailureTracker) pruneAllLocked(now time.Time) {
+	if !t.lastPrune.IsZero() && now.Sub(t.lastPrune) < time.Minute {
+		return
+	}
+	for email := range t.fails {
+		t.pruneLocked(email, now)
+	}
+	t.lastPrune = now
+}
+
+func (t *LoginFailureTracker) removeOldestLocked() {
+	if elem := t.lru.Back(); elem != nil {
+		email, _ := elem.Value.(string)
+		t.removeBucketLocked(email)
+	}
+}
+
+func (t *LoginFailureTracker) removeBucketLocked(email string) {
+	if bucket := t.fails[email]; bucket != nil {
+		t.lru.Remove(bucket.elem)
+		delete(t.fails, email)
+	}
 }

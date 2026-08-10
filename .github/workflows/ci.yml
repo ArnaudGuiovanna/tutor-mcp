@@ -75,6 +75,11 @@ jobs:
       - name: Run tests
         run: go test -race -count=1 -timeout 6m -covermode=atomic -coverprofile=coverage.out ./...
 
+      - name: Enforce MCP hot-path performance budget
+        env:
+          MCP_PERF_BUDGET: "1"
+        run: go test -count=1 -timeout 3m ./tools -run '^TestGetPendingAlertsThenNextActivityP95Budget$'
+
       - name: Upload coverage
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -114,10 +119,10 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      - name: Test database package on PostgreSQL
+      - name: Test full package matrix with PostgreSQL integration enabled
         env:
           TUTOR_TEST_PG_DSN: postgres://tutor:tutor_test@localhost:5432/tutor_test?sslmode=disable
-        run: go test -race -count=1 -timeout 10m ./db
+        run: go test -race -count=1 -timeout 10m ./...
 
   build:
     name: Build (${{ matrix.goos }}/${{ matrix.goarch }})

@@ -6,12 +6,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -25,6 +28,7 @@ import (
 	"tutor-mcp/auth"
 	"tutor-mcp/db"
 	"tutor-mcp/engine"
+	"tutor-mcp/memory"
 	"tutor-mcp/tools"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -62,6 +66,22 @@ func main() {
 	dbPath := cfg.DBPath
 	dbDriver := cfg.DBDriver
 	baseURL := cfg.BaseURL
+	memoryLimits, err := memory.LimitsFromEnv()
+	if err != nil {
+		logger.Error("invalid narrative memory limits", "err", err)
+		os.Exit(1)
+	}
+	if err := memory.ConfigureLimits(memoryLimits); err != nil {
+		logger.Error("configure narrative memory limits", "err", err)
+		os.Exit(1)
+	}
+	logger.Info("narrative memory limits",
+		"max_write_bytes", memoryLimits.MaxWriteBytes,
+		"max_file_bytes", memoryLimits.MaxFileBytes,
+		"max_learner_bytes", memoryLimits.MaxLearnerBytes,
+		"max_files_per_learner", memoryLimits.MaxFilesPerLearner,
+		"max_concurrent_writes", memoryLimits.MaxConcurrentWrites,
+	)
 
 	// Init JWT
 	if err := auth.LoadJWTSecret(); err != nil {
@@ -112,6 +132,24 @@ func main() {
 		logger.Error("unknown DB_DRIVER (want sqlite|postgres)", "driver", dbDriver)
 		os.Exit(1)
 	}
+	if encodedKeys := strings.TrimSpace(os.Getenv("INTEGRATION_SECRET_KEYS")); encodedKeys != "" {
+		keyring, err := db.NewIntegrationSecretKeyring(encodedKeys, os.Getenv("INTEGRATION_SECRET_CURRENT_KEY_ID"))
+		if err != nil {
+			logger.Error("invalid integration secret keyring", "err", err)
+			os.Exit(1)
+		}
+		store.SetIntegrationSecretKeyring(keyring)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		rotated, err := store.RotateIntegrationSecrets(ctx)
+		cancel()
+		if err != nil {
+			logger.Error("failed to rotate integration secrets", "err", err)
+			os.Exit(1)
+		}
+		logger.Info("integration secret encryption enabled", "rotated_records", rotated)
+	} else {
+		logger.Warn("integration secret encryption disabled; webhook credentials remain plaintext")
+	}
 
 	// Create MCP server
 	mcpServer := mcp.NewServer(&mcp.Implementation{
@@ -122,34 +160,67 @@ func main() {
 	// Register tools
 	deps := &tools.Deps{Store: store, Logger: logger, BaseURL: baseURL}
 	tools.RegisterTools(mcpServer, deps)
+	// Install the deadline after tool registration so it wraps the idempotency
+	// middleware too: reservation, handler execution and replay finalization all
+	// share the same bounded context. It applies only to tools/call, never to
+	// initialization, discovery, prompts, or long-lived transport responses.
+	mcpServer.AddReceivingMiddleware(mcpToolCallDeadlineMiddleware(cfg.MCPToolCallTimeout))
 
 	// Create MCP handler — disable localhost protection (server is reached via a public reverse proxy)
 	// and allow Claude.ai cross-origin requests
 	cop := http.NewCrossOriginProtection()
 	cop.AddTrustedOrigin("https://claude.ai")
-	mcpHandler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
+	rawMCPHandler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
 		return mcpServer
 	}, &mcp.StreamableHTTPOptions{
-		DisableLocalhostProtection: true,
-		CrossOriginProtection:      cop,
+		Stateless:                    true,
+		DisableLocalhostProtection:   true,
+		MaxRequestBodyBytes:          cfg.MCPMaxRequestBodyBytes,
+		PropagateRequestCancellation: true,
 	})
+	var mcpHandler http.Handler = cop.Handler(rawMCPHandler)
+	logger.Info("MCP transport limits",
+		"mode", "stateless",
+		"max_request_body_bytes", cfg.MCPMaxRequestBodyBytes,
+		"max_concurrent", cfg.MCPMaxConcurrent,
+		"max_concurrent_per_learner", cfg.MCPMaxConcurrentUser,
+		"tool_call_timeout", cfg.MCPToolCallTimeout,
+	)
+	mcpConcurrencyLimiter, err := auth.NewPrincipalConcurrencyLimiter(cfg.MCPMaxConcurrent, cfg.MCPMaxConcurrentUser)
+	if err != nil {
+		logger.Error("invalid MCP concurrency limits", "err", err)
+		os.Exit(1)
+	}
 
 	// OAuth server
 	oauthServer := auth.NewOAuthServer(store, baseURL, logger)
+	if smtpAddress := strings.TrimSpace(os.Getenv("SMTP_ADDR")); smtpAddress != "" {
+		emailSender, err := auth.NewSMTPEmailSender(auth.SMTPConfig{
+			Address:    smtpAddress,
+			ServerName: strings.TrimSpace(os.Getenv("SMTP_SERVER_NAME")),
+			From:       strings.TrimSpace(os.Getenv("SMTP_FROM")),
+			Username:   os.Getenv("SMTP_USERNAME"),
+			Password:   os.Getenv("SMTP_PASSWORD"),
+		})
+		if err != nil {
+			logger.Error("invalid SMTP configuration", "err", err)
+			os.Exit(1)
+		}
+		oauthServer.SetEmailSender(emailSender)
+		logger.Info("account email delivery enabled", "transport", "smtp_starttls")
+	} else {
+		logger.Warn("account email delivery disabled; public registration and password recovery cannot complete")
+	}
 
 	// HTTP mux
 	mux := http.NewServeMux()
 
-	// Health check
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if err := store.Ping(r.Context()); err != nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte(`{"status":"unhealthy","error":"database unreachable"}`))
-			return
-		}
-		w.Write([]byte(`{"status":"ok"}`))
-	})
+	// Liveness never depends on an external service. Readiness is bounded and
+	// reflects whether this instance can safely receive traffic. /health remains
+	// a backwards-compatible alias for readiness.
+	mux.HandleFunc("GET /live", livenessHandler)
+	mux.HandleFunc("GET /ready", readinessHandler(store))
+	mux.HandleFunc("GET /health", readinessHandler(store))
 
 	// Rate limiters (in-process). Warn loudly if the deployment looks public but
 	// TRUSTED_PROXY_CIDRS is unset - without it every IP-limited request shares
@@ -159,6 +230,7 @@ func main() {
 	loginLimiter := auth.NewRateLimiterWithNamespace("oauth_login", 5.0/60, 5)           // password verification
 	tokenLimiter := auth.NewRateLimiterWithNamespace("oauth_token", 20.0/60, 10)         // code exchange and refresh
 	registerLimiter := auth.NewRateLimiterWithNamespace("oauth_register", 5.0/60, 5)     // dynamic client registration
+	accountLimiter := auth.NewRateLimiterWithNamespace("oauth_account", 5.0/60, 5)       // verification and recovery
 	mcpRatePerMinute := envFloat("MCP_RATE_LIMIT_PER_MIN", 60)
 	mcpBurst := envInt("MCP_RATE_LIMIT_BURST", 60)
 	mcpIPLimiter := auth.NewRateLimiterWithNamespace("mcp_ip", mcpRatePerMinute/60, mcpBurst)
@@ -176,6 +248,7 @@ func main() {
 		loginLimiter.SetBackend(rlBackend)
 		tokenLimiter.SetBackend(rlBackend)
 		registerLimiter.SetBackend(rlBackend)
+		accountLimiter.SetBackend(rlBackend)
 		mcpIPLimiter.SetBackend(rlBackend)
 		mcpLearnerLimiter.SetBackend(rlBackend)
 		oauthServer.SetLoginFailureBackend(db.NewLoginFailureBackend(store))
@@ -188,6 +261,7 @@ func main() {
 	defer loginLimiter.Stop()
 	defer tokenLimiter.Stop()
 	defer registerLimiter.Stop()
+	defer accountLimiter.Stop()
 	defer mcpIPLimiter.Stop()
 	defer mcpLearnerLimiter.Stop()
 
@@ -198,12 +272,24 @@ func main() {
 	mux.Handle("POST /authorize", auth.RateLimitMiddleware(loginLimiter, http.HandlerFunc(oauthServer.HandleAuthorizePost)))
 	mux.Handle("POST /token", auth.RateLimitMiddleware(tokenLimiter, http.HandlerFunc(oauthServer.HandleToken)))
 	mux.Handle("POST /register", auth.RateLimitMiddleware(registerLimiter, http.HandlerFunc(oauthServer.HandleRegister)))
+	mux.Handle("GET /verify-email", auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleVerifyEmailGet)))
+	mux.Handle("POST /verify-email", auth.RateLimitMiddleware(accountLimiter, http.HandlerFunc(oauthServer.HandleVerifyEmailPost)))
+	mux.Handle("GET /recover", auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleRecoverGet)))
+	mux.Handle("POST /recover", auth.RateLimitMiddleware(accountLimiter, http.HandlerFunc(oauthServer.HandleRecoverPost)))
+	mux.Handle("GET /reset-password", auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleResetPasswordGet)))
+	mux.Handle("POST /reset-password", auth.RateLimitMiddleware(accountLimiter, http.HandlerFunc(oauthServer.HandleResetPasswordPost)))
 
 	// MCP route: per-IP shield before auth, then per-learner limiting after auth.
+	// The body limit runs after both guards so rejected callers cannot make the
+	// process buffer request bodies, while valid POSTs are bounded before the SDK.
 	mcpProtectedHandler := auth.RateLimitMiddleware(
 		mcpIPLimiter,
 		auth.BearerMiddleware(baseURL,
-			auth.LearnerRateLimitMiddleware(mcpLearnerLimiter, mcpHandler),
+			auth.LearnerRateLimitMiddleware(mcpLearnerLimiter,
+				mcpConcurrencyLimiter.Middleware(
+					mcpRequestBodyLimitMiddleware(cfg.MCPMaxRequestBodyBytes, mcpHandler),
+				),
+			),
 		),
 	)
 	// The server keeps a bounded WriteTimeout for ordinary HTTP endpoints, but
@@ -317,6 +403,31 @@ func mcpVersion() string {
 	return out
 }
 
+type readinessPinger interface {
+	Ping(context.Context) error
+}
+
+func livenessHandler(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"status":"live"}`))
+}
+
+func readinessHandler(pinger readinessPinger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := pinger.Ping(ctx); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"status":"not_ready","error":"database unreachable"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ready"}`))
+	}
+}
+
 type statusRecorder struct {
 	http.ResponseWriter
 	status      int
@@ -369,6 +480,78 @@ func withoutWriteTimeout(next http.Handler) http.Handler {
 	})
 }
 
+var errMCPToolCallDeadline = errors.New("MCP tool call deadline exceeded")
+
+// mcpToolCallDeadlineMiddleware bounds cooperative tool execution without
+// imposing a deadline on Streamable HTTP itself. Store calls receive this
+// context and can cancel in-flight database work; a handler that ignores its
+// context cannot be detached safely because it may still commit a mutation.
+func mcpToolCallDeadlineMiddleware(timeout time.Duration) mcp.Middleware {
+	if timeout <= 0 {
+		panic("MCP tool call timeout must be positive")
+	}
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method != "tools/call" {
+				return next(ctx, method, req)
+			}
+			deadlineCtx, cancel := context.WithTimeoutCause(ctx, timeout, errMCPToolCallDeadline)
+			defer cancel()
+			result, err := next(deadlineCtx, method, req)
+			if errors.Is(context.Cause(deadlineCtx), errMCPToolCallDeadline) {
+				return &mcp.CallToolResult{
+					Content: []mcp.Content{&mcp.TextContent{Text: "tool call exceeded the server deadline; retry a mutation only by reusing its original idempotency_key"}},
+					StructuredContent: map[string]any{
+						"error": "tool_call_timeout",
+						"retry_with_original_idempotency_key_only": true,
+					},
+					IsError: true,
+				}, nil
+			}
+			return result, err
+		}
+	}
+}
+
+// mcpRequestBodyLimitMiddleware bounds POST bodies before they reach the MCP
+// SDK. Pre-reading is intentional: the SDK may translate a MaxBytesReader error
+// into a generic 400, whereas this layer must reliably return 413 for both a
+// declared Content-Length and an unknown-length/chunked body.
+func mcpRequestBodyLimitMiddleware(maxBytes int64, next http.Handler) http.Handler {
+	if maxBytes <= 0 {
+		panic("MCP request body limit must be positive")
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.Body == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if r.ContentLength > maxBytes {
+			_ = r.Body.Close()
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+
+		limitedBody := http.MaxBytesReader(w, r.Body, maxBytes)
+		body, err := io.ReadAll(limitedBody)
+		_ = limitedBody.Close()
+		if err != nil {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err, &maxBytesErr) {
+				http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
+			http.Error(w, "failed to read request body", http.StatusBadRequest)
+			return
+		}
+
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+		next.ServeHTTP(w, r)
+	})
+}
+
 func requestLogger(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -383,6 +566,8 @@ func requestLogger(logger *slog.Logger, next http.Handler) http.Handler {
 		)
 	})
 }
+
+const defaultMCPAllowedRequestHeaders = "Accept, Content-Type, Authorization, Mcp-Protocol-Version, Mcp-Session-Id, Last-Event-ID, Mcp-Method, Mcp-Name"
 
 func corsMiddleware(allowedOrigins []string, allowedSuffixes []string, next http.Handler) http.Handler {
 	allowed := make(map[string]bool)
@@ -402,19 +587,78 @@ func corsMiddleware(allowedOrigins []string, allowedSuffixes []string, next http
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
+		w.Header().Add("Vary", "Origin")
 		if originAllowed(origin) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Vary", "Origin")
+			if headers, ok := allowedMCPRequestHeaders(r.Header.Get("Access-Control-Request-Headers")); ok {
+				w.Header().Set("Access-Control-Allow-Headers", headers)
+			}
 		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id")
 		w.Header().Set("Access-Control-Expose-Headers", "Mcp-Session-Id")
 		if r.Method == "OPTIONS" {
+			w.Header().Add("Vary", "Access-Control-Request-Method")
+			w.Header().Add("Vary", "Access-Control-Request-Headers")
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// allowedMCPRequestHeaders validates a browser preflight before reflecting it.
+// MCP 2026-07-28 adds Mcp-Method/Mcp-Name and optional, schema-driven
+// Mcp-Param-* headers, so a fixed allow-list alone cannot be protocol-complete.
+func allowedMCPRequestHeaders(requested string) (string, bool) {
+	if strings.TrimSpace(requested) == "" {
+		return defaultMCPAllowedRequestHeaders, true
+	}
+	allowed := map[string]bool{
+		"accept":               true,
+		"authorization":        true,
+		"content-type":         true,
+		"last-event-id":        true,
+		"mcp-method":           true,
+		"mcp-name":             true,
+		"mcp-protocol-version": true,
+		"mcp-session-id":       true,
+	}
+	seen := make(map[string]bool)
+	headers := make([]string, 0, 8)
+	for _, value := range strings.Split(requested, ",") {
+		header := strings.TrimSpace(value)
+		normalized := strings.ToLower(header)
+		if !allowed[normalized] && !(strings.HasPrefix(normalized, "mcp-param-") && len(normalized) > len("mcp-param-") && validHTTPHeaderName(header)) {
+			return "", false
+		}
+		if !seen[normalized] {
+			seen[normalized] = true
+			headers = append(headers, header)
+		}
+	}
+	if len(headers) == 0 {
+		return "", false
+	}
+	return strings.Join(headers, ", "), true
+}
+
+func validHTTPHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			continue
+		}
+		switch c {
+		case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // securityHeaders applies baseline browser-security headers on every response.
@@ -439,11 +683,12 @@ func recoveryMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
+				stackDigest := sha256.Sum256(debug.Stack())
 				logger.Error("panic recovered",
 					"path", r.URL.Path,
 					"method", r.Method,
-					"panic", fmt.Sprintf("%v", rec),
-					"stack", string(debug.Stack()),
+					"panic_type", fmt.Sprintf("%T", rec),
+					"stack_fingerprint", hex.EncodeToString(stackDigest[:8]),
 				)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusInternalServerError)

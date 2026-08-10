@@ -7,14 +7,15 @@ package models
 import "time"
 
 type Learner struct {
-	ID           string
-	Email        string
-	PasswordHash string
-	Objective    string
-	WebhookURL   string
-	ProfileJSON  string
-	CreatedAt    time.Time
-	LastActive   time.Time
+	ID              string
+	Email           string
+	PasswordHash    string
+	Objective       string
+	WebhookURL      string
+	ProfileJSON     string
+	CreatedAt       time.Time
+	LastActive      time.Time
+	EmailVerifiedAt *time.Time
 }
 
 type ConceptState struct {
@@ -101,6 +102,7 @@ type RefreshToken struct {
 	Token     string
 	LearnerID string
 	ClientID  string // optional, blank for pre-issue-#30 tokens
+	Resource  string // exact RFC 8707 protected-resource URI
 	FamilyID  string
 	ExpiresAt time.Time
 	CreatedAt time.Time

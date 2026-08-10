@@ -64,7 +64,7 @@ type GetCurriculumSnapshotParams struct {
 }
 
 func registerGetCurriculumSnapshot(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "get_curriculum_snapshot",
 		Description: "Read the latest or a historical immutable curriculum snapshot, including stable concept IDs, outcomes, criteria, provenance, and review state.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params GetCurriculumSnapshotParams) (*mcp.CallToolResult, any, error) {
@@ -126,7 +126,7 @@ type ReviseCurriculumParams struct {
 }
 
 func registerReviseCurriculum(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "publish_curriculum_revision",
 		Description: "Publish one immutable curriculum revision using optimistic concurrency. Supports rename, metadata update, split, merge, and safe leaf removal; stable IDs and all prior versions are preserved.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params ReviseCurriculumParams) (*mcp.CallToolResult, any, error) {

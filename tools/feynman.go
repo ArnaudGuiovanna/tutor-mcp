@@ -20,7 +20,7 @@ type FeynmanChallengeParams struct {
 }
 
 func registerFeynmanChallenge(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "feynman_challenge",
 		Description: "Ask the learner to explain a concept whose model estimate reached the deep-evidence routing threshold. This probes understanding; it is not itself a demonstrated-mastery claim.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params FeynmanChallengeParams) (*mcp.CallToolResult, any, error) {

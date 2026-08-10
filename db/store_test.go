@@ -12,6 +12,8 @@ import (
 	storeport "tutor-mcp/store"
 )
 
+const testOAuthResource = "https://test.example/mcp"
+
 func TestConsumeAuthCode_WrongClientID(t *testing.T) {
 	store := setupTestDB(t)
 
@@ -23,7 +25,7 @@ func TestConsumeAuthCode_WrongClientID(t *testing.T) {
 	}
 
 	expires := time.Now().Add(5 * time.Minute)
-	if err := store.CreateAuthCodeWithBinding(context.Background(), "code-1", "L1", "chal", "", "client-A", "", expires); err != nil {
+	if err := store.CreateAuthCodeWithBinding(context.Background(), "code-1", "L1", "chal", "", "client-A", "", testOAuthResource, expires); err != nil {
 		t.Fatalf("create code: %v", err)
 	}
 
@@ -59,7 +61,7 @@ func TestConsumeAuthCode_WrongClientID(t *testing.T) {
 func TestConsumeAuthCode_ConcurrentSingleWinner(t *testing.T) {
 	s := setupTestDB(t)
 	ctx := context.Background()
-	if err := s.CreateAuthCodeWithBinding(ctx, "code-race", "L1", "challenge", "", "client-A", "", time.Now().Add(time.Minute)); err != nil {
+	if err := s.CreateAuthCodeWithBinding(ctx, "code-race", "L1", "challenge", "", "client-A", "", testOAuthResource, time.Now().Add(time.Minute)); err != nil {
 		t.Fatalf("create code: %v", err)
 	}
 
@@ -96,7 +98,7 @@ func TestExchangeAuthCodeForRefreshTokenRollsBackConsumeOnInsertFailure(t *testi
 	ctx := context.Background()
 	if err := s.CreateAuthCodeWithBinding(
 		ctx, "code-exchange-rollback", "L1", "challenge", "S256", "client-A",
-		"https://a.example/cb", time.Now().Add(time.Minute),
+		"https://a.example/cb", testOAuthResource, time.Now().Add(time.Minute),
 	); err != nil {
 		t.Fatalf("create auth code: %v", err)
 	}
@@ -136,7 +138,7 @@ func TestExchangeAuthCodeForRefreshTokenRollsBackConsumeOnInsertFailure(t *testi
 func TestRefreshToken_HashedAtRestAndDigestCannotAuthenticate(t *testing.T) {
 	s := setupTestDB(t)
 	ctx := context.Background()
-	rt, err := s.CreateRefreshToken(ctx, "L1", "client-A")
+	rt, err := s.CreateRefreshToken(ctx, "L1", "client-A", testOAuthResource)
 	if err != nil {
 		t.Fatalf("create refresh token: %v", err)
 	}
@@ -161,8 +163,51 @@ func TestRefreshToken_HashedAtRestAndDigestCannotAuthenticate(t *testing.T) {
 
 func TestCreateRefreshTokenRequiresClientBinding(t *testing.T) {
 	s := setupTestDB(t)
-	if _, err := s.CreateRefreshToken(context.Background(), "L1", ""); err == nil {
+	if _, err := s.CreateRefreshToken(context.Background(), "L1", "", testOAuthResource); err == nil {
 		t.Fatal("unbound refresh token was issued")
+	}
+}
+
+func TestCleanupExpiredOAuthClientsInvalidatesRelatedCredentials(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+	const clientID = "ephemeral-client"
+	if err := s.CreateOAuthClientWithSecretCappedTTL(
+		ctx, clientID, "Ephemeral", `["https://client.example/callback"]`, "", 10,
+		time.Now().UTC().Add(-time.Minute),
+	); err != nil {
+		t.Fatalf("create expired client: %v", err)
+	}
+	if err := s.ApproveClient(ctx, "L1", clientID, "https://client.example/callback"); err != nil {
+		t.Fatalf("approve client: %v", err)
+	}
+	if err := s.CreateAuthCodeWithBinding(
+		ctx, "expired-client-code", "L1", "challenge", "S256", clientID,
+		"https://client.example/callback", testOAuthResource, time.Now().UTC().Add(time.Hour),
+	); err != nil {
+		t.Fatalf("create code: %v", err)
+	}
+	rt, err := s.CreateRefreshToken(ctx, "L1", clientID, testOAuthResource)
+	if err != nil {
+		t.Fatalf("create refresh token: %v", err)
+	}
+
+	removed, err := s.CleanupExpiredOAuthClients(ctx)
+	if err != nil || removed != 1 {
+		t.Fatalf("cleanup removed=%d err=%v, want 1", removed, err)
+	}
+	if _, err := s.GetOAuthClient(ctx, clientID); err == nil {
+		t.Fatal("expired OAuth client survived cleanup")
+	}
+	if _, err := s.GetAuthCode(ctx, "expired-client-code", clientID); !errors.Is(err, storeport.ErrInvalidAuthCode) {
+		t.Fatalf("expired client auth code still valid: %v", err)
+	}
+	if _, err := s.GetRefreshToken(ctx, rt.Token); err == nil {
+		t.Fatal("expired client refresh token still active")
+	}
+	approved, err := s.IsClientApproved(ctx, "L1", clientID, "https://client.example/callback")
+	if err != nil || approved {
+		t.Fatalf("expired client approval survived: approved=%v err=%v", approved, err)
 	}
 }
 
@@ -179,7 +224,7 @@ func TestRotateRefreshToken_RejectsAndRevokesUnboundLegacyToken(t *testing.T) {
 		t.Fatalf("seed legacy token: %v", err)
 	}
 
-	if _, err := s.RotateRefreshToken(ctx, "legacy-token", "client-A"); !errors.Is(err, storeport.ErrInvalidRefreshToken) {
+	if _, err := s.RotateRefreshToken(ctx, "legacy-token", "client-A", testOAuthResource); !errors.Is(err, storeport.ErrInvalidRefreshToken) {
 		t.Fatalf("rotate legacy token error = %v, want invalid refresh token", err)
 	}
 	if _, err := s.GetRefreshToken(ctx, "legacy-token"); err == nil {
@@ -208,7 +253,7 @@ func TestRotateRefreshToken_RejectsClientBoundPlaintextLegacyToken(t *testing.T)
 		t.Fatalf("seed legacy bound token: %v", err)
 	}
 
-	if _, err := s.RotateRefreshToken(ctx, "legacy-bound-plaintext", "client-A"); !errors.Is(err, storeport.ErrInvalidRefreshToken) {
+	if _, err := s.RotateRefreshToken(ctx, "legacy-bound-plaintext", "client-A", testOAuthResource); !errors.Is(err, storeport.ErrInvalidRefreshToken) {
 		t.Fatalf("rotate plaintext legacy token error = %v, want invalid refresh token", err)
 	}
 	if _, err := s.GetRefreshToken(ctx, "legacy-bound-plaintext"); err == nil {
@@ -226,7 +271,7 @@ func TestRotateRefreshToken_RejectsClientBoundPlaintextLegacyToken(t *testing.T)
 func TestRotateRefreshToken_ConcurrentReuseSingleWinner(t *testing.T) {
 	s := setupTestDB(t)
 	ctx := context.Background()
-	rt, err := s.CreateRefreshToken(ctx, "L1", "client-A")
+	rt, err := s.CreateRefreshToken(ctx, "L1", "client-A", testOAuthResource)
 	if err != nil {
 		t.Fatalf("create refresh token: %v", err)
 	}
@@ -244,7 +289,7 @@ func TestRotateRefreshToken_ConcurrentReuseSingleWinner(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			next, err := s.RotateRefreshToken(ctx, rt.Token, "client-A")
+			next, err := s.RotateRefreshToken(ctx, rt.Token, "client-A", testOAuthResource)
 			if err != nil {
 				results <- result{err: err}
 				return
@@ -289,11 +334,11 @@ func TestRotateRefreshToken_ConcurrentReuseSingleWinner(t *testing.T) {
 func TestRotateRefreshToken_ReplayRevokesFamily(t *testing.T) {
 	s := setupTestDB(t)
 	ctx := context.Background()
-	root, err := s.CreateRefreshToken(ctx, "L1", "client-A")
+	root, err := s.CreateRefreshToken(ctx, "L1", "client-A", testOAuthResource)
 	if err != nil {
 		t.Fatalf("create refresh token: %v", err)
 	}
-	successor, err := s.RotateRefreshToken(ctx, root.Token, "client-A")
+	successor, err := s.RotateRefreshToken(ctx, root.Token, "client-A", testOAuthResource)
 	if err != nil {
 		t.Fatalf("first rotation: %v", err)
 	}
@@ -301,7 +346,7 @@ func TestRotateRefreshToken_ReplayRevokesFamily(t *testing.T) {
 		t.Fatalf("successor should be active before replay: %v", err)
 	}
 
-	if _, err := s.RotateRefreshToken(ctx, root.Token, "client-A"); !errors.Is(err, storeport.ErrRefreshTokenReuse) {
+	if _, err := s.RotateRefreshToken(ctx, root.Token, "client-A", testOAuthResource); !errors.Is(err, storeport.ErrRefreshTokenReuse) {
 		t.Fatalf("replay error = %v, want ErrRefreshTokenReuse", err)
 	}
 	if _, err := s.GetRefreshToken(ctx, successor.Token); err == nil {
@@ -320,11 +365,11 @@ func TestRotateRefreshToken_ReplayRevokesFamily(t *testing.T) {
 func TestCleanupExpiredRefreshTokens_RetainsAncestorsOfLiveFamily(t *testing.T) {
 	s := setupTestDB(t)
 	ctx := context.Background()
-	root, err := s.CreateRefreshToken(ctx, "L1", "client-A")
+	root, err := s.CreateRefreshToken(ctx, "L1", "client-A", testOAuthResource)
 	if err != nil {
 		t.Fatalf("create root: %v", err)
 	}
-	successor, err := s.RotateRefreshToken(ctx, root.Token, "client-A")
+	successor, err := s.RotateRefreshToken(ctx, root.Token, "client-A", testOAuthResource)
 	if err != nil {
 		t.Fatalf("rotate: %v", err)
 	}
@@ -357,7 +402,7 @@ func TestRotateRefreshToken_SuccessorFailureRollsBackConsumption(t *testing.T) {
 		t.Skip("SQLite trigger fault injection; transaction semantics are exercised on PostgreSQL by the concurrency test")
 	}
 	ctx := context.Background()
-	rt, err := s.CreateRefreshToken(ctx, "L1", "client-A")
+	rt, err := s.CreateRefreshToken(ctx, "L1", "client-A", testOAuthResource)
 	if err != nil {
 		t.Fatalf("create refresh token: %v", err)
 	}
@@ -370,7 +415,7 @@ func TestRotateRefreshToken_SuccessorFailureRollsBackConsumption(t *testing.T) {
 		t.Fatalf("create fault trigger: %v", err)
 	}
 
-	if _, err := s.RotateRefreshToken(ctx, rt.Token, "client-A"); err == nil {
+	if _, err := s.RotateRefreshToken(ctx, rt.Token, "client-A", testOAuthResource); err == nil {
 		t.Fatal("rotation unexpectedly succeeded despite injected insert failure")
 	}
 	if got, err := s.GetRefreshToken(ctx, rt.Token); err != nil || got.Token != rt.Token {

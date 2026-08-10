@@ -101,19 +101,24 @@ func TestRenderAuthPage_RegisterMode(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "Create your account.") {
-		t.Fatal("body missing 'Create your account.' subtitle for register mode")
+	if !strings.Contains(body, "choose your password and approve the client from the verification link") {
+		t.Fatal("body missing mailbox-controlled activation explanation for register mode")
 	}
 	// Register-mode JS bootstrap toggleView() must be present.
 	if !strings.Contains(body, "toggleView();") {
 		t.Fatal("register mode should include startup toggleView() call")
 	}
-	// Confirm-password and client-approval inputs (register-only) must be present.
-	if !strings.Contains(body, `name="password_confirm"`) {
-		t.Fatal("register mode missing password_confirm field")
+	// Registration only collects the mailbox address. A password and client
+	// consent are intentionally deferred to the verification link so an
+	// unauthenticated initiator cannot choose either for somebody else.
+	registerStart := strings.Index(body, `<div id="register-view"`)
+	registerEnd := strings.Index(body, `<p class="toggle">Already have an account?`)
+	if registerStart < 0 || registerEnd <= registerStart {
+		t.Fatal("could not isolate register form")
 	}
-	if !strings.Contains(body, `name="approve_client"`) {
-		t.Fatal("register mode missing approve_client field")
+	registerView := body[registerStart:registerEnd]
+	if strings.Contains(registerView, `name="password"`) || strings.Contains(registerView, `name="approve_client"`) {
+		t.Fatal("register mode must not accept a password or client consent")
 	}
 }
 

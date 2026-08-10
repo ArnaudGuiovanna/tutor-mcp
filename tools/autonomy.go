@@ -18,7 +18,7 @@ type GetAutonomyMetricsParams struct {
 }
 
 func registerGetAutonomyMetrics(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "get_autonomy_metrics",
 		Description: "Current autonomy score with its 4 components and trend. Readable by the learner and the system.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params GetAutonomyMetricsParams) (*mcp.CallToolResult, any, error) {

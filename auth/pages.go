@@ -44,6 +44,7 @@ type authPageData struct {
 	CodeChallenge       string
 	CodeChallengeMethod string
 	Scope               string
+	Resource            string
 	CSRFToken           string
 }
 
@@ -373,6 +374,7 @@ var authTmpl = template.Must(template.New("auth").Parse(`<!DOCTYPE html>
           <input type="hidden" name="code_challenge"        value="{{.Data.CodeChallenge}}" />
           <input type="hidden" name="code_challenge_method" value="{{.Data.CodeChallengeMethod}}" />
           <input type="hidden" name="scope"                 value="{{.Data.Scope}}" />
+		  <input type="hidden" name="resource"              value="{{.Data.Resource}}" />
 
           <label for="login-email">Email</label>
           <input id="login-email" type="email" name="email" placeholder="you@example.com" required autocomplete="email" />
@@ -391,12 +393,13 @@ var authTmpl = template.Must(template.New("auth").Parse(`<!DOCTYPE html>
 
           <button type="submit">Sign in →</button>
         </form>
+        <p class="toggle"><a href="/recover">Forgot your password?</a></p>
         <p class="toggle">No account? <a href="#" class="toggle-link">Create one</a></p>
       </div>
 
       <!-- Register form -->
       <div id="register-view" class="hidden">
-        <p class="subtitle">Create your account.</p>
+        <p class="subtitle">Enter your email. You will choose your password and approve the client from the verification link.</p>
         <form method="POST" action="/authorize">
           <input type="hidden" name="mode" value="register" />
           <input type="hidden" name="csrf_token"            value="{{.Data.CSRFToken}}" />
@@ -407,26 +410,17 @@ var authTmpl = template.Must(template.New("auth").Parse(`<!DOCTYPE html>
           <input type="hidden" name="code_challenge"        value="{{.Data.CodeChallenge}}" />
           <input type="hidden" name="code_challenge_method" value="{{.Data.CodeChallengeMethod}}" />
           <input type="hidden" name="scope"                 value="{{.Data.Scope}}" />
+		  <input type="hidden" name="resource"              value="{{.Data.Resource}}" />
 
           <label for="reg-email">Email</label>
           <input id="reg-email" type="email" name="email" placeholder="you@example.com" required autocomplete="email" />
 
-          <label for="reg-password">Password</label>
-          <input id="reg-password" type="password" name="password" placeholder="••••••••" required autocomplete="new-password" />
-
-          <label for="reg-confirm">Confirm password</label>
-          <input id="reg-confirm" type="password" name="password_confirm" placeholder="••••••••" required autocomplete="new-password" />
-
           <div class="consent-box">
-            <p><strong>{{.Data.ClientName}}</strong> wants access to your tutor/mcp learner account.</p>
-            <p>After account creation, tutor/mcp will send an authorization code to <strong>{{.Data.RedirectOrigin}}</strong>.</p>
-            <label class="consent-check" for="register-consent">
-              <input id="register-consent" type="checkbox" name="approve_client" value="yes" required />
-              <span>I recognize this client and approve sharing access.</span>
-            </label>
+            <p><strong>{{.Data.ClientName}}</strong> requested access to a tutor/mcp learner account.</p>
+            <p>No password or authorization is created here. The email verification page will show the exact client and destination before asking for consent.</p>
           </div>
 
-          <button type="submit">Create account →</button>
+          <button type="submit">Send verification email →</button>
         </form>
         <p class="toggle">Already have an account? <a href="#" class="toggle-link">Sign in</a></p>
       </div>

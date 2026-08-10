@@ -18,7 +18,7 @@ type GetMetacognitiveMirrorParams struct {
 }
 
 func registerGetMetacognitiveMirror(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name: "get_metacognitive_mirror",
 		Description: "Return a factual mirror message if a dependency pattern is consolidated over the last 7 days, otherwise mirror=null. On-demand metacognitive reflection tool. " +
 			"When to call: ONLY outside the activity cycle - for example, on an explicit request for a metacognitive review, or when the learner asks about their own learning patterns. " +

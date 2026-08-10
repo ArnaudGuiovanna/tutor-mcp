@@ -54,6 +54,8 @@ type Scheduler struct {
 // 5s of margin to close the database and finish other shutdown work.
 const defaultStopTimeout = 25 * time.Second
 
+const schedulerDBTimeout = 20 * time.Second
+
 func NewScheduler(store storeport.Store, logger *slog.Logger) *Scheduler {
 	// cron.New() ships no recover middleware: an unrecovered panic in any
 	// scheduled job is a goroutine panic, which Go terminates the whole
@@ -99,7 +101,9 @@ func (s *Scheduler) schedule(name, spec string, period time.Duration, fn func())
 	_, err := s.cron.AddFunc(spec, func() {
 		if s.distributed {
 			key := fmt.Sprintf("%d", time.Now().UTC().Truncate(period).Unix())
-			ok, cerr := s.store.ClaimJobRun(context.Background(), name, key)
+			ctx, cancel := context.WithTimeout(context.Background(), schedulerDBTimeout)
+			ok, cerr := s.store.ClaimJobRun(ctx, name, key)
+			cancel()
 			if cerr != nil {
 				s.logger.Error("claim job run", "job", name, "err", cerr)
 				return
@@ -573,7 +577,8 @@ func fallbackDailyRecap(_ *models.Learner) discordPayload {
 // ─── Cleanup (hourly) ─────────────────────────────────────────────────────
 
 func (s *Scheduler) cleanupExpiredData() {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), schedulerDBTimeout)
+	defer cancel()
 	now := time.Now().UTC()
 	codes, err := s.store.CleanupExpiredCodes(ctx)
 	if err != nil {
@@ -587,6 +592,29 @@ func (s *Scheduler) cleanupExpiredData() {
 		s.logger.Error("scheduler: cleanup tokens", "err", err)
 	} else if tokens > 0 {
 		s.logger.Info("scheduler: cleaned expired refresh tokens", "count", tokens)
+	}
+
+	accountTokens, err := s.store.CleanupExpiredAccountTokens(ctx)
+	if err != nil {
+		s.logger.Error("scheduler: cleanup account tokens", "err", err)
+	} else if accountTokens > 0 {
+		s.logger.Info("scheduler: cleaned account tokens", "count", accountTokens)
+	}
+
+	oauthClients, err := s.store.CleanupExpiredOAuthClients(ctx)
+	if err != nil {
+		s.logger.Error("scheduler: cleanup OAuth clients", "err", err)
+	} else if oauthClients > 0 {
+		s.logger.Info("scheduler: cleaned OAuth clients", "count", oauthClients)
+	}
+
+	rateBuckets, loginFailures, err := s.store.CleanupRateLimitState(
+		ctx, now.Add(-24*time.Hour), now.Add(-24*time.Hour),
+	)
+	if err != nil {
+		s.logger.Error("scheduler: cleanup shared auth limits", "err", err)
+	} else if rateBuckets > 0 || loginFailures > 0 {
+		s.logger.Info("scheduler: cleaned shared auth limits", "rate_buckets", rateBuckets, "login_failures", loginFailures)
 	}
 
 	requeued, err := s.store.RequeueStaleWebhookClaims(ctx, now.Add(-15*time.Minute), now)

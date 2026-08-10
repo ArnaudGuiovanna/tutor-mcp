@@ -18,6 +18,10 @@ import (
 // when the per-deployment client cap is hit.
 var ErrOAuthClientLimitReached = errors.New("oauth client limit reached")
 
+// ErrInvalidAccountToken deliberately collapses unknown, expired, consumed,
+// and wrong-purpose email capabilities into one public failure.
+var ErrInvalidAccountToken = errors.New("invalid account token")
+
 // ErrInvalidAuthCode deliberately collapses unknown, expired, client-bound and
 // already-consumed authorization codes into OAuth's invalid_grant response.
 var ErrInvalidAuthCode = errors.New("invalid authorization code")
@@ -93,6 +97,7 @@ type LoginFailureBackend interface {
 // LearnerStore manages learner accounts and profile data.
 type LearnerStore interface {
 	CreateLearner(ctx context.Context, email, passwordHash, objective, webhookURL string) (*models.Learner, error)
+	CreateUnverifiedLearner(ctx context.Context, email, passwordHash, objective, webhookURL string) (*models.Learner, error)
 	GetLearnerByID(ctx context.Context, id string) (*models.Learner, error)
 	GetLearnerByEmail(ctx context.Context, email string) (*models.Learner, error)
 	UpdateLastActive(ctx context.Context, id string) error
@@ -104,17 +109,24 @@ type LearnerStore interface {
 
 // AuthStore manages OAuth2/refresh-token and auth-code state.
 type AuthStore interface {
-	CreateRefreshToken(ctx context.Context, learnerID, clientID string) (*models.RefreshToken, error)
+	CreateRefreshToken(ctx context.Context, learnerID, clientID, resource string) (*models.RefreshToken, error)
 	GetRefreshToken(ctx context.Context, token string) (*models.RefreshToken, error)
 	DeleteRefreshToken(ctx context.Context, token string) error
-	RotateRefreshToken(ctx context.Context, token, clientID string) (*models.RefreshToken, error)
-	CreateAuthCodeWithBinding(ctx context.Context, code, learnerID, codeChallenge, codeChallengeMethod, clientID, redirectURI string, expiresAt time.Time) error
+	RotateRefreshToken(ctx context.Context, token, clientID, resource string) (*models.RefreshToken, error)
+	CreateAuthCodeWithBinding(ctx context.Context, code, learnerID, codeChallenge, codeChallengeMethod, clientID, redirectURI, resource string, expiresAt time.Time) error
 	GetAuthCode(ctx context.Context, code, clientID string) (*models.AuthCode, error)
 	ConsumeAuthCode(ctx context.Context, code, clientID string) (*models.AuthCode, error)
 	ExchangeAuthCodeForRefreshToken(ctx context.Context, code, clientID string) (*models.AuthCode, *models.RefreshToken, error)
 	CreateOAuthClient(ctx context.Context, clientID, clientName, redirectURIs string) error
 	CreateOAuthClientWithSecret(ctx context.Context, clientID, clientName, redirectURIs, secretHash string) error
 	CreateOAuthClientWithSecretCapped(ctx context.Context, clientID, clientName, redirectURIs, secretHash string, maxClients int) error
+	CreateOAuthClientWithSecretCappedTTL(ctx context.Context, clientID, clientName, redirectURIs, secretHash string, maxClients int, expiresAt time.Time) error
+	CleanupExpiredOAuthClients(ctx context.Context) (int64, error)
+	CreateAccountToken(ctx context.Context, token *models.AccountToken) error
+	GetAccountToken(ctx context.Context, tokenHash, purpose string) (*models.AccountToken, error)
+	ActivateLearnerAndCreateAuthCode(ctx context.Context, tokenHash, passwordHash, code string, codeExpiresAt time.Time, persistClientApproval bool) (*models.AccountToken, error)
+	ResetPasswordWithToken(ctx context.Context, tokenHash, passwordHash string) (string, error)
+	CleanupExpiredAccountTokens(ctx context.Context) (int64, error)
 	CountOAuthClients(ctx context.Context) (int, error)
 	GetOAuthClient(ctx context.Context, clientID string) (*models.OAuthClient, error)
 	IsClientApproved(ctx context.Context, learnerID, clientID, redirectURI string) (bool, error)
@@ -213,6 +225,9 @@ type AssessmentStore interface {
 	// clears it for unsupported methods and, in high-stakes domains, for every
 	// method except human_review.
 	GetEvaluatedAssessmentAttemptsInDomain(ctx context.Context, learnerID, domainID, conceptID string, limit int) ([]*models.AssessmentAttempt, error)
+	// GetEvaluatedAssessmentAttemptsBatchInDomain applies limitPerConcept to
+	// every requested concept while loading the domain evidence in one query.
+	GetEvaluatedAssessmentAttemptsBatchInDomain(ctx context.Context, learnerID, domainID string, concepts []string, limitPerConcept int) (map[string][]*models.AssessmentAttempt, error)
 	GetTrustedPassedAssessmentAttemptsInDomain(ctx context.Context, learnerID, domainID, conceptID string, limit int) ([]*models.AssessmentAttempt, error)
 	HasHumanReviewedEvaluationInDomain(ctx context.Context, learnerID, domainID string) (bool, error)
 }
@@ -276,6 +291,7 @@ type MetacognitionStore interface {
 	CreateTransferRecord(ctx context.Context, r *models.TransferRecord) error
 	GetTransferScores(ctx context.Context, learnerID, conceptID string) ([]*models.TransferRecord, error)
 	GetTransferScoresInDomain(ctx context.Context, learnerID, domainID, conceptID string) ([]*models.TransferRecord, error)
+	GetTransferScoresBatchInDomain(ctx context.Context, learnerID, domainID string, concepts []string) (map[string][]*models.TransferRecord, error)
 	GetTransferRecordsByLearner(ctx context.Context, learnerID string) ([]*models.TransferRecord, error)
 	GetTransferRecordsByDomain(ctx context.Context, learnerID, domainID string) ([]*models.TransferRecord, error)
 	GetHintStatsForMastered(ctx context.Context, learnerID string, threshold float64) (hints int, total int, err error)
@@ -367,6 +383,7 @@ type SnapshotStore interface {
 type SchedulerStore interface {
 	ClaimJobRun(ctx context.Context, name, windowKey string) (bool, error)
 	PurgeJobRunsBefore(ctx context.Context, cutoff time.Time) (int64, error)
+	CleanupRateLimitState(ctx context.Context, bucketCutoff, failureCutoff time.Time) (int64, int64, error)
 }
 
 // ---------------------------------------------------------------------------

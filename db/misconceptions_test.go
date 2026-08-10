@@ -94,8 +94,9 @@ func sqliteTestDBTemplateBytes() ([]byte, error) {
 			sqliteTestDBTemplate.err = err
 			return
 		}
-		if _, err := raw.Exec(`INSERT INTO learners (id, email, password_hash, objective, created_at)
-			VALUES ('L1', 'test@test.com', 'hash', 'test', ?)`, time.Now().UTC()); err != nil {
+		now := time.Now().UTC()
+		if _, err := raw.Exec(`INSERT INTO learners (id, email, password_hash, objective, created_at, email_verified_at)
+			VALUES ('L1', 'test@test.com', 'hash', 'test', ?, ?)`, now, now); err != nil {
 			_ = raw.Close()
 			sqliteTestDBTemplate.err = err
 			return
@@ -145,7 +146,8 @@ func setupTestPG(t *testing.T, baseDSN string) *Store {
 		admin.Close()
 		t.Fatalf("pg migrate: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO learners (id, email, password_hash, objective, created_at) VALUES ('L1', 'test@test.com', 'hash', 'test', $1)`, time.Now()); err != nil {
+	now := time.Now().UTC()
+	if _, err := db.Exec(`INSERT INTO learners (id, email, password_hash, objective, created_at, email_verified_at) VALUES ('L1', 'test@test.com', 'hash', 'test', $1, $1)`, now); err != nil {
 		db.Close()
 		admin.Close()
 		t.Fatalf("pg seed L1: %v", err)

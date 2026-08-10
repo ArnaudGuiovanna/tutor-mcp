@@ -149,6 +149,13 @@ func BuildOLMSnapshot(ctx context.Context, store storeport.Store, learnerID, dom
 // BuildOLMSnapshotAt is the clock-injected OLM builder used where a caller
 // already owns a decision timestamp (orchestrator/scheduler/tests).
 func BuildOLMSnapshotAt(ctx context.Context, store storeport.Store, learnerID, domainID string, now time.Time) (*OLMSnapshot, error) {
+	return BuildOLMSnapshotAtWithEvidence(ctx, store, learnerID, domainID, now, nil)
+}
+
+// BuildOLMSnapshotAtWithEvidence is BuildOLMSnapshotAt with an optional
+// request-scoped evidence snapshot. Callers that already loaded the domain's
+// assessment and transfer facts avoid another pair of store round trips.
+func BuildOLMSnapshotAtWithEvidence(ctx context.Context, store storeport.Store, learnerID, domainID string, now time.Time, evidenceSnapshot *EvidenceSnapshot) (*OLMSnapshot, error) {
 	domain, err := resolveActiveDomain(ctx, store, learnerID, domainID)
 	if err != nil {
 		return nil, err
@@ -193,19 +200,21 @@ func BuildOLMSnapshotAt(ctx context.Context, store storeport.Store, learnerID, d
 			domainInteractions = append(domainInteractions, in)
 		}
 	}
+	evidenceSnapshot, err = ensureEvidenceSnapshot(
+		ctx, store, learnerID, domain.ID, domain.Graph.Concepts, evidenceSnapshot,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("olm: load evidence snapshot: %w", err)
+	}
 
 	// Authoritative mastery ladder. A high BKT estimate alone is represented as
 	// estimated; only strong, retained evidence becomes demonstrated/solid.
 	for _, concept := range domain.Graph.Concepts {
-		transfers, err := store.GetTransferScoresInDomain(ctx, learnerID, domain.ID, concept)
-		if err != nil {
-			return nil, fmt.Errorf("olm: get transfer evidence for %s: %w", concept, err)
-		}
-		assessments, err := store.GetEvaluatedAssessmentAttemptsInDomain(ctx, learnerID, domain.ID, concept, 100)
-		if err != nil {
-			return nil, fmt.Errorf("olm: get evaluated assessment evidence for %s: %w", concept, err)
-		}
-		status := AssessMasteryStatus(learnerID, concept, statesByConcept[concept], domainInteractions, transfers, assessments, now)
+		evidence := evidenceSnapshot.ForConcept(concept)
+		status := AssessMasteryStatus(
+			learnerID, concept, statesByConcept[concept], domainInteractions,
+			evidence.Transfers, evidence.Assessments, now,
+		)
 		snap.MasteryStages[concept] = status
 		if status.Estimated {
 			snap.Estimated++
@@ -232,10 +241,7 @@ func BuildOLMSnapshotAt(ctx context.Context, store storeport.Store, learnerID, d
 			snap.InProgress++
 		}
 	}
-	alertEvidence, err := LoadMasteryAlertEvidence(ctx, store, learnerID, domain.ID, domainStates)
-	if err != nil {
-		return nil, fmt.Errorf("olm: load alert evidence: %w", err)
-	}
+	alertEvidence := evidenceSnapshot.ForMasteryAlerts(domainStates)
 	alerts := ComputeAlertsWithEvidenceAt(domainStates, domainInteractions, alertEvidence, time.Time{}, now)
 
 	if focus := pickFocus(alerts); focus != nil {

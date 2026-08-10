@@ -45,7 +45,7 @@ type CancelAssessmentAttemptParams struct {
 }
 
 func registerPrepareAssessmentAttempt(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "prepare_assessment_attempt",
 		Description: "Freeze an assessment task and passing rubric before showing it to the learner. Returns attempt_id; submit_assessment_attempt must be called only after the learner has committed a response.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params PrepareAssessmentAttemptParams) (*mcp.CallToolResult, any, error) {
@@ -186,7 +186,7 @@ func registerPrepareAssessmentAttempt(server *mcp.Server, deps *Deps) {
 }
 
 func registerSubmitAssessmentAttempt(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "submit_assessment_attempt",
 		Description: "Persist the learner's committed response (or its integrity hash) against a previously frozen assessment attempt. The task and rubric cannot change at this stage.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params SubmitAssessmentAttemptParams) (*mcp.CallToolResult, any, error) {
@@ -227,7 +227,7 @@ func registerSubmitAssessmentAttempt(server *mcp.Server, deps *Deps) {
 }
 
 func registerCancelAssessmentAttempt(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "cancel_assessment_attempt",
 		Description: "Cancel a prepared or submitted assessment attempt without changing the learner model or creating evidence.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params CancelAssessmentAttemptParams) (*mcp.CallToolResult, any, error) {

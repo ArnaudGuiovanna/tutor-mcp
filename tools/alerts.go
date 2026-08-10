@@ -19,7 +19,7 @@ type GetPendingAlertsParams struct {
 }
 
 func registerGetPendingAlerts(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name: "get_pending_alerts",
 		Description: "Retrieve ALL pending alerts for the learner - activity alerts (PLATEAU, FATIGUE, etc.) AND metacognitive alerts (DEPENDENCY_INCREASING, CALIBRATION_DIVERGING, AFFECT_NEGATIVE, TRANSFER_BLOCKED). " +
 			"When to call: FIRST each turn, before any other read tool. If a critical alert surfaces (has_critical=true), handle it before proceeding. " +

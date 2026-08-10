@@ -17,7 +17,7 @@ type GetOLMSnapshotParams struct {
 }
 
 func registerGetOLMSnapshot(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "get_olm_snapshot",
 		Description: "Return a transparent snapshot of model estimates and evidence-backed stages (retained, demonstrated, transferred), plus focus and metacognitive signals. Learner and tutor see the same data.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params GetOLMSnapshotParams) (*mcp.CallToolResult, any, error) {

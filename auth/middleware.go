@@ -6,10 +6,11 @@ package auth
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
+
+	mcpauth "github.com/modelcontextprotocol/go-sdk/auth"
 )
 
 type contextKey string
@@ -17,40 +18,37 @@ type contextKey string
 const LearnerIDKey contextKey = "learner_id"
 
 func BearerMiddleware(baseURL string, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get("Authorization")
-		tokenStr, ok := bearerToken(authHeader)
-		if !ok {
-			w.Header().Set("WWW-Authenticate", fmt.Sprintf(
-				`Bearer resource_metadata="%s/.well-known/oauth-protected-resource"`, baseURL,
-			))
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		learnerID, err := VerifyJWT(tokenStr, baseURL)
+	verifier := func(_ context.Context, token string, _ *http.Request) (*mcpauth.TokenInfo, error) {
+		claims, err := VerifyJWTClaims(token, baseURL)
 		if err != nil {
 			slog.Debug("jwt verify failed", "err", err)
-			w.Header().Set("WWW-Authenticate", fmt.Sprintf(
-				`Bearer resource_metadata="%s/.well-known/oauth-protected-resource", error="invalid_token"`, baseURL,
-			))
+			return nil, mcpauth.ErrInvalidToken
+		}
+		return &mcpauth.TokenInfo{
+			UserID:     claims.Subject,
+			Scopes:     strings.Fields(claims.Scope),
+			Expiration: claims.ExpiresAt.Time,
+		}, nil
+	}
+
+	// The MCP SDK stores TokenInfo under its own private context key. Stateful
+	// transports use TokenInfo.UserID to bind all subsequent requests to the
+	// principal that initialized the session and reject cross-user reuse.
+	withLearnerContext := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tokenInfo := mcpauth.TokenInfoFromContext(r.Context())
+		if tokenInfo == nil || tokenInfo.UserID == "" {
 			http.Error(w, "invalid token", http.StatusUnauthorized)
 			return
 		}
-		ctx := context.WithValue(r.Context(), LearnerIDKey, learnerID)
+		ctx := context.WithValue(r.Context(), LearnerIDKey, tokenInfo.UserID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
-}
 
-func bearerToken(authHeader string) (string, bool) {
-	scheme, token, ok := strings.Cut(authHeader, " ")
-	if !ok || !strings.EqualFold(scheme, "Bearer") {
-		return "", false
-	}
-	token = strings.TrimSpace(token)
-	if token == "" {
-		return "", false
-	}
-	return token, true
+	requireBearer := mcpauth.RequireBearerToken(verifier, &mcpauth.RequireBearerTokenOptions{
+		ResourceMetadataURL: baseURL + "/.well-known/oauth-protected-resource",
+		Scopes:              []string{"learner"},
+	})
+	return requireBearer(withLearnerContext)
 }
 
 func GetLearnerID(ctx context.Context) string {

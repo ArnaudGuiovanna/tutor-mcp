@@ -25,7 +25,7 @@ type RecordAffectParams struct {
 }
 
 func registerRecordAffect(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "record_affect",
 		Description: "Record the learner's emotional state. Call at session start (energy, confidence) and at session end (satisfaction, perceived_difficulty, next_session_intent).",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params RecordAffectParams) (*mcp.CallToolResult, any, error) {

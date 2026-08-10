@@ -5,6 +5,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -135,5 +136,63 @@ func TestRegisterTools_Smoke(t *testing.T) {
 		if _, ok := properties[idempotencyMetaKey]; !ok {
 			t.Errorf("retryable mutation %s does not expose %q in its argument schema", name, idempotencyMetaKey)
 		}
+	}
+	for name, tool := range registered {
+		if tool.Annotations == nil {
+			t.Errorf("%s has no safety annotations", name)
+			continue
+		}
+		if tool.Annotations.ReadOnlyHint != readOnlyTools[name] {
+			t.Errorf("%s readOnlyHint=%v, policy=%v", name, tool.Annotations.ReadOnlyHint, readOnlyTools[name])
+		}
+		if tool.Annotations.DestructiveHint == nil || tool.Annotations.OpenWorldHint == nil {
+			t.Errorf("%s has incomplete boolean safety hints", name)
+		}
+		// Retry protection is conditional on an optional idempotency_key. MCP's
+		// hint is unconditional for repeated calls with the same arguments, so no
+		// tool may advertise it until the key becomes required (or intrinsic
+		// idempotence is proved independently).
+		if tool.Annotations.IdempotentHint {
+			t.Errorf("%s overclaims unconditional idempotence", name)
+		}
+		schemes, ok := tool.Meta["securitySchemes"]
+		if !ok {
+			t.Errorf("%s has no OAuth securitySchemes metadata", name)
+			continue
+		}
+		encoded, err := json.Marshal(schemes)
+		if err != nil || !strings.Contains(string(encoded), `"type":"oauth2"`) || !strings.Contains(string(encoded), `"learner"`) {
+			t.Errorf("%s securitySchemes=%s err=%v", name, encoded, err)
+		}
+	}
+	if deleteTool := registered["delete_domain"]; deleteTool.Annotations.DestructiveHint == nil || !*deleteTool.Annotations.DestructiveHint {
+		t.Error("delete_domain must be marked destructive")
+	}
+	if recordTool := registered["record_interaction"]; recordTool.Annotations.DestructiveHint == nil || *recordTool.Annotations.DestructiveHint {
+		t.Error("record_interaction must be marked additive/non-destructive")
+	}
+	if webhookTool := registered["queue_webhook_message"]; webhookTool.Annotations.OpenWorldHint == nil || !*webhookTool.Annotations.OpenWorldHint {
+		t.Error("queue_webhook_message must be marked open-world")
+	}
+	assertToolSafetyHints(t, registered["learning_negotiation"], false, true, false)
+	assertToolSafetyHints(t, registered["get_metacognitive_mirror"], false, false, true)
+	// get_next_activity can enqueue the same proactive mirror webhook as the
+	// explicit mirror tool, so its open-world hint must remain consistent.
+	assertToolSafetyHints(t, registered["get_next_activity"], false, false, true)
+}
+
+func assertToolSafetyHints(t *testing.T, tool *mcp.Tool, readOnly, destructive, openWorld bool) {
+	t.Helper()
+	if tool == nil || tool.Annotations == nil {
+		t.Fatal("tool or annotations are nil")
+	}
+	if tool.Annotations.ReadOnlyHint != readOnly {
+		t.Errorf("%s readOnlyHint=%v, want %v", tool.Name, tool.Annotations.ReadOnlyHint, readOnly)
+	}
+	if tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint != destructive {
+		t.Errorf("%s destructiveHint=%v, want %v", tool.Name, tool.Annotations.DestructiveHint, destructive)
+	}
+	if tool.Annotations.OpenWorldHint == nil || *tool.Annotations.OpenWorldHint != openWorld {
+		t.Errorf("%s openWorldHint=%v, want %v", tool.Name, tool.Annotations.OpenWorldHint, openWorld)
 	}
 }

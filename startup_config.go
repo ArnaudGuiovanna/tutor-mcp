@@ -5,35 +5,91 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
+
+	"tutor-mcp/db"
+)
+
+const (
+	defaultMCPMaxRequestBodyBytes int64 = 1 << 20 // 1 MiB
+	maxMCPRequestBodyBytes        int64 = 64 << 20
+	defaultMCPToolCallTimeout           = 30 * time.Second
+	maxMCPToolCallTimeoutSeconds  int64 = 600
 )
 
 type startupConfig struct {
-	DBDriver         string
-	DBPath           string
-	BaseURL          string
-	SchedulerMode    string
-	RateLimitBackend string
+	DeploymentProfile      string
+	DBDriver               string
+	DBPath                 string
+	BaseURL                string
+	SchedulerMode          string
+	RateLimitBackend       string
+	MCPMaxRequestBodyBytes int64
+	MCPMaxConcurrent       int
+	MCPMaxConcurrentUser   int
+	MCPToolCallTimeout     time.Duration
 }
 
 func loadStartupConfig(port string) (startupConfig, error) {
 	cfg := startupConfig{
-		DBDriver:         normalizedEnv("DB_DRIVER", "sqlite"),
-		DBPath:           strings.TrimSpace(os.Getenv("DB_PATH")),
-		SchedulerMode:    normalizedEnv("SCHEDULER_MODE", "inprocess"),
-		RateLimitBackend: normalizedEnv("RATELIMIT_BACKEND", "memory"),
+		DeploymentProfile: normalizedEnv("DEPLOYMENT_PROFILE", "development"),
+		DBDriver:          normalizedEnv("DB_DRIVER", "sqlite"),
+		DBPath:            strings.TrimSpace(os.Getenv("DB_PATH")),
+		SchedulerMode:     normalizedEnv("SCHEDULER_MODE", "inprocess"),
+		RateLimitBackend:  normalizedEnv("RATELIMIT_BACKEND", "memory"),
 	}
 	if cfg.DBPath == "" {
 		cfg.DBPath = "./data/runtime.db"
 	}
+	mcpBodyLimit, err := int64EnvInRange(
+		"MCP_MAX_REQUEST_BODY_BYTES",
+		defaultMCPMaxRequestBodyBytes,
+		1,
+		maxMCPRequestBodyBytes,
+	)
+	if err != nil {
+		return startupConfig{}, err
+	}
+	cfg.MCPMaxRequestBodyBytes = mcpBodyLimit
+	mcpMaxConcurrent, err := int64EnvInRange("MCP_MAX_CONCURRENT", 128, 1, 4096)
+	if err != nil {
+		return startupConfig{}, err
+	}
+	mcpMaxConcurrentUser, err := int64EnvInRange("MCP_MAX_CONCURRENT_PER_LEARNER", 8, 1, 4096)
+	if err != nil {
+		return startupConfig{}, err
+	}
+	if mcpMaxConcurrentUser > mcpMaxConcurrent {
+		return startupConfig{}, fmt.Errorf("MCP_MAX_CONCURRENT_PER_LEARNER must not exceed MCP_MAX_CONCURRENT")
+	}
+	cfg.MCPMaxConcurrent = int(mcpMaxConcurrent)
+	cfg.MCPMaxConcurrentUser = int(mcpMaxConcurrentUser)
+	mcpToolCallTimeoutSeconds, err := int64EnvInRange(
+		"MCP_TOOL_CALL_TIMEOUT_SECONDS",
+		int64(defaultMCPToolCallTimeout/time.Second),
+		1,
+		maxMCPToolCallTimeoutSeconds,
+	)
+	if err != nil {
+		return startupConfig{}, err
+	}
+	cfg.MCPToolCallTimeout = time.Duration(mcpToolCallTimeoutSeconds) * time.Second
 
 	switch cfg.DBDriver {
 	case "sqlite", "postgres":
 	default:
 		return startupConfig{}, fmt.Errorf("unknown DB_DRIVER %q (want sqlite or postgres)", cfg.DBDriver)
+	}
+	switch cfg.DeploymentProfile {
+	case "development", "production":
+	default:
+		return startupConfig{}, fmt.Errorf("unknown DEPLOYMENT_PROFILE %q (want development or production)", cfg.DeploymentProfile)
 	}
 
 	switch cfg.SchedulerMode {
@@ -75,8 +131,80 @@ func loadStartupConfig(port string) (startupConfig, error) {
 			return startupConfig{}, fmt.Errorf("SCHEDULER_MODE=distributed requires TUTOR_MCP_MEMORY_ENABLED=off because narrative memory is node-local")
 		}
 	}
+	if cfg.DeploymentProfile == "production" {
+		if err := validateProductionConfig(cfg); err != nil {
+			return startupConfig{}, err
+		}
+	}
 
 	return cfg, nil
+}
+
+func validateProductionConfig(cfg startupConfig) error {
+	if !strings.HasPrefix(cfg.BaseURL, "https://") {
+		return fmt.Errorf("production requires an HTTPS BASE_URL")
+	}
+	if cfg.DBDriver != "postgres" {
+		return fmt.Errorf("production requires DB_DRIVER=postgres")
+	}
+	if cfg.RateLimitBackend != "postgres" {
+		return fmt.Errorf("production requires RATELIMIT_BACKEND=postgres")
+	}
+	if err := validateProductionPostgresDSN(os.Getenv("DATABASE_URL")); err != nil {
+		return err
+	}
+	if strings.TrimSpace(os.Getenv("SMTP_ADDR")) == "" || strings.TrimSpace(os.Getenv("SMTP_FROM")) == "" {
+		return fmt.Errorf("production requires SMTP_ADDR and SMTP_FROM")
+	}
+	if strings.TrimSpace(os.Getenv("INTEGRATION_SECRET_KEYS")) == "" ||
+		strings.TrimSpace(os.Getenv("INTEGRATION_SECRET_CURRENT_KEY_ID")) == "" {
+		return fmt.Errorf("production requires integration secret encryption keys")
+	}
+	if err := validateTrustedProxyCIDRs(os.Getenv("TRUSTED_PROXY_CIDRS")); err != nil {
+		return fmt.Errorf("production TRUSTED_PROXY_CIDRS: %w", err)
+	}
+	return nil
+}
+
+func validateProductionPostgresDSN(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fmt.Errorf("production requires DATABASE_URL")
+	}
+	dsn, err := url.Parse(raw)
+	if err != nil || (dsn.Scheme != "postgres" && dsn.Scheme != "postgresql") || dsn.Hostname() == "" {
+		return fmt.Errorf("production DATABASE_URL must be a postgres URL")
+	}
+	if dsn.Query().Get("sslmode") != "verify-full" {
+		return fmt.Errorf("production DATABASE_URL requires sslmode=verify-full")
+	}
+	if strings.TrimSpace(dsn.Query().Get("sslrootcert")) == "" {
+		return fmt.Errorf("production DATABASE_URL requires an explicit sslrootcert CA")
+	}
+	return nil
+}
+
+func validateTrustedProxyCIDRs(raw string) error {
+	parts := strings.Split(raw, ",")
+	valid := 0
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		_, cidr, err := net.ParseCIDR(part)
+		if err != nil {
+			return fmt.Errorf("invalid CIDR %q", part)
+		}
+		if ones, _ := cidr.Mask.Size(); ones == 0 {
+			return fmt.Errorf("catch-all CIDR %q is unsafe", part)
+		}
+		valid++
+	}
+	if valid == 0 {
+		return fmt.Errorf("at least one trusted reverse-proxy CIDR is required")
+	}
+	return nil
 }
 
 func normalizedEnv(name, fallback string) string {
@@ -85,6 +213,21 @@ func normalizedEnv(name, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func int64EnvInRange(name string, fallback, min, max int64) (int64, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer between %d and %d: %w", name, min, max, err)
+	}
+	if value < min || value > max {
+		return 0, fmt.Errorf("%s must be between %d and %d", name, min, max)
+	}
+	return value, nil
 }
 
 func normalizeBaseURL(raw string) (string, error) {
@@ -121,9 +264,5 @@ func memoryExplicitlyDisabled(raw string) bool {
 }
 
 func ensureSQLiteParent(dbPath string) error {
-	parent := filepath.Dir(filepath.Clean(dbPath))
-	if err := os.MkdirAll(parent, 0o700); err != nil {
-		return fmt.Errorf("create DB_PATH parent %q: %w", parent, err)
-	}
-	return nil
+	return db.PreparePrivateSQLitePath(filepath.Clean(dbPath))
 }

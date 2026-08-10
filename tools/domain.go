@@ -244,7 +244,7 @@ type InitDomainParams struct {
 }
 
 func registerInitDomain(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "init_domain",
 		Description: "Initialize a learning domain with its concepts and prerequisites. Does not destroy existing progress.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params InitDomainParams) (*mcp.CallToolResult, any, error) {
@@ -396,7 +396,7 @@ type AddConceptsParams struct {
 }
 
 func registerAddConcepts(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "add_concepts",
 		Description: "Add concepts through an immutable curriculum revision without destroying progress. Requires the latest expected_version; stale writers are rejected.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params AddConceptsParams) (*mcp.CallToolResult, any, error) {

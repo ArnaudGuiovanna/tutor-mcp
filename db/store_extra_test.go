@@ -199,7 +199,7 @@ func TestWebhookPushLogLifecycle(t *testing.T) {
 
 func TestRefreshTokenLifecycle(t *testing.T) {
 	store := setupTestDB(t)
-	rt, err := store.CreateRefreshToken(context.Background(), "L1", "client-A")
+	rt, err := store.CreateRefreshToken(context.Background(), "L1", "client-A", testOAuthResource)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -256,10 +256,10 @@ func TestCleanupExpiredRefreshTokens(t *testing.T) {
 func TestCleanupExpiredCodes(t *testing.T) {
 	store := setupTestDB(t)
 	now := time.Now().UTC()
-	if err := store.CreateAuthCodeWithBinding(context.Background(), "c-old", "L1", "ch", "", "client-A", "", now.Add(-1*time.Hour)); err != nil {
+	if err := store.CreateAuthCodeWithBinding(context.Background(), "c-old", "L1", "ch", "", "client-A", "", testOAuthResource, now.Add(-1*time.Hour)); err != nil {
 		t.Fatalf("create old: %v", err)
 	}
-	if err := store.CreateAuthCodeWithBinding(context.Background(), "c-new", "L1", "ch", "", "client-A", "", now.Add(1*time.Hour)); err != nil {
+	if err := store.CreateAuthCodeWithBinding(context.Background(), "c-new", "L1", "ch", "", "client-A", "", testOAuthResource, now.Add(1*time.Hour)); err != nil {
 		t.Fatalf("create new: %v", err)
 	}
 	n, err := store.CleanupExpiredCodes(context.Background())

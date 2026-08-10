@@ -22,6 +22,23 @@ const assessmentColumns = `id, learner_id, domain_id, concept_id, session_id,
        evaluator_id, evaluation_method, evaluation_provenance_json,
        trusted_evaluation, created_at, submitted_at, evaluated_at, cancelled_at`
 
+// assessmentEvidenceColumns deliberately derives effective trust at the read
+// boundary. Both the single-concept and batched evidence paths use this exact
+// projection so batching cannot weaken the supported-evaluator or high-stakes
+// policies.
+const assessmentEvidenceColumns = `a.id, a.learner_id, a.domain_id, a.concept_id, a.session_id,
+       a.activity_id, a.activity_version, a.activity_type, a.observable,
+       a.task_text, a.task_content_hash, a.response_text, a.response_content_hash,
+       a.rubric_json, a.passing_score, a.status, a.rubric_score_json, a.score, a.passed,
+       a.evaluator_id, a.evaluation_method, a.evaluation_provenance_json,
+       CASE
+         WHEN a.trusted_evaluation = 1
+          AND a.evaluation_method IN ('external_service','human_review','deterministic')
+          AND (d.high_stakes = 0 OR a.evaluation_method = 'human_review')
+         THEN 1 ELSE 0
+       END AS trusted_evaluation,
+       a.created_at, a.submitted_at, a.evaluated_at, a.cancelled_at`
+
 func (s *Store) CreateAssessmentAttempt(ctx context.Context, a *models.AssessmentAttempt) error {
 	if a == nil || a.ID == "" || a.LearnerID == "" || a.DomainID == "" ||
 		a.ConceptID == "" || a.ActivityID == "" || a.ActivityVersion < 1 ||
@@ -180,19 +197,7 @@ func (s *Store) GetEvaluatedAssessmentAttemptsInDomain(ctx context.Context, lear
 	if limit <= 0 {
 		limit = 50
 	}
-	effectiveColumns := `a.id, a.learner_id, a.domain_id, a.concept_id, a.session_id,
-       a.activity_id, a.activity_version, a.activity_type, a.observable,
-       a.task_text, a.task_content_hash, a.response_text, a.response_content_hash,
-       a.rubric_json, a.passing_score, a.status, a.rubric_score_json, a.score, a.passed,
-       a.evaluator_id, a.evaluation_method, a.evaluation_provenance_json,
-       CASE
-         WHEN a.trusted_evaluation = 1
-          AND a.evaluation_method IN ('external_service','human_review','deterministic')
-          AND (d.high_stakes = 0 OR a.evaluation_method = 'human_review')
-         THEN 1 ELSE 0
-       END,
-       a.created_at, a.submitted_at, a.evaluated_at, a.cancelled_at`
-	rows, err := s.query(ctx, `SELECT `+effectiveColumns+` FROM assessment_attempts a
+	rows, err := s.query(ctx, `SELECT `+assessmentEvidenceColumns+` FROM assessment_attempts a
 		JOIN domains d ON d.id = a.domain_id AND d.learner_id = a.learner_id
 		WHERE a.learner_id = ? AND a.domain_id = ? AND a.concept_id = ?
 		  AND a.status = 'evaluated'

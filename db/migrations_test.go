@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"path/filepath"
@@ -54,6 +55,7 @@ func TestMigrate_Idempotent(t *testing.T) {
 		"curriculum_versions",
 		"curriculum_concepts",
 		"curriculum_metadata_ids",
+		"account_tokens",
 	}
 	for _, table := range expectedTables {
 		var name string
@@ -72,6 +74,8 @@ func TestMigrate_Idempotent(t *testing.T) {
 		"idx_interactions_learner_concept",
 		"idx_scheduled_alerts_learner_type",
 		"idx_oauth_codes_expires",
+		"idx_oauth_clients_expires_at",
+		"idx_account_tokens_learner_purpose",
 		"idx_affect_states_learner",
 		"idx_calibration_records_learner",
 		"idx_transfer_records_learner_concept",
@@ -84,6 +88,7 @@ func TestMigrate_Idempotent(t *testing.T) {
 		"idx_impl_intent_learner_status",
 		"idx_impl_intent_session",
 		"idx_impl_intent_one_per_session",
+		"idx_refresh_tokens_client_resource",
 		"idx_domains_learner_high_stakes",
 		"idx_assessment_attempts_human_review",
 		"idx_wmq_dispatch",
@@ -283,6 +288,80 @@ func TestMigrationPurgesAuthorizationCodesWithoutExactS256Binding(t *testing.T) 
 	}
 }
 
+func TestMigrationRejectsOAuthCredentialsWithoutResourceBinding(t *testing.T) {
+	n := testDBCounter.Add(1)
+	dsn := fmt.Sprintf("file:migrate_resource_binding_%d?mode=memory&cache=shared", n+17000)
+	raw, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { raw.Close() })
+	if err := ensureSchemaMigrationsTable(raw); err != nil {
+		t.Fatal(err)
+	}
+
+	var resourceMigration migration
+	for _, m := range buildMigrations() {
+		if m.Version == "0032_bind_oauth_credentials_to_resource" {
+			resourceMigration = m
+			break
+		}
+		if err := applyMigration(raw, m); err != nil {
+			t.Fatalf("apply %s: %v", m.Version, err)
+		}
+	}
+	if resourceMigration.Version == "" {
+		t.Fatal("OAuth resource-binding migration not found")
+	}
+
+	if _, err := raw.Exec(
+		`INSERT INTO learners (id, email, password_hash, objective)
+		 VALUES ('legacy-resource','legacy-resource@test','h','o')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	expires := time.Now().UTC().Add(time.Hour)
+	if _, err := raw.Exec(
+		`INSERT INTO oauth_codes
+		 (code, learner_id, code_challenge, code_challenge_method, client_id, redirect_uri, expires_at)
+		 VALUES ('legacy-code-resource', 'legacy-resource', 'challenge', 'S256',
+		         'client-A', 'https://client.test/callback', ?)`,
+		expires,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO refresh_tokens
+		 (token, learner_id, client_id, family_id, expires_at, created_at)
+		 VALUES ('sha256:legacy-resource', 'legacy-resource', 'client-A',
+		         'legacy-resource-family', ?, CURRENT_TIMESTAMP)`,
+		expires,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := applyMigration(raw, resourceMigration); err != nil {
+		t.Fatal(err)
+	}
+	var codes int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM oauth_codes WHERE code = 'legacy-code-resource'`).Scan(&codes); err != nil {
+		t.Fatal(err)
+	}
+	if codes != 0 {
+		t.Fatalf("legacy authorization code survived resource migration")
+	}
+	var resource string
+	var revoked sql.NullTime
+	if err := raw.QueryRow(
+		`SELECT resource, revoked_at FROM refresh_tokens WHERE token = 'sha256:legacy-resource'`,
+	).Scan(&resource, &revoked); err != nil {
+		t.Fatal(err)
+	}
+	if resource != "" || !revoked.Valid {
+		t.Fatalf("legacy refresh token resource=%q revoked=%v, want blank and revoked", resource, revoked.Valid)
+	}
+}
+
 func TestMigrationBackfillsStructuredWebhookDomainScope(t *testing.T) {
 	n := testDBCounter.Add(1)
 	dsn := fmt.Sprintf("file:migrate_webhook_domain_%d?mode=memory&cache=shared", n+17000)
@@ -477,6 +556,54 @@ func TestMigrate_ConcurrentSerializesSchemaMigrations(t *testing.T) {
 	}
 	if rowCount != len(buildMigrations()) {
 		t.Fatalf("schema_migrations row count = %d, want %d", rowCount, len(buildMigrations()))
+	}
+}
+
+func TestMigrateContextRetriesSQLiteLockContention(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "retry-lock.db")
+	lockOwner, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lockOwner.Close() })
+	contender, err := OpenDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = contender.Close() })
+	if err := Migrate(lockOwner); err != nil {
+		t.Fatalf("initial migrate: %v", err)
+	}
+	// Force the first BEGIN EXCLUSIVE attempt to report SQLITE_BUSY quickly;
+	// MigrateContext must retry rather than inheriting this short OLTP budget.
+	if _, err := contender.Exec(`PRAGMA busy_timeout=20`); err != nil {
+		t.Fatalf("set contender busy timeout: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, err := lockOwner.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN EXCLUSIVE`); err != nil {
+		t.Fatalf("hold exclusive lock: %v", err)
+	}
+
+	started := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		close(started)
+		done <- MigrateContext(ctx, contender)
+	}()
+	<-started
+	time.Sleep(120 * time.Millisecond)
+	if _, err := conn.ExecContext(ctx, `ROLLBACK`); err != nil {
+		t.Fatalf("release exclusive lock: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("migration did not recover after lock release: %v", err)
 	}
 }
 

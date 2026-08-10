@@ -27,6 +27,27 @@ import (
 
 var testDBCounter int
 
+const testOAuthResource = "https://test.example/mcp"
+
+type testEmailSender struct {
+	verificationTo    []string
+	verificationLinks []string
+	resetTo           []string
+	resetLinks        []string
+}
+
+func (s *testEmailSender) SendVerification(_ context.Context, to, link string) error {
+	s.verificationTo = append(s.verificationTo, to)
+	s.verificationLinks = append(s.verificationLinks, link)
+	return nil
+}
+
+func (s *testEmailSender) SendPasswordReset(_ context.Context, to, link string) error {
+	s.resetTo = append(s.resetTo, to)
+	s.resetLinks = append(s.resetLinks, link)
+	return nil
+}
+
 func newTestServer(t *testing.T) (*OAuthServer, *db.Store) {
 	t.Helper()
 	testDBCounter++
@@ -42,7 +63,9 @@ func newTestServer(t *testing.T) (*OAuthServer, *db.Store) {
 
 	store := db.NewStore(sqldb)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewOAuthServer(store, "https://test.example", logger), store
+	server := NewOAuthServer(store, "https://test.example", logger)
+	server.SetEmailSender(&testEmailSender{})
+	return server, store
 }
 
 func seedClient(t *testing.T, store *db.Store, clientID, redirectURI string) {
@@ -212,7 +235,7 @@ func TestAuthorizeGet_UnregisteredRedirectURI(t *testing.T) {
 	s, store := newTestServer(t)
 	seedClient(t, store, "cid", "https://good.example/cb")
 
-	req := httptest.NewRequest("GET", "/authorize?client_id=cid&redirect_uri=https://attacker.example/evil&response_type=code", nil)
+	req := httptest.NewRequest("GET", "/authorize?client_id=cid&redirect_uri=https://attacker.example/evil&response_type=code&resource=https%3A%2F%2Ftest.example%2Fmcp", nil)
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizeGet(rec, req)
 
@@ -228,7 +251,7 @@ func TestAuthorizeGet_ValidRedirectURI_SetsCSRFCookie(t *testing.T) {
 	s, store := newTestServer(t)
 	seedClient(t, store, "cid", "https://good.example/cb")
 
-	req := httptest.NewRequest("GET", "/authorize?client_id=cid&redirect_uri=https://good.example/cb&response_type=code&state=xyz&code_challenge=abc&code_challenge_method=S256", nil)
+	req := httptest.NewRequest("GET", "/authorize?client_id=cid&redirect_uri=https://good.example/cb&response_type=code&state=xyz&code_challenge=abc&code_challenge_method=S256&resource=https%3A%2F%2Ftest.example%2Fmcp", nil)
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizeGet(rec, req)
 
@@ -335,6 +358,7 @@ func TestAuthorizePost_RotatesCSRFAndRejectsReplay(t *testing.T) {
 	form.Set("client_id", "cid")
 	form.Set("redirect_uri", "https://good.example/cb")
 	form.Set("response_type", "code")
+	form.Set("resource", testOAuthResource)
 	form.Set("code_challenge", "abc")
 	form.Set("code_challenge_method", "S256")
 	form.Set("email", "u@example.com")
@@ -379,6 +403,7 @@ func TestAuthorizePost_SuccessClearsCSRFCookie(t *testing.T) {
 	form.Set("client_id", "cid")
 	form.Set("redirect_uri", "https://good.example/cb")
 	form.Set("response_type", "code")
+	form.Set("resource", testOAuthResource)
 	form.Set("code_challenge", "abc")
 	form.Set("code_challenge_method", "S256")
 	form.Set("email", "u-success@example.com")
@@ -408,7 +433,7 @@ func TestAuthorizeGet_RendersStrictCSPWithoutInlineHandlers(t *testing.T) {
 	s, store := newTestServer(t)
 	seedClient(t, store, "cid", "https://good.example/cb")
 
-	req := httptest.NewRequest("GET", "/authorize?client_id=cid&redirect_uri=https://good.example/cb&response_type=code&code_challenge=abc&code_challenge_method=S256", nil)
+	req := httptest.NewRequest("GET", "/authorize?client_id=cid&redirect_uri=https://good.example/cb&response_type=code&code_challenge=abc&code_challenge_method=S256&resource=https%3A%2F%2Ftest.example%2Fmcp", nil)
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizeGet(rec, req)
 
@@ -434,7 +459,7 @@ func TestAuthorizeGet_PublicClientWithoutPKCERejected(t *testing.T) {
 	s, store := newTestServer(t)
 	seedClient(t, store, "cid", "https://good.example/cb")
 
-	req := httptest.NewRequest("GET", "/authorize?client_id=cid&redirect_uri=https://good.example/cb&response_type=code&state=xyz", nil)
+	req := httptest.NewRequest("GET", "/authorize?client_id=cid&redirect_uri=https://good.example/cb&response_type=code&state=xyz&resource=https%3A%2F%2Ftest.example%2Fmcp", nil)
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizeGet(rec, req)
 
@@ -447,7 +472,7 @@ func TestAuthorizeGet_PublicClientWithPlainPKCERejected(t *testing.T) {
 	s, store := newTestServer(t)
 	seedClient(t, store, "cid", "https://good.example/cb")
 
-	req := httptest.NewRequest("GET", "/authorize?client_id=cid&redirect_uri=https://good.example/cb&response_type=code&code_challenge=abc&code_challenge_method=plain", nil)
+	req := httptest.NewRequest("GET", "/authorize?client_id=cid&redirect_uri=https://good.example/cb&response_type=code&code_challenge=abc&code_challenge_method=plain&resource=https%3A%2F%2Ftest.example%2Fmcp", nil)
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizeGet(rec, req)
 
@@ -467,6 +492,7 @@ func TestAuthorizePost_CSRFMatch_InvalidCreds(t *testing.T) {
 	form.Set("client_id", "cid")
 	form.Set("redirect_uri", "https://good.example/cb")
 	form.Set("response_type", "code")
+	form.Set("resource", testOAuthResource)
 	form.Set("code_challenge", "abc")
 	form.Set("code_challenge_method", "S256")
 	form.Set("email", "u@example.com")
@@ -496,6 +522,7 @@ func TestAuthorizePost_InvalidEmailRejectedBeforePersistence(t *testing.T) {
 	form.Set("client_id", "cid")
 	form.Set("redirect_uri", "https://good.example/cb")
 	form.Set("response_type", "code")
+	form.Set("resource", testOAuthResource)
 	form.Set("code_challenge", "abc")
 	form.Set("code_challenge_method", "S256")
 	form.Set("email", "not-an-email")
@@ -530,7 +557,7 @@ func TestAuthorizePost_InvalidEmailRejectedBeforePersistence(t *testing.T) {
 func TestRefreshTokenGrant_RejectsMissingClientID(t *testing.T) {
 	s, store := newTestServer(t)
 	learnerID := seedLearner(t, store, "rt-noclient@example.com", "pw")
-	rt, err := store.CreateRefreshToken(context.Background(), learnerID, "client-A")
+	rt, err := store.CreateRefreshToken(context.Background(), learnerID, "client-A", testOAuthResource)
 	if err != nil {
 		t.Fatalf("seed refresh token: %v", err)
 	}
@@ -538,6 +565,7 @@ func TestRefreshTokenGrant_RejectsMissingClientID(t *testing.T) {
 	form := url.Values{
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {rt.Token},
+		"resource":      {testOAuthResource},
 	}
 	req := httptest.NewRequest("POST", "/token", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -569,7 +597,7 @@ func TestRefreshTokenGrant_RejectsCrossClientRedemption(t *testing.T) {
 	seedClient(t, store, "client-B", "https://b.example/cb")
 	learnerID := seedLearner(t, store, "rt-bound@example.com", "pw")
 	// Bind the refresh token to client-A.
-	rt, err := store.CreateRefreshToken(context.Background(), learnerID, "client-A")
+	rt, err := store.CreateRefreshToken(context.Background(), learnerID, "client-A", testOAuthResource)
 	if err != nil {
 		t.Fatalf("seed refresh token: %v", err)
 	}
@@ -579,6 +607,7 @@ func TestRefreshTokenGrant_RejectsCrossClientRedemption(t *testing.T) {
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {rt.Token},
 		"client_id":     {"client-B"},
+		"resource":      {testOAuthResource},
 	}
 	req := httptest.NewRequest("POST", "/token", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -608,6 +637,7 @@ func driveAuthorizePost(t *testing.T, s *OAuthServer, clientID, redirectURI, cod
 	q.Set("client_id", clientID)
 	q.Set("redirect_uri", redirectURI)
 	q.Set("response_type", "code")
+	q.Set("resource", testOAuthResource)
 	q.Set("state", "s-114")
 	if codeChallenge != "" {
 		q.Set("code_challenge", codeChallenge)
@@ -636,6 +666,7 @@ func driveAuthorizePost(t *testing.T, s *OAuthServer, clientID, redirectURI, cod
 	form.Set("client_id", clientID)
 	form.Set("redirect_uri", redirectURI)
 	form.Set("response_type", "code")
+	form.Set("resource", testOAuthResource)
 	form.Set("state", "s-114")
 	form.Set("scope", "learner")
 	form.Set("email", email)
@@ -709,6 +740,7 @@ func TestTokenEndpoint_ConfidentialClientWithoutPKCE_Issue114(t *testing.T) {
 	// /token with client_secret_basic and NO code_verifier.
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
+	form.Set("resource", testOAuthResource)
 	form.Set("code", code)
 	form.Set("redirect_uri", redirectURI)
 	tokReq := httptest.NewRequest("POST", "/token", strings.NewReader(form.Encode()))
@@ -744,6 +776,7 @@ func TestTokenEndpoint_ConfidentialClientWithoutPKCE_Issue114(t *testing.T) {
 	// where the conditional PKCE branch lets a code be redeemed twice.
 	form2 := url.Values{}
 	form2.Set("grant_type", "authorization_code")
+	form2.Set("resource", testOAuthResource)
 	form2.Set("code", code)
 	form2.Set("redirect_uri", redirectURI)
 	tokReq2 := httptest.NewRequest("POST", "/token", strings.NewReader(form2.Encode()))
@@ -778,6 +811,7 @@ func TestTokenEndpoint_ConfidentialClientWithoutPKCE_Issue114_ClientSecretPost(t
 
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
+	form.Set("resource", testOAuthResource)
 	form.Set("code", code)
 	form.Set("redirect_uri", redirectURI)
 	form.Set("client_id", clientID)
@@ -818,6 +852,7 @@ func TestTokenEndpoint_ConfidentialClientWithPKCE_StillEnforced(t *testing.T) {
 
 		form := url.Values{}
 		form.Set("grant_type", "authorization_code")
+		form.Set("resource", testOAuthResource)
 		form.Set("code", code)
 		form.Set("code_verifier", verifier)
 		form.Set("redirect_uri", redirectURI)
@@ -837,6 +872,7 @@ func TestTokenEndpoint_ConfidentialClientWithPKCE_StillEnforced(t *testing.T) {
 
 		form := url.Values{}
 		form.Set("grant_type", "authorization_code")
+		form.Set("resource", testOAuthResource)
 		form.Set("code", code)
 		form.Set("code_verifier", "wrong-verifier-aaaaaaaaaaaaaaaaaaaaaaaaa")
 		form.Set("redirect_uri", redirectURI)
@@ -859,6 +895,7 @@ func TestTokenEndpoint_ConfidentialClientWithPKCE_StillEnforced(t *testing.T) {
 
 		form := url.Values{}
 		form.Set("grant_type", "authorization_code")
+		form.Set("resource", testOAuthResource)
 		form.Set("code", code)
 		form.Set("redirect_uri", redirectURI)
 		// No code_verifier.
@@ -896,12 +933,13 @@ func TestTokenEndpoint_PublicClientStillRequiresPKCE(t *testing.T) {
 	// Direct seed: empty code_challenge for a public client. /token must
 	// still require a verifier (or otherwise refuse) because public clients
 	// have no secret to authenticate with.
-	if err := store.CreateAuthCodeWithBinding(context.Background(), "pub-code-114", learner, "", "", "cid-pub", "", time.Now().Add(time.Hour)); err != nil {
+	if err := store.CreateAuthCodeWithBinding(context.Background(), "pub-code-114", learner, "", "", "cid-pub", "", testOAuthResource, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("seed auth code: %v", err)
 	}
 
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
+	form.Set("resource", testOAuthResource)
 	form.Set("code", "pub-code-114")
 	form.Set("client_id", "cid-pub")
 	// No code_verifier, no client_secret — pure public-client misuse.
@@ -959,6 +997,7 @@ func TestTokenEndpoint_ConfidentialClientWithBadSecret_NoPKCE_Rejected(t *testin
 	// /token with the WRONG client_secret and NO code_verifier.
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
+	form.Set("resource", testOAuthResource)
 	form.Set("code", code)
 	tokReq := httptest.NewRequest("POST", "/token", strings.NewReader(form.Encode()))
 	tokReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")

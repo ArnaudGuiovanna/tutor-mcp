@@ -50,7 +50,7 @@ type domainDashboard struct {
 }
 
 func registerGetDashboardState(server *mcp.Server, deps *Deps) {
-	mcp.AddTool(server, &mcp.Tool{
+	addTool(server, &mcp.Tool{
 		Name:        "get_dashboard_state",
 		Description: "Return the learning state as structured JSON (per-concept progress, retention alerts, trajectory signal, autonomy metrics, next action). The LLM can formulate a text response from this JSON for the learner.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params GetDashboardStateParams) (*mcp.CallToolResult, any, error) {
@@ -126,11 +126,14 @@ func registerGetDashboardState(server *mcp.Server, deps *Deps) {
 			}
 			states = append(states, domainStates...)
 			interactions = append(interactions, domainInteractions...)
-			alertEvidence, err := engine.LoadMasteryAlertEvidence(ctx, deps.Store, learnerID, domain.ID, domainStates)
+			evidenceSnapshot, err := engine.LoadEvidenceSnapshot(
+				ctx, deps.Store, learnerID, domain.ID, domain.Graph.Concepts,
+			)
 			if err != nil {
 				r, _ := safeErrorResult(deps.Logger, "failed to load dashboard alert evidence", err)
 				return r, nil, nil
 			}
+			alertEvidence := evidenceSnapshot.ForMasteryAlerts(domainStates)
 			domainAlerts := engine.ComputeAlertsWithEvidenceAt(domainStates, domainInteractions, alertEvidence, sessionStart, now)
 			for i := range domainAlerts {
 				domainAlerts[i].DomainID = domain.ID
@@ -154,27 +157,18 @@ func registerGetDashboardState(server *mcp.Server, deps *Deps) {
 			retainedCount := 0
 			demonstratedCount := 0
 			transferredCount := 0
+			interactionsByConcept := make(map[string][]*models.Interaction, len(domain.Graph.Concepts))
+			for _, interaction := range domainInteractions {
+				interactionsByConcept[interaction.Concept] = append(interactionsByConcept[interaction.Concept], interaction)
+			}
 			for _, concept := range domain.Graph.Concepts {
 				routingStatus := algorithms.ConceptStatus(graph, mastery, concept)
 				cs := stateMap[concept]
-				conceptInteractions := make([]*models.Interaction, 0)
-				for _, interaction := range domainInteractions {
-					if interaction.Concept == concept {
-						conceptInteractions = append(conceptInteractions, interaction)
-					}
-				}
-				transferRecords, err := deps.Store.GetTransferScoresInDomain(ctx, learnerID, domain.ID, concept)
-				if err != nil {
-					r, _ := safeErrorResult(deps.Logger, "failed to load dashboard transfer evidence", err)
-					return r, nil, nil
-				}
-				assessments, err := deps.Store.GetEvaluatedAssessmentAttemptsInDomain(ctx, learnerID, domain.ID, concept, 100)
-				if err != nil {
-					r, _ := safeErrorResult(deps.Logger, "failed to load dashboard assessment evidence", err)
-					return r, nil, nil
-				}
+				conceptInteractions := interactionsByConcept[concept]
+				conceptEvidence := evidenceSnapshot.ForConcept(concept)
 				masteryStatus := engine.AssessMasteryStatus(
-					learnerID, concept, cs, conceptInteractions, transferRecords, assessments, now,
+					learnerID, concept, cs, conceptInteractions,
+					conceptEvidence.Transfers, conceptEvidence.Assessments, now,
 				)
 
 				cp := conceptProgress{
