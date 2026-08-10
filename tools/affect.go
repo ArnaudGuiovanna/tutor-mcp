@@ -6,10 +6,12 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"tutor-mcp/engine"
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -48,7 +50,11 @@ func registerRecordAffect(server *mcp.Server, deps *Deps) {
 		}
 		learningSession, err := deps.Store.GetLearningSession(ctx, learnerID, params.SessionID)
 		if err != nil {
-			r, _ := errorResult("learning session not found")
+			if errors.Is(err, storeport.ErrNotFound) {
+				r, _ := errorResult("learning session not found")
+				return r, nil, nil
+			}
+			r, _ := safeErrorResult(deps.Logger, "failed to load learning session", err)
 			return r, nil, nil
 		}
 		if learningSession.Status != models.LearningSessionStatusOpen {

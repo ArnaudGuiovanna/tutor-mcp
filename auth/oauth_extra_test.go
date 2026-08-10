@@ -28,6 +28,26 @@ import (
 func futureTime() time.Time { return time.Now().Add(time.Hour) }
 func pastTime() time.Time   { return time.Now().Add(-time.Hour) }
 
+func assertLearnerScopesSupported(t *testing.T, meta map[string]interface{}, want []string) {
+	t.Helper()
+	raw, ok := meta["scopes_supported"].([]interface{})
+	if !ok {
+		t.Fatalf("scopes_supported = %T, want array", meta["scopes_supported"])
+	}
+	if len(raw) != len(want) {
+		t.Fatalf("scopes_supported = %v, want exactly %v", raw, want)
+	}
+	for i, value := range raw {
+		scope, ok := value.(string)
+		if !ok {
+			t.Fatalf("non-string supported scope: %T", value)
+		}
+		if scope != want[i] {
+			t.Fatalf("scopes_supported = %v, want exactly %v", raw, want)
+		}
+	}
+}
+
 // ─── Metadata endpoints ─────────────────────────────────────────────────────
 
 func TestHandleAuthServerMetadata(t *testing.T) {
@@ -64,6 +84,7 @@ func TestHandleAuthServerMetadata(t *testing.T) {
 	if meta["authorization_response_iss_parameter_supported"] != true {
 		t.Fatalf("iss parameter support flag missing or false: %v", meta["authorization_response_iss_parameter_supported"])
 	}
+	assertLearnerScopesSupported(t, meta, []string{models.OAuthScopeLearner})
 	methods, _ := meta["code_challenge_methods_supported"].([]interface{})
 	found := false
 	for _, m := range methods {
@@ -99,6 +120,35 @@ func TestHandleProtectedResourceMetadata(t *testing.T) {
 	if len(servers) != 1 || servers[0] != "https://test.example" {
 		t.Fatalf("authorization_servers = %v", servers)
 	}
+	assertLearnerScopesSupported(t, meta, []string{models.OAuthScopeLearner})
+}
+
+func TestOAuthMetadataGranularScopeRollout(t *testing.T) {
+	s, _ := newTestServer(t)
+	s.SetGranularScopesEnabled(true)
+
+	t.Run("authorization server publishes granular capabilities only", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		s.HandleAuthServerMetadata(rec, httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil))
+		var meta map[string]interface{}
+		if err := json.Unmarshal(rec.Body.Bytes(), &meta); err != nil {
+			t.Fatalf("decode metadata: %v", err)
+		}
+		assertLearnerScopesSupported(t, meta, []string{
+			models.OAuthScopeLearnerRead,
+			models.OAuthScopeLearnerWrite,
+		})
+	})
+
+	t.Run("protected resource bootstraps with read only", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		s.HandleProtectedResourceMetadata(rec, httptest.NewRequest(http.MethodGet, "/.well-known/oauth-protected-resource", nil))
+		var meta map[string]interface{}
+		if err := json.Unmarshal(rec.Body.Bytes(), &meta); err != nil {
+			t.Fatalf("decode metadata: %v", err)
+		}
+		assertLearnerScopesSupported(t, meta, []string{models.OAuthScopeLearnerRead})
+	})
 }
 
 // ─── HandleToken: dispatcher ─────────────────────────────────────────────────
@@ -631,8 +681,118 @@ func TestHandleToken_RefreshToken_Success(t *testing.T) {
 	if newRT == "" || newRT == rt.Token {
 		t.Fatalf("refresh token must rotate; old=%q new=%q", rt.Token, newRT)
 	}
+	if resp["scope"] != models.OAuthScopeLearner {
+		t.Fatalf("legacy refresh scope = %v, want %q", resp["scope"], models.OAuthScopeLearner)
+	}
+	legacyAccess, _ := resp["access_token"].(string)
+	legacyClaims, err := VerifyJWTClaims(legacyAccess, "https://test.example")
+	if err != nil || legacyClaims.Scope != models.OAuthScopeLearner {
+		t.Fatalf("legacy access claims = %+v, err=%v", legacyClaims, err)
+	}
+	stored, err := store.GetRefreshToken(context.Background(), newRT)
+	if err != nil || stored.Scope != models.OAuthScopeLearner {
+		t.Fatalf("legacy successor = %+v, err=%v", stored, err)
+	}
 	if _, err := store.GetRefreshToken(context.Background(), rt.Token); err == nil {
 		t.Fatal("old refresh token must be deleted after rotation")
+	}
+}
+
+func TestHandleToken_RefreshScopeNarrowsButNeverWidens(t *testing.T) {
+	setTestSecret(t)
+	s, oauthStore := newTestServer(t)
+	s.SetGranularScopesEnabled(true)
+	const clientID = "cid-refresh-scope"
+	seedClient(t, oauthStore, clientID, "https://app.example/cb")
+	learner := seedLearner(t, oauthStore, "refresh-scope@example.com", "pw")
+	root, err := oauthStore.CreateRefreshTokenWithScope(
+		context.Background(), learner, clientID, testOAuthResource,
+		models.OAuthScopeLearnerReadWrite,
+	)
+	if err != nil {
+		t.Fatalf("seed scoped refresh token: %v", err)
+	}
+
+	refresh := func(token, scope string) (*httptest.ResponseRecorder, map[string]interface{}) {
+		t.Helper()
+		form := url.Values{
+			"grant_type":    {"refresh_token"},
+			"resource":      {testOAuthResource},
+			"refresh_token": {token},
+			"client_id":     {clientID},
+		}
+		if scope != "" {
+			form.Set("scope", scope)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		s.HandleToken(rec, req)
+		var response map[string]interface{}
+		_ = json.Unmarshal(rec.Body.Bytes(), &response)
+		return rec, response
+	}
+
+	narrowedRec, narrowed := refresh(root.Token, models.OAuthScopeLearnerRead)
+	if narrowedRec.Code != http.StatusOK {
+		t.Fatalf("narrow refresh status = %d; body=%q", narrowedRec.Code, narrowedRec.Body.String())
+	}
+	if narrowed["scope"] != models.OAuthScopeLearnerRead {
+		t.Fatalf("narrow response scope = %v", narrowed["scope"])
+	}
+	narrowedAccess, _ := narrowed["access_token"].(string)
+	claims, err := VerifyJWTClaims(narrowedAccess, "https://test.example")
+	if err != nil || claims.Scope != models.OAuthScopeLearnerRead {
+		t.Fatalf("narrow JWT claims = %+v, err=%v", claims, err)
+	}
+	narrowedToken, _ := narrowed["refresh_token"].(string)
+	storedNarrowed, err := oauthStore.GetRefreshToken(context.Background(), narrowedToken)
+	if err != nil || storedNarrowed.Scope != models.OAuthScopeLearnerRead {
+		t.Fatalf("narrow refresh token = %+v, err=%v", storedNarrowed, err)
+	}
+
+	widenRec, widen := refresh(narrowedToken, models.OAuthScopeLearnerWrite)
+	if widenRec.Code != http.StatusBadRequest || widen["error"] != "invalid_scope" {
+		t.Fatalf("widen response = %d %q", widenRec.Code, widenRec.Body.String())
+	}
+	if stillActive, err := oauthStore.GetRefreshToken(context.Background(), narrowedToken); err != nil || stillActive.Scope != models.OAuthScopeLearnerRead {
+		t.Fatalf("rejected widening consumed or changed token: token=%+v err=%v", stillActive, err)
+	}
+
+	preservedRec, preserved := refresh(narrowedToken, "")
+	if preservedRec.Code != http.StatusOK || preserved["scope"] != models.OAuthScopeLearnerRead {
+		t.Fatalf("omitted scope must preserve grant: %d %q", preservedRec.Code, preservedRec.Body.String())
+	}
+}
+
+func TestHandleToken_PhaseARejectsGranularRefreshNarrowing(t *testing.T) {
+	setTestSecret(t)
+	s, oauthStore := newTestServer(t) // rollout flag intentionally remains OFF
+	const clientID = "cid-refresh-phase-a"
+	seedClient(t, oauthStore, clientID, "https://app.example/cb")
+	learner := seedLearner(t, oauthStore, "refresh-phase-a@example.com", "pw")
+	root, err := oauthStore.CreateRefreshTokenWithScope(
+		context.Background(), learner, clientID, testOAuthResource, models.OAuthScopeLearner,
+	)
+	if err != nil {
+		t.Fatalf("seed legacy refresh token: %v", err)
+	}
+	form := url.Values{
+		"grant_type":    {"refresh_token"},
+		"resource":      {testOAuthResource},
+		"refresh_token": {root.Token},
+		"client_id":     {clientID},
+		"scope":         {models.OAuthScopeLearnerRead},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	s.HandleToken(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "invalid_scope") {
+		t.Fatalf("status=%d body=%q, want 400 invalid_scope", rec.Code, rec.Body.String())
+	}
+	if stored, err := oauthStore.GetRefreshToken(context.Background(), root.Token); err != nil || stored.Scope != models.OAuthScopeLearner {
+		t.Fatalf("rejected narrowing consumed or changed legacy refresh token: token=%+v err=%v", stored, err)
 	}
 }
 
@@ -880,6 +1040,9 @@ func TestHandleRegister_PublicClient(t *testing.T) {
 	}
 	if _, ok := resp["registration_client_uri"]; ok {
 		t.Fatal("response advertises an unimplemented RFC 7592 management endpoint")
+	}
+	if _, ok := resp["scope"]; ok {
+		t.Fatal("dynamic client registration response must not advertise a false client scope restriction")
 	}
 }
 
@@ -1143,7 +1306,7 @@ func TestVerifyClientAuth(t *testing.T) {
 
 func TestWriteTokenResponse(t *testing.T) {
 	rec := httptest.NewRecorder()
-	writeTokenResponse(rec, "AT", "RT")
+	writeTokenResponse(rec, "AT", "RT", models.OAuthScopeLearner)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
@@ -1406,6 +1569,8 @@ func TestAuthorizePost_RegisterRequiresEmailVerificationBeforeRedirect(t *testin
 	}
 	if body := getRec.Body.String(); !strings.Contains(body, "Test Client") ||
 		!strings.Contains(body, "https://good.example") ||
+		!strings.Contains(body, "Requested permissions:") ||
+		!strings.Contains(body, "Read and modify your learner profile") ||
 		!strings.Contains(body, `name="password"`) ||
 		!strings.Contains(body, `name="approve_client"`) {
 		t.Fatalf("verification page does not disclose the credential/consent boundary: %q", body)

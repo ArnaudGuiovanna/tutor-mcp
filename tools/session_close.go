@@ -6,6 +6,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -49,11 +50,19 @@ func registerRecordSessionClose(server *mcp.Server, deps *Deps) {
 		if params.SessionID != "" {
 			learningSession, err = deps.Store.GetLearningSession(ctx, learnerID, params.SessionID)
 			if err != nil {
-				r, _ := errorResult("learning session not found")
+				if errors.Is(err, storeport.ErrNotFound) {
+					r, _ := errorResult("learning session not found")
+					return r, nil, nil
+				}
+				r, _ := safeErrorResult(deps.Logger, "failed to load learning session", err)
 				return r, nil, nil
 			}
 		} else {
-			learningSession, _ = deps.Store.GetActiveLearningSession(ctx, learnerID)
+			learningSession, err = deps.Store.GetActiveLearningSession(ctx, learnerID)
+			if err != nil && !errors.Is(err, storeport.ErrNotFound) {
+				r, _ := safeErrorResult(deps.Logger, "failed to load active learning session", err)
+				return r, nil, nil
+			}
 		}
 
 		domainID := params.DomainID
@@ -61,6 +70,10 @@ func registerRecordSessionClose(server *mcp.Server, deps *Deps) {
 			domainID = learningSession.DomainID
 		}
 		domain, err := resolveDomain(ctx, deps.Store, learnerID, domainID)
+		if err != nil && !errors.Is(err, storeport.ErrNotFound) {
+			r, _ := safeErrorResult(deps.Logger, "failed to resolve session domain", err)
+			return r, nil, nil
+		}
 		if err != nil || domain == nil {
 			if params.DomainID != "" {
 				deps.Logger.Error("record_session_close: domain not found by id", "err", err, "learner", learnerID, "domain_id", params.DomainID)

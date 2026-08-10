@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"tutor-mcp/models"
+
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -56,8 +58,18 @@ func GenerateJWT(issuer, learnerID string) (string, error) {
 // GenerateJWTForResource signs an access token for an explicitly authorized
 // RFC 8707 resource. Only this server's canonical /mcp URI is issuable.
 func GenerateJWTForResource(issuer, resource, learnerID string) (string, error) {
+	return GenerateJWTForResourceAndScope(issuer, resource, learnerID, models.OAuthScopeLearner)
+}
+
+// GenerateJWTForResourceAndScope signs an access token carrying the exact
+// canonical grant persisted through the authorization-code lifecycle.
+func GenerateJWTForResourceAndScope(issuer, resource, learnerID, scope string) (string, error) {
 	if resource == "" || resource != MCPResource(issuer) {
 		return "", fmt.Errorf("resource must equal the canonical MCP resource")
+	}
+	canonicalScope, err := models.CanonicalOAuthScope(scope)
+	if err != nil {
+		return "", fmt.Errorf("invalid OAuth scope: %w", err)
 	}
 	claims := Claims{
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -67,7 +79,7 @@ func GenerateJWTForResource(issuer, resource, learnerID string) (string, error) 
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(AccessTokenTTL)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 		},
-		Scope: "learner",
+		Scope: canonicalScope,
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString(jwtSecret)
@@ -110,6 +122,10 @@ func VerifyJWTClaimsForResource(tokenString, expectedIssuer, expectedResource st
 	}
 	if claims.ExpiresAt == nil {
 		return nil, fmt.Errorf("invalid claims: expiration is required")
+	}
+	canonicalScope, err := models.CanonicalOAuthScope(claims.Scope)
+	if err != nil || canonicalScope != claims.Scope {
+		return nil, fmt.Errorf("invalid claims: unsupported or non-canonical scope")
 	}
 	return claims, nil
 }

@@ -10,17 +10,18 @@ import (
 )
 
 type accountPageData struct {
-	Title           string
-	Message         string
-	Token           string
-	CSRFToken       string
-	ClientName      string
-	ClientID        string
-	RedirectOrigin  string
-	ShowVerify      bool
-	ShowRecover     bool
-	ShowReset       bool
-	ShowBackToLogin bool
+	Title            string
+	Message          string
+	Token            string
+	CSRFToken        string
+	ClientName       string
+	ClientID         string
+	RedirectOrigin   string
+	ScopeDescription string
+	ShowVerify       bool
+	ShowRecover      bool
+	ShowReset        bool
+	ShowBackToLogin  bool
 }
 
 var accountTmpl = template.Must(template.New("account").Parse(`<!doctype html>
@@ -54,7 +55,8 @@ var accountTmpl = template.Must(template.New("account").Parse(`<!doctype html>
     <div class="client">
       <strong>{{.ClientName}}</strong><br>
       Client ID: {{.ClientID}}<br>
-      Authorization code destination: {{.RedirectOrigin}}
+      Authorization code destination: {{.RedirectOrigin}}<br>
+      <strong>Requested permissions:</strong> {{.ScopeDescription}}
     </div>
     <p>Client names are self-declared. Verify the client ID and destination before continuing.</p>
     <label for="verify-password">Choose your password</label>

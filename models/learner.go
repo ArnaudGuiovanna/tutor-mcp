@@ -103,6 +103,7 @@ type RefreshToken struct {
 	LearnerID string
 	ClientID  string // optional, blank for pre-issue-#30 tokens
 	Resource  string // exact RFC 8707 protected-resource URI
+	Scope     string // exact canonical OAuth grant; legacy "learner" is bounded
 	FamilyID  string
 	ExpiresAt time.Time
 	CreatedAt time.Time

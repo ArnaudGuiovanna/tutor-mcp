@@ -5,12 +5,28 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 )
+
+type failingLearningSessionLookupStore struct {
+	storeport.Store
+	activeErr error
+	byIDErr   error
+}
+
+func (s *failingLearningSessionLookupStore) GetActiveLearningSession(context.Context, string) (*models.LearningSession, error) {
+	return nil, s.activeErr
+}
+
+func (s *failingLearningSessionLookupStore) GetLearningSession(context.Context, string, string) (*models.LearningSession, error) {
+	return nil, s.byIDErr
+}
 
 func TestRecordSessionClose_NoAuth(t *testing.T) {
 	_, deps := setupToolsTest(t)
@@ -27,6 +43,44 @@ func TestRecordSessionClose_NoDomain(t *testing.T) {
 	out := decodeResult(t, res)
 	if got, _ := out["needs_domain_setup"].(bool); !got {
 		t.Fatalf("expected needs_domain_setup=true, got %v", out)
+	}
+}
+
+func TestRecordSessionClose_ActiveSessionBackendFailureIsNotAbsence(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	_ = makeOwnerDomain(t, store, "L_owner", "math")
+	deps.Store = &failingLearningSessionLookupStore{Store: store, activeErr: errors.New("database unavailable")}
+
+	res := callTool(t, deps, registerRecordSessionClose, "L_owner", "record_session_close", map[string]any{})
+	if !res.IsError || resultText(res) != "failed to load active learning session" {
+		t.Fatalf("backend failure was not surfaced safely: error=%v text=%q", res.IsError, resultText(res))
+	}
+	if _, err := store.GetActiveLearningSession(context.Background(), "L_owner"); !errors.Is(err, storeport.ErrNotFound) {
+		t.Fatalf("handler continued and opened a session after lookup failure: %v", err)
+	}
+}
+
+func TestRecordSessionClose_ExplicitSessionBackendFailureIsNotNotFound(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	deps.Store = &failingLearningSessionLookupStore{Store: store, byIDErr: context.DeadlineExceeded}
+
+	res := callTool(t, deps, registerRecordSessionClose, "L_owner", "record_session_close", map[string]any{
+		"session_id": "sess_unknown",
+	})
+	if !res.IsError || resultText(res) != "failed to load learning session" {
+		t.Fatalf("backend failure was collapsed to not-found: error=%v text=%q", res.IsError, resultText(res))
+	}
+}
+
+func TestRecordSessionClose_ClosedDatabaseIsNotAbsence(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	if err := store.RawDB().Close(); err != nil {
+		t.Fatalf("close test database: %v", err)
+	}
+
+	res := callTool(t, deps, registerRecordSessionClose, "L_owner", "record_session_close", map[string]any{})
+	if !res.IsError || resultText(res) != "failed to load active learning session" {
+		t.Fatalf("closed database was collapsed to absence: error=%v text=%q", res.IsError, resultText(res))
 	}
 }
 

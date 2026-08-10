@@ -32,6 +32,47 @@ var ErrInvalidAuthCode = errors.New("invalid authorization code")
 // failure.
 var ErrInvalidRefreshToken = errors.New("invalid refresh token")
 
+// ErrInvalidOAuthScope covers unsupported authorization scopes and refresh
+// requests that attempt to widen the credential's persisted grant.
+var ErrInvalidOAuthScope = errors.New("invalid oauth scope")
+
+// ErrNotFound is the persistence-port sentinel for an expected missing row.
+// Store implementations should preserve their native cause as well so callers
+// can distinguish absence from an unavailable backend without depending on a
+// particular SQL driver.
+var ErrNotFound = errors.New("store item not found")
+
+type notFoundError struct {
+	cause error
+}
+
+func (e *notFoundError) Error() string {
+	if e.cause == nil {
+		return ErrNotFound.Error()
+	}
+	return e.cause.Error()
+}
+
+// Unwrap exposes both the stable port sentinel and the implementation cause.
+// In particular, the SQL store continues to satisfy existing errors.Is checks
+// for sql.ErrNoRows while application code can use ErrNotFound.
+func (e *notFoundError) Unwrap() []error {
+	if e.cause == nil {
+		return []error{ErrNotFound}
+	}
+	return []error{ErrNotFound, e.cause}
+}
+
+// WrapNotFound marks a backend-specific absence with the stable Store
+// contract. It is intentionally limited to confirmed absence; timeouts,
+// connection failures, and cancelled queries must pass through unchanged.
+func WrapNotFound(cause error) error {
+	if errors.Is(cause, ErrNotFound) {
+		return cause
+	}
+	return &notFoundError{cause: cause}
+}
+
 // ErrRefreshTokenReuse marks a replay of an already-used or revoked refresh
 // token. OAuth responses deliberately collapse it to invalid_grant, while the
 // store keeps it distinct so the caller can audit suspected credential theft.
@@ -110,10 +151,13 @@ type LearnerStore interface {
 // AuthStore manages OAuth2/refresh-token and auth-code state.
 type AuthStore interface {
 	CreateRefreshToken(ctx context.Context, learnerID, clientID, resource string) (*models.RefreshToken, error)
+	CreateRefreshTokenWithScope(ctx context.Context, learnerID, clientID, resource, scope string) (*models.RefreshToken, error)
 	GetRefreshToken(ctx context.Context, token string) (*models.RefreshToken, error)
 	DeleteRefreshToken(ctx context.Context, token string) error
 	RotateRefreshToken(ctx context.Context, token, clientID, resource string) (*models.RefreshToken, error)
+	RotateRefreshTokenWithScope(ctx context.Context, token, clientID, resource, requestedScope string) (*models.RefreshToken, error)
 	CreateAuthCodeWithBinding(ctx context.Context, code, learnerID, codeChallenge, codeChallengeMethod, clientID, redirectURI, resource string, expiresAt time.Time) error
+	CreateAuthCodeWithBindingAndScope(ctx context.Context, code, learnerID, codeChallenge, codeChallengeMethod, clientID, redirectURI, resource, scope string, expiresAt time.Time) error
 	GetAuthCode(ctx context.Context, code, clientID string) (*models.AuthCode, error)
 	ConsumeAuthCode(ctx context.Context, code, clientID string) (*models.AuthCode, error)
 	ExchangeAuthCodeForRefreshToken(ctx context.Context, code, clientID string) (*models.AuthCode, *models.RefreshToken, error)
@@ -130,7 +174,9 @@ type AuthStore interface {
 	CountOAuthClients(ctx context.Context) (int, error)
 	GetOAuthClient(ctx context.Context, clientID string) (*models.OAuthClient, error)
 	IsClientApproved(ctx context.Context, learnerID, clientID, redirectURI string) (bool, error)
+	IsClientApprovedForScope(ctx context.Context, learnerID, clientID, redirectURI, scope string) (bool, error)
 	ApproveClient(ctx context.Context, learnerID, clientID, redirectURI string) error
+	ApproveClientForScope(ctx context.Context, learnerID, clientID, redirectURI, scope string) error
 	CleanupExpiredCodes(ctx context.Context) (int64, error)
 	CleanupExpiredRefreshTokens(ctx context.Context) (int64, error)
 }

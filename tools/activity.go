@@ -6,6 +6,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"tutor-mcp/engine"
 	"tutor-mcp/memory"
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -23,6 +25,22 @@ type GetNextActivityParams struct {
 	DomainID   string `json:"domain_id,omitempty" jsonschema:"target domain ID; if absent, the learner's last active domain is used"`
 	DomainName string `json:"domain_name,omitempty" jsonschema:"target domain name when the learner names a subject but the domain_id is unknown"`
 	Intent     string `json:"intent,omitempty" jsonschema:"learner intent: auto or review. Use review when the learner asks to revise/review already studied material"`
+}
+
+func motivationDegradedComponentNames(err error) []string {
+	var optional *engine.MotivationDegradationError
+	if errors.As(err, &optional) {
+		components := make([]string, 0, len(optional.Components))
+		for _, component := range optional.Components {
+			components = append(components, "motivation_brief."+component)
+		}
+		return components
+	}
+	var required *engine.MotivationDependencyError
+	if errors.As(err, &required) {
+		return []string{"motivation_brief." + required.Component}
+	}
+	return nil
 }
 
 func registerGetNextActivity(server *mcp.Server, deps *Deps) {
@@ -65,13 +83,18 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 		domainStart := time.Now()
 		domain, err := resolveActivityDomain(ctx, deps.Store, learnerID, params.DomainID, params.DomainName)
 		domainMs := time.Since(domainStart).Milliseconds()
+		var selectionErr *activityDomainSelectionError
+		if errors.As(err, &selectionErr) {
+			r, _ := errorResult(selectionErr.Error())
+			return r, nil, nil
+		}
+		if err != nil && !errors.Is(err, storeport.ErrNotFound) {
+			r, _ := safeErrorResult(deps.Logger, "failed to resolve activity domain", err)
+			return r, nil, nil
+		}
 		if err != nil || domain == nil {
 			if params.DomainName != "" {
-				msg := "domain not found"
-				if err != nil {
-					msg = err.Error()
-				}
-				r, _ := errorResult(msg)
+				r, _ := errorResult("domain not found")
 				return r, nil, nil
 			}
 			r, _ := jsonResult(map[string]interface{}{
@@ -390,6 +413,11 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 		)
 		if motivationErr != nil {
 			markDegraded("motivation_brief", motivationErr)
+			for _, component := range motivationDegradedComponentNames(motivationErr) {
+				degradedComponents = append(degradedComponents, component)
+				deps.Logger.Warn("get_next_activity: motivation component degraded",
+					"component", component, "learner", learnerID, "domain", domain.ID)
+			}
 		}
 		motivationMs := time.Since(motivationStart).Milliseconds()
 

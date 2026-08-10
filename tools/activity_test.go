@@ -20,10 +20,29 @@ import (
 	"tutor-mcp/db"
 	"tutor-mcp/memory"
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	_ "modernc.org/sqlite"
 )
+
+type failingActivityDomainStore struct {
+	storeport.Store
+	err error
+}
+
+type failingMotivationOptionalStore struct {
+	storeport.Store
+	err error
+}
+
+func (s *failingMotivationOptionalStore) SelfInitiatedRatioInDomain(context.Context, string, string, string) (float64, error) {
+	return 0, s.err
+}
+
+func (s *failingActivityDomainStore) GetDomainsByLearner(context.Context, string, bool) ([]*models.Domain, error) {
+	return nil, s.err
+}
 
 func TestGetNextActivity_NoAuth(t *testing.T) {
 	_, deps := setupToolsTest(t)
@@ -61,6 +80,35 @@ func TestGetNextActivity_NeedsDomainSetup(t *testing.T) {
 	out := decodeResult(t, res)
 	if out["needs_domain_setup"] != true {
 		t.Fatalf("expected needs_domain_setup=true, got %v", out["needs_domain_setup"])
+	}
+}
+
+func TestGetNextActivity_DomainBackendFailureIsNotSetup(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	deps.Store = &failingActivityDomainStore{Store: store, err: context.DeadlineExceeded}
+
+	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{})
+	if !res.IsError || resultText(res) != "failed to resolve activity domain" {
+		t.Fatalf("backend failure was collapsed to setup: error=%v text=%q", res.IsError, resultText(res))
+	}
+}
+
+func TestGetNextActivity_ExplicitArchivedDomainUsesNonRevealingSetup(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	domain := makeOwnerDomain(t, store, "L_owner", "archived-activity-domain")
+	if err := store.ArchiveDomain(context.Background(), domain.ID, "L_owner"); err != nil {
+		t.Fatalf("archive domain: %v", err)
+	}
+
+	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{
+		"domain_id": domain.ID,
+	})
+	if res.IsError {
+		t.Fatalf("archived domain should follow non-revealing absence path: %q", resultText(res))
+	}
+	payload := decodeResult(t, res)
+	if payload["needs_domain_setup"] != true {
+		t.Fatalf("archived domain did not return setup: %v", payload)
 	}
 }
 
@@ -118,6 +166,30 @@ func TestGetNextActivity_HappyPath(t *testing.T) {
 	}
 	if got := contract["learner_explanation"]; got == "" {
 		t.Fatalf("expected contract learner_explanation, got %v", contract)
+	}
+}
+
+func TestGetNextActivity_ExposesTypedMotivationDegradation(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	domain := makeOwnerDomain(t, store, "L_owner", "motivation-degradation")
+	state := models.NewConceptState("L_owner", "a")
+	state.DomainID = domain.ID
+	if err := store.InsertConceptStateIfNotExists(context.Background(), state); err != nil {
+		t.Fatalf("seed concept state: %v", err)
+	}
+	deps.Store = &failingMotivationOptionalStore{Store: store, err: context.DeadlineExceeded}
+
+	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{
+		"domain_id": domain.ID,
+	})
+	if res.IsError {
+		t.Fatalf("optional motivation failure aborted activity: %q", resultText(res))
+	}
+	payload := decodeResult(t, res)
+	assertDegradedComponent(t, payload, "motivation_brief")
+	assertDegradedComponent(t, payload, "motivation_brief.self_initiated_ratio")
+	if _, ok := payload["motivation_brief"]; !ok {
+		t.Fatalf("usable motivation brief was omitted: %v", payload)
 	}
 }
 

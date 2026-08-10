@@ -74,6 +74,7 @@ func TestRenderAuthPage_LoginNoError(t *testing.T) {
 		`value="challenge-xyz"`,
 		`value="S256"`,
 		`value="learner"`,
+		`Requested permissions:</strong> Read and modify your learner profile`,
 		`name="approve_client"`,
 		`I recognize this client and approve sharing access.`,
 		`https://good.example`,
@@ -86,6 +87,21 @@ func TestRenderAuthPage_LoginNoError(t *testing.T) {
 	// Login mode: must not invoke toggleView() at startup.
 	if strings.Contains(body, `{{if eq .Mode "register"}}toggleView();{{end}}`) {
 		t.Fatal("template directive leaked into output")
+	}
+}
+
+func TestOAuthScopeDescriptionDisclosesExactCapability(t *testing.T) {
+	tests := map[string]string{
+		"learner:read":                 "Read your learner profile",
+		"learner:write":                "Modify your learner profile",
+		"learner:read learner:write":   "Read and modify your learner profile",
+		"learner":                      "Read and modify your learner profile",
+		"unexpected:future-capability": "could not be verified",
+	}
+	for scope, want := range tests {
+		if got := oauthScopeDescription(scope); !strings.Contains(got, want) {
+			t.Fatalf("scope %q description=%q, want substring %q", scope, got, want)
+		}
 	}
 }
 

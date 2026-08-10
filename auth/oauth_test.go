@@ -21,6 +21,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"tutor-mcp/db"
+	"tutor-mcp/models"
 
 	_ "modernc.org/sqlite"
 )
@@ -132,20 +133,34 @@ func TestValidateAuthorizationParams(t *testing.T) {
 		name         string
 		responseType string
 		scope        string
+		granular     bool
+		wantScope    string
 		wantErr      bool
 	}{
-		{name: "supported", responseType: "code", scope: "learner"},
-		{name: "scope omitted", responseType: "code"},
+		{name: "phase A legacy bundle", responseType: "code", scope: "learner", wantScope: models.OAuthScopeLearner},
+		{name: "phase A omitted uses legacy bundle", responseType: "code", wantScope: models.OAuthScopeLearner},
+		{name: "phase A read rejected", responseType: "code", scope: "learner:read", wantErr: true},
+		{name: "phase A read write rejected", responseType: "code", scope: "learner:read learner:write", wantErr: true},
+		{name: "phase B legacy still accepted", responseType: "code", scope: "learner", granular: true, wantScope: models.OAuthScopeLearner},
+		{name: "phase B omitted uses legacy bundle", responseType: "code", granular: true, wantScope: models.OAuthScopeLearner},
+		{name: "phase B read", responseType: "code", scope: "learner:read", granular: true, wantScope: models.OAuthScopeLearnerRead},
+		{name: "phase B write", responseType: "code", scope: "learner:write", granular: true, wantScope: models.OAuthScopeLearnerWrite},
+		{name: "phase B read and write", responseType: "code", scope: "learner:read learner:write", granular: true, wantScope: models.OAuthScopeLearnerReadWrite},
+		{name: "phase B combination canonicalized", responseType: "code", scope: "learner:write learner:read", granular: true, wantScope: models.OAuthScopeLearnerReadWrite},
+		{name: "phase B cached redundant legacy combination", responseType: "code", scope: "learner learner:read learner:write", granular: true, wantScope: models.OAuthScopeLearner},
 		{name: "response type missing", scope: "learner", wantErr: true},
 		{name: "implicit rejected", responseType: "token", scope: "learner", wantErr: true},
-		{name: "unknown scope rejected", responseType: "code", scope: "admin", wantErr: true},
-		{name: "multiple scopes rejected", responseType: "code", scope: "learner admin", wantErr: true},
+		{name: "unknown scope rejected", responseType: "code", scope: "admin", granular: true, wantErr: true},
+		{name: "duplicate rejected", responseType: "code", scope: "learner:read learner:read", granular: true, wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateAuthorizationParams(tc.responseType, tc.scope)
+			gotScope, err := validatedAuthorizationScope(tc.responseType, tc.scope, tc.granular)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("validateAuthorizationParams(%q, %q) error = %v, wantErr=%v",
 					tc.responseType, tc.scope, err, tc.wantErr)
+			}
+			if err == nil && gotScope != tc.wantScope {
+				t.Fatalf("validated scope = %q, want %q", gotScope, tc.wantScope)
 			}
 		})
 	}
@@ -633,12 +648,21 @@ func TestRefreshTokenGrant_RejectsCrossClientRedemption(t *testing.T) {
 // returns the authorization code extracted from the redirect URL.
 func driveAuthorizePost(t *testing.T, s *OAuthServer, clientID, redirectURI, codeChallenge, codeChallengeMethod, email, password string) string {
 	t.Helper()
+	return driveAuthorizePostWithScope(
+		t, s, clientID, redirectURI, codeChallenge, codeChallengeMethod,
+		email, password, models.OAuthScopeLearner,
+	)
+}
+
+func driveAuthorizePostWithScope(t *testing.T, s *OAuthServer, clientID, redirectURI, codeChallenge, codeChallengeMethod, email, password, scope string) string {
+	t.Helper()
 	q := url.Values{}
 	q.Set("client_id", clientID)
 	q.Set("redirect_uri", redirectURI)
 	q.Set("response_type", "code")
 	q.Set("resource", testOAuthResource)
 	q.Set("state", "s-114")
+	q.Set("scope", scope)
 	if codeChallenge != "" {
 		q.Set("code_challenge", codeChallenge)
 		q.Set("code_challenge_method", codeChallengeMethod)
@@ -668,7 +692,7 @@ func driveAuthorizePost(t *testing.T, s *OAuthServer, clientID, redirectURI, cod
 	form.Set("response_type", "code")
 	form.Set("resource", testOAuthResource)
 	form.Set("state", "s-114")
-	form.Set("scope", "learner")
+	form.Set("scope", scope)
 	form.Set("email", email)
 	form.Set("password", password)
 	form.Set("approve_client", "yes")
@@ -699,6 +723,82 @@ func driveAuthorizePost(t *testing.T, s *OAuthServer, clientID, redirectURI, cod
 		t.Fatalf("authorize POST: no code in redirect %q", loc)
 	}
 	return code
+}
+
+func TestOAuthGranularScopeAuthorizationCodeEndToEnd(t *testing.T) {
+	setTestSecret(t)
+	s, oauthStore := newTestServer(t)
+	s.SetGranularScopesEnabled(true)
+	const (
+		clientID    = "cid-granular-read"
+		redirectURI = "https://granular.example/callback"
+		email       = "granular-read@example.com"
+		password    = "granular-password"
+		verifier    = "granular-read-verifier"
+	)
+	seedClient(t, oauthStore, clientID, redirectURI)
+	seedLearner(t, oauthStore, email, password)
+	hash := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(hash[:])
+
+	code := driveAuthorizePostWithScope(
+		t, s, clientID, redirectURI, challenge, "S256", email, password,
+		models.OAuthScopeLearnerRead,
+	)
+	authCode, err := oauthStore.GetAuthCode(context.Background(), code, clientID)
+	if err != nil {
+		t.Fatalf("read scoped authorization code: %v", err)
+	}
+	if authCode.Scope != models.OAuthScopeLearnerRead {
+		t.Fatalf("authorization-code scope = %q, want %q", authCode.Scope, models.OAuthScopeLearnerRead)
+	}
+	approved, err := oauthStore.IsClientApprovedForScope(context.Background(), authCode.LearnerID, clientID, redirectURI, models.OAuthScopeLearnerRead)
+	if err != nil || !approved {
+		t.Fatalf("read consent persisted = %v, err=%v", approved, err)
+	}
+	approvedWrite, err := oauthStore.IsClientApprovedForScope(context.Background(), authCode.LearnerID, clientID, redirectURI, models.OAuthScopeLearnerWrite)
+	if err != nil || approvedWrite {
+		t.Fatalf("write consent must not be inferred from read consent: approved=%v err=%v", approvedWrite, err)
+	}
+
+	form := url.Values{
+		"grant_type":    {"authorization_code"},
+		"resource":      {testOAuthResource},
+		"code":          {code},
+		"code_verifier": {verifier},
+		"client_id":     {clientID},
+		"redirect_uri":  {redirectURI},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	s.HandleToken(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("token status = %d, want 200; body=%q", rec.Code, rec.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode token response: %v", err)
+	}
+	if response["scope"] != models.OAuthScopeLearnerRead {
+		t.Fatalf("token response scope = %v", response["scope"])
+	}
+	accessToken, _ := response["access_token"].(string)
+	claims, err := VerifyJWTClaims(accessToken, "https://test.example")
+	if err != nil {
+		t.Fatalf("verify scoped access token: %v", err)
+	}
+	if claims.Scope != models.OAuthScopeLearnerRead {
+		t.Fatalf("JWT scope = %q, want %q", claims.Scope, models.OAuthScopeLearnerRead)
+	}
+	refreshToken, _ := response["refresh_token"].(string)
+	storedRefresh, err := oauthStore.GetRefreshToken(context.Background(), refreshToken)
+	if err != nil {
+		t.Fatalf("read scoped refresh token: %v", err)
+	}
+	if storedRefresh.Scope != models.OAuthScopeLearnerRead {
+		t.Fatalf("refresh-token scope = %q, want %q", storedRefresh.Scope, models.OAuthScopeLearnerRead)
+	}
 }
 
 // seedConfidentialClient registers a confidential client with a known secret

@@ -6,6 +6,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -18,6 +19,7 @@ import (
 func TestRegisterTools_Smoke(t *testing.T) {
 	t.Setenv("REGULATION_GOAL", "on")
 	_, deps := setupToolsTest(t)
+	deps.OAuthGranularScopes = true
 
 	ctx := context.Background()
 	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0"}, nil)
@@ -161,7 +163,18 @@ func TestRegisterTools_Smoke(t *testing.T) {
 			continue
 		}
 		encoded, err := json.Marshal(schemes)
-		if err != nil || !strings.Contains(string(encoded), `"type":"oauth2"`) || !strings.Contains(string(encoded), `"learner"`) {
+		requiredScopes, known := requiredOAuthScopesForTool(name)
+		if !known {
+			t.Errorf("%s has no OAuth scope policy", name)
+			continue
+		}
+		var advertised []struct {
+			Type   string   `json:"type"`
+			Scopes []string `json:"scopes"`
+		}
+		decodeErr := json.Unmarshal(encoded, &advertised)
+		if err != nil || decodeErr != nil || len(advertised) != 1 || advertised[0].Type != "oauth2" ||
+			!slices.Equal(advertised[0].Scopes, requiredScopes) {
 			t.Errorf("%s securitySchemes=%s err=%v", name, encoded, err)
 		}
 	}
@@ -176,9 +189,51 @@ func TestRegisterTools_Smoke(t *testing.T) {
 	}
 	assertToolSafetyHints(t, registered["learning_negotiation"], false, true, false)
 	assertToolSafetyHints(t, registered["get_metacognitive_mirror"], false, false, true)
+	assertToolSafetyHints(t, registered["get_curriculum_snapshot"], false, false, false)
+	assertToolSafetyHints(t, registered["get_memory_state"], false, false, false)
 	// get_next_activity can enqueue the same proactive mirror webhook as the
 	// explicit mirror tool, so its open-world hint must remain consistent.
 	assertToolSafetyHints(t, registered["get_next_activity"], false, false, true)
+}
+
+func TestRegisterTools_LegacyRolloutAdvertisesOnlyBundle(t *testing.T) {
+	t.Setenv("REGULATION_GOAL", "on")
+	_, deps := setupToolsTest(t)
+	deps.OAuthGranularScopes = false
+
+	server := mcp.NewServer(&mcp.Implementation{Name: "legacy-scope-metadata", Version: "0"}, nil)
+	RegisterTools(server, deps)
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	if _, err := server.Connect(context.Background(), serverTransport, nil); err != nil {
+		t.Fatal(err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "legacy-scope-client", Version: "0"}, nil)
+	session, err := client.Connect(context.Background(), clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	listed, err := session.ListTools(context.Background(), &mcp.ListToolsParams{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Tools) != 45 {
+		t.Fatalf("listed tools=%d, want 45", len(listed.Tools))
+	}
+	for _, tool := range listed.Tools {
+		encoded, err := json.Marshal(tool.Meta["securitySchemes"])
+		if err != nil {
+			t.Fatalf("%s encode securitySchemes: %v", tool.Name, err)
+		}
+		var schemes []struct {
+			Type   string   `json:"type"`
+			Scopes []string `json:"scopes"`
+		}
+		if err := json.Unmarshal(encoded, &schemes); err != nil || len(schemes) != 1 ||
+			schemes[0].Type != "oauth2" || !slices.Equal(schemes[0].Scopes, []string{"learner"}) {
+			t.Fatalf("%s phase-A securitySchemes=%s decodeErr=%v", tool.Name, encoded, err)
+		}
+	}
 }
 
 func assertToolSafetyHints(t *testing.T, tool *mcp.Tool, readOnly, destructive, openWorld bool) {

@@ -767,6 +767,36 @@ CREATE TABLE account_tokens (
 CREATE INDEX idx_account_tokens_learner_purpose
     ON account_tokens(learner_id, purpose, expires_at)`,
 	})
+	// The previous authorization server only issued the bounded legacy
+	// `learner` grant, even when the request omitted scope. It is therefore safe
+	// to label already-bound credentials and consent explicitly as `learner`.
+	// The same default keeps old nodes safe during a rolling deploy: their INSERT
+	// statements omit this new column and must keep producing the bounded legacy
+	// grant until every process runs the granular-scope build.
+	// Anything outside the complete supported vocabulary is purged or revoked
+	// rather than guessed.
+	out = append(out, migration{
+		Version: "0035_oauth_tool_scopes",
+		Body: `ALTER TABLE oauth_codes ADD COLUMN scope TEXT NOT NULL DEFAULT 'learner';
+ALTER TABLE refresh_tokens ADD COLUMN scope TEXT NOT NULL DEFAULT 'learner';
+ALTER TABLE learner_approved_clients ADD COLUMN scope TEXT NOT NULL DEFAULT 'learner';
+UPDATE oauth_codes SET scope = 'learner' WHERE TRIM(scope) = '';
+UPDATE refresh_tokens SET scope = 'learner' WHERE TRIM(scope) = '';
+UPDATE learner_approved_clients SET scope = 'learner' WHERE TRIM(scope) = '';
+UPDATE account_tokens SET scope = 'learner'
+WHERE purpose = 'email_verification' AND TRIM(scope) = '';
+DELETE FROM oauth_codes
+WHERE scope NOT IN ('learner', 'learner:read', 'learner:write', 'learner:read learner:write');
+UPDATE refresh_tokens
+SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP)
+WHERE scope NOT IN ('learner', 'learner:read', 'learner:write', 'learner:read learner:write');
+DELETE FROM learner_approved_clients
+WHERE scope NOT IN ('learner', 'learner:read', 'learner:write', 'learner:read learner:write');
+UPDATE account_tokens
+SET consumed_at = COALESCE(consumed_at, CURRENT_TIMESTAMP)
+WHERE purpose = 'email_verification'
+  AND scope NOT IN ('learner', 'learner:read', 'learner:write', 'learner:read learner:write')`,
+	})
 	return out
 }
 

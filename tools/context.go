@@ -7,6 +7,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"tutor-mcp/algorithms"
 	"tutor-mcp/engine"
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -226,7 +228,12 @@ func registerGetLearnerContext(server *mcp.Server, deps *Deps) {
 		}
 		// An interrupted client can resume the canonical durable session
 		// instead of inventing a second correlation ID.
-		if activeSession, sessionErr := deps.Store.GetActiveLearningSession(ctx, learnerID); sessionErr == nil {
+		activeSession, sessionErr := deps.Store.GetActiveLearningSession(ctx, learnerID)
+		if sessionErr != nil && !errors.Is(sessionErr, storeport.ErrNotFound) {
+			r, _ := safeErrorResult(deps.Logger, "failed to load active learning session", sessionErr)
+			return r, nil, nil
+		}
+		if sessionErr == nil {
 			payload["active_session"] = activeSession
 			payload["session_id"] = activeSession.ID
 		}

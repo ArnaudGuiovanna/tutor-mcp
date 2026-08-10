@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"tutor-mcp/auth"
 	"tutor-mcp/models"
@@ -19,10 +20,13 @@ import (
 
 // Deps holds shared dependencies for all MCP tool handlers.
 type Deps struct {
-	Store   storeport.Store
-	Logger  *slog.Logger
-	BaseURL string
+	Store               storeport.Store
+	Logger              *slog.Logger
+	BaseURL             string
+	OAuthGranularScopes bool
 }
+
+var toolRegistrationOAuthModes sync.Map // map[*mcp.Server]bool; populated only during RegisterTools
 
 var readOnlyTools = map[string]bool{
 	"get_pending_alerts":             true,
@@ -43,6 +47,45 @@ var readOnlyTools = map[string]bool{
 	"get_goal_relevance":             true,
 }
 
+// readWriteTools contains read-oriented tools whose handlers also persist
+// learner state or enqueue external work. A write-only grant must not expose
+// their primary read payload, while a read-only grant must not authorize their
+// side effects, so these tools require both granular capabilities.
+var readWriteTools = map[string]bool{
+	"get_curriculum_snapshot":  true,
+	"get_memory_state":         true,
+	"get_next_activity":        true,
+	"get_metacognitive_mirror": true,
+}
+
+var writeTools = map[string]bool{
+	"add_concepts":                    true,
+	"archive_domain":                  true,
+	"calibration_check":               true,
+	"cancel_assessment_attempt":       true,
+	"delete_domain":                   true,
+	"init_domain":                     true,
+	"learning_negotiation":            true,
+	"mark_domain_high_stakes":         true,
+	"prepare_assessment_attempt":      true,
+	"publish_curriculum_revision":     true,
+	"queue_webhook_message":           true,
+	"record_affect":                   true,
+	"record_calibration_result":       true,
+	"record_interaction":              true,
+	"record_session_close":            true,
+	"record_transfer_result":          true,
+	"set_domain_priority":             true,
+	"set_goal_relevance":              true,
+	"start_learning_session":          true,
+	"submit_assessment_attempt":       true,
+	"unarchive_domain":                true,
+	"update_availability_model":       true,
+	"update_implementation_intention": true,
+	"update_learner_memory":           true,
+	"update_learner_profile":          true,
+}
+
 // additiveWriteTools contains mutations that create or append state without
 // replacing/removing existing learner state. All other writes are marked
 // destructive conservatively so hosts can put an approval boundary around
@@ -50,6 +93,8 @@ var readOnlyTools = map[string]bool{
 var additiveWriteTools = map[string]bool{
 	"start_learning_session":     true,
 	"get_next_activity":          true,
+	"get_curriculum_snapshot":    true,
+	"get_memory_state":           true,
 	"record_interaction":         true,
 	"prepare_assessment_attempt": true,
 	"init_domain":                true,
@@ -73,11 +118,52 @@ var openWorldTools = map[string]bool{
 
 func boolHint(v bool) *bool { return &v }
 
+func requiredOAuthScopesForTool(name string) ([]string, bool) {
+	if readWriteTools[name] {
+		return []string{models.OAuthScopeLearnerRead, models.OAuthScopeLearnerWrite}, true
+	}
+	if readOnlyTools[name] {
+		return []string{models.OAuthScopeLearnerRead}, true
+	}
+	if writeTools[name] {
+		return []string{models.OAuthScopeLearnerWrite}, true
+	}
+	return nil, false
+}
+
+func oauthToolAvailable(name string) bool {
+	switch name {
+	case "set_goal_relevance", "get_goal_relevance":
+		return regulationGoalEnabled()
+	default:
+		return true
+	}
+}
+
+func hasRequiredOAuthScopes(ctx context.Context, required []string) bool {
+	for _, scope := range required {
+		if !auth.HasOAuthScope(ctx, scope) {
+			return false
+		}
+	}
+	return true
+}
+
 // addTool is the single registration boundary for authorization and safety
 // metadata. ChatGPT consumes the securitySchemes compatibility entry from
 // _meta, while standard MCP clients consume ToolAnnotations.
 func addTool[In, Out any](server *mcp.Server, tool *mcp.Tool, handler mcp.ToolHandlerFor[In, Out]) {
 	readOnly := readOnlyTools[tool.Name]
+	requiredScopes, known := requiredOAuthScopesForTool(tool.Name)
+	if !known {
+		panic("missing OAuth scope policy for MCP tool " + tool.Name)
+	}
+	granularScopes, _ := toolRegistrationOAuthModes.Load(server)
+	granular, _ := granularScopes.(bool)
+	advertisedScopes := requiredScopes
+	if !granular {
+		advertisedScopes = []string{models.OAuthScopeLearner}
+	}
 	destructive := !readOnly && !additiveWriteTools[tool.Name]
 	openWorld := openWorldTools[tool.Name]
 	tool.Annotations = &mcp.ToolAnnotations{
@@ -95,9 +181,47 @@ func addTool[In, Out any](server *mcp.Server, tool *mcp.Tool, handler mcp.ToolHa
 	}
 	tool.Meta["securitySchemes"] = []map[string]any{{
 		"type":   "oauth2",
-		"scopes": []string{"learner"},
+		"scopes": advertisedScopes,
 	}}
-	mcp.AddTool(server, tool, handler)
+	scopedHandler := func(ctx context.Context, req *mcp.CallToolRequest, input In) (*mcp.CallToolResult, Out, error) {
+		var zero Out
+		// Leave missing authentication to the handler's existing canonical path,
+		// but fail closed when a principal exists without the capability required
+		// by this exact tool. The bounded legacy learner grant is accepted by
+		// OAuthScopeAllows and cannot silently cover future scope families.
+		if auth.GetLearnerID(ctx) != "" && !hasRequiredOAuthScopes(ctx, requiredScopes) {
+			result := insufficientOAuthScopeResult(ctx, "", requiredScopes, granular)
+			return result, zero, nil
+		}
+		return handler(ctx, req, input)
+	}
+	mcp.AddTool(server, tool, scopedHandler)
+}
+
+// toolOAuthScopeMiddleware is installed after the idempotency middleware, so
+// it executes first and an unauthorized mutation cannot reserve a replay key.
+// addTool repeats the check because many package-level tests and embedders
+// register one tool directly instead of calling RegisterTools.
+func toolOAuthScopeMiddleware(baseURL string, granular bool) mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method != "tools/call" || auth.GetLearnerID(ctx) == "" {
+				return next(ctx, method, req)
+			}
+			call, ok := req.(*mcp.CallToolRequest)
+			if !ok || call.Params == nil {
+				return next(ctx, method, req)
+			}
+			requiredScopes, known := requiredOAuthScopesForTool(call.Params.Name)
+			if !known || !oauthToolAvailable(call.Params.Name) {
+				return next(ctx, method, req)
+			}
+			if hasRequiredOAuthScopes(ctx, requiredScopes) {
+				return next(ctx, method, req)
+			}
+			return insufficientOAuthScopeResult(ctx, baseURL, requiredScopes, granular), nil
+		}
+	}
 }
 
 func getLearnerID(ctx context.Context) (string, error) {
@@ -130,10 +254,10 @@ func resolveDomain(ctx context.Context, store storeport.Store, learnerID, domain
 			return nil, err
 		}
 		if d.LearnerID != learnerID {
-			return nil, fmt.Errorf("domain not found")
+			return nil, fmt.Errorf("domain not found: %w", storeport.ErrNotFound)
 		}
 		if d.Archived {
-			return nil, fmt.Errorf("domain not found")
+			return nil, fmt.Errorf("domain not found: %w", storeport.ErrNotFound)
 		}
 		return d, nil
 	}
@@ -196,6 +320,9 @@ func noActiveDomainResult() (*mcp.CallToolResult, any) {
 
 // RegisterTools registers all MCP tools and prompts on the given server.
 func RegisterTools(server *mcp.Server, deps *Deps) {
+	granularScopes := deps != nil && deps.OAuthGranularScopes
+	toolRegistrationOAuthModes.Store(server, granularScopes)
+	defer toolRegistrationOAuthModes.Delete(server)
 	addIdempotencyMiddleware(server, deps)
 	registerStartLearningSession(server, deps)
 	registerGetPendingAlerts(server, deps)
@@ -246,4 +373,9 @@ func RegisterTools(server *mcp.Server, deps *Deps) {
 	registerSetGoalRelevance(server, deps)
 	registerGetGoalRelevance(server, deps)
 	RegisterPrompt(server)
+	baseURL := ""
+	if deps != nil {
+		baseURL = deps.BaseURL
+	}
+	server.AddReceivingMiddleware(toolOAuthScopeMiddleware(baseURL, granularScopes))
 }

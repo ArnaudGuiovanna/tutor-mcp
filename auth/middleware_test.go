@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"tutor-mcp/models"
+
 	"github.com/golang-jwt/jwt/v5"
 	mcpauth "github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -53,10 +55,55 @@ func TestBearerMiddleware_MissingAuthHeader(t *testing.T) {
 	if !strings.Contains(wa, `resource_metadata="https://test.example/.well-known/oauth-protected-resource"`) {
 		t.Fatalf("WWW-Authenticate missing resource_metadata: %q", wa)
 	}
+	if !strings.Contains(wa, `scope="learner"`) {
+		t.Fatalf("WWW-Authenticate missing legacy bootstrap scope: %q", wa)
+	}
 	// No invalid_token marker on missing header (only on invalid).
 	if strings.Contains(wa, `error="invalid_token"`) {
 		t.Fatalf("missing token should NOT produce invalid_token marker: %q", wa)
 	}
+}
+
+func TestBearerMiddlewareWithScopeHint_GranularBootstrapIsNotGlobalAuthorization(t *testing.T) {
+	setTestSecret(t)
+	const issuer = "https://test.example"
+
+	t.Run("missing token challenges for read", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		BearerMiddlewareWithScopeHint(issuer, models.OAuthScopeLearnerRead, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			t.Fatal("next called without bearer token")
+		})).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/mcp", nil))
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", rec.Code)
+		}
+		if challenge := rec.Header().Get("WWW-Authenticate"); !strings.Contains(challenge, `scope="learner:read"`) {
+			t.Fatalf("granular bootstrap challenge = %q", challenge)
+		}
+	})
+
+	t.Run("write-only token reaches per-tool boundary", func(t *testing.T) {
+		token, err := GenerateJWTForResourceAndScope(
+			issuer, MCPResource(issuer), "write-only-learner", models.OAuthScopeLearnerWrite,
+		)
+		if err != nil {
+			t.Fatalf("generate token: %v", err)
+		}
+		called := false
+		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+			if got := GetOAuthScope(r.Context()); got != models.OAuthScopeLearnerWrite {
+				t.Fatalf("scope in context = %q, want %q", got, models.OAuthScopeLearnerWrite)
+			}
+			w.WriteHeader(http.StatusNoContent)
+		})
+		req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		BearerMiddlewareWithScopeHint(issuer, models.OAuthScopeLearnerRead, next).ServeHTTP(rec, req)
+		if rec.Code != http.StatusNoContent || !called {
+			t.Fatalf("write-only token status=%d called=%v, want 204/true; body=%q", rec.Code, called, rec.Body.String())
+		}
+	})
 }
 
 func TestBearerMiddleware_NonBearerScheme(t *testing.T) {
@@ -196,7 +243,10 @@ func TestBearerMiddleware_PopulatesMCPTokenInfo(t *testing.T) {
 	setTestSecret(t)
 
 	const learnerID = "learner-sdk-context"
-	token, err := GenerateJWT("https://test.example", learnerID)
+	token, err := GenerateJWTForResourceAndScope(
+		"https://test.example", MCPResource("https://test.example"), learnerID,
+		models.OAuthScopeLearnerRead,
+	)
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
@@ -209,14 +259,17 @@ func TestBearerMiddleware_PopulatesMCPTokenInfo(t *testing.T) {
 		if info.UserID != learnerID {
 			t.Errorf("TokenInfo.UserID = %q, want %q", info.UserID, learnerID)
 		}
-		if len(info.Scopes) != 1 || info.Scopes[0] != "learner" {
-			t.Errorf("TokenInfo.Scopes = %v, want [learner]", info.Scopes)
+		if len(info.Scopes) != 1 || info.Scopes[0] != models.OAuthScopeLearnerRead {
+			t.Errorf("TokenInfo.Scopes = %v, want [%s]", info.Scopes, models.OAuthScopeLearnerRead)
 		}
 		if info.Expiration.Before(time.Now()) || info.Expiration.After(time.Now().Add(AccessTokenTTL+time.Second)) {
 			t.Errorf("TokenInfo.Expiration = %v, want the JWT expiry within %v", info.Expiration, AccessTokenTTL)
 		}
 		if got := GetLearnerID(r.Context()); got != learnerID {
 			t.Errorf("GetLearnerID = %q, want %q", got, learnerID)
+		}
+		if got := GetOAuthScope(r.Context()); got != models.OAuthScopeLearnerRead {
+			t.Errorf("GetOAuthScope = %q, want %q", got, models.OAuthScopeLearnerRead)
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
@@ -257,13 +310,13 @@ func TestBearerMiddleware_RejectsTokenWithoutLearnerScope(t *testing.T) {
 	rec := httptest.NewRecorder()
 	BearerMiddleware(issuer, next).ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403; body=%q", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401; body=%q", rec.Code, rec.Body.String())
 	}
 	if called {
 		t.Fatal("next must not be called without the learner scope")
 	}
-	if !strings.Contains(rec.Body.String(), "insufficient scope") {
+	if !strings.Contains(rec.Body.String(), "invalid token") {
 		t.Fatalf("unexpected response body %q", rec.Body.String())
 	}
 }

@@ -64,6 +64,7 @@ func callRecordCalibration(t *testing.T, deps *Deps, learnerID, predictionID str
 	server.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			ctx = context.WithValue(ctx, auth.LearnerIDKey, learnerID)
+			ctx = auth.WithOAuthScope(ctx, models.OAuthScopeLearner)
 			return next(ctx, method, req)
 		}
 	})
@@ -138,6 +139,7 @@ func callRecordCalibrationRaw(t *testing.T, deps *Deps, learnerID string, argsJS
 	server.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			ctx = context.WithValue(ctx, auth.LearnerIDKey, learnerID)
+			ctx = auth.WithOAuthScope(ctx, models.OAuthScopeLearner)
 			return next(ctx, method, req)
 		}
 	})

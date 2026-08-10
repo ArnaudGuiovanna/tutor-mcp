@@ -7,6 +7,8 @@ package engine
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -118,8 +120,10 @@ func (s *Scheduler) schedule(name, spec string, period time.Duration, fn func())
 }
 
 // slogCronLogger adapts robfig/cron's Logger interface onto an *slog.Logger.
-// cron only emits two kinds of messages: routine Info and Error (the latter
-// is what cron.Recover uses to report a recovered panic + stack).
+// cron.Recover supplies both the recovered value as an error and the raw stack.
+// Neither is safe for standard logs: panic/error text can contain learner data
+// or credentials, and stacks contain filesystem paths. Retain only safe types
+// and a correlation fingerprint.
 type slogCronLogger struct {
 	l *slog.Logger
 }
@@ -135,8 +139,35 @@ func (s slogCronLogger) Error(err error, msg string, keysAndValues ...interface{
 	if s.l == nil {
 		return
 	}
-	args := append([]interface{}{"err", err}, keysAndValues...)
-	s.l.Error("cron: "+msg, args...)
+	event := "error"
+	if msg == "panic" {
+		event = "panic_recovered"
+	}
+	args := []interface{}{
+		"component", "scheduler_cron",
+		"event", event,
+		"error_type", fmt.Sprintf("%T", err),
+	}
+	if fingerprint := cronStackFingerprint(keysAndValues); fingerprint != "" {
+		args = append(args, "stack_fingerprint", fingerprint)
+	}
+	s.l.Error("scheduler cron failure", args...)
+}
+
+func cronStackFingerprint(keysAndValues []interface{}) string {
+	for i := 0; i+1 < len(keysAndValues); i += 2 {
+		key, ok := keysAndValues[i].(string)
+		if !ok || key != "stack" {
+			continue
+		}
+		stack, ok := keysAndValues[i+1].(string)
+		if !ok || stack == "" {
+			return ""
+		}
+		digest := sha256.Sum256([]byte(stack))
+		return hex.EncodeToString(digest[:8])
+	}
+	return ""
 }
 
 func (s *Scheduler) Start() error {

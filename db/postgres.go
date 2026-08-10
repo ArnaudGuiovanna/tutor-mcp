@@ -470,6 +470,30 @@ CREATE INDEX IF NOT EXISTS idx_account_tokens_learner_purpose
 CREATE INDEX IF NOT EXISTS idx_interactions_domain_recent
     ON interactions(learner_id, domain_id, created_at DESC)`,
 	},
+	{
+		Version: "postgres_0026_oauth_tool_scopes",
+		// DEFAULT learner is intentional expand/contract compatibility: an old
+		// process omits the new columns and only knows the bounded legacy grant.
+		Body: `ALTER TABLE oauth_codes ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT 'learner';
+ALTER TABLE refresh_tokens ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT 'learner';
+ALTER TABLE learner_approved_clients ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT 'learner';
+UPDATE oauth_codes SET scope = 'learner' WHERE BTRIM(scope) = '';
+UPDATE refresh_tokens SET scope = 'learner' WHERE BTRIM(scope) = '';
+UPDATE learner_approved_clients SET scope = 'learner' WHERE BTRIM(scope) = '';
+UPDATE account_tokens SET scope = 'learner'
+WHERE purpose = 'email_verification' AND BTRIM(scope) = '';
+DELETE FROM oauth_codes
+WHERE scope NOT IN ('learner', 'learner:read', 'learner:write', 'learner:read learner:write');
+UPDATE refresh_tokens
+SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP)
+WHERE scope NOT IN ('learner', 'learner:read', 'learner:write', 'learner:read learner:write');
+DELETE FROM learner_approved_clients
+WHERE scope NOT IN ('learner', 'learner:read', 'learner:write', 'learner:read learner:write');
+UPDATE account_tokens
+SET consumed_at = COALESCE(consumed_at, CURRENT_TIMESTAMP)
+WHERE purpose = 'email_verification'
+  AND scope NOT IN ('learner', 'learner:read', 'learner:write', 'learner:read learner:write')`,
+	},
 }
 
 // OpenPostgres opens a PostgreSQL-backed *sql.DB via the pgx database/sql

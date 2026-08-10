@@ -6,10 +6,12 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 )
 
 type learningSessionScanner interface {
@@ -171,8 +173,8 @@ func (s *Store) GetLearningSession(ctx context.Context, learnerID, sessionID str
 		sessionID, learnerID,
 	))
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("learning session not found")
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("learning session not found: %w", storeport.WrapNotFound(err))
 		}
 		return nil, fmt.Errorf("get learning session: %w", err)
 	}
@@ -186,8 +188,8 @@ func (s *Store) GetActiveLearningSession(ctx context.Context, learnerID string) 
 		learnerID, models.LearningSessionStatusOpen,
 	))
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("active learning session not found")
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("active learning session not found: %w", storeport.WrapNotFound(err))
 		}
 		return nil, fmt.Errorf("get active learning session: %w", err)
 	}
@@ -211,7 +213,7 @@ func (s *Store) TouchLearningSession(ctx context.Context, learnerID, sessionID s
 	}
 	rows, _ := res.RowsAffected()
 	if rows == 0 {
-		return nil, fmt.Errorf("open learning session not found")
+		return nil, fmt.Errorf("open learning session not found: %w", storeport.ErrNotFound)
 	}
 	return s.GetLearningSession(ctx, learnerID, sessionID)
 }
@@ -235,7 +237,10 @@ func (s *Store) CloseLearningSession(ctx context.Context, learnerID, sessionID s
 	}
 	session, err := s.GetLearningSession(ctx, learnerID, sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("learning session not found")
+		if errors.Is(err, storeport.ErrNotFound) {
+			return nil, fmt.Errorf("learning session not found: %w", err)
+		}
+		return nil, fmt.Errorf("read closed learning session: %w", err)
 	}
 	if session.Status != models.LearningSessionStatusClosed {
 		return nil, fmt.Errorf("learning session could not be closed")

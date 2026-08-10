@@ -5,6 +5,8 @@ package tools
 
 import (
 	"context"
+	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -24,6 +26,26 @@ func TestRecordAffect_MissingSessionID(t *testing.T) {
 	res := callTool(t, deps, registerRecordAffect, "L_owner", "record_affect", map[string]any{"session_id": ""})
 	if !res.IsError || !strings.Contains(resultText(res), "session_id is required") {
 		t.Fatalf("got %q", resultText(res))
+	}
+}
+
+func TestRecordAffect_SessionBackendFailureIsSafe(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	secretPath := "/private/tenant/L_owner/sessions.db"
+	deps.Store = &failingLearningSessionLookupStore{
+		Store:   store,
+		byIDErr: &os.PathError{Op: "read", Path: secretPath, Err: errors.New("backend unavailable")},
+	}
+
+	res := callTool(t, deps, registerRecordAffect, "L_owner", "record_affect", map[string]any{
+		"session_id": "session",
+		"energy":     3,
+	})
+	if !res.IsError || resultText(res) != "failed to load learning session" {
+		t.Fatalf("backend failure was not surfaced safely: error=%v text=%q", res.IsError, resultText(res))
+	}
+	if strings.Contains(resultText(res), secretPath) {
+		t.Fatalf("backend failure leaked a path: %q", resultText(res))
 	}
 }
 

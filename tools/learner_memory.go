@@ -5,12 +5,14 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
 	"tutor-mcp/memory"
+	storeport "tutor-mcp/store"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -31,7 +33,26 @@ var allowedMemoryOperations = []string{
 	string(memory.OpReplaceFile),
 }
 
-var writeLearnerMemory = memory.Write
+var (
+	writeLearnerMemory        = memory.Write
+	ensureLearnerMemoryDirs   = memory.EnsureLearnerDirs
+	readLearnerMemory         = memory.Read
+	listLearnerMemorySessions = memory.ListSessions
+	listLearnerMemoryArchives = memory.ListArchives
+	listLearnerMemoryConcepts = memory.ListConcepts
+	pathForLearnerMemoryRead  = memory.PathForRead
+	statLearnerMemoryPath     = os.Lstat
+)
+
+// memoryWriteDependencyError distinguishes an unavailable persistence
+// dependency from caller-owned validation failures. Its cause is retained for
+// structured logging but is never returned verbatim in a tool result.
+type memoryWriteDependencyError struct {
+	err error
+}
+
+func (e *memoryWriteDependencyError) Error() string { return "memory validation dependency failed" }
+func (e *memoryWriteDependencyError) Unwrap() error { return e.err }
 
 type UpdateLearnerMemoryParams struct {
 	IdempotentMutationParams
@@ -64,6 +85,11 @@ func registerUpdateLearnerMemory(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 		if err := validateMemoryWriteParams(ctx, deps, learnerID, params); err != nil {
+			var dependencyErr *memoryWriteDependencyError
+			if errors.As(err, &dependencyErr) {
+				r, _ := safeErrorResult(deps.Logger, "memory validation unavailable", err)
+				return r, nil, nil
+			}
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
 		}
@@ -92,8 +118,11 @@ func registerUpdateLearnerMemory(server *mcp.Server, deps *Deps) {
 		var degradedComponents []string
 		if err := writeLearnerMemory(writeReq); err != nil {
 			if !memory.IsCommittedWriteError(err) {
-				deps.Logger.Warn("update_learner_memory: write failed", "err", err, "learner", learnerID, "scope", params.Scope)
-				r, _ := errorResult(err.Error())
+				if errors.Is(err, memory.ErrQuotaExceeded) {
+					r, _ := errorResult("memory quota exceeded")
+					return r, nil, nil
+				}
+				r, _ := safeErrorResult(deps.Logger, "memory write failed", err)
 				return r, nil, nil
 			}
 			// Rename already made the exact new content visible. Retrying an
@@ -164,9 +193,9 @@ func registerReadRawSession(server *mcp.Server, deps *Deps) {
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
 		}
-		raw, err := memory.Read(learnerID, memory.ScopeSession, ts.Format(time.RFC3339))
+		raw, err := readLearnerMemory(learnerID, memory.ScopeSession, ts.Format(time.RFC3339))
 		if err != nil {
-			r, _ := errorResult(err.Error())
+			r, _ := safeErrorResult(deps.Logger, "memory session unavailable", err)
 			return r, nil, nil
 		}
 		if strings.TrimSpace(raw) == "" {
@@ -175,7 +204,7 @@ func registerReadRawSession(server *mcp.Server, deps *Deps) {
 		}
 		payload, err := memory.ParseSessionPayload(ts, raw)
 		if err != nil {
-			r, _ := errorResult(err.Error())
+			r, _ := safeErrorResult(deps.Logger, "memory session is invalid", err)
 			return r, nil, nil
 		}
 		r, _ := jsonResult(map[string]any{"ok": true, "session_payload": payload})
@@ -198,33 +227,87 @@ func registerGetMemoryState(server *mcp.Server, deps *Deps) {
 			r, _ := jsonResult(map[string]any{"ok": false, "status": "not_enabled"})
 			return r, nil, nil
 		}
-		if err := memory.EnsureLearnerDirs(learnerID); err != nil {
-			r, _ := errorResult(err.Error())
+		if err := ensureLearnerMemoryDirs(learnerID); err != nil {
+			r, _ := safeErrorResult(deps.Logger, "memory state unavailable", err)
 			return r, nil, nil
 		}
-		sessions, _ := memory.ListSessions(learnerID)
-		archives, _ := memory.ListArchives(learnerID)
-		concepts, _ := memory.ListConcepts(learnerID)
-		pending, _ := memory.Read(learnerID, memory.ScopeMemoryPending, "")
-		ec, _ := memory.LoadContext(learnerID, "", nil, nil)
+		sessions, err := listLearnerMemorySessions(learnerID)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "memory state unavailable", err)
+			return r, nil, nil
+		}
+		archives, err := listLearnerMemoryArchives(learnerID)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "memory state unavailable", err)
+			return r, nil, nil
+		}
+		concepts, err := listLearnerMemoryConcepts(learnerID)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "memory state unavailable", err)
+			return r, nil, nil
+		}
+		pending, err := readLearnerMemory(learnerID, memory.ScopeMemoryPending, "")
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "memory state unavailable", err)
+			return r, nil, nil
+		}
+
+		var degradedComponents []string
+		var recentNarrativeSignal any
+		ec, contextErr := memory.LoadContext(learnerID, "", nil, nil)
+		if contextErr != nil {
+			logMemoryStateDegradation(deps, "narrative_context", contextErr)
+			degradedComponents = append(degradedComponents, "narrative_context")
+		} else {
+			recentNarrativeSignal = ec != nil && ec.HasRecentNarrativeSignal()
+		}
+
+		var memorySizeValue any
+		memorySize, sizeErr := learnerMemorySize(learnerID, concepts, archives, sessions)
+		if sizeErr != nil {
+			logMemoryStateDegradation(deps, "memory_statistics", sizeErr)
+			degradedComponents = append(degradedComponents, "memory_statistics")
+			// HasRecentNarrativeSignal also depends on file metadata. Do not
+			// report a potentially false negative when metadata is unavailable.
+			if contextErr == nil {
+				recentNarrativeSignal = nil
+				degradedComponents = append(degradedComponents, "narrative_signal")
+			}
+		} else {
+			memorySizeValue = memorySize
+		}
+
+		var consolidationLagValue any
+		consolidationLag, lagErr := consolidationLagDays(learnerID, sessions, archives)
+		if lagErr != nil {
+			logMemoryStateDegradation(deps, "consolidation_lag", lagErr)
+			degradedComponents = append(degradedComponents, "consolidation_lag")
+		} else {
+			consolidationLagValue = consolidationLag
+		}
 
 		var oldest, newest any
 		if len(sessions) > 0 {
 			newest = sessions[0]
 			oldest = sessions[len(sessions)-1]
 		}
-		r, _ := jsonResult(map[string]any{
+		payload := map[string]any{
 			"ok":                          true,
-			"memory_size_bytes":           learnerMemorySize(learnerID),
+			"memory_size_bytes":           memorySizeValue,
 			"pending_count":               countPendingMemoryItems(pending),
 			"session_count":               len(sessions),
 			"archive_count":               len(archives),
 			"concept_count":               len(concepts),
 			"oldest_session":              oldest,
 			"newest_session":              newest,
-			"consolidation_lag_days":      consolidationLagDays(learnerID, sessions, archives),
-			"has_recent_narrative_signal": ec != nil && ec.HasRecentNarrativeSignal(),
-		})
+			"consolidation_lag_days":      consolidationLagValue,
+			"has_recent_narrative_signal": recentNarrativeSignal,
+		}
+		if len(degradedComponents) > 0 {
+			payload["status"] = "degraded"
+			payload["degraded_components"] = degradedComponents
+		}
+		r, _ := jsonResult(payload)
 		return r, nil, nil
 	})
 }
@@ -280,7 +363,13 @@ func validateMemoryWriteParams(ctx context.Context, deps *Deps, learnerID string
 		}
 		if params.DomainID != "" {
 			domain, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
-			if err != nil || domain == nil {
+			if err != nil {
+				if !errors.Is(err, storeport.ErrNotFound) {
+					return &memoryWriteDependencyError{err: fmt.Errorf("resolve concept domain: %w", err)}
+				}
+				return fmt.Errorf("domain not found")
+			}
+			if domain == nil {
 				return fmt.Errorf("domain not found")
 			}
 			if err := validateConceptInDomain(domain, params.ConceptSlug); err != nil {
@@ -289,7 +378,7 @@ func validateMemoryWriteParams(ctx context.Context, deps *Deps, learnerID string
 		} else {
 			active, err := deps.Store.ActiveDomainConceptSet(ctx, learnerID)
 			if err != nil {
-				return fmt.Errorf("active concept lookup failed: %w", err)
+				return &memoryWriteDependencyError{err: fmt.Errorf("load active concept set: %w", err)}
 			}
 			if !active[params.ConceptSlug] {
 				return fmt.Errorf("concept_slug must match an active concept")
@@ -320,6 +409,9 @@ func validateMemoryWriteParams(ctx context.Context, deps *Deps, learnerID string
 		if params.SessionID != "" {
 			session, err := deps.Store.GetLearningSession(ctx, learnerID, params.SessionID)
 			if err != nil {
+				if !errors.Is(err, storeport.ErrNotFound) {
+					return &memoryWriteDependencyError{err: fmt.Errorf("load learning session: %w", err)}
+				}
 				return fmt.Errorf("learning session not found")
 			}
 			if expectedDomainID != "" && expectedDomainID != session.DomainID {
@@ -448,71 +540,93 @@ func countPendingMemoryItems(content string) int {
 	return count
 }
 
-func learnerMemorySize(learnerID string) int64 {
+func learnerMemorySize(learnerID string, concepts, archives []string, sessions []time.Time) (int64, error) {
 	var total int64
 	for _, scope := range []memory.Scope{memory.ScopeMemory, memory.ScopeMemoryPending} {
-		if path, err := memory.PathForRead(learnerID, scope, ""); err == nil {
-			if info, statErr := os.Stat(path); statErr == nil {
-				total += info.Size()
-			}
+		info, exists, err := learnerMemoryFileInfo(learnerID, scope, "")
+		if err != nil {
+			return 0, err
+		}
+		if exists {
+			total += info.Size()
 		}
 	}
-	for _, concept := range mustListMemoryConcepts(learnerID) {
-		if path, err := memory.PathForRead(learnerID, memory.ScopeConcept, concept); err == nil {
-			if info, statErr := os.Stat(path); statErr == nil {
-				total += info.Size()
-			}
+	for _, concept := range concepts {
+		info, exists, err := learnerMemoryFileInfo(learnerID, memory.ScopeConcept, concept)
+		if err != nil {
+			return 0, err
+		}
+		if exists {
+			total += info.Size()
 		}
 	}
-	for _, archive := range mustListMemoryArchives(learnerID) {
-		if path, err := memory.PathForRead(learnerID, memory.ScopeArchive, archive); err == nil {
-			if info, statErr := os.Stat(path); statErr == nil {
-				total += info.Size()
-			}
+	for _, archive := range archives {
+		info, exists, err := learnerMemoryFileInfo(learnerID, memory.ScopeArchive, archive)
+		if err != nil {
+			return 0, err
+		}
+		if exists {
+			total += info.Size()
 		}
 	}
-	for _, ts := range mustListMemorySessions(learnerID) {
-		if path, err := memory.PathForRead(learnerID, memory.ScopeSession, ts.Format(time.RFC3339)); err == nil {
-			if info, statErr := os.Stat(path); statErr == nil {
-				total += info.Size()
-			}
+	for _, ts := range sessions {
+		info, exists, err := learnerMemoryFileInfo(learnerID, memory.ScopeSession, ts.Format(time.RFC3339))
+		if err != nil {
+			return 0, err
+		}
+		if exists {
+			total += info.Size()
 		}
 	}
-	return total
+	return total, nil
 }
 
-func consolidationLagDays(learnerID string, sessions []time.Time, archives []string) int {
+func consolidationLagDays(learnerID string, sessions []time.Time, archives []string) (int, error) {
 	if len(sessions) == 0 {
-		return 0
+		return 0, nil
 	}
 	var newestArchive time.Time
 	for _, archive := range archives {
-		if path, err := memory.PathForRead(learnerID, memory.ScopeArchive, archive); err == nil {
-			if info, statErr := os.Stat(path); statErr == nil && info.ModTime().After(newestArchive) {
-				newestArchive = info.ModTime()
-			}
+		info, exists, err := learnerMemoryFileInfo(learnerID, memory.ScopeArchive, archive)
+		if err != nil {
+			return 0, err
+		}
+		if exists && info.ModTime().After(newestArchive) {
+			newestArchive = info.ModTime()
 		}
 	}
 	if newestArchive.IsZero() {
-		return int(time.Since(sessions[len(sessions)-1]).Hours() / 24)
+		return int(time.Since(sessions[len(sessions)-1]).Hours() / 24), nil
 	}
 	if sessions[0].Before(newestArchive) {
-		return 0
+		return 0, nil
 	}
-	return int(time.Since(newestArchive).Hours() / 24)
+	return int(time.Since(newestArchive).Hours() / 24), nil
 }
 
-func mustListMemoryConcepts(learnerID string) []string {
-	out, _ := memory.ListConcepts(learnerID)
-	return out
+func learnerMemoryFileInfo(learnerID string, scope memory.Scope, key string) (os.FileInfo, bool, error) {
+	path, err := pathForLearnerMemoryRead(learnerID, scope, key)
+	if err != nil {
+		return nil, false, err
+	}
+	info, err := statLearnerMemoryPath(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, false, errors.New("memory entry is not a regular file")
+	}
+	return info, true, nil
 }
 
-func mustListMemoryArchives(learnerID string) []string {
-	out, _ := memory.ListArchives(learnerID)
-	return out
-}
-
-func mustListMemorySessions(learnerID string) []time.Time {
-	out, _ := memory.ListSessions(learnerID)
-	return out
+func logMemoryStateDegradation(deps *Deps, component string, err error) {
+	if deps == nil || deps.Logger == nil {
+		return
+	}
+	// File-system errors frequently embed absolute paths. Keep ordinary logs
+	// and the MCP response limited to a stable component name and error class.
+	deps.Logger.Warn("get_memory_state: optional component unavailable", "component", component, "error_type", fmt.Sprintf("%T", err))
 }

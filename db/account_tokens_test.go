@@ -51,6 +51,33 @@ func TestExpiredAccountTokenIsRejected(t *testing.T) {
 	}
 }
 
+func TestLegacyBlankEmailVerificationScopeIsReadAsBoundedLearnerGrant(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+	learner, err := s.CreateUnverifiedLearner(ctx, "rolling-scope@example.test", "hash", "learn", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if _, err := s.root.Exec(rb(s, `INSERT INTO account_tokens
+		(token_hash, learner_id, purpose, client_id, redirect_uri, resource, state, scope,
+		 code_challenge, code_challenge_method, expires_at, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, '', '', ?, 'S256', ?, ?)`),
+		"sha256:rolling-account-scope", learner.ID, accountTokenEmailVerification,
+		"client-A", "https://client.example/callback", testOAuthResource,
+		"pkce-challenge", now.Add(time.Hour), now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	token, err := s.GetAccountToken(ctx, "sha256:rolling-account-scope", accountTokenEmailVerification)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token.Scope != models.OAuthScopeLearner {
+		t.Fatalf("legacy blank account-token scope = %q, want %q", token.Scope, models.OAuthScopeLearner)
+	}
+}
+
 func TestConcurrentEmailVerificationHasSingleWinner(t *testing.T) {
 	s := setupTestDB(t)
 	ctx := context.Background()

@@ -87,6 +87,10 @@ func (s *OAuthServer) loadEmailVerificationContext(ctx context.Context, raw stri
 	if err != nil || token.Resource != MCPResource(s.baseURL) {
 		return nil, nil, storeport.ErrInvalidAccountToken
 	}
+	canonicalScope, err := models.CanonicalOAuthScope(token.Scope)
+	if err != nil || canonicalScope != token.Scope {
+		return nil, nil, storeport.ErrInvalidAccountToken
+	}
 	if err := s.validateRedirectURI(ctx, token.ClientID, token.RedirectURI); err != nil {
 		return nil, nil, storeport.ErrInvalidAccountToken
 	}
@@ -108,14 +112,15 @@ func (s *OAuthServer) renderEmailVerificationForm(w http.ResponseWriter, status 
 	}
 	setAccountCSRFCookie(w, csrfToken, "/verify-email", 1800)
 	renderAccountPage(w, status, accountPageData{
-		Title:          "Secure your account",
-		Message:        message,
-		Token:          raw,
-		CSRFToken:      csrfToken,
-		ClientName:     client.ClientName,
-		ClientID:       token.ClientID,
-		RedirectOrigin: formActionOriginFromRedirectURI(token.RedirectURI),
-		ShowVerify:     true,
+		Title:            "Secure your account",
+		Message:          message,
+		Token:            raw,
+		CSRFToken:        csrfToken,
+		ClientName:       client.ClientName,
+		ClientID:         token.ClientID,
+		RedirectOrigin:   formActionOriginFromRedirectURI(token.RedirectURI),
+		ScopeDescription: oauthScopeDescription(token.Scope),
+		ShowVerify:       true,
 	})
 }
 

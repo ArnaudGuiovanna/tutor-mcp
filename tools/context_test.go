@@ -89,6 +89,16 @@ func TestGetLearnerContext_NeedsDomainSetup(t *testing.T) {
 	}
 }
 
+func TestGetLearnerContext_ActiveSessionBackendFailureIsVisible(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	deps.Store = &failingLearningSessionLookupStore{Store: store, activeErr: context.DeadlineExceeded}
+
+	res := callTool(t, deps, registerGetLearnerContext, "L_owner", "get_learner_context", map[string]any{})
+	if !res.IsError || resultText(res) != "failed to load active learning session" {
+		t.Fatalf("active-session backend failure was hidden: error=%v text=%q", res.IsError, resultText(res))
+	}
+}
+
 func TestGetLearnerContext_WithDomain(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	d := makeOwnerDomain(t, store, "L_owner", "math")

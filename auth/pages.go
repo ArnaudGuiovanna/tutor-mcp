@@ -44,6 +44,7 @@ type authPageData struct {
 	CodeChallenge       string
 	CodeChallengeMethod string
 	Scope               string
+	ScopeDescription    string
 	Resource            string
 	CSRFToken           string
 }
@@ -384,6 +385,7 @@ var authTmpl = template.Must(template.New("auth").Parse(`<!DOCTYPE html>
 
           <div class="consent-box">
             <p><strong>{{.Data.ClientName}}</strong> wants access to your tutor/mcp learner account.</p>
+			<p><strong>Requested permissions:</strong> {{.Data.ScopeDescription}}</p>
             <p>After sign-in, tutor/mcp will send an authorization code to <strong>{{.Data.RedirectOrigin}}</strong>.</p>
             <label class="consent-check" for="login-consent">
               <input id="login-consent" type="checkbox" name="approve_client" value="yes" required />
@@ -417,6 +419,7 @@ var authTmpl = template.Must(template.New("auth").Parse(`<!DOCTYPE html>
 
           <div class="consent-box">
             <p><strong>{{.Data.ClientName}}</strong> requested access to a tutor/mcp learner account.</p>
+			<p><strong>Requested permissions:</strong> {{.Data.ScopeDescription}}</p>
             <p>No password or authorization is created here. The email verification page will show the exact client and destination before asking for consent.</p>
           </div>
 
@@ -462,6 +465,9 @@ func renderAuthPage(w http.ResponseWriter, data authPageData, errMsg string, mod
 	}
 	if data.RedirectOrigin == "" {
 		data.RedirectOrigin = formActionOriginFromRedirectURI(data.RedirectURI)
+	}
+	if data.ScopeDescription == "" {
+		data.ScopeDescription = oauthScopeDescription(data.Scope)
 	}
 	nonce, err := generateNonce()
 	if err != nil {

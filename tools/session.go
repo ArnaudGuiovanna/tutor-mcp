@@ -5,13 +5,34 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// learningSessionRequestError is safe to expose to callers. Persistence and
+// transport failures deliberately use ordinary wrapped errors so callers can
+// route them through safeErrorResult without leaking backend details.
+type learningSessionRequestError struct {
+	message string
+}
+
+func (e *learningSessionRequestError) Error() string { return e.message }
+
+func learningSessionResolutionErrorResult(deps *Deps, err error) *mcp.CallToolResult {
+	var requestErr *learningSessionRequestError
+	if errors.As(err, &requestErr) {
+		result, _ := errorResult(requestErr.Error())
+		return result
+	}
+	result, _ := safeErrorResult(deps.Logger, "failed to resolve learning session", err)
+	return result
+}
 
 type StartLearningSessionParams struct {
 	IdempotentMutationParams
@@ -67,17 +88,28 @@ func resolveOpenLearningSession(ctx context.Context, deps *Deps, learnerID, doma
 	if sessionID != "" {
 		session, err := deps.Store.GetLearningSession(ctx, learnerID, sessionID)
 		if err != nil {
-			return nil, fmt.Errorf("learning session not found")
+			if errors.Is(err, storeport.ErrNotFound) {
+				return nil, &learningSessionRequestError{message: "learning session not found"}
+			}
+			return nil, fmt.Errorf("load learning session: %w", err)
 		}
 		if session.Status != models.LearningSessionStatusOpen {
-			return nil, fmt.Errorf("learning session is closed")
+			return nil, &learningSessionRequestError{message: "learning session is closed"}
 		}
 		// DomainID is the current active domain, not an immutable scope: one
 		// explicit session may intentionally switch subjects while all events
 		// remain correlated by the same session ID.
-		return deps.Store.OpenLearningSession(ctx, learnerID, domainID, sessionID, now)
+		resumed, err := deps.Store.OpenLearningSession(ctx, learnerID, domainID, sessionID, now)
+		if err != nil {
+			return nil, fmt.Errorf("resume learning session: %w", err)
+		}
+		return resumed, nil
 	}
-	return deps.Store.OpenLearningSession(ctx, learnerID, domainID, "", now)
+	session, err := deps.Store.OpenLearningSession(ctx, learnerID, domainID, "", now)
+	if err != nil {
+		return nil, fmt.Errorf("open learning session: %w", err)
+	}
+	return session, nil
 }
 
 type ListImplementationIntentionsParams struct {

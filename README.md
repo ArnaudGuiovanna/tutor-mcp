@@ -251,6 +251,7 @@ Environment variables read at boot:
 | `MCP_MAX_CONCURRENT` | `128` | Maximum in-flight authenticated MCP calls per process; overflow is rejected immediately. |
 | `MCP_MAX_CONCURRENT_PER_LEARNER` | `8` | Maximum in-flight MCP calls for one learner; cannot exceed the global limit. |
 | `MCP_TOOL_CALL_TIMEOUT_SECONDS` | `30` | Cooperative server deadline applied only to `tools/call` (1–600 seconds); discovery and long-lived transport responses are unaffected. |
+| `OAUTH_GRANULAR_SCOPES` | **`off`** *(opt-in)* | `on` publishes and issues per-tool `learner:read` / `learner:write` grants; `off` keeps the bounded legacy `learner` compatibility mode. Only `on` and `off` are accepted. Use the [two-phase rollout and rollback runbook](./docs/oauth-granular-scopes-rollout.md). |
 | `SMTP_ADDR` / `SMTP_FROM` | — | SMTP endpoint and sender for verification/recovery. Delivery requires STARTTLS (TLS 1.2+); public account flows cannot complete when absent. Optional `SMTP_SERVER_NAME`, `SMTP_USERNAME`, `SMTP_PASSWORD`. |
 | `INTEGRATION_SECRET_KEYS` | — | Comma-separated `key_id:base64-32-byte-key` keyring used to encrypt Discord webhook credentials at rest. Supply old and new keys during rotation. |
 | `INTEGRATION_SECRET_CURRENT_KEY_ID` | — | Key ID used for new envelopes; startup atomically re-encrypts legacy/old-key records. Required with `INTEGRATION_SECRET_KEYS`. |
@@ -271,7 +272,9 @@ rate-limit buckets. The MCP endpoint applies both per-IP/per-learner rates and
 the in-flight concurrency ceilings configured above.
 OAuth access tokens expire after 30 minutes. Refresh tokens rotate as a family;
 replay of an already-used member revokes the family instead of issuing another
-access token.
+access token. Granular OAuth scopes are an opt-in fleet-wide change; follow the
+[scope rollout runbook](./docs/oauth-granular-scopes-rollout.md) before enabling
+them.
 
 Data lifecycle cleanup is opt-in and runs through a separate dry-run-first
 maintenance command; it is never triggered by server startup. See

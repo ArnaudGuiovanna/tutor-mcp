@@ -34,6 +34,12 @@ type startupConfig struct {
 	MCPMaxConcurrent       int
 	MCPMaxConcurrentUser   int
 	MCPToolCallTimeout     time.Duration
+
+	// OAuthGranularScopes gates publication and issuance of per-tool
+	// learner:read / learner:write grants. It defaults to false so a schema
+	// expansion can be deployed across the fleet before behavior changes.
+	// main passes this value to the OAuth and MCP configuration boundaries.
+	OAuthGranularScopes bool
 }
 
 func loadStartupConfig(port string) (startupConfig, error) {
@@ -47,6 +53,11 @@ func loadStartupConfig(port string) (startupConfig, error) {
 	if cfg.DBPath == "" {
 		cfg.DBPath = "./data/runtime.db"
 	}
+	oauthGranularScopes, err := onOffEnv("OAUTH_GRANULAR_SCOPES", false)
+	if err != nil {
+		return startupConfig{}, err
+	}
+	cfg.OAuthGranularScopes = oauthGranularScopes
 	mcpBodyLimit, err := int64EnvInRange(
 		"MCP_MAX_REQUEST_BODY_BYTES",
 		defaultMCPMaxRequestBodyBytes,
@@ -213,6 +224,21 @@ func normalizedEnv(name, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+// onOffEnv parses an operator-facing feature switch. Unknown values fail at
+// boot instead of silently selecting a security-sensitive OAuth mode.
+func onOffEnv(name string, fallback bool) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "":
+		return fallback, nil
+	case "on":
+		return true, nil
+	case "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("%s must be on or off", name)
+	}
 }
 
 func int64EnvInRange(name string, fallback, min, max int64) (int64, error) {

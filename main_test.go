@@ -8,11 +8,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -89,22 +91,25 @@ func TestLiveAndReadyHealthContracts(t *testing.T) {
 }
 
 func TestRecoveryMiddlewareDoesNotLogPanicValueOrStack(t *testing.T) {
-	const secret = "panic-secret-reset-token"
+	const secret = "https://discord.com/api/webhooks/123/panic-secret-token"
+	const pathToken = "reset-token-in-private-path"
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
 	handler := recoveryMiddleware(logger, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		panic(secret)
 	}))
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/mcp", nil))
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/panic/"+pathToken, nil))
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status=%d", rec.Code)
 	}
-	if strings.Contains(logs.String(), secret) || strings.Contains(logs.String(), "goroutine ") {
+	if strings.Contains(logs.String(), secret) || strings.Contains(logs.String(), pathToken) || strings.Contains(logs.String(), "goroutine ") {
 		t.Fatalf("panic log disclosed sensitive value or raw stack: %s", logs.String())
 	}
-	if !strings.Contains(logs.String(), "stack_fingerprint") {
-		t.Fatalf("panic log missing correlation fingerprint: %s", logs.String())
+	for _, diagnostic := range []string{"component=http_recovery", "path_fingerprint", "panic_type=string", "stack_fingerprint"} {
+		if !strings.Contains(logs.String(), diagnostic) {
+			t.Fatalf("panic log missing safe diagnostic %q: %s", diagnostic, logs.String())
+		}
 	}
 }
 
@@ -125,6 +130,43 @@ func TestPrivacySafeLogAttrPseudonymizesLearningIdentifiers(t *testing.T) {
 	}
 	if !strings.Contains(logged, "status=ok") {
 		t.Fatalf("non-sensitive operational attribute was changed: %q", logged)
+	}
+}
+
+func TestPrivacySafeLogAttrClassifiesErrorsWithoutRenderingThem(t *testing.T) {
+	const webhookSecret = "https://discord.com/api/webhooks/456/private-token"
+	const dsnSecret = "postgres://admin:private-password@db.internal/tutor"
+	var out bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&out, &slog.HandlerOptions{
+		ReplaceAttr: newPrivacySafeLogAttr(),
+	}))
+	transportErr := &url.Error{
+		Op:  "Post",
+		URL: webhookSecret,
+		Err: errors.New(dsnSecret),
+	}
+	logger.Error("webhook dispatch failed",
+		"component", "webhook_dispatch",
+		"err", transportErr,
+		"error", webhookSecret,
+		"path", "/private/runtime/"+webhookSecret,
+		"token", webhookSecret,
+		"URL", webhookSecret,
+		"Token", webhookSecret,
+		"stack", "goroutine 42 [running]:\n/private/runtime/"+webhookSecret,
+		"panic", webhookSecret,
+	)
+
+	logged := out.String()
+	for _, secret := range []string{webhookSecret, dsnSecret, "private-password", "/private/runtime/", "goroutine 42"} {
+		if strings.Contains(logged, secret) {
+			t.Fatalf("sensitive error value leaked in log: %q", logged)
+		}
+	}
+	for _, diagnostic := range []string{"component=webhook_dispatch", "err=class:*url.Error", "error=class:String", "path=anon:", "token=anon:", "URL=anon:", "Token=anon:", "stack=anon:", "panic=anon:"} {
+		if !strings.Contains(logged, diagnostic) {
+			t.Fatalf("safe diagnostic %q missing from log: %q", diagnostic, logged)
+		}
 	}
 }
 
@@ -594,6 +636,141 @@ func (t bearerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 	return t.base.RoundTrip(clone)
 }
 
+type independentStatelessMCPNode struct {
+	name    string
+	server  *mcp.Server
+	handler http.Handler
+	http    *httptest.Server
+}
+
+func newIndependentStatelessMCPNode(t *testing.T, name, issuer string, store *db.Store) *independentStatelessMCPNode {
+	t.Helper()
+	server := mcp.NewServer(&mcp.Implementation{Name: name, Version: "test"}, nil)
+	tutortools.RegisterTools(server, &tutortools.Deps{
+		Store:   store,
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		BaseURL: issuer,
+	})
+	rawHandler := mcp.NewStreamableHTTPHandler(
+		func(*http.Request) *mcp.Server { return server },
+		&mcp.StreamableHTTPOptions{
+			Stateless:                    true,
+			DisableLocalhostProtection:   true,
+			PropagateRequestCancellation: true,
+		},
+	)
+	handler := auth.BearerMiddleware(issuer, withoutWriteTimeout(rawHandler))
+	httpServer := newIPv4HTTPTestServer(t, handler)
+	t.Cleanup(httpServer.Close)
+	return &independentStatelessMCPNode{
+		name: name, server: server, handler: rawHandler, http: httpServer,
+	}
+}
+
+type roundRobinTarget struct {
+	name string
+	url  *url.URL
+}
+
+type roundRobinObservation struct {
+	node              string
+	method            string
+	name              string
+	protocol          string
+	requestSessionID  string
+	responseSessionID string
+}
+
+// roundRobinBearerTransport models a load balancer with no affinity: every
+// HTTP request is sent to the next node, irrespective of protocol or session
+// headers. Observations let the test prove which independent handler served
+// each MCP operation.
+type roundRobinBearerTransport struct {
+	mu           sync.Mutex
+	base         http.RoundTripper
+	token        string
+	targets      []roundRobinTarget
+	next         int
+	observations []roundRobinObservation
+}
+
+func (t *roundRobinBearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.mu.Lock()
+	target := t.targets[t.next%len(t.targets)]
+	t.next++
+	observationIndex := len(t.observations)
+	t.observations = append(t.observations, roundRobinObservation{
+		node:             target.name,
+		method:           req.Header.Get("Mcp-Method"),
+		name:             req.Header.Get("Mcp-Name"),
+		protocol:         req.Header.Get("Mcp-Protocol-Version"),
+		requestSessionID: req.Header.Get("Mcp-Session-Id"),
+	})
+	t.mu.Unlock()
+
+	clone := req.Clone(req.Context())
+	clone.Header = req.Header.Clone()
+	clone.Header.Set("Authorization", "Bearer "+t.token)
+	clone.URL.Scheme = target.url.Scheme
+	clone.URL.Host = target.url.Host
+	clone.Host = target.url.Host
+	resp, err := t.base.RoundTrip(clone)
+	if resp != nil {
+		t.mu.Lock()
+		t.observations[observationIndex].responseSessionID = resp.Header.Get("Mcp-Session-Id")
+		t.mu.Unlock()
+	}
+	return resp, err
+}
+
+func (t *roundRobinBearerTransport) snapshot() []roundRobinObservation {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]roundRobinObservation(nil), t.observations...)
+}
+
+type rawMCPHTTPResponse struct {
+	status    int
+	header    http.Header
+	body      []byte
+	node      string
+	operation string
+}
+
+func postRawMCPRPC(t *testing.T, client *http.Client, node *independentStatelessMCPNode, token, protocol, operation, body string) rawMCPHTTPResponse {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, node.http.URL+"/mcp", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	if protocol != "" {
+		req.Header.Set("MCP-Protocol-Version", protocol)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("%s on %s: %v", operation, node.name, err)
+	}
+	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read %s response from %s: %v", operation, node.name, err)
+	}
+	return rawMCPHTTPResponse{
+		status: resp.StatusCode, header: resp.Header.Clone(), body: responseBody,
+		node: node.name, operation: operation,
+	}
+}
+
+func assertNoMCPSession(t *testing.T, response rawMCPHTTPResponse) {
+	t.Helper()
+	if sessionID := response.header.Get("Mcp-Session-Id"); sessionID != "" {
+		t.Fatalf("%s on %s issued session ID %q", response.operation, response.node, sessionID)
+	}
+}
+
 func callToolText(result *mcp.CallToolResult) string {
 	if result == nil {
 		return ""
@@ -756,63 +933,166 @@ func TestStreamableHTTPClientCompletesTutoringLoop(t *testing.T) {
 	}
 }
 
-func TestStatelessMCPLegacyProtocolWorksAcrossRoundRobinNodes(t *testing.T) {
+func TestStatelessMCPProtocolsWorkAcrossIndependentRoundRobinNodes(t *testing.T) {
 	t.Setenv("JWT_SECRET", base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")))
 	if err := auth.LoadJWTSecret(); err != nil {
 		t.Fatal(err)
 	}
 	const issuer = "https://tutor.example"
-	server := mcp.NewServer(&mcp.Implementation{Name: "round-robin", Version: "test"}, nil)
-	newNode := func() *httptest.Server {
-		handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{
-			Stateless: true, DisableLocalhostProtection: true,
-		})
-		return newIPv4HTTPTestServer(t, auth.BearerMiddleware(issuer, handler))
-	}
-	nodeA, nodeB := newNode(), newNode()
-	t.Cleanup(nodeA.Close)
-	t.Cleanup(nodeB.Close)
-	token, err := auth.GenerateJWT(issuer, "round-robin-learner")
+	dbPath := filepath.Join(t.TempDir(), "round-robin.db")
+	databaseA, err := db.OpenDB(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = databaseA.Close() })
+	if err := db.Migrate(databaseA); err != nil {
+		t.Fatal(err)
+	}
+	// Each node owns a distinct Store and sql.DB pool. The SQLite file is the
+	// only shared application state, mirroring separate node-local Store
+	// instances over the same PostgreSQL database in a production fleet.
+	databaseB, err := db.OpenDB(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = databaseB.Close() })
+	storeA := db.NewStore(databaseA)
+	storeB := db.NewStore(databaseB)
+	if storeA == storeB {
+		t.Fatal("round-robin nodes unexpectedly share one Store instance")
+	}
 
-	postRPC := func(endpoint, protocol, body string) *http.Response {
-		t.Helper()
-		req, err := http.NewRequest(http.MethodPost, endpoint+"/mcp", strings.NewReader(body))
+	modernLearner, err := storeA.CreateLearner(context.Background(), "modern-round-robin@example.test", "hash", "modern", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyLearner, err := storeA.CreateLearner(context.Background(), "legacy-round-robin@example.test", "hash", "legacy", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeA := newIndependentStatelessMCPNode(t, "round-robin-node-a", issuer, storeA)
+	nodeB := newIndependentStatelessMCPNode(t, "round-robin-node-b", issuer, storeB)
+	if nodeA.server == nodeB.server || nodeA.handler == nodeB.handler {
+		t.Fatal("round-robin nodes share MCP server or Streamable HTTP handler state")
+	}
+
+	t.Run("protocol_2026_07_28", func(t *testing.T) {
+		token, err := auth.GenerateJWT(issuer, modernLearner.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json, text/event-stream")
-		if protocol != "" {
-			req.Header.Set("MCP-Protocol-Version", protocol)
-		}
-		resp, err := http.DefaultClient.Do(req)
+		urlA, err := url.Parse(nodeA.http.URL)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return resp
-	}
+		urlB, err := url.Parse(nodeB.http.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		baseTransport := http.DefaultTransport.(*http.Transport).Clone()
+		t.Cleanup(baseTransport.CloseIdleConnections)
+		roundRobin := &roundRobinBearerTransport{
+			base:  baseTransport,
+			token: token,
+			targets: []roundRobinTarget{
+				{name: nodeA.name, url: urlA},
+				{name: nodeB.name, url: urlB},
+			},
+		}
+		client := mcp.NewClient(&mcp.Implementation{Name: "round-robin-2026-client", Version: "test"}, nil)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
+			Endpoint:   nodeA.http.URL + "/mcp",
+			HTTPClient: &http.Client{Transport: roundRobin},
+		}, nil)
+		if err != nil {
+			t.Fatalf("connect 2026 client: %v", err)
+		}
+		defer session.Close()
+		if got := session.InitializeResult().ProtocolVersion; got != "2026-07-28" {
+			t.Fatalf("negotiated protocol=%q, want 2026-07-28", got)
+		}
+		if listed, err := session.ListTools(ctx, nil); err != nil || len(listed.Tools) == 0 {
+			t.Fatalf("list tools through node B: count=%d err=%v", len(listed.Tools), err)
+		}
+		initialized, err := session.CallTool(ctx, &mcp.CallToolParams{
+			Name: "init_domain",
+			Arguments: map[string]any{
+				"name":          "Modern Round Robin",
+				"concepts":      []string{"stateless-modern"},
+				"prerequisites": map[string][]string{},
+			},
+		})
+		if err != nil || initialized.IsError {
+			t.Fatalf("init_domain through node A: result=%q err=%v", callToolText(initialized), err)
+		}
+		dashboard, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "get_dashboard_state"})
+		if err != nil || dashboard.IsError || !strings.Contains(callToolText(dashboard), "Modern Round Robin") {
+			t.Fatalf("dashboard through node B did not read node A state: result=%q err=%v", callToolText(dashboard), err)
+		}
 
-	const legacy = "2025-03-26"
-	initialize := postRPC(nodeA.URL, "", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"legacy-client","version":"1"}}}`)
-	initializeBody, _ := io.ReadAll(initialize.Body)
-	_ = initialize.Body.Close()
-	if initialize.StatusCode != http.StatusOK || !bytes.Contains(initializeBody, []byte(`"protocolVersion":"`+legacy+`"`)) {
-		t.Fatalf("legacy initialize status=%d body=%s", initialize.StatusCode, initializeBody)
-	}
-	if sessionID := initialize.Header.Get("Mcp-Session-Id"); sessionID != "" {
-		t.Fatalf("stateless node issued session ID %q", sessionID)
-	}
+		observations := roundRobin.snapshot()
+		want := []roundRobinObservation{
+			{node: nodeA.name, method: "server/discover", protocol: "2026-07-28"},
+			{node: nodeB.name, method: "tools/list", protocol: "2026-07-28"},
+			{node: nodeA.name, method: "tools/call", name: "init_domain", protocol: "2026-07-28"},
+			{node: nodeB.name, method: "tools/call", name: "get_dashboard_state", protocol: "2026-07-28"},
+		}
+		if len(observations) < len(want) {
+			t.Fatalf("observed only %d requests, want at least %d: %+v", len(observations), len(want), observations)
+		}
+		for i, expected := range want {
+			got := observations[i]
+			if got.node != expected.node || got.method != expected.method || got.name != expected.name || got.protocol != expected.protocol {
+				t.Fatalf("request %d=%+v, want route %+v", i, got, expected)
+			}
+			if got.requestSessionID != "" || got.responseSessionID != "" {
+				t.Fatalf("request %d used session affinity: %+v", i, got)
+			}
+		}
+	})
 
-	// The next request intentionally hits another node and carries no session
-	// identifier. A stateful regression would fail here or demand affinity.
-	list := postRPC(nodeB.URL, legacy, `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`)
-	listBody, _ := io.ReadAll(list.Body)
-	_ = list.Body.Close()
-	if list.StatusCode != http.StatusOK || !bytes.Contains(listBody, []byte(`"tools"`)) {
-		t.Fatalf("round-robin tools/list status=%d body=%s", list.StatusCode, listBody)
-	}
+	t.Run("legacy_2025_03_26", func(t *testing.T) {
+		const legacy = "2025-03-26"
+		token, err := auth.GenerateJWT(issuer, legacyLearner.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		client := &http.Client{Timeout: 15 * time.Second}
+		responses := []rawMCPHTTPResponse{
+			postRawMCPRPC(t, client, nodeA, token, "", "initialize", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"legacy-client","version":"1"}}}`),
+			postRawMCPRPC(t, client, nodeB, token, legacy, "notifications/initialized", `{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`),
+			postRawMCPRPC(t, client, nodeA, token, legacy, "tools/list", `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`),
+			postRawMCPRPC(t, client, nodeB, token, legacy, "tools/call init_domain", `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"init_domain","arguments":{"name":"Legacy Round Robin","concepts":["stateless-legacy"],"prerequisites":{}}}}`),
+			postRawMCPRPC(t, client, nodeA, token, legacy, "tools/call get_dashboard_state", `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_dashboard_state","arguments":{}}}`),
+		}
+		for _, response := range responses {
+			assertNoMCPSession(t, response)
+		}
+		if responses[0].status != http.StatusOK || !bytes.Contains(responses[0].body, []byte(`"protocolVersion":"`+legacy+`"`)) {
+			t.Fatalf("legacy initialize status=%d body=%s", responses[0].status, responses[0].body)
+		}
+		if responses[1].status != http.StatusAccepted {
+			t.Fatalf("legacy initialized notification status=%d body=%s", responses[1].status, responses[1].body)
+		}
+		if responses[2].status != http.StatusOK || !bytes.Contains(responses[2].body, []byte(`"tools"`)) {
+			t.Fatalf("legacy tools/list status=%d body=%s", responses[2].status, responses[2].body)
+		}
+		if responses[3].status != http.StatusOK || !bytes.Contains(responses[3].body, []byte("Legacy Round Robin")) {
+			t.Fatalf("legacy init_domain status=%d body=%s", responses[3].status, responses[3].body)
+		}
+		if responses[4].status != http.StatusOK || !bytes.Contains(responses[4].body, []byte("Legacy Round Robin")) {
+			t.Fatalf("legacy dashboard on node A did not read node B state: status=%d body=%s", responses[4].status, responses[4].body)
+		}
+		for i, response := range responses {
+			wantNode := nodeA.name
+			if i%2 == 1 {
+				wantNode = nodeB.name
+			}
+			if response.node != wantNode {
+				t.Fatalf("legacy request %d routed to %s, want %s", i, response.node, wantNode)
+			}
+		}
+	})
 }

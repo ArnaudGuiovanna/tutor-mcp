@@ -7,12 +7,79 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"tutor-mcp/algorithms"
 	"tutor-mcp/models"
 	storeport "tutor-mcp/store"
 )
+
+const (
+	individualInterestMasteryThreshold    = 0.85
+	motivationComponentConceptState       = "concept_state"
+	motivationComponentRecentFailure      = "recent_failure"
+	motivationComponentSessionsOnConcept  = "sessions_on_concept"
+	motivationComponentSelfInitiatedRatio = "self_initiated_ratio"
+	motivationComponentRecentAffect       = "recent_affect"
+	motivationComponentValueFramings      = "value_framings"
+	motivationComponentValueAxisRotation  = "value_axis_rotation"
+)
+
+// MotivationDependencyError identifies a required dependency whose failure
+// makes brief selection or its required side effects unreliable.
+type MotivationDependencyError struct {
+	Component string
+	Err       error
+}
+
+func (e *MotivationDependencyError) Error() string {
+	return fmt.Sprintf("motivation: required dependency %s failed", e.Component)
+}
+
+func (e *MotivationDependencyError) Unwrap() error { return e.Err }
+
+// MotivationDegradationError reports optional enrichments that could not be
+// loaded. Build returns it together with a usable brief: callers can preserve
+// the brief while exposing Components through their existing degraded-result
+// contract. Error deliberately contains component names only; underlying
+// causes remain available through errors.Is/errors.As without entering logs.
+type MotivationDegradationError struct {
+	Components []string
+	causes     error
+}
+
+func (e *MotivationDegradationError) Error() string {
+	return "motivation: optional enrichments degraded: " + strings.Join(e.Components, ",")
+}
+
+func (e *MotivationDegradationError) Unwrap() error { return e.causes }
+
+type motivationDegradations struct {
+	components []string
+	causes     []error
+}
+
+func (d *motivationDegradations) add(component string, err error) {
+	d.components = append(d.components, component)
+	d.causes = append(d.causes, fmt.Errorf("%s: %w", component, err))
+}
+
+func (d *motivationDegradations) err() error {
+	if len(d.components) == 0 {
+		return nil
+	}
+	return &MotivationDegradationError{
+		Components: append([]string(nil), d.components...),
+		causes:     errors.Join(d.causes...),
+	}
+}
+
+func requiredMotivationDependency(component string, err error) error {
+	return &MotivationDependencyError{Component: component, Err: err}
+}
 
 // BriefInput gathers the signals the motivation engine needs to decide which brief (if any) to fire.
 // Keep this purely data — no store access — so the selection logic can be unit-tested in isolation.
@@ -33,14 +100,14 @@ type BriefInput struct {
 // InferInterestPhase maps session count / mastery / self-initiated ratio to a
 // Hidi-Renninger phase label.
 //
-// The 0.85 here is *not* a BKT mastery threshold and intentionally bypasses
+// individualInterestMasteryThreshold is *not* a BKT mastery threshold and intentionally bypasses
 // algorithms.MasteryBKT() / REGULATION_THRESHOLD. It is an empirical bound
 // for the "individual interest" phase from Hidi & Renninger 2006 (Four-Phase
 // Model of Interest Development), which is conceptually orthogonal to the
 // runtime's notion of "concept BKT-mastered". Coupling them was rejected in
 // docs/regulation-design/07-threshold-resolver.md OQ-7.2.
 func InferInterestPhase(sessions int, mastery, selfInitRatio float64) string {
-	if mastery > 0.85 || (selfInitRatio > 0.6 && sessions >= 3) {
+	if mastery > individualInterestMasteryThreshold || (selfInitRatio > 0.6 && sessions >= 3) {
 		return models.InterestPhaseIndividual
 	}
 	if mastery >= 0.5 {
@@ -173,6 +240,10 @@ func affectIsNegative(a *models.AffectState, now time.Time) bool {
 // ComposeBrief builds a MotivationBrief from the given signals and the chosen kind.
 // The caller is responsible for persisting Domain.LastValueAxis when kind == competence_value.
 func ComposeBrief(in BriefInput, kind, pickedAxis string) *models.MotivationBrief {
+	return composeBrief(in, kind, pickedAxis, nil, false)
+}
+
+func composeBrief(in BriefInput, kind, pickedAxis string, framings *models.DomainValueFramings, framingsLoaded bool) *models.MotivationBrief {
 	if kind == "" {
 		return &models.MotivationBrief{Kind: ""}
 	}
@@ -196,12 +267,11 @@ func ComposeBrief(in BriefInput, kind, pickedAxis string) *models.MotivationBrie
 		brief.Instruction = "Briefly celebrate crossing the threshold, without excessive emphasis. Tie it to overall progress in one sentence."
 
 	case models.MotivationKindCompetenceValue:
-		var framings *models.DomainValueFramings
-		if in.Domain != nil && in.Domain.ValueFramingsJSON != "" {
-			var parsed models.DomainValueFramings
-			if err := json.Unmarshal([]byte(in.Domain.ValueFramingsJSON), &parsed); err == nil {
-				framings = &parsed
-			}
+		if !framingsLoaded {
+			// ComposeBrief is also a public pure helper used outside Build. Keep
+			// its historical best-effort behavior; Build uses the loaded=true
+			// path and reports malformed persisted JSON as a degradation.
+			framings, _ = parseDomainValueFramings(in.Domain)
 		}
 		statement := ""
 		if framings != nil {
@@ -271,6 +341,17 @@ func ComposeBrief(in BriefInput, kind, pickedAxis string) *models.MotivationBrie
 	return brief
 }
 
+func parseDomainValueFramings(domain *models.Domain) (*models.DomainValueFramings, error) {
+	if domain == nil || strings.TrimSpace(domain.ValueFramingsJSON) == "" {
+		return nil, nil
+	}
+	var framings models.DomainValueFramings
+	if err := json.Unmarshal([]byte(domain.ValueFramingsJSON), &framings); err != nil {
+		return nil, fmt.Errorf("parse domain value framings: %w", err)
+	}
+	return &framings, nil
+}
+
 // MotivationEngine wires SelectBrief / ComposeBrief to the persistence layer and
 // handles side effects (e.g., rotating the domain's last_value_axis).
 type MotivationEngine struct {
@@ -286,6 +367,7 @@ func NewMotivationEngine(store storeport.Store) *MotivationEngine {
 // brief fires). Returns a brief with Kind == "" when no trigger matches.
 func (m *MotivationEngine) Build(ctx context.Context, learnerID string, domain *models.Domain, concept string, activityType models.ActivityType, plateauActive bool, sessionExerciseCount int) (*models.MotivationBrief, error) {
 	now := time.Now().UTC()
+	var degraded motivationDegradations
 
 	in := BriefInput{
 		Domain:               domain,
@@ -302,22 +384,37 @@ func (m *MotivationEngine) Build(ctx context.Context, learnerID string, domain *
 		if domain != nil {
 			domainID = domain.ID
 		}
-		cs, _ := m.store.GetConceptStateInDomain(ctx, learnerID, domainID, concept)
+		cs, err := m.store.GetConceptStateInDomain(ctx, learnerID, domainID, concept)
+		if err != nil {
+			return nil, requiredMotivationDependency(motivationComponentConceptState, err)
+		}
 		in.ConceptState = cs
 
-		if fail, _ := m.store.LastFailureOnConceptInDomain(ctx, learnerID, domainID, concept, 24*time.Hour); fail != nil {
+		fail, err := m.store.LastFailureOnConceptInDomain(ctx, learnerID, domainID, concept, 24*time.Hour)
+		if err != nil {
+			return nil, requiredMotivationDependency(motivationComponentRecentFailure, err)
+		}
+		if fail != nil {
 			in.LastFailure = fail
 		}
-		if sessions, err := m.store.CountSessionsOnConceptInDomain(ctx, learnerID, domainID, concept); err == nil {
-			in.SessionsOnConcept = sessions
+		sessions, err := m.store.CountSessionsOnConceptInDomain(ctx, learnerID, domainID, concept)
+		if err != nil {
+			return nil, requiredMotivationDependency(motivationComponentSessionsOnConcept, err)
 		}
-		if ratio, err := m.store.SelfInitiatedRatioInDomain(ctx, learnerID, domainID, concept); err == nil {
+		in.SessionsOnConcept = sessions
+		if ratio, err := m.store.SelfInitiatedRatioInDomain(ctx, learnerID, domainID, concept); err != nil {
+			degraded.add(motivationComponentSelfInitiatedRatio, err)
+		} else {
 			in.SelfInitiatedRatio = ratio
 		}
 	}
 
 	// Latest affect (global, not concept-scoped)
-	if affects, _ := m.store.GetRecentAffectStates(ctx, learnerID, 1); len(affects) > 0 {
+	affects, err := m.store.GetRecentAffectStates(ctx, learnerID, 1)
+	if err != nil {
+		return nil, requiredMotivationDependency(motivationComponentRecentAffect, err)
+	}
+	if len(affects) > 0 {
 		in.LatestAffect = affects[0]
 	}
 
@@ -325,17 +422,19 @@ func (m *MotivationEngine) Build(ctx context.Context, learnerID string, domain *
 
 	// Rotate axis if kind is competence_value
 	pickedAxis := ""
+	var framings *models.DomainValueFramings
+	framingsLoaded := false
 	if kind == models.MotivationKindCompetenceValue && domain != nil {
-		var framings *models.DomainValueFramings
-		if domain.ValueFramingsJSON != "" {
-			var parsed models.DomainValueFramings
-			if err := json.Unmarshal([]byte(domain.ValueFramingsJSON), &parsed); err == nil {
-				framings = &parsed
-			}
+		framingsLoaded = true
+		framings, err = parseDomainValueFramings(domain)
+		if err != nil {
+			degraded.add(motivationComponentValueFramings, err)
 		}
 		pickedAxis = nextValueAxis(domain.LastValueAxis, framings)
-		_ = m.store.UpdateDomainLastValueAxis(ctx, domain.ID, pickedAxis)
+		if err := m.store.UpdateDomainLastValueAxis(ctx, domain.ID, pickedAxis); err != nil {
+			return nil, requiredMotivationDependency(motivationComponentValueAxisRotation, err)
+		}
 	}
 
-	return ComposeBrief(in, kind, pickedAxis), nil
+	return composeBrief(in, kind, pickedAxis, framings, framingsLoaded), degraded.err()
 }

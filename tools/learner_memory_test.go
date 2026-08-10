@@ -5,10 +5,25 @@ package tools
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"tutor-mcp/memory"
+	storeport "tutor-mcp/store"
 )
+
+type failingMemoryConceptLookupStore struct {
+	storeport.Store
+	err error
+}
+
+func (s *failingMemoryConceptLookupStore) ActiveDomainConceptSet(context.Context, string) (map[string]bool, error) {
+	return nil, s.err
+}
 
 func TestUpdateLearnerMemory_WriteSessionAndReadRawSession(t *testing.T) {
 	t.Setenv("TUTOR_MCP_MEMORY_ROOT", t.TempDir())
@@ -134,6 +149,60 @@ func TestUpdateLearnerMemory_ConceptMustBeActive(t *testing.T) {
 	}
 }
 
+func TestUpdateLearnerMemory_ValidationDependencyFailureIsSafe(t *testing.T) {
+	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
+	store, deps := setupToolsTest(t)
+	secretPath := "/private/tenant/L_owner/concepts.db"
+	deps.Store = &failingMemoryConceptLookupStore{
+		Store: store,
+		err:   &os.PathError{Op: "open", Path: secretPath, Err: os.ErrPermission},
+	}
+
+	res := callTool(t, deps, registerUpdateLearnerMemory, "L_owner", "update_learner_memory", map[string]any{
+		"scope":        "concept",
+		"concept_slug": "a",
+		"section_key":  "Current state",
+		"content":      "Observation.",
+	})
+	if !res.IsError || resultText(res) != "memory validation unavailable" {
+		t.Fatalf("dependency failure was not surfaced safely: error=%v text=%q", res.IsError, resultText(res))
+	}
+	if strings.Contains(resultText(res), secretPath) {
+		t.Fatalf("dependency failure leaked a path: %q", resultText(res))
+	}
+}
+
+func TestUpdateLearnerMemory_WriteFailureIsSafeAndQuotaIsStable(t *testing.T) {
+	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
+	_, deps := setupToolsTest(t)
+	originalWrite := writeLearnerMemory
+	t.Cleanup(func() { writeLearnerMemory = originalWrite })
+
+	secretPath := "/private/tenant/L_owner/MEMORY.md"
+	writeLearnerMemory = func(memory.WriteRequest) error {
+		return &os.PathError{Op: "rename", Path: secretPath, Err: os.ErrPermission}
+	}
+	res := callTool(t, deps, registerUpdateLearnerMemory, "L_owner", "update_learner_memory", map[string]any{
+		"scope": "memory_pending", "operation": "append", "content": "- observation",
+	})
+	if !res.IsError || resultText(res) != "memory write failed" {
+		t.Fatalf("write failure was not surfaced safely: error=%v text=%q", res.IsError, resultText(res))
+	}
+	if strings.Contains(resultText(res), secretPath) {
+		t.Fatalf("write failure leaked a path: %q", resultText(res))
+	}
+
+	writeLearnerMemory = func(memory.WriteRequest) error {
+		return fmt.Errorf("%w: private limit details", memory.ErrQuotaExceeded)
+	}
+	quota := callTool(t, deps, registerUpdateLearnerMemory, "L_owner", "update_learner_memory", map[string]any{
+		"scope": "memory_pending", "operation": "append", "content": "- observation",
+	})
+	if !quota.IsError || resultText(quota) != "memory quota exceeded" {
+		t.Fatalf("quota failure = error=%v text=%q", quota.IsError, resultText(quota))
+	}
+}
+
 func TestUpdateLearnerMemory_ArchiveMarksConsolidationCompleted(t *testing.T) {
 	t.Setenv("TUTOR_MCP_MEMORY_ROOT", t.TempDir())
 	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
@@ -186,6 +255,216 @@ func TestGetMemoryState_ReturnsCounts(t *testing.T) {
 	}
 	if out["has_recent_narrative_signal"] != true {
 		t.Fatalf("expected narrative signal: %v", out)
+	}
+}
+
+func TestGetMemoryState_RequiredListingFailureIsSafe(t *testing.T) {
+	t.Setenv("TUTOR_MCP_MEMORY_ROOT", t.TempDir())
+	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
+	_, deps := setupToolsTest(t)
+
+	original := listLearnerMemorySessions
+	t.Cleanup(func() { listLearnerMemorySessions = original })
+	secretPath := "/private/tenant/L_owner/sessions"
+	listLearnerMemorySessions = func(string) ([]time.Time, error) {
+		return nil, &os.PathError{Op: "readdir", Path: secretPath, Err: os.ErrPermission}
+	}
+
+	res := callTool(t, deps, registerGetMemoryState, "L_owner", "get_memory_state", map[string]any{})
+	if !res.IsError || resultText(res) != "memory state unavailable" {
+		t.Fatalf("listing failure was not surfaced safely: error=%v text=%q", res.IsError, resultText(res))
+	}
+	if strings.Contains(resultText(res), secretPath) {
+		t.Fatalf("listing failure leaked a filesystem path: %q", resultText(res))
+	}
+}
+
+func TestGetMemoryState_RequiredPendingReadFailureIsSafe(t *testing.T) {
+	t.Setenv("TUTOR_MCP_MEMORY_ROOT", t.TempDir())
+	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
+	_, deps := setupToolsTest(t)
+
+	original := readLearnerMemory
+	t.Cleanup(func() { readLearnerMemory = original })
+	secretPath := "/private/tenant/L_owner/MEMORY_pending.md"
+	readLearnerMemory = func(learnerID string, scope memory.Scope, key string) (string, error) {
+		if scope == memory.ScopeMemoryPending {
+			return "", &os.PathError{Op: "read", Path: secretPath, Err: errors.New("storage unavailable")}
+		}
+		return original(learnerID, scope, key)
+	}
+
+	res := callTool(t, deps, registerGetMemoryState, "L_owner", "get_memory_state", map[string]any{})
+	if !res.IsError || resultText(res) != "memory state unavailable" {
+		t.Fatalf("pending-memory failure was not surfaced safely: error=%v text=%q", res.IsError, resultText(res))
+	}
+	if strings.Contains(resultText(res), secretPath) {
+		t.Fatalf("pending-memory failure leaked a filesystem path: %q", resultText(res))
+	}
+}
+
+func TestGetMemoryState_StatFailureDegradesOptionalFields(t *testing.T) {
+	t.Setenv("TUTOR_MCP_MEMORY_ROOT", t.TempDir())
+	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
+	_, deps := setupToolsTest(t)
+	learnerID := "L_owner"
+	now := time.Now().UTC().Add(-24 * time.Hour).Truncate(time.Second)
+	if err := memory.Write(memory.WriteRequest{
+		LearnerID: learnerID,
+		Scope:     memory.ScopeSession,
+		Timestamp: now,
+		Operation: memory.OpReplaceFile,
+		Content:   "A valid legacy session summary.",
+	}); err != nil {
+		t.Fatalf("seed session memory: %v", err)
+	}
+	if err := memory.Write(memory.WriteRequest{
+		LearnerID: learnerID,
+		Scope:     memory.ScopeArchive,
+		Period:    "2026",
+		Operation: memory.OpReplaceFile,
+		Content:   "A valid archive.",
+	}); err != nil {
+		t.Fatalf("seed archive memory: %v", err)
+	}
+
+	original := statLearnerMemoryPath
+	t.Cleanup(func() { statLearnerMemoryPath = original })
+	secretPath := "/private/tenant/L_owner/MEMORY.md"
+	statLearnerMemoryPath = func(string) (os.FileInfo, error) {
+		return nil, &os.PathError{Op: "lstat", Path: secretPath, Err: os.ErrPermission}
+	}
+
+	res := callTool(t, deps, registerGetMemoryState, learnerID, "get_memory_state", map[string]any{})
+	if res.IsError {
+		t.Fatalf("optional stat failure should be degraded, got %q", resultText(res))
+	}
+	out := decodeResult(t, res)
+	if out["ok"] != true || out["status"] != "degraded" {
+		t.Fatalf("unexpected degraded response: %v", out)
+	}
+	if out["memory_size_bytes"] != nil || out["consolidation_lag_days"] != nil || out["has_recent_narrative_signal"] != nil {
+		t.Fatalf("unavailable optional values must be null, not zero/false: %v", out)
+	}
+	assertMemoryDegradedComponents(t, out, "memory_statistics", "consolidation_lag", "narrative_signal")
+	if strings.Contains(resultText(res), secretPath) {
+		t.Fatalf("stat failure leaked a filesystem path: %q", resultText(res))
+	}
+}
+
+func TestGetMemoryState_CorruptSessionDegradesNarrativeContext(t *testing.T) {
+	t.Setenv("TUTOR_MCP_MEMORY_ROOT", t.TempDir())
+	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
+	_, deps := setupToolsTest(t)
+	learnerID := "L_owner"
+	ts := time.Now().UTC().Truncate(time.Second)
+	if err := memory.EnsureLearnerDirs(learnerID); err != nil {
+		t.Fatalf("ensure learner memory: %v", err)
+	}
+	path, err := memory.PathForRead(learnerID, memory.ScopeSession, ts.Format(time.RFC3339))
+	if err != nil {
+		t.Fatalf("session path: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("---\ntimestamp: [\n---\ncorrupt"), 0o600); err != nil {
+		t.Fatalf("write corrupt session: %v", err)
+	}
+
+	res := callTool(t, deps, registerGetMemoryState, learnerID, "get_memory_state", map[string]any{})
+	if res.IsError {
+		t.Fatalf("narrative parsing is optional to inventory: %q", resultText(res))
+	}
+	out := decodeResult(t, res)
+	if out["status"] != "degraded" || out["session_count"] != float64(1) {
+		t.Fatalf("corruption must preserve inventory with an explicit degradation: %v", out)
+	}
+	if out["has_recent_narrative_signal"] != nil {
+		t.Fatalf("corrupt narrative must not become a false signal: %v", out)
+	}
+	assertMemoryDegradedComponents(t, out, "narrative_context")
+	if strings.Contains(resultText(res), path) {
+		t.Fatalf("corruption response leaked a filesystem path: %q", resultText(res))
+	}
+}
+
+func TestGetMemoryState_AbsentMemoryIsHealthy(t *testing.T) {
+	t.Setenv("TUTOR_MCP_MEMORY_ROOT", t.TempDir())
+	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
+	_, deps := setupToolsTest(t)
+
+	res := callTool(t, deps, registerGetMemoryState, "L_owner", "get_memory_state", map[string]any{})
+	if res.IsError {
+		t.Fatalf("normal memory absence failed: %q", resultText(res))
+	}
+	out := decodeResult(t, res)
+	for _, field := range []string{"memory_size_bytes", "pending_count", "session_count", "archive_count", "concept_count", "consolidation_lag_days"} {
+		if out[field] != float64(0) {
+			t.Fatalf("%s = %v, want healthy zero: %v", field, out[field], out)
+		}
+	}
+	if out["has_recent_narrative_signal"] != false {
+		t.Fatalf("empty memory should have no narrative signal: %v", out)
+	}
+	if _, degraded := out["degraded_components"]; degraded {
+		t.Fatalf("normal absence must not be marked degraded: %v", out)
+	}
+}
+
+func TestReadRawSession_FailureIsSafeAndAbsenceIsNormal(t *testing.T) {
+	t.Setenv("TUTOR_MCP_MEMORY_ROOT", t.TempDir())
+	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
+	_, deps := setupToolsTest(t)
+	timestamp := time.Date(2026, 5, 14, 9, 30, 0, 0, time.UTC).Format(time.RFC3339)
+
+	absent := callTool(t, deps, registerReadRawSession, "L_owner", "read_raw_session", map[string]any{"timestamp": timestamp})
+	if absent.IsError {
+		t.Fatalf("normal session absence failed: %q", resultText(absent))
+	}
+	if out := decodeResult(t, absent); out["ok"] != true || out["session_payload"] != nil {
+		t.Fatalf("unexpected absent-session response: %v", out)
+	}
+
+	original := readLearnerMemory
+	t.Cleanup(func() { readLearnerMemory = original })
+	secretContent := "private learner content"
+	readLearnerMemory = func(string, memory.Scope, string) (string, error) {
+		return "---\ntimestamp: [" + secretContent + "\n---\ncorrupt", nil
+	}
+	corrupt := callTool(t, deps, registerReadRawSession, "L_owner", "read_raw_session", map[string]any{"timestamp": timestamp})
+	if !corrupt.IsError || resultText(corrupt) != "memory session is invalid" {
+		t.Fatalf("corrupt session was not surfaced safely: error=%v text=%q", corrupt.IsError, resultText(corrupt))
+	}
+	if strings.Contains(resultText(corrupt), secretContent) {
+		t.Fatalf("session parse failure leaked learner content: %q", resultText(corrupt))
+	}
+
+	secretPath := "/private/tenant/L_owner/sessions/secret.md"
+	readLearnerMemory = func(string, memory.Scope, string) (string, error) {
+		return "", &os.PathError{Op: "read", Path: secretPath, Err: os.ErrPermission}
+	}
+	failed := callTool(t, deps, registerReadRawSession, "L_owner", "read_raw_session", map[string]any{"timestamp": timestamp})
+	if !failed.IsError || resultText(failed) != "memory session unavailable" {
+		t.Fatalf("session read failure was not surfaced safely: error=%v text=%q", failed.IsError, resultText(failed))
+	}
+	if strings.Contains(resultText(failed), secretPath) {
+		t.Fatalf("session read failure leaked a filesystem path: %q", resultText(failed))
+	}
+}
+
+func assertMemoryDegradedComponents(t *testing.T, out map[string]any, want ...string) {
+	t.Helper()
+	raw, ok := out["degraded_components"].([]any)
+	if !ok {
+		t.Fatalf("degraded_components missing from %v", out)
+	}
+	got := make(map[string]bool, len(raw))
+	for _, component := range raw {
+		name, _ := component.(string)
+		got[name] = true
+	}
+	for _, component := range want {
+		if !got[component] {
+			t.Fatalf("degraded component %q missing from %v", component, out)
+		}
 	}
 }
 

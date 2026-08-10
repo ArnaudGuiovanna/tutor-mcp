@@ -51,8 +51,9 @@
 
 ### P0-PROTO-02 — Passer à MCP 2026-07-28 stateless
 
-- **Statut / effort :** `IN_PROGRESS` / `M` — rouvert le 2026-08-10 : le
-  preflight CORS et le test round-robin ne prouvaient pas encore le gate.
+- **Statut / effort :** `DONE` / `M` — clôturé le 2026-08-10 avec deux
+  serveurs MCP et deux pools Store indépendants, un routage requête par requête
+  sans session de transport, et les parcours `2026-07-28` et legacy.
 - **Actions :** migrer le SDK Go v1.4.1 vers la version stable supportant
   `2026-07-28`, activer `Stateless`, propager l'annulation HTTP et mettre à jour
   les en-têtes CORS/protocole.
@@ -61,9 +62,9 @@
 
 ### P0-PROTO-03 — Publier l'autorisation et la sûreté par outil
 
-- **Statut / effort :** `IN_PROGRESS` / `M` — rouvert le 2026-08-10 : deux
-  outils annoncés read-only ont des effets d'écriture et le scope reste
-  générique.
+- **Statut / effort :** `DONE` / `M` — clôturé le 2026-08-10 avec policy
+  exhaustive des 45 outils, scopes lecture/écriture (ou les deux), rollout
+  OAuth en deux phases, challenges HTTP/MCP et annotations testées.
 - **Actions :** définir des scopes cohérents, `securitySchemes`, challenges
   d'élévation et annotations read-only/destructive/idempotent/open-world pour
   les outils, puis faire appliquer l'autorisation dans chaque handler.
@@ -137,12 +138,13 @@
 
 ### P1-OAUTH-01 — Protéger l'enregistrement dynamique des clients
 
-- **Statut / effort :** `IN_PROGRESS` / `M` — rouvert le 2026-08-10 : les
-  bornes de stockage ne constituent pas encore une politique d'admission et de
-  saturation conforme au critère d'acceptation.
-- **Problème :** `/register` est public, le plafond global de 10 000 clients
-  est durable et il n'existe ni TTL ni suppression opérationnelle
-  (`auth/oauth.go:58`, `auth/oauth.go:965`).
+- **Statut / effort :** `IN_PROGRESS` / `M` — le TTL, le cleanup, le cap
+  atomique et le retrait des champs RFC 7592 fictifs sont livrés ; il manque
+  encore la politique d'admission production et l'activation des clients.
+- **Problème :** `/register` reste anonyme en production, les requêtes
+  équivalentes créent plusieurs clients et le TTL expire aussi les clients
+  utilisés. Le cleanup dans le chemin HTTP ajoute en outre une transaction à
+  toute requête invalide (`auth/oauth.go:966`).
 - **Actions :** initial access token ou software statement, allowlist de modes
   autorisés, TTL des clients jamais utilisés, quotas et commande d'administration.
 - **Critères d'acceptation :** un appel non autorisé ne crée aucun client ; un
@@ -165,7 +167,9 @@
 
 ### P1-ERR-01 — Propager les erreurs du moteur de motivation
 
-- **Statut / effort :** `TODO` / `M`
+- **Statut / effort :** `DONE` / `M` — clôturé le 2026-08-10 avec erreurs
+  typées par dépendance, enrichissements dégradés conservant le brief et
+  composants stables exposés dans `get_next_activity`.
 - **Problème :** `MotivationEngine.Build` ignore des erreurs de lecture, de
   parsing et d'écriture dans `engine/motivation.go:287`.
 - **Actions :** distinguer dépendances obligatoires et enrichissements
@@ -178,7 +182,9 @@
 
 ### P1-ERR-02 — Distinguer absence de session et panne DB
 
-- **Statut / effort :** `TODO` / `S`
+- **Statut / effort :** `DONE` / `S` — clôturé le 2026-08-10 avec
+  `store.ErrNotFound`, erreurs backend expurgées et tests absence, timeout,
+  connexion fermée, propriété et succès.
 - **Problème :** `record_session_close` ignore l'erreur de
   `GetActiveLearningSession` dans `tools/session_close.go:48`.
 - **Actions :** introduire un sentinel `ErrNotFound`, propager toute autre
@@ -189,7 +195,10 @@
 
 ### P1-ERR-03 — Ne pas convertir une panne DB en « configuration requise »
 
-- **Statut / effort :** `TODO` / `S`
+- **Statut / effort :** `DONE` / `S` — clôturé le 2026-08-10 : seules les
+  absences confirmées produisent `needs_domain_setup`; panne, timeout et erreur
+  de sélection suivent des résultats distincts. Archivage et domaine étranger
+  restent volontairement sur le chemin d'absence non révélateur.
 - **Problème :** certains chemins de `tools/activity.go` peuvent présenter une
   erreur de résolution comme `needs_domain_setup=true`.
 - **Actions :** réserver ce résultat à `sql.ErrNoRows`/absence confirmée et
@@ -200,7 +209,9 @@
 
 ### P1-MEM-01 — Rendre l'état mémoire honnête en cas d'I/O dégradée
 
-- **Statut / effort :** `TODO` / `M`
+- **Statut / effort :** `DONE` / `M` — clôturé le 2026-08-10 avec inventaire
+  strict, valeurs optionnelles nulles en dégradation, composants explicites et
+  aucune fuite de chemin ou contenu dans les résultats MCP.
 - **Problème :** `tools/learner_memory.go:185` ignore des erreurs de listing,
   lecture et `stat`, puis peut retourner `ok:true` avec des zéros.
 - **Actions :** faire retourner `(valeur, erreur)` aux helpers et publier
@@ -285,9 +296,9 @@
 
 ### P1-MCP-01 — Préparer le transport MCP stateless récent
 
-- **Statut / effort :** `IN_PROGRESS` / `M` — rouvert le 2026-08-10 : le test
-  round-robin partageait la même instance serveur entre les deux handlers et
-  ne simulait pas deux processus indépendants.
+- **Statut / effort :** `DONE` / `M` — clôturé le 2026-08-10 avec SDK Go
+  v1.7.0, transport stateless et test round-robin entre deux serveurs, handlers
+  et pools DB indépendants pour le protocole courant et le client legacy.
 - **Problème :** le projet reste sur le SDK v1.4.1 et le transport stateful,
   désormais borné mais local au nœud.
 - **Actions :** évaluer puis migrer vers une version stable compatible avec le
@@ -331,7 +342,9 @@
 
 ### P1-TEST-01 — Étendre la matrice d'intégration PostgreSQL
 
-- **Statut / effort :** `TODO` / `L`
+- **Statut / effort :** `IN_PROGRESS` / `L` — la CI exécute désormais
+  `go test -race ./...` avec PostgreSQL et couvre les migrations/scopes ; les
+  scénarios crash/lease/redelivery restent liés à P1-JOB/P1-WEBHOOK.
 - **Problème :** la CI PostgreSQL couvre principalement `db`, alors que les
   garanties de jobs, outils et scheduler dépendent du comportement réel de
   PostgreSQL et de son pool.
@@ -356,7 +369,7 @@
 | P2-TX-01 | `TODO` / `M` | Introduire une interface `TxStore` métier au lieu du Store complet dans `WithTx`. | Impossible d'appeler `Close`, `Migrate`, `Ping` ou `WithTx` depuis le callback. |
 | P2-DB-01 | `TODO` / `S` | Retirer `Migrate` du Store runtime ou dispatcher selon le dialecte en conservant le contexte (`db/store.go:72`). | PostgreSQL n'appelle jamais le migrateur SQLite ; annulation respectée. |
 | P2-DATA-01 | `TODO` / `M` | Rendre le parsing des timestamps strict et migrer explicitement les valeurs legacy. | Valeur corrompue mesurée/quarantinée, jamais convertie silencieusement en zéro. |
-| P2-OAUTH-01 | `TODO` / `M` | Implémenter réellement RFC 7592 ou retirer `registration_access_token` et `registration_client_uri`. | Aucun champ ou endpoint annoncé sans implémentation et persistance sécurisée. |
+| P2-OAUTH-01 | `DONE` / `M` | Les champs `registration_access_token` et `registration_client_uri` ont été retirés tant que RFC 7592 n'est pas implémenté. | Aucun champ ou endpoint de gestion client n'est annoncé sans implémentation. |
 | P2-DEAD-01 | `TODO` / `S` | Déprécier puis supprimer les méthodes Store sans appel listées ci-dessous. | Deux releases de dépréciation si API publique ; interface et mocks nettoyés. |
 | P2-LOG-01 | `TODO` / `M` | Centraliser la redaction des erreurs/panics et envoyer les stacks vers un sink restreint. | Tests avec PII, DSN, chemin et webhook ; aucune fuite dans le log standard. |
 | P2-OBS-01 | `TODO` / `L` | Ajouter OpenTelemetry, request/trace IDs et métriques DB/jobs/webhooks/MCP. | Dashboards et alertes sur p95/p99, saturation pool, queue lag, DLQ et sessions. |

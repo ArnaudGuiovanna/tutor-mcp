@@ -5,6 +5,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"sync"
@@ -54,6 +55,30 @@ func (h *captureHandler) contains(substr string) bool {
 		}
 	}
 	return false
+}
+
+func TestSlogCronLoggerRedactsRecoveredErrorAndStack(t *testing.T) {
+	const webhookSecret = "https://discord.com/api/webhooks/789/cron-panic-token"
+	cap := &captureHandler{}
+	logger := slogCronLogger{l: slog.New(cap)}
+
+	logger.Error(
+		errors.New("delivery panic at "+webhookSecret),
+		"panic",
+		"stack", "goroutine 42 [running]:\n/private/source/path\n"+webhookSecret,
+		"unexpected", webhookSecret,
+	)
+
+	for _, secret := range []string{webhookSecret, "delivery panic", "goroutine 42", "/private/source/path"} {
+		if cap.contains(secret) {
+			t.Fatalf("cron recovery leaked %q in standard logs", secret)
+		}
+	}
+	for _, diagnostic := range []string{"scheduler cron failure", "component=scheduler_cron", "event=panic_recovered", "error_type=*errors.errorString", "stack_fingerprint="} {
+		if !cap.contains(diagnostic) {
+			t.Fatalf("cron recovery omitted safe diagnostic %q", diagnostic)
+		}
+	}
 }
 
 // TestScheduler_PanickingJobDoesNotCrashLoop is the issue #35 reproducer:

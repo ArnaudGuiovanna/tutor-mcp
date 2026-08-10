@@ -5,12 +5,41 @@ package db
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 )
+
+func TestLearningSession_MissingLookupsExposeStoreSentinel(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+
+	for name, lookup := range map[string]func() error{
+		"explicit": func() error {
+			_, err := s.GetLearningSession(ctx, "L1", "sess_missing")
+			return err
+		},
+		"active": func() error {
+			_, err := s.GetActiveLearningSession(ctx, "L1")
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := lookup()
+			if !errors.Is(err, storeport.ErrNotFound) {
+				t.Fatalf("error %v does not expose store.ErrNotFound", err)
+			}
+			if !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("error %v no longer preserves sql.ErrNoRows", err)
+			}
+		})
+	}
+}
 
 func TestLearningSession_OpenConcurrentAndCloseIdempotent(t *testing.T) {
 	s := setupTestDB(t)
@@ -105,11 +134,11 @@ func TestLearningSession_OwnershipAndRequestedID(t *testing.T) {
 	if _, err := s.GetLearningSession(ctx, "L2", session.ID); err == nil {
 		t.Fatal("other learner read session")
 	}
-	if _, err := s.TouchLearningSession(ctx, "L2", session.ID, now); err == nil {
-		t.Fatal("other learner touched session")
+	if _, err := s.TouchLearningSession(ctx, "L2", session.ID, now); !errors.Is(err, storeport.ErrNotFound) {
+		t.Fatalf("other learner touch error = %v, want ErrNotFound", err)
 	}
-	if _, err := s.CloseLearningSession(ctx, "L2", session.ID, now); err == nil {
-		t.Fatal("other learner closed session")
+	if _, err := s.CloseLearningSession(ctx, "L2", session.ID, now); !errors.Is(err, storeport.ErrNotFound) {
+		t.Fatalf("other learner close error = %v, want ErrNotFound", err)
 	}
 }
 

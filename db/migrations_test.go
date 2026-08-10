@@ -425,6 +425,207 @@ func TestMigrationBackfillsStructuredWebhookDomainScope(t *testing.T) {
 	}
 }
 
+func TestMigrationOAuthToolScopesBackfillsLegacyAndRevokesInvalid(t *testing.T) {
+	n := testDBCounter.Add(1)
+	dsn := fmt.Sprintf("file:migrate_oauth_tool_scopes_%d?mode=memory&cache=shared", n+18000)
+	raw, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { raw.Close() })
+	if err := ensureSchemaMigrationsTable(raw); err != nil {
+		t.Fatal(err)
+	}
+
+	var scopeMigration migration
+	for _, m := range buildMigrations() {
+		if m.Version == "0035_oauth_tool_scopes" {
+			scopeMigration = m
+			break
+		}
+		if err := applyMigration(raw, m); err != nil {
+			t.Fatalf("apply %s: %v", m.Version, err)
+		}
+	}
+	if scopeMigration.Version == "" {
+		t.Fatal("OAuth tool-scope migration not found")
+	}
+
+	now := time.Now().UTC()
+	expires := now.Add(time.Hour)
+	if _, err := raw.Exec(
+		`INSERT INTO learners (id, email, password_hash, objective, email_verified_at)
+		 VALUES ('scope-legacy', 'scope-legacy@test', 'h', 'o', ?)`, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, clientID := range []string{"scope-client", "scope-corrupt-client"} {
+		if _, err := raw.Exec(
+			`INSERT INTO oauth_clients (client_id, client_name, redirect_uris)
+			 VALUES (?, 'scope client', '["https://client.test/callback"]')`, clientID,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO oauth_codes
+		 (code, learner_id, code_challenge, code_challenge_method, client_id, redirect_uri, resource, expires_at)
+		 VALUES ('legacy-scope-code', 'scope-legacy', 'challenge', 'S256',
+		         'scope-client', 'https://client.test/callback', ?, ?)`, testOAuthResource, expires,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO refresh_tokens
+		 (token, learner_id, client_id, resource, family_id, expires_at, created_at)
+		 VALUES ('sha256:legacy-scope-token', 'scope-legacy', 'scope-client', ?,
+		         'legacy-scope-family', ?, ?)`, testOAuthResource, expires, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO learner_approved_clients (learner_id, client_id, redirect_uri)
+		 VALUES ('scope-legacy', 'scope-client', 'https://client.test/callback')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO account_tokens
+		 (token_hash, learner_id, purpose, client_id, redirect_uri, resource, scope,
+		  code_challenge, code_challenge_method, expires_at, created_at)
+		 VALUES ('legacy-scope-account', 'scope-legacy', 'email_verification',
+		         'scope-client', 'https://client.test/callback', ?, '',
+		         'challenge', 'S256', ?, ?)`, testOAuthResource, expires, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	statements := splitSQLStatements(scopeMigration.Body)
+	if len(statements) < 4 {
+		t.Fatalf("scope migration has only %d statements", len(statements))
+	}
+	// Run the additive column declarations first so we can also exercise the
+	// corruption scrub independently from the blank-scope legacy backfill.
+	for _, statement := range statements[:3] {
+		if _, err := raw.Exec(statement); err != nil {
+			t.Fatalf("add scope column: %v", err)
+		}
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO oauth_codes
+		 (code, learner_id, code_challenge, code_challenge_method, client_id, redirect_uri, resource, scope, expires_at)
+		 VALUES ('invalid-scope-code', 'scope-legacy', 'challenge', 'S256',
+		         'scope-corrupt-client', 'https://client.test/callback', ?, 'admin', ?)`, testOAuthResource, expires,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO refresh_tokens
+		 (token, learner_id, client_id, resource, scope, family_id, expires_at, created_at)
+		 VALUES ('sha256:invalid-scope-token', 'scope-legacy', 'scope-corrupt-client', ?,
+		         'admin', 'invalid-scope-family', ?, ?)`, testOAuthResource, expires, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO learner_approved_clients (learner_id, client_id, redirect_uri, scope)
+		 VALUES ('scope-legacy', 'scope-corrupt-client', 'https://client.test/callback', 'admin')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO account_tokens
+		 (token_hash, learner_id, purpose, client_id, redirect_uri, resource, scope,
+		  code_challenge, code_challenge_method, expires_at, created_at)
+		 VALUES ('invalid-scope-account', 'scope-legacy', 'email_verification',
+		         'scope-corrupt-client', 'https://client.test/callback', ?, 'admin',
+		         'challenge', 'S256', ?, ?)`, testOAuthResource, expires, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range statements[3:] {
+		if _, err := raw.Exec(statement); err != nil {
+			t.Fatalf("apply scope data migration: %v", err)
+		}
+	}
+
+	for table, predicate := range map[string]string{
+		"oauth_codes":              "code = 'legacy-scope-code'",
+		"refresh_tokens":           "token = 'sha256:legacy-scope-token'",
+		"learner_approved_clients": "client_id = 'scope-client'",
+		"account_tokens":           "token_hash = 'legacy-scope-account'",
+	} {
+		var scope string
+		if err := raw.QueryRow(`SELECT scope FROM ` + table + ` WHERE ` + predicate).Scan(&scope); err != nil {
+			t.Fatalf("read backfilled %s scope: %v", table, err)
+		}
+		if scope != models.OAuthScopeLearner {
+			t.Fatalf("%s legacy scope = %q, want %q", table, scope, models.OAuthScopeLearner)
+		}
+	}
+	var legacyRevoked, invalidRevoked, legacyConsumed, invalidConsumed sql.NullTime
+	if err := raw.QueryRow(`SELECT revoked_at FROM refresh_tokens WHERE token = 'sha256:legacy-scope-token'`).Scan(&legacyRevoked); err != nil || legacyRevoked.Valid {
+		t.Fatalf("valid legacy refresh token was revoked: %v err=%v", legacyRevoked.Valid, err)
+	}
+	if err := raw.QueryRow(`SELECT revoked_at FROM refresh_tokens WHERE token = 'sha256:invalid-scope-token'`).Scan(&invalidRevoked); err != nil || !invalidRevoked.Valid {
+		t.Fatalf("invalid-scope refresh token was not revoked: %v err=%v", invalidRevoked.Valid, err)
+	}
+	if err := raw.QueryRow(`SELECT consumed_at FROM account_tokens WHERE token_hash = 'legacy-scope-account'`).Scan(&legacyConsumed); err != nil || legacyConsumed.Valid {
+		t.Fatalf("valid legacy account token was consumed: %v err=%v", legacyConsumed.Valid, err)
+	}
+	if err := raw.QueryRow(`SELECT consumed_at FROM account_tokens WHERE token_hash = 'invalid-scope-account'`).Scan(&invalidConsumed); err != nil || !invalidConsumed.Valid {
+		t.Fatalf("invalid-scope account token was not consumed: %v err=%v", invalidConsumed.Valid, err)
+	}
+	for table, predicate := range map[string]string{
+		"oauth_codes":              "code = 'invalid-scope-code'",
+		"learner_approved_clients": "client_id = 'scope-corrupt-client'",
+	} {
+		var count int
+		if err := raw.QueryRow(`SELECT COUNT(*) FROM ` + table + ` WHERE ` + predicate).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("invalid-scope %s rows = %d, err=%v", table, count, err)
+		}
+	}
+
+	// An old process can keep serving briefly after the additive migration. Its
+	// INSERT statements do not name the new column, so the DB default must retain
+	// the only grant that binary understood instead of creating unusable rows.
+	if _, err := raw.Exec(
+		`INSERT INTO oauth_codes
+		 (code, learner_id, code_challenge, code_challenge_method, client_id, redirect_uri, resource, expires_at)
+		 VALUES ('rolling-scope-code', 'scope-legacy', 'challenge', 'S256',
+		         'scope-corrupt-client', 'https://client.test/callback', ?, ?)`, testOAuthResource, expires,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO refresh_tokens
+		 (token, learner_id, client_id, resource, family_id, expires_at, created_at)
+		 VALUES ('sha256:rolling-scope-token', 'scope-legacy', 'scope-corrupt-client', ?,
+		         'rolling-scope-family', ?, ?)`, testOAuthResource, expires, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO learner_approved_clients (learner_id, client_id, redirect_uri)
+		 VALUES ('scope-legacy', 'scope-corrupt-client', 'https://client.test/callback')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for table, predicate := range map[string]string{
+		"oauth_codes":              "code = 'rolling-scope-code'",
+		"refresh_tokens":           "token = 'sha256:rolling-scope-token'",
+		"learner_approved_clients": "client_id = 'scope-corrupt-client'",
+	} {
+		var scope string
+		if err := raw.QueryRow(`SELECT scope FROM ` + table + ` WHERE ` + predicate).Scan(&scope); err != nil {
+			t.Fatalf("read rolling-writer %s scope: %v", table, err)
+		}
+		if scope != models.OAuthScopeLearner {
+			t.Fatalf("%s rolling-writer scope = %q, want %q", table, scope, models.OAuthScopeLearner)
+		}
+	}
+}
+
 func TestSessionMigrations_PreserveLegacyRowsWithoutInventingAssociations(t *testing.T) {
 	n := testDBCounter.Add(1)
 	dsn := fmt.Sprintf("file:migrate_sessions_legacy_%d?mode=memory&cache=shared", n+20000)

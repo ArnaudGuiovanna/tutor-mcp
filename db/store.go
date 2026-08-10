@@ -516,7 +516,7 @@ func (s *Store) UpdateLearnerProfile(ctx context.Context, learnerID, profileJSON
 
 const refreshTokenHashPrefix = "sha256:"
 
-func newRefreshToken(learnerID, clientID, resource, familyID string) (*models.RefreshToken, error) {
+func newRefreshToken(learnerID, clientID, resource, scope, familyID string) (*models.RefreshToken, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return nil, fmt.Errorf("generate token: %w", err)
@@ -534,6 +534,7 @@ func newRefreshToken(learnerID, clientID, resource, familyID string) (*models.Re
 		LearnerID: learnerID,
 		ClientID:  clientID,
 		Resource:  resource,
+		Scope:     scope,
 		FamilyID:  familyID,
 		ExpiresAt: now.Add(30 * 24 * time.Hour),
 		CreatedAt: now,
@@ -554,11 +555,15 @@ func (s *Store) insertRefreshToken(ctx context.Context, rt *models.RefreshToken)
 	if strings.TrimSpace(rt.ClientID) == "" || strings.TrimSpace(rt.Resource) == "" {
 		return fmt.Errorf("refresh token client_id and resource are required")
 	}
-	_, err := s.exec(ctx,
+	canonicalScope, err := models.CanonicalOAuthScope(rt.Scope)
+	if err != nil || canonicalScope != rt.Scope {
+		return fmt.Errorf("refresh token scope is invalid: %w", store.ErrInvalidOAuthScope)
+	}
+	_, err = s.exec(ctx,
 		`INSERT INTO refresh_tokens
-		    (token, learner_id, client_id, resource, family_id, expires_at, created_at, used_at, revoked_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		refreshTokenHash(rt.Token), rt.LearnerID, nullString(rt.ClientID), rt.Resource, rt.FamilyID,
+		    (token, learner_id, client_id, resource, scope, family_id, expires_at, created_at, used_at, revoked_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		refreshTokenHash(rt.Token), rt.LearnerID, nullString(rt.ClientID), rt.Resource, rt.Scope, rt.FamilyID,
 		rt.ExpiresAt, rt.CreatedAt, rt.UsedAt, rt.RevokedAt,
 	)
 	return err
@@ -570,10 +575,18 @@ func (s *Store) insertRefreshToken(ctx context.Context, rt *models.RefreshToken)
 // adopted during rotation lets any newly registered client redeem a stolen
 // pre-upgrade credential.
 func (s *Store) CreateRefreshToken(ctx context.Context, learnerID, clientID, resource string) (*models.RefreshToken, error) {
+	return s.CreateRefreshTokenWithScope(ctx, learnerID, clientID, resource, models.OAuthScopeLearner)
+}
+
+func (s *Store) CreateRefreshTokenWithScope(ctx context.Context, learnerID, clientID, resource, scope string) (*models.RefreshToken, error) {
 	if strings.TrimSpace(clientID) == "" || strings.TrimSpace(resource) == "" {
 		return nil, fmt.Errorf("create refresh token: client_id and resource are required")
 	}
-	rt, err := newRefreshToken(learnerID, clientID, resource, "")
+	canonicalScope, err := models.CanonicalOAuthScope(scope)
+	if err != nil {
+		return nil, fmt.Errorf("create refresh token: %w", store.ErrInvalidOAuthScope)
+	}
+	rt, err := newRefreshToken(learnerID, clientID, resource, canonicalScope, "")
 	if err != nil {
 		return nil, err
 	}
@@ -588,12 +601,12 @@ func (s *Store) GetRefreshToken(ctx context.Context, token string) (*models.Refr
 	var clientID sql.NullString
 	var usedAt, revokedAt sql.NullTime
 	err := s.queryRow(ctx,
-		`SELECT learner_id, client_id, resource, family_id, expires_at, created_at, used_at, revoked_at
+		`SELECT learner_id, client_id, resource, scope, family_id, expires_at, created_at, used_at, revoked_at
 		 FROM refresh_tokens
 		 WHERE token = ?
 		   AND expires_at > ? AND used_at IS NULL AND revoked_at IS NULL`,
 		refreshTokenHash(token), time.Now().UTC(),
-	).Scan(&rt.LearnerID, &clientID, &rt.Resource, &rt.FamilyID, &rt.ExpiresAt, &rt.CreatedAt, &usedAt, &revokedAt)
+	).Scan(&rt.LearnerID, &clientID, &rt.Resource, &rt.Scope, &rt.FamilyID, &rt.ExpiresAt, &rt.CreatedAt, &usedAt, &revokedAt)
 	if err != nil {
 		return nil, fmt.Errorf("get refresh token: %w", err)
 	}
@@ -629,10 +642,20 @@ func (s *Store) DeleteRefreshToken(ctx context.Context, token string) error {
 // the row; under SQLite BEGIN IMMEDIATE provides the same ordering. If
 // successor insertion fails, rollback restores the old token to active state.
 func (s *Store) RotateRefreshToken(ctx context.Context, token, clientID, resource string) (*models.RefreshToken, error) {
+	return s.RotateRefreshTokenWithScope(ctx, token, clientID, resource, "")
+}
+
+func (s *Store) RotateRefreshTokenWithScope(ctx context.Context, token, clientID, resource, requestedScope string) (*models.RefreshToken, error) {
 	if strings.TrimSpace(clientID) == "" || strings.TrimSpace(resource) == "" {
 		return nil, fmt.Errorf("rotate refresh token: %w", store.ErrInvalidRefreshToken)
 	}
-	successor, err := newRefreshToken("", clientID, resource, "")
+	if requestedScope != "" {
+		canonical, scopeErr := models.CanonicalOAuthScope(requestedScope)
+		if scopeErr != nil || canonical != requestedScope {
+			return nil, fmt.Errorf("rotate refresh token: %w", store.ErrInvalidOAuthScope)
+		}
+	}
+	successor, err := newRefreshToken("", clientID, resource, models.OAuthScopeLearner, "")
 	if err != nil {
 		return nil, err
 	}
@@ -640,9 +663,10 @@ func (s *Store) RotateRefreshToken(ctx context.Context, token, clientID, resourc
 	now := time.Now().UTC()
 	reuseDetected := false
 	legacyRejected := false
+	invalidScopeRejected := false
 	err = s.inTx(ctx, nil, func(txs *Store) error {
 		var storedClientID sql.NullString
-		var storedResource string
+		var storedResource, storedScope string
 		err := txs.queryRow(ctx,
 			`UPDATE refresh_tokens
 			 SET used_at = ?,
@@ -653,26 +677,28 @@ func (s *Store) RotateRefreshToken(ctx context.Context, token, clientID, resourc
 			   AND revoked_at IS NULL
 			   AND client_id = ?
 			   AND resource = ?
-			 RETURNING learner_id, client_id, resource, family_id`,
+			 RETURNING learner_id, client_id, resource, scope, family_id`,
 			now, successor.FamilyID, refreshTokenHash(token), now, clientID, resource,
-		).Scan(&successor.LearnerID, &storedClientID, &storedResource, &successor.FamilyID)
+		).Scan(&successor.LearnerID, &storedClientID, &storedResource, &storedScope, &successor.FamilyID)
 		if errors.Is(err, sql.ErrNoRows) {
 			var familyID string
 			var existingClientID sql.NullString
-			var existingResource string
+			var existingResource, existingScope string
 			var usedAt, revokedAt sql.NullTime
 			lookupErr := txs.queryRow(ctx,
-				`SELECT family_id, client_id, resource, used_at, revoked_at
+				`SELECT family_id, client_id, resource, scope, used_at, revoked_at
 				 FROM refresh_tokens WHERE `+refreshTokenInspectionPredicate,
 				refreshTokenHash(token), token,
-			).Scan(&familyID, &existingClientID, &existingResource, &usedAt, &revokedAt)
+			).Scan(&familyID, &existingClientID, &existingResource, &existingScope, &usedAt, &revokedAt)
 			if errors.Is(lookupErr, sql.ErrNoRows) {
 				return store.ErrInvalidRefreshToken
 			}
 			if lookupErr != nil {
 				return fmt.Errorf("inspect rejected refresh token: %w", lookupErr)
 			}
-			if !existingClientID.Valid || existingClientID.String == "" || strings.TrimSpace(existingResource) == "" {
+			existingCanonicalScope, existingScopeErr := models.CanonicalOAuthScope(existingScope)
+			if !existingClientID.Valid || existingClientID.String == "" || strings.TrimSpace(existingResource) == "" ||
+				existingScopeErr != nil || existingCanonicalScope != existingScope {
 				// Pre-binding tokens cannot prove which OAuth client originally
 				// received them. Revoke rather than assigning attacker-selected
 				// ownership on first use.
@@ -727,6 +753,24 @@ func (s *Store) RotateRefreshToken(ctx context.Context, token, clientID, resourc
 		if err != nil {
 			return fmt.Errorf("consume refresh token: %w", err)
 		}
+		canonicalStoredScope, scopeErr := models.CanonicalOAuthScope(storedScope)
+		if scopeErr != nil || canonicalStoredScope != storedScope {
+			if _, revokeErr := txs.exec(ctx,
+				`UPDATE refresh_tokens SET revoked_at = COALESCE(revoked_at, ?) WHERE family_id = ?`,
+				now, successor.FamilyID,
+			); revokeErr != nil {
+				return fmt.Errorf("revoke invalid-scope refresh token family: %w", revokeErr)
+			}
+			invalidScopeRejected = true
+			return nil
+		}
+		successor.Scope = canonicalStoredScope
+		if requestedScope != "" {
+			if !models.OAuthScopeCanNarrow(canonicalStoredScope, requestedScope) {
+				return store.ErrInvalidOAuthScope
+			}
+			successor.Scope = requestedScope
+		}
 
 		if err := txs.insertRefreshToken(ctx, successor); err != nil {
 			return fmt.Errorf("create rotated refresh token: %w", err)
@@ -740,6 +784,9 @@ func (s *Store) RotateRefreshToken(ctx context.Context, token, clientID, resourc
 		return nil, fmt.Errorf("rotate refresh token: %w", store.ErrRefreshTokenReuse)
 	}
 	if legacyRejected {
+		return nil, fmt.Errorf("rotate refresh token: %w", store.ErrInvalidRefreshToken)
+	}
+	if invalidScopeRejected {
 		return nil, fmt.Errorf("rotate refresh token: %w", store.ErrInvalidRefreshToken)
 	}
 	return successor, nil
@@ -875,6 +922,9 @@ func (s *Store) GetDomainByLearner(ctx context.Context, learnerID string) (*mode
 	)
 	d, err := scanDomainRow(row)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			err = store.WrapNotFound(err)
+		}
 		return nil, fmt.Errorf("get domain by learner: %w", err)
 	}
 	return d, nil
@@ -884,6 +934,9 @@ func (s *Store) GetDomainByID(ctx context.Context, id string) (*models.Domain, e
 	row := s.queryRow(ctx, `SELECT `+domainCols+` FROM domains WHERE id = ? AND deleted_at IS NULL`, id)
 	d, err := scanDomainRow(row)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			err = store.WrapNotFound(err)
+		}
 		return nil, fmt.Errorf("get domain by id: %w", err)
 	}
 	return d, nil
@@ -1945,14 +1998,25 @@ func (s *Store) getConceptsDueForReview(ctx context.Context, learnerID, domainID
 // authorization time. Empty method/redirect values are accepted only so tests
 // can exercise rows created before those columns existed.
 func (s *Store) CreateAuthCodeWithBinding(ctx context.Context, code, learnerID, codeChallenge, codeChallengeMethod, clientID, redirectURI, resource string, expiresAt time.Time) error {
+	return s.CreateAuthCodeWithBindingAndScope(
+		ctx, code, learnerID, codeChallenge, codeChallengeMethod, clientID, redirectURI,
+		resource, models.OAuthScopeLearner, expiresAt,
+	)
+}
+
+func (s *Store) CreateAuthCodeWithBindingAndScope(ctx context.Context, code, learnerID, codeChallenge, codeChallengeMethod, clientID, redirectURI, resource, scope string, expiresAt time.Time) error {
 	if strings.TrimSpace(resource) == "" {
 		return fmt.Errorf("create auth code: resource is required")
 	}
-	_, err := s.exec(ctx,
+	canonicalScope, err := models.CanonicalOAuthScope(scope)
+	if err != nil {
+		return fmt.Errorf("create auth code: %w", store.ErrInvalidOAuthScope)
+	}
+	_, err = s.exec(ctx,
 		`INSERT INTO oauth_codes
-		    (code, learner_id, code_challenge, code_challenge_method, client_id, redirect_uri, resource, expires_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		code, learnerID, codeChallenge, codeChallengeMethod, clientID, redirectURI, resource, expiresAt,
+		    (code, learner_id, code_challenge, code_challenge_method, client_id, redirect_uri, resource, scope, expires_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		code, learnerID, codeChallenge, codeChallengeMethod, clientID, redirectURI, resource, canonicalScope, expiresAt,
 	)
 	if err != nil {
 		return fmt.Errorf("create auth code: %w", err)
@@ -1966,7 +2030,7 @@ func (s *Store) CreateAuthCodeWithBinding(ctx context.Context, code, learnerID, 
 func (s *Store) GetAuthCode(ctx context.Context, code, clientID string) (*models.AuthCode, error) {
 	ac := &models.AuthCode{}
 	err := s.queryRow(ctx,
-		`SELECT code, learner_id, code_challenge, code_challenge_method, client_id, redirect_uri, resource, expires_at
+		`SELECT code, learner_id, code_challenge, code_challenge_method, client_id, redirect_uri, resource, scope, expires_at
 		 FROM oauth_codes
 		 WHERE code = ? AND client_id = ? AND expires_at > ?
 		   AND EXISTS (
@@ -1975,7 +2039,7 @@ func (s *Store) GetAuthCode(ctx context.Context, code, clientID string) (*models
 		         AND learners.email_verified_at IS NOT NULL
 		   )`,
 		code, clientID, time.Now().UTC(),
-	).Scan(&ac.Code, &ac.LearnerID, &ac.CodeChallenge, &ac.CodeChallengeMethod, &ac.ClientID, &ac.RedirectURI, &ac.Resource, &ac.ExpiresAt)
+	).Scan(&ac.Code, &ac.LearnerID, &ac.CodeChallenge, &ac.CodeChallengeMethod, &ac.ClientID, &ac.RedirectURI, &ac.Resource, &ac.Scope, &ac.ExpiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("get auth code: %w", store.ErrInvalidAuthCode)
 	}
@@ -1999,9 +2063,9 @@ func (s *Store) ConsumeAuthCode(ctx context.Context, code, clientID string) (*mo
 		       WHERE learners.id = oauth_codes.learner_id
 		         AND learners.email_verified_at IS NOT NULL
 		   )
-		 RETURNING code, learner_id, code_challenge, code_challenge_method, client_id, redirect_uri, resource, expires_at`,
+		 RETURNING code, learner_id, code_challenge, code_challenge_method, client_id, redirect_uri, resource, scope, expires_at`,
 		code, clientID, time.Now().UTC(),
-	).Scan(&ac.Code, &ac.LearnerID, &ac.CodeChallenge, &ac.CodeChallengeMethod, &ac.ClientID, &ac.RedirectURI, &ac.Resource, &ac.ExpiresAt)
+	).Scan(&ac.Code, &ac.LearnerID, &ac.CodeChallenge, &ac.CodeChallengeMethod, &ac.ClientID, &ac.RedirectURI, &ac.Resource, &ac.Scope, &ac.ExpiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("consume auth code: %w", store.ErrInvalidAuthCode)
 	}
@@ -2019,7 +2083,7 @@ func (s *Store) ExchangeAuthCodeForRefreshToken(ctx context.Context, code, clien
 	if strings.TrimSpace(clientID) == "" {
 		return nil, nil, fmt.Errorf("exchange auth code: client_id is required")
 	}
-	rt, err := newRefreshToken("", clientID, "", "")
+	rt, err := newRefreshToken("", clientID, "", models.OAuthScopeLearner, "")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -2032,6 +2096,7 @@ func (s *Store) ExchangeAuthCodeForRefreshToken(ctx context.Context, code, clien
 		}
 		rt.LearnerID = authCode.LearnerID
 		rt.Resource = authCode.Resource
+		rt.Scope = authCode.Scope
 		if err := txs.insertRefreshToken(ctx, rt); err != nil {
 			return fmt.Errorf("create refresh token: %w", err)
 		}
@@ -2185,11 +2250,19 @@ func (s *Store) CleanupExpiredOAuthClients(ctx context.Context) (int64, error) {
 // approve_client prompt. A different redirect_uri (even on the same client)
 // re-prompts because the approval is scoped to redirect_uri, not client_id.
 func (s *Store) IsClientApproved(ctx context.Context, learnerID, clientID, redirectURI string) (bool, error) {
+	return s.IsClientApprovedForScope(ctx, learnerID, clientID, redirectURI, models.OAuthScopeLearner)
+}
+
+func (s *Store) IsClientApprovedForScope(ctx context.Context, learnerID, clientID, redirectURI, scope string) (bool, error) {
+	canonicalScope, scopeErr := models.CanonicalOAuthScope(scope)
+	if scopeErr != nil || canonicalScope != scope {
+		return false, fmt.Errorf("is client approved: %w", store.ErrInvalidOAuthScope)
+	}
 	var one int
 	err := s.queryRow(ctx,
 		`SELECT 1 FROM learner_approved_clients
-		 WHERE learner_id = ? AND client_id = ? AND redirect_uri = ?`,
-		learnerID, clientID, redirectURI,
+		 WHERE learner_id = ? AND client_id = ? AND redirect_uri = ? AND scope = ?`,
+		learnerID, clientID, redirectURI, canonicalScope,
 	).Scan(&one)
 	if err == sql.ErrNoRows {
 		return false, nil
@@ -2204,11 +2277,20 @@ func (s *Store) IsClientApproved(ctx context.Context, learnerID, clientID, redir
 // this exact redirect_uri. Idempotent: re-approving the same triple is a no-op
 // (ON CONFLICT DO NOTHING preserves the original approved_at timestamp). R001.
 func (s *Store) ApproveClient(ctx context.Context, learnerID, clientID, redirectURI string) error {
+	return s.ApproveClientForScope(ctx, learnerID, clientID, redirectURI, models.OAuthScopeLearner)
+}
+
+func (s *Store) ApproveClientForScope(ctx context.Context, learnerID, clientID, redirectURI, scope string) error {
+	canonicalScope, scopeErr := models.CanonicalOAuthScope(scope)
+	if scopeErr != nil || canonicalScope != scope {
+		return fmt.Errorf("approve client: %w", store.ErrInvalidOAuthScope)
+	}
 	_, err := s.exec(ctx,
-		`INSERT INTO learner_approved_clients (learner_id, client_id, redirect_uri)
-		 VALUES (?, ?, ?)
-		 ON CONFLICT(learner_id, client_id, redirect_uri) DO NOTHING`,
-		learnerID, clientID, redirectURI,
+		`INSERT INTO learner_approved_clients (learner_id, client_id, redirect_uri, scope)
+		 VALUES (?, ?, ?, ?)
+		 ON CONFLICT(learner_id, client_id, redirect_uri)
+		 DO UPDATE SET scope = excluded.scope, approved_at = CURRENT_TIMESTAMP`,
+		learnerID, clientID, redirectURI, canonicalScope,
 	)
 	if err != nil {
 		return fmt.Errorf("approve client: %w", err)

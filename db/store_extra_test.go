@@ -5,12 +5,38 @@ package db
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"testing"
 	"time"
 
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 	"tutor-mcp/webhookurl"
 )
+
+func TestDomainLookups_MissingExposeStoreSentinel(t *testing.T) {
+	store := setupTestDB(t)
+	ctx := context.Background()
+
+	for name, lookup := range map[string]func() error{
+		"by learner": func() error {
+			_, err := store.GetDomainByLearner(ctx, "L1")
+			return err
+		},
+		"by id": func() error {
+			_, err := store.GetDomainByID(ctx, "domain_missing")
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := lookup()
+			if !errors.Is(err, storeport.ErrNotFound) || !errors.Is(err, sql.ErrNoRows) {
+				t.Fatalf("missing lookup lost sentinel/cause: %v", err)
+			}
+		})
+	}
+}
 
 // ─── IsSafeWebhookURL ───────────────────────────────────────────────────────
 

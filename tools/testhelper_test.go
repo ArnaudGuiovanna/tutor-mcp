@@ -172,6 +172,7 @@ func callTool(
 		server.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
 			return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 				ctx = context.WithValue(ctx, auth.LearnerIDKey, learnerID)
+				ctx = auth.WithOAuthScope(ctx, models.OAuthScopeLearner)
 				return next(ctx, method, req)
 			}
 		})

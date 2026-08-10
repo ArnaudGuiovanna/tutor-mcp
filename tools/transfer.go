@@ -259,8 +259,7 @@ func registerRecordTransferResult(server *mcp.Server, deps *Deps) {
 		}
 		learningSession, err := resolveOpenLearningSession(ctx, deps, learnerID, domain.ID, params.SessionID, time.Now().UTC())
 		if err != nil {
-			r, _ := errorResult(err.Error())
-			return r, nil, nil
+			return learningSessionResolutionErrorResult(deps, err), nil, nil
 		}
 
 		record := &models.TransferRecord{

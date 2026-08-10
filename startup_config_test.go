@@ -30,11 +30,49 @@ func TestLoadStartupConfigDefaults(t *testing.T) {
 	if cfg.DeploymentProfile != "development" || cfg.MCPMaxConcurrent != 128 || cfg.MCPMaxConcurrentUser != 8 {
 		t.Fatalf("unexpected safety defaults: %+v", cfg)
 	}
+	if cfg.OAuthGranularScopes {
+		t.Fatal("OAuthGranularScopes=true, want the rollout-safe default false")
+	}
 	if cfg.MCPMaxRequestBodyBytes != 1<<20 {
 		t.Fatalf("MCPMaxRequestBodyBytes=%d, want %d", cfg.MCPMaxRequestBodyBytes, 1<<20)
 	}
 	if cfg.MCPToolCallTimeout != 30*time.Second {
 		t.Fatalf("MCPToolCallTimeout=%v, want 30s", cfg.MCPToolCallTimeout)
+	}
+}
+
+func TestLoadStartupConfigOAuthGranularScopes(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		want    bool
+		wantErr string
+	}{
+		{name: "explicit off", value: "off"},
+		{name: "explicit on", value: "on", want: true},
+		{name: "normalized on", value: " ON ", want: true},
+		{name: "unknown value", value: "enabled", wantErr: "OAUTH_GRANULAR_SCOPES must be on or off"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearStartupEnv(t)
+			t.Setenv("OAUTH_GRANULAR_SCOPES", tt.value)
+
+			cfg, err := loadStartupConfig("3000")
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error=%v, want substring %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.OAuthGranularScopes != tt.want {
+				t.Fatalf("OAuthGranularScopes=%v, want %v", cfg.OAuthGranularScopes, tt.want)
+			}
+		})
 	}
 }
 
@@ -273,6 +311,7 @@ func clearStartupEnv(t *testing.T) {
 		"MCP_MAX_CONCURRENT",
 		"MCP_MAX_CONCURRENT_PER_LEARNER",
 		"MCP_TOOL_CALL_TIMEOUT_SECONDS",
+		"OAUTH_GRANULAR_SCOPES",
 		"RATELIMIT_BACKEND",
 		"SMTP_ADDR",
 		"SMTP_FROM",

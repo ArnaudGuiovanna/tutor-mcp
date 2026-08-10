@@ -27,12 +27,13 @@ func TestMigratePostgresConcurrent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer admin.Close()
-	admin.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE")
+	registerPostgresSchemaCleanup(t, admin, schema)
+	if _, err := admin.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE"); err != nil {
+		t.Fatalf("drop stale schema %s: %v", schema, err)
+	}
 	if _, err := admin.Exec("CREATE SCHEMA " + schema); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { admin.Exec("DROP SCHEMA " + schema + " CASCADE") })
 
 	sep := "?"
 	if strings.Contains(base, "?") {
@@ -83,12 +84,13 @@ func TestMigratePostgresDetectsChecksumDrift(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer admin.Close()
-	admin.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE")
+	registerPostgresSchemaCleanup(t, admin, schema)
+	if _, err := admin.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE"); err != nil {
+		t.Fatalf("drop stale schema %s: %v", schema, err)
+	}
 	if _, err := admin.Exec("CREATE SCHEMA " + schema); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { admin.Exec("DROP SCHEMA " + schema + " CASCADE") })
 
 	sep := "?"
 	if strings.Contains(base, "?") {
@@ -118,4 +120,19 @@ func TestMigratePostgresDetectsChecksumDrift(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
 		t.Fatalf("expected checksum mismatch error, got: %v", err)
 	}
+}
+
+// registerPostgresSchemaCleanup keeps the admin connection alive until the
+// schema has been dropped. Closing admin first makes database/sql reject the
+// cleanup Exec and silently leaves test schemas behind.
+func registerPostgresSchemaCleanup(t *testing.T, admin *sql.DB, schema string) {
+	t.Helper()
+	t.Cleanup(func() {
+		if _, err := admin.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE"); err != nil {
+			t.Errorf("drop test schema %s: %v", schema, err)
+		}
+		if err := admin.Close(); err != nil {
+			t.Errorf("close postgres admin connection: %v", err)
+		}
+	})
 }

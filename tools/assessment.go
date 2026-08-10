@@ -125,8 +125,7 @@ func registerPrepareAssessmentAttempt(server *mcp.Server, deps *Deps) {
 		now := time.Now().UTC()
 		learningSession, err := resolveOpenLearningSession(ctx, deps, learnerID, domain.ID, params.SessionID, now)
 		if err != nil {
-			r, _ := errorResult(err.Error())
-			return r, nil, nil
+			return learningSessionResolutionErrorResult(deps, err), nil, nil
 		}
 
 		version := params.ActivityVersion

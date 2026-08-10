@@ -29,6 +29,7 @@ import (
 	"tutor-mcp/db"
 	"tutor-mcp/engine"
 	"tutor-mcp/memory"
+	"tutor-mcp/models"
 	"tutor-mcp/tools"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -158,7 +159,12 @@ func main() {
 	}, nil)
 
 	// Register tools
-	deps := &tools.Deps{Store: store, Logger: logger, BaseURL: baseURL}
+	deps := &tools.Deps{
+		Store:               store,
+		Logger:              logger,
+		BaseURL:             baseURL,
+		OAuthGranularScopes: cfg.OAuthGranularScopes,
+	}
 	tools.RegisterTools(mcpServer, deps)
 	// Install the deadline after tool registration so it wraps the idempotency
 	// middleware too: reservation, handler execution and replay finalization all
@@ -178,7 +184,16 @@ func main() {
 		MaxRequestBodyBytes:          cfg.MCPMaxRequestBodyBytes,
 		PropagateRequestCancellation: true,
 	})
-	var mcpHandler http.Handler = cop.Handler(rawMCPHandler)
+	// Reject untrusted cross-origin POSTs before reading their bodies. Trusted
+	// requests are then bounded once, inspected for a per-tool OAuth step-up,
+	// and finally delegated to the SDK with the same bytes.
+	var mcpHandler http.Handler = cop.Handler(
+		mcpRequestBodyLimitMiddleware(cfg.MCPMaxRequestBodyBytes,
+			tools.OAuthScopeHTTPMiddleware(
+				baseURL, cfg.MCPMaxRequestBodyBytes, cfg.OAuthGranularScopes, rawMCPHandler,
+			),
+		),
+	)
 	logger.Info("MCP transport limits",
 		"mode", "stateless",
 		"max_request_body_bytes", cfg.MCPMaxRequestBodyBytes,
@@ -194,6 +209,7 @@ func main() {
 
 	// OAuth server
 	oauthServer := auth.NewOAuthServer(store, baseURL, logger)
+	oauthServer.SetGranularScopesEnabled(cfg.OAuthGranularScopes)
 	if smtpAddress := strings.TrimSpace(os.Getenv("SMTP_ADDR")); smtpAddress != "" {
 		emailSender, err := auth.NewSMTPEmailSender(auth.SMTPConfig{
 			Address:    smtpAddress,
@@ -282,12 +298,16 @@ func main() {
 	// MCP route: per-IP shield before auth, then per-learner limiting after auth.
 	// The body limit runs after both guards so rejected callers cannot make the
 	// process buffer request bodies, while valid POSTs are bounded before the SDK.
+	initialOAuthScope := models.OAuthScopeLearner
+	if cfg.OAuthGranularScopes {
+		initialOAuthScope = models.OAuthScopeLearnerRead
+	}
 	mcpProtectedHandler := auth.RateLimitMiddleware(
 		mcpIPLimiter,
-		auth.BearerMiddleware(baseURL,
+		auth.BearerMiddlewareWithScopeHint(baseURL, initialOAuthScope,
 			auth.LearnerRateLimitMiddleware(mcpLearnerLimiter,
 				mcpConcurrencyLimiter.Middleware(
-					mcpRequestBodyLimitMiddleware(cfg.MCPMaxRequestBodyBytes, mcpHandler),
+					mcpHandler,
 				),
 			),
 		),
@@ -360,7 +380,9 @@ var pseudonymizedLogKeys = map[string]struct{}{
 	"session": {}, "session_id": {},
 	"domain": {}, "domain_id": {}, "concept": {},
 	"assessment_attempt": {}, "evaluator_id": {}, "prediction_id": {},
-	"redirect_uri": {}, "webhook_url": {}, "url": {},
+	"redirect_uri": {}, "webhook_url": {}, "url": {}, "path": {},
+	"dsn": {}, "database_url": {}, "authorization": {}, "token": {}, "secret": {},
+	"stack": {}, "panic": {}, "panic_value": {},
 	"ua": {}, "client_name": {}, "domain_name": {},
 }
 
@@ -374,7 +396,14 @@ func newPrivacySafeLogAttr() func([]string, slog.Attr) slog.Attr {
 		key = nil
 	}
 	return func(_ []string, attr slog.Attr) slog.Attr {
-		if _, sensitive := pseudonymizedLogKeys[attr.Key]; !sensitive {
+		if strings.EqualFold(attr.Key, "err") || strings.EqualFold(attr.Key, "error") {
+			// Never ask an error or Stringer for its text: network errors can
+			// embed a credential-bearing URL, database errors can embed a DSN,
+			// and filesystem errors can embed an absolute path. The dynamic type
+			// is stable enough to route diagnostics without disclosing values.
+			return slog.String(attr.Key, "class:"+safeLogValueClass(attr.Value))
+		}
+		if _, sensitive := pseudonymizedLogKeys[strings.ToLower(attr.Key)]; !sensitive {
 			return attr
 		}
 		if attr.Value.Kind() != slog.KindString || attr.Value.String() == "" || len(key) == 0 {
@@ -384,6 +413,13 @@ func newPrivacySafeLogAttr() func([]string, slog.Attr) slog.Attr {
 		_, _ = mac.Write([]byte(attr.Value.String()))
 		return slog.String(attr.Key, "anon:"+hex.EncodeToString(mac.Sum(nil)[:8]))
 	}
+}
+
+func safeLogValueClass(value slog.Value) string {
+	if value.Kind() == slog.KindAny {
+		return fmt.Sprintf("%T", value.Any())
+	}
+	return value.Kind().String()
 }
 
 func shouldPrintVersion(args []string) bool {
@@ -548,7 +584,7 @@ func mcpRequestBodyLimitMiddleware(maxBytes int64, next http.Handler) http.Handl
 
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.ContentLength = int64(len(body))
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, tools.WithBoundedMCPRequestBody(r, body))
 	})
 }
 
@@ -595,7 +631,7 @@ func corsMiddleware(allowedOrigins []string, allowedSuffixes []string, next http
 			}
 		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Expose-Headers", "Mcp-Session-Id")
+		w.Header().Set("Access-Control-Expose-Headers", "Mcp-Session-Id, WWW-Authenticate")
 		if r.Method == "OPTIONS" {
 			w.Header().Add("Vary", "Access-Control-Request-Method")
 			w.Header().Add("Vary", "Access-Control-Request-Headers")
@@ -677,15 +713,17 @@ func securityHeaders(baseURL string, next http.Handler) http.Handler {
 }
 
 // recoveryMiddleware turns a panic in any downstream handler into a 500
-// instead of taking the whole process down. The stack trace is logged, never
-// returned to the client.
+// instead of taking the whole process down. Only keyed fingerprints of the
+// path and stack are logged; neither raw value is returned or persisted.
 func recoveryMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
 				stackDigest := sha256.Sum256(debug.Stack())
+				pathDigest := sha256.Sum256([]byte(r.URL.EscapedPath()))
 				logger.Error("panic recovered",
-					"path", r.URL.Path,
+					"component", "http_recovery",
+					"path_fingerprint", hex.EncodeToString(pathDigest[:8]),
 					"method", r.Method,
 					"panic_type", fmt.Sprintf("%T", rec),
 					"stack_fingerprint", hex.EncodeToString(stackDigest[:8]),

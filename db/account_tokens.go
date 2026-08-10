@@ -48,6 +48,14 @@ func scanAccountToken(row accountTokenScanner) (*models.AccountToken, error) {
 		stamp := consumedAt.Time
 		token.ConsumedAt = &stamp
 	}
+	// During a rolling upgrade, the immediately preceding binary can still
+	// write an omitted authorization scope into the already-existing account
+	// token column. Omission meant the bounded legacy learner grant, so retain
+	// that exact historical meaning while all newly issued tokens are required
+	// to persist a canonical non-empty scope.
+	if token.Purpose == accountTokenEmailVerification && strings.TrimSpace(token.Scope) == "" {
+		token.Scope = models.OAuthScopeLearner
+	}
 	return token, nil
 }
 
@@ -71,6 +79,12 @@ func (s *Store) CreateAccountToken(ctx context.Context, token *models.AccountTok
 		(strings.TrimSpace(token.ClientID) == "" || strings.TrimSpace(token.RedirectURI) == "" ||
 			strings.TrimSpace(token.Resource) == "") {
 		return fmt.Errorf("create account token: OAuth continuation is incomplete")
+	}
+	if token.Purpose == accountTokenEmailVerification {
+		canonicalScope, err := models.CanonicalOAuthScope(token.Scope)
+		if err != nil || canonicalScope != token.Scope {
+			return fmt.Errorf("create account token: %w", store.ErrInvalidOAuthScope)
+		}
 	}
 	if token.CodeChallenge == "" && token.CodeChallengeMethod != "" {
 		return fmt.Errorf("create account token: PKCE method requires a challenge")
@@ -142,6 +156,10 @@ func (s *Store) ActivateLearnerAndCreateAuthCode(ctx context.Context, tokenHash,
 			strings.TrimSpace(token.Resource) == "" {
 			return store.ErrInvalidAccountToken
 		}
+		canonicalScope, scopeErr := models.CanonicalOAuthScope(token.Scope)
+		if scopeErr != nil || canonicalScope != token.Scope {
+			return store.ErrInvalidAccountToken
+		}
 		result, err := txs.exec(ctx,
 			`UPDATE learners SET password_hash = ?, email_verified_at = ?
 			 WHERE id = ? AND email_verified_at IS NULL`,
@@ -166,13 +184,13 @@ func (s *Store) ActivateLearnerAndCreateAuthCode(ctx context.Context, tokenHash,
 			return fmt.Errorf("clear pending client approvals: %w", err)
 		}
 		if persistClientApproval {
-			if err := txs.ApproveClient(ctx, token.LearnerID, token.ClientID, token.RedirectURI); err != nil {
+			if err := txs.ApproveClientForScope(ctx, token.LearnerID, token.ClientID, token.RedirectURI, token.Scope); err != nil {
 				return fmt.Errorf("approve verified client: %w", err)
 			}
 		}
-		if err := txs.CreateAuthCodeWithBinding(
+		if err := txs.CreateAuthCodeWithBindingAndScope(
 			ctx, code, token.LearnerID, token.CodeChallenge, token.CodeChallengeMethod,
-			token.ClientID, token.RedirectURI, token.Resource, codeExpiresAt,
+			token.ClientID, token.RedirectURI, token.Resource, token.Scope, codeExpiresAt,
 		); err != nil {
 			return err
 		}

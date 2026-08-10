@@ -126,6 +126,7 @@ type OAuthServer struct {
 	store                oauthStore
 	baseURL              string
 	logger               *slog.Logger
+	granularScopes       bool
 	emailSender          EmailSender
 	loginFailures        *LoginFailureTracker
 	maxRegisteredClients int
@@ -135,6 +136,15 @@ type OAuthServer struct {
 	csrfMu               sync.Mutex
 	usedCSRF             map[string]time.Time
 	lastCSRFPrune        time.Time
+}
+
+// SetGranularScopesEnabled switches discovery and authorization issuance from
+// the bounded legacy `learner` bundle to learner:read / learner:write. It must
+// be set during startup, before the server begins handling requests. Runtime
+// token verification remains scope-aware in both modes so phase-A nodes can be
+// deployed fleet-wide before granular issuance is enabled.
+func (s *OAuthServer) SetGranularScopesEnabled(enabled bool) {
+	s.granularScopes = enabled
 }
 
 // NewOAuthServer creates a new OAuthServer. The login-failure tracker locks
@@ -198,6 +208,13 @@ func (s *OAuthServer) SetLoginFailureBackend(backend LoginFailureBackend) {
 }
 
 func (s *OAuthServer) HandleAuthServerMetadata(w http.ResponseWriter, r *http.Request) {
+	scopesSupported := []string{models.OAuthScopeLearner}
+	if s.granularScopes {
+		scopesSupported = []string{
+			models.OAuthScopeLearnerRead,
+			models.OAuthScopeLearnerWrite,
+		}
+	}
 	meta := map[string]interface{}{
 		"issuer":                                s.baseURL,
 		"authorization_endpoint":                s.baseURL + "/authorize",
@@ -205,7 +222,7 @@ func (s *OAuthServer) HandleAuthServerMetadata(w http.ResponseWriter, r *http.Re
 		"response_types_supported":              []string{"code"},
 		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
 		"code_challenge_methods_supported":      []string{"S256"},
-		"scopes_supported":                      []string{"learner"},
+		"scopes_supported":                      scopesSupported,
 		"registration_endpoint":                 s.baseURL + "/register",
 		"client_id_metadata_document_supported": true,
 		"token_endpoint_auth_methods_supported": []string{"none", "client_secret_basic", "client_secret_post"},
@@ -217,10 +234,17 @@ func (s *OAuthServer) HandleAuthServerMetadata(w http.ResponseWriter, r *http.Re
 }
 
 func (s *OAuthServer) HandleProtectedResourceMetadata(w http.ResponseWriter, r *http.Request) {
+	// MCP clients request every protected-resource scope when the initial 401
+	// challenge has no scope hint. Advertise only the least-privilege bootstrap
+	// scope here; write access is acquired per tool through step-up challenges.
+	scopesSupported := []string{models.OAuthScopeLearner}
+	if s.granularScopes {
+		scopesSupported = []string{models.OAuthScopeLearnerRead}
+	}
 	meta := map[string]interface{}{
 		"resource":              s.baseURL + "/mcp",
 		"authorization_servers": []string{s.baseURL},
-		"scopes_supported":      []string{"learner"},
+		"scopes_supported":      scopesSupported,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(meta)
@@ -248,14 +272,15 @@ func (s *OAuthServer) validateRedirectURI(ctx context.Context, clientID, redirec
 	return fmt.Errorf("redirect_uri not registered")
 }
 
-func validateAuthorizationParams(responseType, scope string) error {
+func validatedAuthorizationScope(responseType, scope string, granularEnabled bool) (string, error) {
 	if responseType != "code" {
-		return fmt.Errorf("unsupported response_type")
+		return "", fmt.Errorf("unsupported response_type")
 	}
-	if scope != "" && scope != "learner" {
-		return fmt.Errorf("unsupported scope")
+	canonical, err := normalizeAuthorizationScope(scope, granularEnabled)
+	if err != nil {
+		return "", fmt.Errorf("unsupported scope: %w", err)
 	}
-	return nil
+	return canonical, nil
 }
 
 func (s *OAuthServer) HandleAuthorizeGet(w http.ResponseWriter, r *http.Request) {
@@ -275,7 +300,8 @@ func (s *OAuthServer) HandleAuthorizeGet(w http.ResponseWriter, r *http.Request)
 		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
 		return
 	}
-	if err := validateAuthorizationParams(q.Get("response_type"), q.Get("scope")); err != nil {
+	scope, err := validatedAuthorizationScope(q.Get("response_type"), q.Get("scope"), s.granularScopes)
+	if err != nil {
 		s.logger.Debug("authorize GET: parameters rejected", "err", err, "client_id", clientID)
 		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
 		return
@@ -312,7 +338,7 @@ func (s *OAuthServer) HandleAuthorizeGet(w http.ResponseWriter, r *http.Request)
 		State:               q.Get("state"),
 		CodeChallenge:       codeChallenge,
 		CodeChallengeMethod: codeChallengeMethod,
-		Scope:               q.Get("scope"),
+		Scope:               scope,
 		Resource:            resource,
 		CSRFToken:           csrfToken,
 	}
@@ -387,7 +413,8 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
 		return
 	}
-	if err := validateAuthorizationParams(r.FormValue("response_type"), r.FormValue("scope")); err != nil {
+	scope, err := validatedAuthorizationScope(r.FormValue("response_type"), r.FormValue("scope"), s.granularScopes)
+	if err != nil {
 		s.logger.Debug("authorize POST: parameters rejected", "err", err, "client_id", clientID)
 		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
 		return
@@ -424,7 +451,7 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 		State:               state,
 		CodeChallenge:       codeChallenge,
 		CodeChallengeMethod: codeChallengeMethod,
-		Scope:               r.FormValue("scope"),
+		Scope:               scope,
 		Resource:            resource,
 		CSRFToken:           formCSRF,
 	}
@@ -530,7 +557,7 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 		// client cannot reuse a previously-granted consent at a different URL.
 		approved := false
 		if !isCIMDClientID(clientID) {
-			approved, err = s.store.IsClientApproved(ctx, existing.ID, clientID, redirectURI)
+			approved, err = s.store.IsClientApprovedForScope(ctx, existing.ID, clientID, redirectURI, scope)
 			if err != nil {
 				s.logger.Error("client approval lookup failed", "err", err, "learner", existing.ID, "client", clientID)
 				renderAuthPage(w, data, "Internal error. Please try again.", "login")
@@ -551,7 +578,7 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 			return
 		}
 		if !approved && !isCIMDClientID(clientID) {
-			if err := s.store.ApproveClient(ctx, existing.ID, clientID, redirectURI); err != nil {
+			if err := s.store.ApproveClientForScope(ctx, existing.ID, clientID, redirectURI, scope); err != nil {
 				s.logger.Warn("persist client approval failed", "err", err, "learner", existing.ID, "client", clientID)
 			}
 		}
@@ -566,9 +593,9 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := s.store.CreateAuthCodeWithBinding(
+	if err := s.store.CreateAuthCodeWithBindingAndScope(
 		ctx, code, learnerID, codeChallenge, codeChallengeMethod,
-		clientID, redirectURI, resource, time.Now().Add(5*time.Minute),
+		clientID, redirectURI, resource, scope, time.Now().Add(5*time.Minute),
 	); err != nil {
 		s.logger.Error("create auth code failed", "err", err)
 		renderAuthPage(w, data, "Internal error. Please try again.", mode)
@@ -742,7 +769,7 @@ func (s *OAuthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *htt
 
 	// Sign before mutating persistence. Configuration/signing failures must not
 	// consume a valid one-time code.
-	accessToken, err := GenerateJWTForResource(s.baseURL, resource, authCode.LearnerID)
+	accessToken, err := GenerateJWTForResourceAndScope(s.baseURL, resource, authCode.LearnerID, authCode.Scope)
 	if err != nil {
 		s.logger.Error("generate jwt failed", "err", err)
 		writeTokenError(w, "server_error", http.StatusInternalServerError)
@@ -763,7 +790,13 @@ func (s *OAuthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *htt
 		return
 	}
 
-	writeTokenResponse(w, accessToken, rt.Token)
+	if rt.Scope != authCode.Scope {
+		s.logger.Error("token exchange: persisted scope mismatch")
+		writeTokenError(w, "server_error", http.StatusInternalServerError)
+		return
+	}
+
+	writeTokenResponse(w, accessToken, rt.Token, rt.Scope)
 }
 
 func (s *OAuthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Request) {
@@ -776,6 +809,11 @@ func (s *OAuthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Req
 	}
 	if resource != MCPResource(s.baseURL) {
 		writeTokenError(w, "invalid_grant", http.StatusBadRequest)
+		return
+	}
+	requestedScope, err := normalizeRefreshScope(r.FormValue("scope"), s.granularScopes)
+	if err != nil {
+		writeTokenError(w, "invalid_scope", http.StatusBadRequest)
 		return
 	}
 
@@ -801,8 +839,12 @@ func (s *OAuthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Req
 	// Rotation is one DB transaction. The store rechecks validity and client
 	// binding while atomically consuming the row. A replay of any retained
 	// ancestor revokes the whole family before returning invalid_grant.
-	newRT, err := s.store.RotateRefreshToken(ctx, refreshToken, clientID, resource)
+	newRT, err := s.store.RotateRefreshTokenWithScope(ctx, refreshToken, clientID, resource, requestedScope)
 	if err != nil {
+		if errors.Is(err, storeport.ErrInvalidOAuthScope) {
+			writeTokenError(w, "invalid_scope", http.StatusBadRequest)
+			return
+		}
 		if errors.Is(err, storeport.ErrRefreshTokenReuse) {
 			s.logger.Warn("refresh token reuse detected; family revoked", "client_id", clientID)
 			writeTokenError(w, "invalid_grant", http.StatusBadRequest)
@@ -818,17 +860,17 @@ func (s *OAuthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	accessToken, err := GenerateJWTForResource(s.baseURL, newRT.Resource, newRT.LearnerID)
+	accessToken, err := GenerateJWTForResourceAndScope(s.baseURL, newRT.Resource, newRT.LearnerID, newRT.Scope)
 	if err != nil {
 		s.logger.Error("generate jwt failed after refresh rotation", "err", err)
 		writeTokenError(w, "server_error", http.StatusInternalServerError)
 		return
 	}
 
-	writeTokenResponse(w, accessToken, newRT.Token)
+	writeTokenResponse(w, accessToken, newRT.Token, newRT.Scope)
 }
 
-func writeTokenResponse(w http.ResponseWriter, accessToken, refreshToken string) {
+func writeTokenResponse(w http.ResponseWriter, accessToken, refreshToken, scope string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
@@ -837,7 +879,7 @@ func writeTokenResponse(w http.ResponseWriter, accessToken, refreshToken string)
 		"token_type":    "bearer",
 		"expires_in":    int(AccessTokenTTL.Seconds()),
 		"refresh_token": refreshToken,
-		"scope":         "learner",
+		"scope":         scope,
 	})
 }
 
@@ -1072,7 +1114,6 @@ func (s *OAuthServer) HandleRegister(w http.ResponseWriter, r *http.Request) {
 		"grant_types":                []string{"authorization_code", "refresh_token"},
 		"response_types":             []string{"code"},
 		"token_endpoint_auth_method": authMethod,
-		"scope":                      "learner",
 		"application_type":           applicationType,
 		"client_id_expires_at":       expiresAt.Unix(),
 	}

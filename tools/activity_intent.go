@@ -21,6 +21,15 @@ const (
 	activityIntentReview = "review"
 )
 
+// activityDomainSelectionError represents a caller-correctable domain name,
+// as opposed to an unavailable persistence backend. Its message is safe to
+// return to the authenticated learner.
+type activityDomainSelectionError struct {
+	message string
+}
+
+func (e *activityDomainSelectionError) Error() string { return e.message }
+
 func normalizeActivityIntent(raw string) (string, error) {
 	token := compactToken(raw)
 	switch token {
@@ -70,11 +79,17 @@ func resolveActivityDomain(ctx context.Context, store storeport.Store, learnerID
 
 	switch len(matches) {
 	case 0:
-		return nil, fmt.Errorf("domain_name %q did not match an active domain; available domains: %s", domainName, domainNames(domains))
+		return nil, &activityDomainSelectionError{message: fmt.Sprintf(
+			"domain_name %q did not match an active domain; available domains: %s",
+			domainName, domainNames(domains),
+		)}
 	case 1:
 		return matches[0], nil
 	default:
-		return nil, fmt.Errorf("domain_name %q is ambiguous; matching domains: %s", domainName, domainNames(matches))
+		return nil, &activityDomainSelectionError{message: fmt.Sprintf(
+			"domain_name %q is ambiguous; matching domains: %s",
+			domainName, domainNames(matches),
+		)}
 	}
 }
 
