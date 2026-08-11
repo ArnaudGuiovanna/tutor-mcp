@@ -1,3 +1,5 @@
+
+
 <p align="center">
   <img src="docs/banner.svg" alt="tutor/mcp — Self-learning is a superpower." width="100%" />
 </p>
@@ -223,7 +225,7 @@ Environment variables read at boot:
 
 | Variable | Default | Effect |
 |---|---|---|
-| `JWT_SECRET` | — *(required)* | HS256 secret. Must be valid base64 (plain strings rejected at boot). Use `openssl rand -base64 32` — 32+ decoded bytes recommended for HS256. |
+| `JWT_SECRET` | — *(required)* | HS256 secret. Must be valid base64 (plain strings rejected at boot). Use `openssl rand -base64 32` — 32+ decoded bytes are required (enforced at startup). |
 | `PORT` | `3000` | HTTP listen port |
 | `DB_DRIVER` | `sqlite` | `sqlite` (recommended MVP profile, embedded) or `postgres` (experimental). |
 | `DB_PATH` | `./data/runtime.db` | SQLite path (ignored when `DB_DRIVER=postgres`) |
