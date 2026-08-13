@@ -261,6 +261,7 @@ func newAlertActivityPairCaller(tb testing.TB, deps *Deps) func(string) time.Dur
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			if learnerID, _ := currentLearner.Load().(string); learnerID != "" {
 				ctx = context.WithValue(ctx, auth.LearnerIDKey, learnerID)
+				ctx = auth.WithOAuthScope(ctx, models.OAuthScopeLearner)
 			}
 			return next(ctx, method, req)
 		}
