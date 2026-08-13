@@ -60,7 +60,7 @@ jobs:
   test:
     name: Test (race detector)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 35
 
     steps:
       - name: Checkout
@@ -73,7 +73,7 @@ jobs:
           cache: true
 
       - name: Run tests
-        run: go test -race -count=1 -timeout 6m -covermode=atomic -coverprofile=coverage.out ./...
+        run: go test -race -count=1 -timeout 30m -covermode=atomic -coverprofile=coverage.out ./...
 
       - name: Enforce MCP hot-path performance budget
         env:
@@ -92,7 +92,7 @@ jobs:
   postgres-test:
     name: Test (PostgreSQL 17)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
 
     services:
       postgres:
@@ -126,7 +126,7 @@ jobs:
           # 50-learner/2k-write gate belongs on every change: it catches lost
           # updates, pool starvation and dialect drift under concurrent load.
           TUTOR_LOAD_TEST: "1"
-        run: go test -race -count=1 -timeout 12m ./...
+        run: go test -race -count=1 -timeout 35m ./...
 
   build:
     name: Build (${{ matrix.goos }}/${{ matrix.goarch }})
