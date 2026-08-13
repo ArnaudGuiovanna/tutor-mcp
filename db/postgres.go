@@ -942,7 +942,12 @@ BEGIN
         EXECUTE format('DROP TRIGGER IF EXISTS tenant_scope_guard ON %I', table_name);
         EXECUTE format('CREATE TRIGGER tenant_scope_guard BEFORE INSERT OR UPDATE OF tenant_id, learner_id ON %I FOR EACH ROW EXECUTE FUNCTION tutor_enforce_tenant_from_learner()', table_name);
         constraint_name := table_name || '_tenant_learner_fk';
-        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = constraint_name) THEN
+        IF NOT EXISTS (
+            SELECT 1
+            FROM pg_constraint
+            WHERE conrelid = to_regclass(table_name)
+              AND conname = constraint_name
+        ) THEN
             EXECUTE format('ALTER TABLE %I ADD CONSTRAINT %I FOREIGN KEY (tenant_id, learner_id) REFERENCES learners(tenant_id, id) NOT VALID', table_name, constraint_name);
         END IF;
         EXECUTE format('ALTER TABLE %I VALIDATE CONSTRAINT %I', table_name, constraint_name);

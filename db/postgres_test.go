@@ -70,6 +70,69 @@ func TestMigratePostgresConcurrent(t *testing.T) {
 	}
 }
 
+// TestMigratePostgresScopesConstraintsToSchema guards against catalog checks
+// accidentally finding a same-named constraint in another tenant test schema.
+// Each schema must receive its own composite foreign keys.
+func TestMigratePostgresScopesConstraintsToSchema(t *testing.T) {
+	base := os.Getenv("TUTOR_TEST_PG_DSN")
+	if base == "" {
+		t.Skip("set TUTOR_TEST_PG_DSN")
+	}
+
+	admin, err := sql.Open("pgx", base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schemas := []string{"mig_constraint_scope_a", "mig_constraint_scope_b"}
+	t.Cleanup(func() {
+		for _, schema := range schemas {
+			if _, err := admin.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE"); err != nil {
+				t.Errorf("drop test schema %s: %v", schema, err)
+			}
+		}
+		if err := admin.Close(); err != nil {
+			t.Errorf("close postgres admin connection: %v", err)
+		}
+	})
+
+	sep := "?"
+	if strings.Contains(base, "?") {
+		sep = "&"
+	}
+	for _, schema := range schemas {
+		if _, err := admin.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE"); err != nil {
+			t.Fatalf("drop stale schema %s: %v", schema, err)
+		}
+		if _, err := admin.Exec("CREATE SCHEMA " + schema); err != nil {
+			t.Fatalf("create schema %s: %v", schema, err)
+		}
+		d, err := sql.Open("pgx", base+sep+"search_path="+schema)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.MigratePostgres(context.Background(), d); err != nil {
+			d.Close()
+			t.Fatalf("migrate schema %s: %v", schema, err)
+		}
+		var constraints int
+		if err := d.QueryRow(`
+			SELECT count(*)
+			FROM pg_constraint
+			WHERE conrelid = 'refresh_tokens'::regclass
+			  AND conname = 'refresh_tokens_tenant_learner_fk'
+		`).Scan(&constraints); err != nil {
+			d.Close()
+			t.Fatalf("query schema %s constraint: %v", schema, err)
+		}
+		if err := d.Close(); err != nil {
+			t.Fatalf("close schema %s database: %v", schema, err)
+		}
+		if constraints != 1 {
+			t.Fatalf("schema %s constraint count=%d, want 1", schema, constraints)
+		}
+	}
+}
+
 // TestMigratePostgresDetectsChecksumDrift gives Postgres the same anti-drift
 // guard SQLite has: MigratePostgres records the schema checksum in
 // schema_migrations and refuses to proceed if a prior apply recorded a
