@@ -20,6 +20,13 @@ import (
 
 const idempotencyMetaKey = "idempotency_key"
 
+type idempotencyContextKey struct{}
+
+func idempotencyKeyFromContext(ctx context.Context) string {
+	key, _ := ctx.Value(idempotencyContextKey{}).(string)
+	return key
+}
+
 // IdempotentMutationParams is embedded by write-tool inputs so hosts that
 // cannot set MCP request metadata can still opt into replay protection. A
 // transport may equivalently send the key in `_meta.idempotency_key`.
@@ -108,6 +115,7 @@ func idempotencyMiddleware(deps *Deps) mcp.Middleware {
 				return cachedToolCallResult(cached), nil
 			}
 
+			ctx = context.WithValue(ctx, idempotencyContextKey{}, key)
 			result, callErr := next(ctx, method, req)
 			toolResult, isToolResult := result.(*mcp.CallToolResult)
 			if callErr != nil || !isToolResult || toolResult == nil || toolResult.IsError {

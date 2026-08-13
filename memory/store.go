@@ -4,6 +4,7 @@
 package memory
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -36,15 +37,18 @@ const (
 )
 
 type WriteRequest struct {
-	LearnerID   string
-	DomainID    string
-	Scope       Scope
-	ConceptSlug string
-	Period      string
-	Timestamp   time.Time
-	Operation   Operation
-	Content     string
-	SectionKey  string
+	TenantID     string
+	EnrollmentID string
+	LearnerID    string
+	DomainID     string
+	Scope        Scope
+	ConceptSlug  string
+	Period       string
+	Timestamp    time.Time
+	Operation    Operation
+	Content      string
+	SectionKey   string
+	MutationID   string
 }
 
 // CommittedWriteError reports a durability-sync problem discovered after the
@@ -185,6 +189,12 @@ func Root() string {
 }
 
 func EnsureLearnerDirs(learnerID string) error {
+	if configuredNarrativeStore() != nil {
+		if learnerID == "" {
+			return errors.New("memory: learner_id is required")
+		}
+		return nil
+	}
 	base, err := learnerDir(learnerID)
 	if err != nil {
 		return err
@@ -203,6 +213,10 @@ func EnsureLearnerDirs(learnerID string) error {
 }
 
 func Write(req WriteRequest) error {
+	return WriteContext(context.Background(), req)
+}
+
+func WriteContext(ctx context.Context, req WriteRequest) error {
 	if !Enabled() {
 		return errors.New("memory: not_enabled")
 	}
@@ -221,6 +235,9 @@ func Write(req WriteRequest) error {
 	}
 	if req.Operation == "" {
 		req.Operation = defaultOperation(req.Scope)
+	}
+	if backend := configuredNarrativeStore(); backend != nil {
+		return writeSharedNarrative(ctx, backend, req, limits)
 	}
 	if err := EnsureLearnerDirs(req.LearnerID); err != nil {
 		return err
@@ -333,8 +350,26 @@ func enforceWriteQuota(base, target string, nextSize int64, limits Limits) error
 }
 
 func Read(learnerID string, scope Scope, key string) (string, error) {
+	return ReadContext(context.Background(), learnerID, scope, key)
+}
+
+func ReadContext(ctx context.Context, learnerID string, scope Scope, key string) (string, error) {
 	if !Enabled() {
 		return "", nil
+	}
+	if backend := configuredNarrativeStore(); backend != nil {
+		objectKey, err := narrativeKeyForRead(learnerID, scope, key)
+		if err != nil {
+			return "", err
+		}
+		object, err := backend.GetNarrative(ctx, objectKey)
+		if errors.Is(err, ErrNarrativeNotFound) {
+			return "", nil
+		}
+		if err != nil {
+			return "", err
+		}
+		return object.Content, nil
 	}
 	req := WriteRequest{LearnerID: learnerID, Scope: scope}
 	switch scope {
@@ -369,8 +404,26 @@ func Read(learnerID string, scope Scope, key string) (string, error) {
 // concept file, because identical concept labels can exist in unrelated
 // domains.
 func ReadDomainConcept(learnerID, domainID, concept string) (string, error) {
+	return ReadDomainConceptContext(context.Background(), learnerID, domainID, concept)
+}
+
+func ReadDomainConceptContext(ctx context.Context, learnerID, domainID, concept string) (string, error) {
 	if !Enabled() {
 		return "", nil
+	}
+	if backend := configuredNarrativeStore(); backend != nil {
+		key := NarrativeKey{LearnerID: learnerID, DomainID: domainID, Scope: ScopeConcept, Key: concept}
+		if err := key.Validate(); err != nil {
+			return "", err
+		}
+		object, err := backend.GetNarrative(ctx, key)
+		if errors.Is(err, ErrNarrativeNotFound) {
+			return "", nil
+		}
+		if err != nil {
+			return "", err
+		}
+		return object.Content, nil
 	}
 	req := WriteRequest{LearnerID: learnerID, DomainID: domainID, Scope: ScopeConcept, ConceptSlug: concept}
 	path, err := pathFor(req)
@@ -415,6 +468,22 @@ func readNarrativeFile(path string, maxBytes int64) ([]byte, error) {
 }
 
 func ListSessions(learnerID string) ([]time.Time, error) {
+	if backend := configuredNarrativeStore(); backend != nil {
+		limits, _ := configuredLimits()
+		items, err := backend.ListNarratives(context.Background(), learnerID, ScopeSession, "", limits.MaxFilesPerLearner)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]time.Time, 0, len(items))
+		for _, item := range items {
+			ts, err := parseSessionKey(item.Key)
+			if err == nil {
+				out = append(out, ts.UTC())
+			}
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].After(out[j]) })
+		return out, nil
+	}
 	base, err := learnerDir(learnerID)
 	if err != nil {
 		return nil, err
@@ -443,10 +512,16 @@ func ListSessions(learnerID string) ([]time.Time, error) {
 }
 
 func ListArchives(learnerID string) ([]string, error) {
+	if backend := configuredNarrativeStore(); backend != nil {
+		return listSharedNarrativeKeys(context.Background(), backend, learnerID, ScopeArchive, "")
+	}
 	return listMarkdownKeys(learnerID, "archives", false)
 }
 
 func ListConcepts(learnerID string) ([]string, error) {
+	if backend := configuredNarrativeStore(); backend != nil {
+		return listSharedNarrativeKeys(context.Background(), backend, learnerID, ScopeConcept, "")
+	}
 	return listMarkdownKeys(learnerID, "concepts", true)
 }
 

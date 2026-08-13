@@ -4,14 +4,18 @@
 package tools
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"tutor-mcp/db"
 	"tutor-mcp/memory"
 	storeport "tutor-mcp/store"
 )
@@ -255,6 +259,61 @@ func TestGetMemoryState_ReturnsCounts(t *testing.T) {
 	}
 	if out["has_recent_narrative_signal"] != true {
 		t.Fatalf("expected narrative signal: %v", out)
+	}
+}
+
+func TestMemoryTools_SharedBackendReplaysAppendWithoutLocalFiles(t *testing.T) {
+	localRoot := filepath.Join(t.TempDir(), "must-remain-absent")
+	t.Setenv("TUTOR_MCP_MEMORY_ROOT", localRoot)
+	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
+	store, deps := setupToolsTest(t)
+	encodedKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x5a}, 32))
+	keyring, err := db.NewIntegrationSecretKeyring("narrative:"+encodedKey, "narrative")
+	if err != nil {
+		t.Fatalf("build narrative keyring: %v", err)
+	}
+	store.SetIntegrationSecretKeyring(keyring)
+	memory.ConfigureNarrativeStore(store)
+	t.Cleanup(func() { memory.ConfigureNarrativeStore(nil) })
+
+	args := map[string]any{
+		"scope":           "memory_pending",
+		"operation":       "append",
+		"content":         "- one shared observation",
+		"idempotency_key": "shared-tool-retry-1",
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		res := callTool(t, deps, registerUpdateLearnerMemory, "L_owner", "update_learner_memory", args)
+		if res.IsError {
+			t.Fatalf("shared update attempt %d failed: %s", attempt+1, resultText(res))
+		}
+	}
+	content, err := memory.Read("L_owner", memory.ScopeMemoryPending, "")
+	if err != nil || strings.Count(content, "one shared observation") != 1 {
+		t.Fatalf("shared replay content=%q err=%v", content, err)
+	}
+
+	state := callTool(t, deps, registerGetMemoryState, "L_owner", "get_memory_state", map[string]any{})
+	if state.IsError {
+		t.Fatalf("shared get_memory_state failed: %s", resultText(state))
+	}
+	if out := decodeResult(t, state); out["pending_count"] != float64(1) || out["memory_size_bytes"] == float64(0) {
+		t.Fatalf("unexpected shared memory state: %v", out)
+	}
+	if _, err := os.Stat(localRoot); !os.IsNotExist(err) {
+		t.Fatalf("shared backend unexpectedly touched local root: %v", err)
+	}
+
+	var ciphertext string
+	if err := store.RawDB().QueryRow(
+		`SELECT ciphertext FROM narrative_objects
+		 WHERE learner_id = ? AND scope = ? AND domain_id = '' AND object_key = ''`,
+		"L_owner", string(memory.ScopeMemoryPending),
+	).Scan(&ciphertext); err != nil {
+		t.Fatalf("read shared ciphertext: %v", err)
+	}
+	if strings.Contains(ciphertext, "one shared observation") {
+		t.Fatal("shared database exposed narrative plaintext")
 	}
 }
 

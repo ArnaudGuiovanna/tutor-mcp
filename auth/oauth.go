@@ -19,12 +19,11 @@ import (
 	"net/http"
 	"net/mail"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
-
-	"golang.org/x/crypto/bcrypt"
 
 	"tutor-mcp/models"
 	storeport "tutor-mcp/store"
@@ -61,12 +60,18 @@ const (
 // timing oracle without ever accepting the dummy credential.
 var dummyPasswordHash = []byte("$2a$12$Cfv5jtGrBAIaZzVQI1XKyeTp9.kxPz23zkFOYmZjLKp3L1qGdvb0a")
 
+// The same syntactically valid digest with a minimum work factor is used only
+// as timing padding. Its checksum need not match: bcrypt still performs the
+// requested work before returning a credential mismatch.
+var dummyMinCostPasswordHash = []byte("$2a$04$Cfv5jtGrBAIaZzVQI1XKyeTp9.kxPz23zkFOYmZjLKp3L1qGdvb0a")
+
 const (
-	authorizeBodyLimitBytes          int64 = 16 << 10
-	tokenBodyLimitBytes              int64 = 16 << 10
-	registerBodyLimitBytes           int64 = 16 << 10
-	defaultMaxRegisteredOAuthClients       = 10_000
-	emailMaxLen                            = 254
+	authorizeBodyLimitBytes             int64 = 16 << 10
+	tokenBodyLimitBytes                 int64 = 16 << 10
+	registerBodyLimitBytes              int64 = 16 << 10
+	defaultMaxRegisteredOAuthClients          = 10_000
+	defaultDCRInitialTokenRegistrations       = 1_000
+	emailMaxLen                               = 254
 	// clientNameMaxLen caps the byte-length of an attacker-controlled
 	// client_name on /register. The value is echoed on the consent screen
 	// and into the registration response; a multi-KB phishing string would
@@ -115,10 +120,35 @@ func parseLimitedForm(w http.ResponseWriter, r *http.Request, limit int64) bool 
 	return true
 }
 
+func writeBcryptBusyJSON(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", bcryptBusyRetryAfter)
+	writeTokenError(w, "temporarily_unavailable", http.StatusServiceUnavailable)
+}
+
+func renderBcryptBusyAuthPage(w http.ResponseWriter, data authPageData, mode string) {
+	w.Header().Set("Retry-After", bcryptBusyRetryAfter)
+	renderAuthPageStatus(w, http.StatusServiceUnavailable, data,
+		"Sign-in is temporarily busy. Please try again shortly.", mode)
+}
+
 // oauthStore is the persistence surface the OAuth server needs.
 type oauthStore interface {
 	storeport.LearnerStore
 	storeport.AuthStore
+	storeport.IdentityStore
+	WithTenantTx(context.Context, models.TenantScope, func(context.Context, storeport.Store) error) error
+}
+
+// serviceAccountAuthenticator is deliberately separate from oauthStore so
+// alternative OAuth store implementations do not gain an unrelated method.
+// A server can advertise and accept client_credentials only when its store
+// provides the durable service-account credential boundary.
+type serviceAccountAuthenticator interface {
+	AuthenticateServiceAccount(context.Context, models.ServiceAccountCredential) (models.Principal, error)
+}
+
+type oauthCSRFConsumer interface {
+	ConsumeOAuthCSRF(context.Context, models.OAuthCSRFCredential) (bool, error)
 }
 
 // OAuthServer implements the OAuth 2.1 authorization server.
@@ -129,6 +159,8 @@ type OAuthServer struct {
 	granularScopes       bool
 	emailSender          EmailSender
 	loginFailures        *LoginFailureTracker
+	bcrypt               *bcryptBudget
+	dcrMode              string
 	maxRegisteredClients int
 	cimdHTTPClient       *http.Client
 	cimdMu               sync.Mutex
@@ -155,6 +187,8 @@ func NewOAuthServer(store oauthStore, baseURL string, logger *slog.Logger) *OAut
 		baseURL:              baseURL,
 		logger:               logger,
 		loginFailures:        NewLoginFailureTracker(5, 10*time.Minute),
+		bcrypt:               currentBcryptBudget(),
+		dcrMode:              DCRModeOpen,
 		maxRegisteredClients: defaultMaxRegisteredOAuthClients,
 		cimdHTTPClient:       newCIMDHTTPClient(),
 		cimdCache:            make(map[string]cachedCIMDClient),
@@ -178,11 +212,21 @@ func setAuthorizeCSRFCookie(w http.ResponseWriter, value string, maxAge int) {
 	http.SetCookie(w, cookie)
 }
 
-// consumeCSRF makes a valid double-submit token single-use within this server
-// process. Cookie rotation protects normal browser retries; the replay cache
-// additionally rejects an exact HTTP replay carrying the old Cookie header.
-func (s *OAuthServer) consumeCSRF(token string) bool {
+// consumeCSRF makes a valid double-submit token single-use fleet-wide when the
+// durable store implements oauthCSRFConsumer. The bounded local fallback is
+// retained only for small embedders and unit-test stores.
+func (s *OAuthServer) consumeCSRF(ctx context.Context, token string) bool {
 	now := time.Now().UTC()
+	if consumer, ok := s.store.(oauthCSRFConsumer); ok {
+		consumed, err := consumer.ConsumeOAuthCSRF(ctx, models.OAuthCSRFCredential{
+			Token: token, ExpiresAt: now.Add(time.Hour),
+		})
+		if err != nil {
+			s.logger.Error("durable CSRF consumption failed", "error_type", fmt.Sprintf("%T", err))
+			return false
+		}
+		return consumed
+	}
 	s.csrfMu.Lock()
 	defer s.csrfMu.Unlock()
 	if s.lastCSRFPrune.IsZero() || now.Sub(s.lastCSRFPrune) >= time.Minute {
@@ -220,14 +264,17 @@ func (s *OAuthServer) HandleAuthServerMetadata(w http.ResponseWriter, r *http.Re
 		"authorization_endpoint":                s.baseURL + "/authorize",
 		"token_endpoint":                        s.baseURL + "/token",
 		"response_types_supported":              []string{"code"},
-		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
+		"grant_types_supported":                 []string{"authorization_code", "refresh_token", "client_credentials"},
 		"code_challenge_methods_supported":      []string{"S256"},
 		"scopes_supported":                      scopesSupported,
-		"registration_endpoint":                 s.baseURL + "/register",
 		"client_id_metadata_document_supported": true,
 		"token_endpoint_auth_methods_supported": []string{"none", "client_secret_basic", "client_secret_post"},
 		// RFC 9207: we include iss in authorization responses.
 		"authorization_response_iss_parameter_supported": true,
+		"jwks_uri": s.baseURL + "/.well-known/jwks.json",
+	}
+	if s.dynamicClientRegistrationEnabled() {
+		meta["registration_endpoint"] = s.baseURL + "/register"
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(meta)
@@ -385,7 +432,7 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 		http.Error(w, "forbidden: csrf check failed", http.StatusForbidden)
 		return
 	}
-	if !s.consumeCSRF(formCSRF) {
+	if !s.consumeCSRF(r.Context(), formCSRF) {
 		http.Error(w, "forbidden: csrf token already used", http.StatusForbidden)
 		return
 	}
@@ -469,7 +516,7 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	var learnerID string
+	var selectedPrincipal models.Principal
 
 	if mode == "register" {
 		// Registration creates only an inactive placeholder credential. The
@@ -484,8 +531,15 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 			renderAuthPage(w, data, "Internal error. Please try again.", "register")
 			return
 		}
-		pendingHash, err := bcrypt.GenerateFromPassword([]byte(pendingCredential), bcryptCost)
+		pendingHash, err := s.bcrypt.Generate(ctx, []byte(pendingCredential), bcryptCost)
 		if err != nil {
+			if errors.Is(err, ErrBcryptBusy) {
+				renderBcryptBusyAuthPage(w, data, "register")
+				return
+			}
+			if ctx.Err() != nil {
+				return
+			}
 			s.logger.Error("bcrypt pending credential failed", "err", err)
 			renderAuthPage(w, data, "Internal error. Please try again.", "register")
 			return
@@ -494,20 +548,32 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 		// Check if email already exists. A database failure is not equivalent
 		// to an available address; continuing could create a duplicate account
 		// or expose backend-dependent behavior.
-		existing, lookupErr := s.store.GetLearnerByEmail(ctx, email)
-		if lookupErr == nil && existing != nil {
+		existingUser, lookupErr := s.store.GetLocalUserByEmail(ctx, email)
+		if lookupErr == nil && existingUser != nil {
 			// A fresh request for an inactive placeholder replaces the prior OAuth
 			// continuation. This lets the mailbox owner recover from an attacker-
 			// initiated pending registration without revealing account state.
-			if existing.EmailVerifiedAt == nil {
-				if err := s.sendEmailVerification(ctx, existing, data); err != nil {
-					s.logger.Error("pending registration verification delivery failed", "err", err)
+			if existingUser.EmailVerifiedAt == nil {
+				memberships, membershipErr := s.store.ListMembershipsForUser(ctx, existingUser.ID)
+				if membershipErr == nil && len(memberships) == 1 && memberships[0].LearnerID != "" {
+					membership := memberships[0]
+					scope := models.TenantScope{
+						TenantID: membership.TenantID, UserID: membership.UserID,
+						MembershipID: membership.ID, LearnerID: membership.LearnerID,
+					}
+					_ = s.store.WithTenantTx(ctx, scope, func(txCtx context.Context, scoped storeport.Store) error {
+						learner, learnerErr := scoped.GetLearnerByID(txCtx, membership.LearnerID)
+						if learnerErr != nil {
+							return learnerErr
+						}
+						return s.sendEmailVerification(txCtx, learner, data)
+					})
 				}
 			}
 			s.renderVerificationPending(w)
 			return
 		}
-		if lookupErr != nil && !errors.Is(lookupErr, sql.ErrNoRows) {
+		if lookupErr != nil && !errors.Is(lookupErr, sql.ErrNoRows) && !errors.Is(lookupErr, storeport.ErrAmbiguousIdentity) {
 			s.logger.Error("registration learner lookup failed", "err", lookupErr)
 			renderAuthPage(w, data, "Internal error. Please try again.", "register")
 			return
@@ -525,30 +591,111 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 		return
 	} else {
 		// Login flow.
-		// Per-account lockout (issue #36): refuse new attempts when the email
-		// has accumulated too many recent failures, regardless of source IP.
-		// The per-IP authLimiter still runs in front; this guard catches the
-		// distributed-source brute-force the IP limiter cannot see.
-		if !s.loginFailures.Allow(email) {
-			// Never let an attacker lock the rightful owner out by submitting bad
-			// passwords for their email. Continue through the constant-cost check;
-			// a correct password resets the bucket, while bad attempts remain
-			// covered by the IP limiter and audit signal.
-			s.logger.Warn("login failure threshold reached; correct credentials remain allowed")
+		// Always perform exactly one budgeted bcrypt comparison before applying
+		// any account penalty. Unknown accounts use the current cost-12 dummy;
+		// inactive accounts use their stored hash but remain indistinguishable
+		// from absent/wrong credentials. Most importantly, a correct active
+		// credential is never refused because an attacker filled its counter.
+		globalUser, lookupErr := s.store.GetLocalUserByEmail(ctx, email)
+		passwordHash := dummyPasswordHash
+		if lookupErr == nil && globalUser != nil {
+			passwordHash = []byte(globalUser.PasswordHash)
 		}
-		existing, err := s.store.GetLearnerByEmail(ctx, email)
-		if err != nil {
-			_ = bcrypt.CompareHashAndPassword(dummyPasswordHash, []byte(password))
-			s.loginFailures.Record(email)
-			renderAuthPage(w, data, "Invalid email or password.", "login")
+		passwordErr := s.bcrypt.CompareCredential(
+			ctx, passwordHash, []byte(password),
+			dummyPasswordHash, dummyMinCostPasswordHash, bcryptCost,
+		)
+		if errors.Is(passwordErr, ErrBcryptBusy) {
+			renderBcryptBusyAuthPage(w, data, "login")
 			return
 		}
-		if err := bcrypt.CompareHashAndPassword([]byte(existing.PasswordHash), []byte(password)); err != nil {
-			s.loginFailures.Record(email)
-			renderAuthPage(w, data, "Invalid email or password.", "login")
+		if ctx.Err() != nil {
 			return
 		}
-		s.loginFailures.Reset(email)
+		if lookupErr != nil && !errors.Is(lookupErr, sql.ErrNoRows) {
+			s.logger.Error("login learner lookup failed", "err", lookupErr)
+			renderAuthPage(w, data, "Internal error. Please try again.", "login")
+			return
+		}
+		if lookupErr != nil || globalUser == nil || passwordErr != nil || globalUser.EmailVerifiedAt == nil || globalUser.Status != models.UserStatusActive {
+			count := s.loginFailures.RecordContext(ctx, email)
+			status := http.StatusUnauthorized
+			if retryAfter := s.loginFailures.RetryAfter(count); retryAfter > 0 {
+				status = http.StatusTooManyRequests
+				w.Header().Set("Retry-After", fmt.Sprintf("%d", int(retryAfter/time.Second)))
+				if count == s.loginFailures.Threshold() {
+					s.logger.Warn("login failure threshold reached; correct credentials remain allowed")
+				}
+			}
+			renderAuthPageStatus(w, status, data, "Invalid email or password.", "login")
+			return
+		}
+		if !s.loginFailures.AllowContext(ctx, email) {
+			memberships, membershipErr := s.store.ListActiveMembershipsForUser(ctx, globalUser.ID)
+			if membershipErr != nil || len(memberships) != 1 {
+				renderAuthPage(w, data, "Choose an organization after signing in.", "login")
+				return
+			}
+			trusted, trustErr := s.isTrustedLoginDevice(ctx, r, memberships[0].LearnerID)
+			if trustErr != nil {
+				s.logger.Error("trusted login device lookup failed", "error_type", fmt.Sprintf("%T", trustErr))
+				renderAuthPage(w, data, "Internal error. Please try again.", "login")
+				return
+			}
+			if !trusted {
+				adaptiveScope := models.TenantScope{
+					TenantID: memberships[0].TenantID, UserID: memberships[0].UserID,
+					MembershipID: memberships[0].ID, LearnerID: memberships[0].LearnerID,
+				}
+				var learner *models.Learner
+				learnerErr := s.store.WithTenantTx(ctx, adaptiveScope, func(txCtx context.Context, scoped storeport.Store) error {
+					var loadErr error
+					learner, loadErr = scoped.GetLearnerByID(txCtx, memberships[0].LearnerID)
+					return loadErr
+				})
+				if learnerErr != nil {
+					renderAuthPage(w, data, "Internal error. Please try again.", "login")
+					return
+				}
+				if _, challengeErr := s.sendLoginChallenge(ctx, learner, data); challengeErr != nil {
+					s.logger.Error("adaptive login challenge failed", "error_type", fmt.Sprintf("%T", challengeErr))
+					renderAuthPageStatus(w, http.StatusServiceUnavailable, data, "Additional sign-in verification is temporarily unavailable.", "login")
+					return
+				}
+				renderAuthPageStatus(w, http.StatusAccepted, data, "Check your email to approve this device before signing in.", "login")
+				return
+			}
+		}
+		s.loginFailures.ResetContext(ctx, email)
+		memberships, membershipErr := s.store.ListActiveMembershipsForUser(ctx, globalUser.ID)
+		if membershipErr != nil || len(memberships) == 0 {
+			renderAuthPage(w, data, "No active organization membership is available.", "login")
+			return
+		}
+		selectedTenant := strings.TrimSpace(r.FormValue("tenant_id"))
+		if len(memberships) > 1 && selectedTenant == "" {
+			data.TenantOptions = make([]tenantOption, 0, len(memberships))
+			for _, membership := range memberships {
+				data.TenantOptions = append(data.TenantOptions, tenantOption{ID: membership.TenantID, Name: membership.TenantName})
+			}
+			renderAuthPage(w, data, "Choose the organization for this session.", "login")
+			return
+		}
+		var selected models.TenantMembership
+		for _, membership := range memberships {
+			if (len(memberships) == 1 && selectedTenant == "") || membership.TenantID == selectedTenant {
+				selected = membership
+				break
+			}
+		}
+		if selected.ID == "" || selected.LearnerID == "" {
+			renderAuthPage(w, data, "The selected organization is not available.", "login")
+			return
+		}
+		tenantScope := models.TenantScope{
+			TenantID: selected.TenantID, UserID: selected.UserID,
+			MembershipID: selected.ID, LearnerID: selected.LearnerID,
+		}
 		// R001: if the learner has already approved this client+redirect_uri,
 		// the approval screen is no longer meaningful — skip it. Re-prompting
 		// every time trained users to click through reflexively, defeating the
@@ -557,9 +704,13 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 		// client cannot reuse a previously-granted consent at a different URL.
 		approved := false
 		if !isCIMDClientID(clientID) {
-			approved, err = s.store.IsClientApprovedForScope(ctx, existing.ID, clientID, redirectURI, scope)
+			err = s.store.WithTenantTx(ctx, tenantScope, func(txCtx context.Context, scoped storeport.Store) error {
+				var approvalErr error
+				approved, approvalErr = scoped.IsClientApprovedForScope(txCtx, selected.LearnerID, clientID, redirectURI, scope)
+				return approvalErr
+			})
 			if err != nil {
-				s.logger.Error("client approval lookup failed", "err", err, "learner", existing.ID, "client", clientID)
+				s.logger.Error("client approval lookup failed", "err", err, "learner", selected.LearnerID, "client", clientID)
 				renderAuthPage(w, data, "Internal error. Please try again.", "login")
 				return
 			}
@@ -568,21 +719,23 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 			renderAuthPage(w, data, "Please confirm that you recognize and approve this OAuth client before continuing.", "login")
 			return
 		}
-		if existing.EmailVerifiedAt == nil {
-			if err := s.sendEmailVerification(ctx, existing, data); err != nil {
-				s.logger.Error("login verification delivery failed", "err", err)
-				renderAuthPage(w, data, "Internal error. Please try again.", "login")
-				return
+		if !approved && !isCIMDClientID(clientID) {
+			if err := s.store.WithTenantTx(ctx, tenantScope, func(txCtx context.Context, scoped storeport.Store) error {
+				return scoped.ApproveClientForScope(txCtx, selected.LearnerID, clientID, redirectURI, scope)
+			}); err != nil {
+				s.logger.Warn("persist client approval failed", "err", err, "learner", selected.LearnerID, "client", clientID)
 			}
-			s.renderVerificationPending(w)
+		}
+		selectedPrincipal = models.Principal{
+			UserID: selected.UserID, TenantID: selected.TenantID,
+			MembershipID: selected.ID, LearnerID: selected.LearnerID,
+			Roles: append([]string(nil), selected.Roles...), Scopes: strings.Fields(scope),
+			TokenVersion: selected.Version,
+		}
+		if err := selectedPrincipal.Validate(); err != nil {
+			renderAuthPage(w, data, "The selected organization is not available.", "login")
 			return
 		}
-		if !approved && !isCIMDClientID(clientID) {
-			if err := s.store.ApproveClientForScope(ctx, existing.ID, clientID, redirectURI, scope); err != nil {
-				s.logger.Warn("persist client approval failed", "err", err, "learner", existing.ID, "client", clientID)
-			}
-		}
-		learnerID = existing.ID
 	}
 
 	// Generate auth code
@@ -593,11 +746,12 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := s.store.CreateAuthCodeWithBindingAndScope(
-		ctx, code, learnerID, codeChallenge, codeChallengeMethod,
+	createCodeErr := s.store.CreateAuthCodeForPrincipal(
+		ctx, code, selectedPrincipal, codeChallenge, codeChallengeMethod,
 		clientID, redirectURI, resource, scope, time.Now().Add(5*time.Minute),
-	); err != nil {
-		s.logger.Error("create auth code failed", "err", err)
+	)
+	if createCodeErr != nil {
+		s.logger.Error("create auth code failed", "err", createCodeErr)
 		renderAuthPage(w, data, "Internal error. Please try again.", mode)
 		return
 	}
@@ -631,17 +785,20 @@ func extractClientCredentials(r *http.Request) (string, string) {
 	return r.FormValue("client_id"), r.FormValue("client_secret")
 }
 
-// verifyClientAuth enforces secret-based authentication for confidential clients.
-// Public clients (empty stored hash) pass through and rely on PKCE.
-// The stored hash is a bcrypt digest; CompareHashAndPassword is constant-time.
-func verifyClientAuth(client *models.OAuthClient, suppliedSecret string) error {
+// verifyClientAuthWithBudget enforces secret-based authentication for
+// confidential clients. Public clients (empty stored hash) pass through and
+// rely on PKCE. Every handler comparison shares the process-wide CPU budget.
+func verifyClientAuthWithBudget(ctx context.Context, budget *bcryptBudget, client *models.OAuthClient, suppliedSecret string) error {
 	if client.ClientSecretHash == "" {
 		return nil
 	}
 	if suppliedSecret == "" {
 		return fmt.Errorf("invalid_client")
 	}
-	if err := bcrypt.CompareHashAndPassword([]byte(client.ClientSecretHash), []byte(suppliedSecret)); err != nil {
+	if err := budget.Compare(ctx, []byte(client.ClientSecretHash), []byte(suppliedSecret)); err != nil {
+		if errors.Is(err, ErrBcryptBusy) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
 		return fmt.Errorf("invalid_client")
 	}
 	return nil
@@ -659,9 +816,58 @@ func (s *OAuthServer) HandleToken(w http.ResponseWriter, r *http.Request) {
 		s.handleAuthorizationCodeGrant(w, r)
 	case "refresh_token":
 		s.handleRefreshTokenGrant(w, r)
+	case "client_credentials":
+		s.handleClientCredentialsGrant(w, r)
 	default:
 		http.Error(w, `{"error":"unsupported_grant_type"}`, http.StatusBadRequest)
 	}
+}
+
+func (s *OAuthServer) handleClientCredentialsGrant(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	resource := r.FormValue("resource")
+	clientID, clientSecret := extractClientCredentials(r)
+	if clientID == "" || clientSecret == "" || resource == "" {
+		writeTokenError(w, "invalid_request", http.StatusBadRequest)
+		return
+	}
+	if resource != MCPResource(s.baseURL) {
+		writeTokenError(w, "invalid_target", http.StatusBadRequest)
+		return
+	}
+	authenticator, ok := s.store.(serviceAccountAuthenticator)
+	if !ok {
+		s.logger.Error("client credentials store is unavailable")
+		writeTokenError(w, "server_error", http.StatusInternalServerError)
+		return
+	}
+	principal, err := authenticator.AuthenticateServiceAccount(ctx, models.ServiceAccountCredential{
+		ClientID: clientID,
+		Secret:   clientSecret,
+	})
+	if err != nil {
+		s.logger.Debug("client credentials authentication failed", "client_id", clientID)
+		writeTokenError(w, "invalid_client", http.StatusUnauthorized)
+		return
+	}
+	grantedScope := strings.Join(principal.Scopes, " ")
+	requestedScope := r.FormValue("scope")
+	if requestedScope != "" {
+		canonical, err := models.CanonicalOAuthScope(requestedScope)
+		if err != nil || canonical != grantedScope {
+			writeTokenError(w, "invalid_scope", http.StatusBadRequest)
+			return
+		}
+	}
+	accessToken, err := GenerateJWTForPrincipalAndScope(
+		s.baseURL, resource, clientID, principal, grantedScope,
+	)
+	if err != nil {
+		s.logger.Error("generate service-account jwt failed", "err", err)
+		writeTokenError(w, "server_error", http.StatusInternalServerError)
+		return
+	}
+	writeAccessTokenResponse(w, accessToken, grantedScope)
 }
 
 func (s *OAuthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *http.Request) {
@@ -691,7 +897,14 @@ func (s *OAuthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *htt
 		writeTokenError(w, "invalid_client", http.StatusUnauthorized)
 		return
 	}
-	if err := verifyClientAuth(client, clientSecret); err != nil {
+	if err := verifyClientAuthWithBudget(ctx, s.bcrypt, client, clientSecret); err != nil {
+		if errors.Is(err, ErrBcryptBusy) {
+			writeBcryptBusyJSON(w)
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
 		s.logger.Debug("token exchange: client auth failed", "client_id", clientID)
 		writeTokenError(w, "invalid_client", http.StatusUnauthorized)
 		return
@@ -767,9 +980,19 @@ func (s *OAuthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *htt
 		}
 	}
 
+	// Resolve the currently active tenant membership immediately before signing.
+	// A suspended membership or stale authorization state cannot be converted
+	// into a bearer, even if its short-lived code has not expired yet.
+	principal, err := s.store.GetPrincipalForLearner(ctx, authCode.LearnerID, strings.Fields(authCode.Scope))
+	if err != nil {
+		s.logger.Debug("token exchange: tenant membership inactive", "err", err)
+		writeTokenError(w, "invalid_grant", http.StatusBadRequest)
+		return
+	}
+
 	// Sign before mutating persistence. Configuration/signing failures must not
 	// consume a valid one-time code.
-	accessToken, err := GenerateJWTForResourceAndScope(s.baseURL, resource, authCode.LearnerID, authCode.Scope)
+	accessToken, err := GenerateJWTForPrincipalAndScope(s.baseURL, resource, clientID, principal, authCode.Scope)
 	if err != nil {
 		s.logger.Error("generate jwt failed", "err", err)
 		writeTokenError(w, "server_error", http.StatusInternalServerError)
@@ -831,9 +1054,34 @@ func (s *OAuthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Req
 		writeTokenError(w, "invalid_client", http.StatusUnauthorized)
 		return
 	}
-	if err := verifyClientAuth(client, clientSecret); err != nil {
+	if err := verifyClientAuthWithBudget(ctx, s.bcrypt, client, clientSecret); err != nil {
+		if errors.Is(err, ErrBcryptBusy) {
+			writeBcryptBusyJSON(w)
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
 		writeTokenError(w, "invalid_client", http.StatusUnauthorized)
 		return
+	}
+
+	// Check the exact active membership before consuming the rotating
+	// credential. This keeps suspension/revocation fail-closed and avoids
+	// needlessly burning a valid token when authorization has been withdrawn.
+	currentRT, lookupErr := s.store.GetRefreshToken(ctx, refreshToken)
+	var principal models.Principal
+	if lookupErr == nil {
+		if currentRT.ClientID != clientID || currentRT.Resource != resource {
+			writeTokenError(w, "invalid_grant", http.StatusBadRequest)
+			return
+		}
+		principal, err = s.store.GetPrincipalForLearner(ctx, currentRT.LearnerID, strings.Fields(currentRT.Scope))
+		if err != nil {
+			s.logger.Debug("refresh grant: tenant membership inactive", "err", err)
+			writeTokenError(w, "invalid_grant", http.StatusBadRequest)
+			return
+		}
 	}
 
 	// Rotation is one DB transaction. The store rechecks validity and client
@@ -859,8 +1107,17 @@ func (s *OAuthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Req
 		writeTokenError(w, "server_error", http.StatusInternalServerError)
 		return
 	}
+	if lookupErr != nil {
+		// A successful rotation must have had an active lookup above. Reaching
+		// this branch would indicate inconsistent persistence semantics; never
+		// mint a bearer without the validated tenant membership.
+		s.logger.Error("refresh rotation succeeded without active principal", "lookup_err", lookupErr)
+		writeTokenError(w, "server_error", http.StatusInternalServerError)
+		return
+	}
 
-	accessToken, err := GenerateJWTForResourceAndScope(s.baseURL, newRT.Resource, newRT.LearnerID, newRT.Scope)
+	principal.Scopes = strings.Fields(newRT.Scope)
+	accessToken, err := GenerateJWTForPrincipalAndScope(s.baseURL, newRT.Resource, clientID, principal, newRT.Scope)
 	if err != nil {
 		s.logger.Error("generate jwt failed after refresh rotation", "err", err)
 		writeTokenError(w, "server_error", http.StatusInternalServerError)
@@ -880,6 +1137,18 @@ func writeTokenResponse(w http.ResponseWriter, accessToken, refreshToken, scope 
 		"expires_in":    int(AccessTokenTTL.Seconds()),
 		"refresh_token": refreshToken,
 		"scope":         scope,
+	})
+}
+
+func writeAccessTokenResponse(w http.ResponseWriter, accessToken, scope string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"access_token": accessToken,
+		"token_type":   "bearer",
+		"expires_in":   int(AccessTokenTTL.Seconds()),
+		"scope":        scope,
 	})
 }
 
@@ -962,13 +1231,19 @@ func isPrivateIP(ip net.IP) bool {
 }
 
 // HandleRegister implements RFC 7591 dynamic client registration.
-// Claude.ai must register as an OAuth client before starting the auth flow.
+// Admission policy is enforced before body parsing or persistence; development
+// defaults to open compatibility while production must select token/disabled.
 func (s *OAuthServer) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	if _, err := s.store.CleanupExpiredOAuthClients(ctx); err != nil {
-		s.logger.Error("cleanup expired dynamic clients failed", "err", err)
-		http.Error(w, `{"error":"server_error"}`, http.StatusInternalServerError)
-		return
+	admission, admitted := dynamicClientRegistrationAdmission(ctx)
+	if !admitted {
+		admittedRequest, ok := s.admitDynamicClientRegistration(w, r)
+		if !ok {
+			return
+		}
+		r = admittedRequest
+		ctx = r.Context()
+		admission, _ = dynamicClientRegistrationAdmission(ctx)
 	}
 	if r.ContentLength > registerBodyLimitBytes {
 		writeRegistrationErrorStatus(w, http.StatusRequestEntityTooLarge, "invalid_client_metadata", "request body too large")
@@ -1061,9 +1336,12 @@ func (s *OAuthServer) HandleRegister(w http.ResponseWriter, r *http.Request) {
 		writeRegistrationError(w, "invalid_redirect_uri", err.Error())
 		return
 	}
-
-	if err := s.requireRegistrationCapacity(w); err != nil {
-		return
+	sort.Strings(uris)
+	for index := 1; index < len(uris); index++ {
+		if uris[index] == uris[index-1] {
+			writeRegistrationError(w, "invalid_redirect_uri", "redirect_uris must not contain duplicates")
+			return
+		}
 	}
 
 	clientID, err := generateCode()
@@ -1085,8 +1363,16 @@ func (s *OAuthServer) HandleRegister(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"server_error"}`, http.StatusInternalServerError)
 			return
 		}
-		hash, herr := bcrypt.GenerateFromPassword([]byte(clientSecret), bcryptCost)
+		hash, herr := s.bcrypt.Generate(ctx, []byte(clientSecret), bcryptCost)
 		if herr != nil {
+			if errors.Is(herr, ErrBcryptBusy) {
+				w.Header().Set("Retry-After", bcryptBusyRetryAfter)
+				writeRegistrationErrorStatus(w, http.StatusServiceUnavailable, "temporarily_unavailable", "server is busy; retry shortly")
+				return
+			}
+			if ctx.Err() != nil {
+				return
+			}
 			s.logger.Error("bcrypt client secret failed", "err", herr)
 			http.Error(w, `{"error":"server_error"}`, http.StatusInternalServerError)
 			return
@@ -1094,10 +1380,38 @@ func (s *OAuthServer) HandleRegister(w http.ResponseWriter, r *http.Request) {
 		secretHash = string(hash)
 	}
 
-	expiresAt := time.Now().UTC().Add(dynamicClientTTL)
-	if err := s.store.CreateOAuthClientWithSecretCappedTTL(ctx, clientID, clientName, string(redirectURIsJSON), secretHash, s.maxRegisteredClients, expiresAt); err != nil {
+	now := time.Now().UTC()
+	expiresAt := now.Add(dynamicClientTTL)
+	registration, err := s.store.RegisterDynamicOAuthClient(ctx, models.DynamicClientRegistration{
+		TokenID:                   admission.TokenID,
+		Fingerprint:               dynamicRegistrationFingerprint(clientName, string(redirectURIsJSON), authMethod, applicationType),
+		CandidateClientID:         clientID,
+		ClientName:                clientName,
+		RedirectURIsJSON:          string(redirectURIsJSON),
+		AuthMethod:                authMethod,
+		ApplicationType:           applicationType,
+		CandidateClientSecret:     clientSecret,
+		CandidateClientSecretHash: secretHash,
+		MaxClients:                s.maxRegisteredClients,
+		ExpiresAt:                 expiresAt,
+		Now:                       now,
+	})
+	if err != nil {
 		if errors.Is(err, storeport.ErrOAuthClientLimitReached) {
 			writeRegistrationError(w, "registration_disabled", "client cap reached")
+			return
+		}
+		if errors.Is(err, storeport.ErrDCRInitialAccessTokenQuota) {
+			writeRegistrationError(w, "registration_disabled", "initial access token quota reached")
+			return
+		}
+		if errors.Is(err, storeport.ErrDCRInvalidInitialAccessToken) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="oauth-dcr", error="invalid_token"`)
+			writeRegistrationErrorStatus(w, http.StatusUnauthorized, "invalid_token", "initial access token is missing or invalid")
+			return
+		}
+		if errors.Is(err, storeport.ErrDCRReplaySecretUnavailable) {
+			writeRegistrationError(w, "registration_disabled", "equivalent confidential client cannot be replayed safely")
 			return
 		}
 		s.logger.Error("persist client registration failed", "err", err)
@@ -1107,47 +1421,43 @@ func (s *OAuthServer) HandleRegister(w http.ResponseWriter, r *http.Request) {
 
 	// Echo back all client metadata + add our fields (RFC 7591 compliance)
 	resp := map[string]interface{}{
-		"client_id":                  clientID,
-		"client_id_issued_at":        time.Now().Unix(),
+		"client_id":                  registration.ClientID,
+		"client_id_issued_at":        registration.IssuedAt.Unix(),
 		"client_name":                clientName,
 		"redirect_uris":              uris,
 		"grant_types":                []string{"authorization_code", "refresh_token"},
 		"response_types":             []string{"code"},
 		"token_endpoint_auth_method": authMethod,
 		"application_type":           applicationType,
-		"client_id_expires_at":       expiresAt.Unix(),
+		"client_id_expires_at":       registration.ExpiresAt.Unix(),
 	}
 	if confidential {
-		resp["client_secret"] = clientSecret
+		resp["client_secret"] = registration.ClientSecret
 		// 0 = secret never expires (RFC 7591 §3.2.1)
 		resp["client_secret_expires_at"] = 0
 	}
 
-	s.logger.Info("dynamic client registered", "client_id", clientID, "confidential", confidential)
+	s.logger.Info("dynamic client registered", "client_id", registration.ClientID, "confidential", confidential, "replayed", registration.Replayed)
 
 	// RFC 6749 §5.1: responses with credentials must not be cached.
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
-	w.WriteHeader(http.StatusCreated)
+	status := http.StatusCreated
+	if registration.Replayed {
+		status = http.StatusOK
+	}
+	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(resp)
 }
 
-func (s *OAuthServer) requireRegistrationCapacity(w http.ResponseWriter) error {
-	if s.maxRegisteredClients <= 0 {
-		return nil
+func dynamicRegistrationFingerprint(clientName, redirectURIsJSON, authMethod, applicationType string) string {
+	hash := sha256.New()
+	for _, field := range []string{clientName, redirectURIsJSON, authMethod, applicationType} {
+		_, _ = fmt.Fprintf(hash, "%d:", len(field))
+		_, _ = hash.Write([]byte(field))
 	}
-	n, err := s.store.CountOAuthClients(context.Background())
-	if err != nil {
-		s.logger.Error("count oauth clients failed", "err", err)
-		http.Error(w, `{"error":"server_error"}`, http.StatusInternalServerError)
-		return err
-	}
-	if n >= s.maxRegisteredClients {
-		writeRegistrationError(w, "registration_disabled", "client cap reached")
-		return fmt.Errorf("oauth client cap reached")
-	}
-	return nil
+	return fmt.Sprintf("%x", hash.Sum(nil))
 }
 
 func writeRegistrationError(w http.ResponseWriter, errCode, desc string) {

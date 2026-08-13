@@ -95,15 +95,18 @@ func TestRun_NarrativeMemoryDryRunThenApply(t *testing.T) {
 	}
 
 	var applyOut bytes.Buffer
-	if err := run([]string{"--memory-days=30", "--apply"}, &applyOut, &bytes.Buffer{}, getenv); err != nil {
+	if err := run([]string{
+		"--memory-days=30", "--apply", "--job-id=memory-retention-test", "--actor=test",
+		"--backup-reference=test-backup", "--backup-created-at=2026-08-03T11:00:00Z",
+	}, &applyOut, &bytes.Buffer{}, getenv); err != nil {
 		t.Fatal(err)
 	}
-	var applied db.RetentionReport
+	var applied db.RetentionJob
 	if err := json.Unmarshal(applyOut.Bytes(), &applied); err != nil {
 		t.Fatal(err)
 	}
-	if applied.NarrativeMemoryFiles.Applied != 1 {
-		t.Fatalf("memory apply report = %+v", applied.NarrativeMemoryFiles)
+	if applied.Status != "completed" || len(applied.Phases) != 2 || applied.Phases[1].Applied != 1 {
+		t.Fatalf("memory apply job = %+v", applied)
 	}
 	if _, err := os.Stat(memoryFile); !os.IsNotExist(err) {
 		t.Fatalf("old narrative remains after apply: %v", err)
@@ -179,18 +182,150 @@ func TestRun_DryRunThenApply(t *testing.T) {
 	}
 
 	var applyOut bytes.Buffer
-	if err := run([]string{"--event-days=30", "--apply"}, &applyOut, &bytes.Buffer{}, getenv); err != nil {
+	if err := run([]string{
+		"--event-days=30", "--apply", "--job-id=event-retention-test", "--actor=test",
+		"--backup-reference=test-backup", "--backup-created-at=2026-08-03T11:00:00Z",
+	}, &applyOut, &bytes.Buffer{}, getenv); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	var applied db.RetentionReport
+	var applied db.RetentionJob
 	if err := json.Unmarshal(applyOut.Bytes(), &applied); err != nil {
 		t.Fatalf("decode apply report: %v\n%s", err, applyOut.String())
 	}
-	if applied.DryRun || applied.ScheduledAlertEvents.Applied != 1 {
-		t.Fatalf("apply report = %+v", applied)
+	if applied.Status != "completed" || len(applied.Phases) != 2 || applied.Phases[0].Applied != 1 {
+		t.Fatalf("apply job = %+v", applied)
 	}
 	if got := countScheduledAlerts(t, path); got != 0 {
 		t.Fatalf("apply left rows: count=%d", got)
+	}
+}
+
+func TestRun_LegalHoldProtectsLocalNarrativeUntilAuditedRelease(t *testing.T) {
+	memoryRoot := t.TempDir()
+	t.Setenv("TUTOR_MCP_MEMORY_ROOT", memoryRoot)
+	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
+	path := filepath.Join(t.TempDir(), "runtime.db")
+	database, err := db.OpenDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Migrate(database); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	if _, err := database.Exec(
+		`INSERT INTO learners (id, email, password_hash, objective, created_at) VALUES (?, ?, 'hash', 'learn', ?)`,
+		"L1", "hold@test.invalid", now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	memoryFile := filepath.Join(memoryRoot, "learners", "L1", "MEMORY.md")
+	if err := os.MkdirAll(filepath.Dir(memoryFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(memoryFile, []byte("held narrative"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := now.AddDate(0, 0, -60)
+	if err := os.Chtimes(memoryFile, old, old); err != nil {
+		t.Fatal(err)
+	}
+	previousNow := timeNowUTC
+	timeNowUTC = func() time.Time { return now }
+	t.Cleanup(func() { timeNowUTC = previousNow })
+	getenv := mapEnv(map[string]string{"DB_PATH": path, "RETENTION_ACTOR": "legal"})
+
+	if err := run([]string{
+		"--action=hold-create", "--hold-id=case-1", "--learner=L1",
+		"--reason=litigation", "--apply",
+	}, &bytes.Buffer{}, &bytes.Buffer{}, getenv); err != nil {
+		t.Fatal(err)
+	}
+	var dryOut bytes.Buffer
+	if err := run([]string{"--memory-days=30"}, &dryOut, &bytes.Buffer{}, getenv); err != nil {
+		t.Fatal(err)
+	}
+	var dry db.RetentionReport
+	if err := json.Unmarshal(dryOut.Bytes(), &dry); err != nil {
+		t.Fatal(err)
+	}
+	if dry.NarrativeMemoryFiles.Eligible != 0 || dry.NarrativeMemoryFiles.Held != 1 {
+		t.Fatalf("held narrative dry-run=%+v", dry.NarrativeMemoryFiles)
+	}
+	var heldApply bytes.Buffer
+	if err := run([]string{
+		"--memory-days=30", "--apply", "--job-id=held-memory", "--actor=legal",
+		"--backup-reference=backup-held", "--backup-created-at=2026-08-03T11:00:00Z",
+	}, &heldApply, &bytes.Buffer{}, getenv); err != nil {
+		t.Fatal(err)
+	}
+	var heldJob db.RetentionJob
+	if err := json.Unmarshal(heldApply.Bytes(), &heldJob); err != nil {
+		t.Fatal(err)
+	}
+	if heldJob.Phases[1].Applied != 0 || heldJob.Phases[1].Held != 1 {
+		t.Fatalf("held narrative job=%+v", heldJob.Phases[1])
+	}
+	if _, err := os.Stat(memoryFile); err != nil {
+		t.Fatalf("legal hold did not preserve narrative: %v", err)
+	}
+
+	if err := run([]string{
+		"--action=hold-release", "--hold-id=case-1", "--reason=case-closed", "--apply",
+	}, &bytes.Buffer{}, &bytes.Buffer{}, getenv); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{
+		"--memory-days=30", "--apply", "--job-id=released-memory", "--actor=legal",
+		"--backup-reference=backup-released", "--backup-created-at=2026-08-03T11:00:00Z",
+	}, &bytes.Buffer{}, &bytes.Buffer{}, getenv); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(memoryFile); !os.IsNotExist(err) {
+		t.Fatalf("released narrative remains: %v", err)
+	}
+
+	var listOut bytes.Buffer
+	if err := run([]string{"--action=hold-list"}, &listOut, &bytes.Buffer{}, getenv); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(listOut.String(), `"released_at"`) || !strings.Contains(listOut.String(), "case-closed") {
+		t.Fatalf("hold release audit missing: %s", listOut.String())
+	}
+}
+
+func TestRun_RejectsStaleBackupBeforeCreatingJob(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runtime.db")
+	database, err := db.OpenDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Migrate(database); err != nil {
+		t.Fatal(err)
+	}
+	_ = database.Close()
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	previousNow := timeNowUTC
+	timeNowUTC = func() time.Time { return now }
+	t.Cleanup(func() { timeNowUTC = previousNow })
+	err = run([]string{
+		"--event-days=30", "--apply", "--job-id=stale-backup", "--actor=test",
+		"--backup-reference=old-backup", "--backup-created-at=2026-08-01T00:00:00Z",
+	}, &bytes.Buffer{}, &bytes.Buffer{}, mapEnv(map[string]string{"DB_PATH": path}))
+	if err == nil || !strings.Contains(err.Error(), "older") {
+		t.Fatalf("stale backup error=%v", err)
+	}
+	database, err = db.OpenDBReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var jobs int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM retention_jobs`).Scan(&jobs); err != nil || jobs != 0 {
+		t.Fatalf("stale backup created jobs=%d err=%v", jobs, err)
 	}
 }
 

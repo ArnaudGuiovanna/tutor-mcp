@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -25,6 +26,8 @@ const (
 	cimdDocumentLimitBytes int64 = 64 << 10
 	cimdDefaultCacheTTL          = 5 * time.Minute
 	cimdMaxCacheTTL              = 24 * time.Hour
+	cimdFetchTimeout             = 5 * time.Second
+	cimdCacheCapacity            = 256
 )
 
 type cimdDocument struct {
@@ -39,7 +42,21 @@ type cimdDocument struct {
 type cachedCIMDClient struct {
 	client    *models.OAuthClient
 	expiresAt time.Time
+	lastUsed  uint64
+	flight    *cimdFlight
 }
+
+// cimdFlight represents one metadata request shared by every concurrent
+// resolver for the same client_id. Each caller still waits on its own context;
+// cancelling one waiter therefore cannot cancel the request for the others.
+type cimdFlight struct {
+	done    chan struct{}
+	client  *models.OAuthClient
+	err     error
+	waiters atomic.Int32
+}
+
+var cimdCacheUseSequence atomic.Uint64
 
 func newCIMDHTTPClient() *http.Client {
 	dialer := &net.Dialer{Timeout: 3 * time.Second, KeepAlive: 30 * time.Second}
@@ -145,75 +162,167 @@ func (s *OAuthServer) resolveOAuthClient(ctx context.Context, clientID string) (
 }
 
 func (s *OAuthServer) fetchCIMDClient(ctx context.Context, clientID string) (*models.OAuthClient, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if _, err := parseCIMDClientID(clientID); err != nil {
+		return nil, err
+	}
+
 	now := time.Now().UTC()
 	s.cimdMu.Lock()
-	if cached := s.cimdCache[clientID]; cached.client != nil && cached.expiresAt.After(now) {
+	if s.cimdCache == nil {
+		s.cimdCache = make(map[string]cachedCIMDClient)
+	}
+	s.pruneExpiredCIMDClientsLocked(now)
+	if cached, ok := s.cimdCache[clientID]; ok && cached.client != nil {
+		cached.lastUsed = cimdCacheUseSequence.Add(1)
+		s.cimdCache[clientID] = cached
 		client := *cached.client
 		s.cimdMu.Unlock()
 		return &client, nil
 	}
+	if cached, ok := s.cimdCache[clientID]; ok && cached.flight != nil {
+		flight := cached.flight
+		s.cimdMu.Unlock()
+		return waitForCIMDFlight(ctx, flight)
+	}
+	for len(s.cimdCache) >= cimdCacheCapacity {
+		if !s.evictCIMDClientLocked() {
+			s.cimdMu.Unlock()
+			return nil, fmt.Errorf("CIMD cache is at capacity")
+		}
+	}
+	flight := &cimdFlight{done: make(chan struct{})}
+	s.cimdCache[clientID] = cachedCIMDClient{flight: flight}
 	s.cimdMu.Unlock()
 
-	if _, err := parseCIMDClientID(clientID); err != nil {
-		return nil, err
+	// The fetch has its own bounded lifetime so cancellation of the first
+	// caller cannot make every other waiter fail. The production HTTP client
+	// has the same timeout as an additional transport-wide bound.
+	go s.runCIMDFlight(clientID, flight)
+	return waitForCIMDFlight(ctx, flight)
+}
+
+func waitForCIMDFlight(ctx context.Context, flight *cimdFlight) (*models.OAuthClient, error) {
+	flight.waiters.Add(1)
+	defer flight.waiters.Add(-1)
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-flight.done:
+		if flight.err != nil {
+			return nil, flight.err
+		}
+		client := *flight.client
+		return &client, nil
 	}
+}
+
+func (s *OAuthServer) runCIMDFlight(clientID string, flight *cimdFlight) {
+	ctx, cancel := context.WithTimeout(context.Background(), cimdFetchTimeout)
+	defer cancel()
+
+	client, ttl, err := s.fetchCIMDDocument(ctx, clientID)
+
+	s.cimdMu.Lock()
+	flight.client = client
+	flight.err = err
+	if current, ok := s.cimdCache[clientID]; ok && current.flight == flight {
+		if err != nil || ttl <= 0 {
+			delete(s.cimdCache, clientID)
+		} else {
+			s.cimdCache[clientID] = cachedCIMDClient{
+				client:    client,
+				expiresAt: time.Now().UTC().Add(ttl),
+				lastUsed:  cimdCacheUseSequence.Add(1),
+			}
+		}
+	}
+	close(flight.done)
+	s.cimdMu.Unlock()
+}
+
+func (s *OAuthServer) fetchCIMDDocument(ctx context.Context, clientID string) (*models.OAuthClient, time.Duration, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, clientID, nil)
 	if err != nil {
-		return nil, fmt.Errorf("create CIMD request: %w", err)
+		return nil, 0, fmt.Errorf("create CIMD request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "tutor-mcp-cimd/1")
 	resp, err := s.cimdHTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetch CIMD: %w", err)
+		return nil, 0, fmt.Errorf("fetch CIMD: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("fetch CIMD: unexpected HTTP status %d", resp.StatusCode)
+		return nil, 0, fmt.Errorf("fetch CIMD: unexpected HTTP status %d", resp.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, cimdDocumentLimitBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("read CIMD: %w", err)
+		return nil, 0, fmt.Errorf("read CIMD: %w", err)
 	}
 	if int64(len(body)) > cimdDocumentLimitBytes {
-		return nil, fmt.Errorf("CIMD document too large")
+		return nil, 0, fmt.Errorf("CIMD document too large")
 	}
 	var doc cimdDocument
 	if err := json.Unmarshal(body, &doc); err != nil {
-		return nil, fmt.Errorf("decode CIMD: %w", err)
+		return nil, 0, fmt.Errorf("decode CIMD: %w", err)
 	}
 	if doc.ClientID != clientID || doc.ClientName == "" || len(doc.ClientName) > clientNameMaxLen ||
 		!utf8.ValidString(doc.ClientName) || strings.ContainsAny(doc.ClientName, "\r\n\t") {
-		return nil, fmt.Errorf("invalid CIMD identity metadata")
+		return nil, 0, fmt.Errorf("invalid CIMD identity metadata")
 	}
 	if doc.TokenEndpointAuthMethod != "none" {
-		return nil, fmt.Errorf("unsupported CIMD token_endpoint_auth_method")
+		return nil, 0, fmt.Errorf("unsupported CIMD token_endpoint_auth_method")
 	}
 	if len(doc.RedirectURIs) == 0 || validateRegistrationRedirectURIs(doc.RedirectURIs) != nil {
-		return nil, fmt.Errorf("invalid CIMD redirect_uris")
+		return nil, 0, fmt.Errorf("invalid CIMD redirect_uris")
 	}
 	if len(doc.GrantTypes) > 0 && !containsString(doc.GrantTypes, "authorization_code") {
-		return nil, fmt.Errorf("CIMD does not support authorization_code")
+		return nil, 0, fmt.Errorf("CIMD does not support authorization_code")
 	}
 	if len(doc.ResponseTypes) > 0 && !containsString(doc.ResponseTypes, "code") {
-		return nil, fmt.Errorf("CIMD does not support code responses")
+		return nil, 0, fmt.Errorf("CIMD does not support code responses")
 	}
 	redirectJSON, err := json.Marshal(doc.RedirectURIs)
 	if err != nil {
-		return nil, fmt.Errorf("encode CIMD redirect_uris: %w", err)
+		return nil, 0, fmt.Errorf("encode CIMD redirect_uris: %w", err)
 	}
 	client := &models.OAuthClient{
 		ClientID:     clientID,
 		ClientName:   doc.ClientName,
 		RedirectURIs: string(redirectJSON),
 	}
-	if ttl := cimdCacheTTL(resp.Header.Get("Cache-Control")); ttl > 0 {
-		s.cimdMu.Lock()
-		s.cimdCache[clientID] = cachedCIMDClient{client: client, expiresAt: now.Add(ttl)}
-		s.cimdMu.Unlock()
+	return client, cimdCacheTTL(resp.Header.Get("Cache-Control")), nil
+}
+
+func (s *OAuthServer) pruneExpiredCIMDClientsLocked(now time.Time) {
+	for clientID, cached := range s.cimdCache {
+		if cached.flight == nil && (cached.client == nil || !cached.expiresAt.After(now)) {
+			delete(s.cimdCache, clientID)
+		}
 	}
-	copy := *client
-	return &copy, nil
+}
+
+func (s *OAuthServer) evictCIMDClientLocked() bool {
+	var victim string
+	var oldest uint64
+	found := false
+	for clientID, cached := range s.cimdCache {
+		if cached.flight != nil {
+			continue
+		}
+		if !found || cached.lastUsed < oldest || (cached.lastUsed == oldest && clientID < victim) {
+			victim = clientID
+			oldest = cached.lastUsed
+			found = true
+		}
+	}
+	if found {
+		delete(s.cimdCache, victim)
+	}
+	return found
 }
 
 func cimdCacheTTL(cacheControl string) time.Duration {

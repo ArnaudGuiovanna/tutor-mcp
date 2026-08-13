@@ -56,6 +56,10 @@ func TestMigrate_Idempotent(t *testing.T) {
 		"curriculum_concepts",
 		"curriculum_metadata_ids",
 		"account_tokens",
+		"tenants",
+		"users",
+		"tenant_memberships",
+		"external_identities",
 	}
 	for _, table := range expectedTables {
 		var name string
@@ -102,6 +106,9 @@ func TestMigrate_Idempotent(t *testing.T) {
 		"idx_curriculum_versions_learner_domain",
 		"idx_curriculum_concepts_learner_domain",
 		"idx_curriculum_metadata_learner_domain",
+		"idx_users_normalized_email",
+		"idx_tenant_memberships_user_status",
+		"idx_learners_tenant_id_id",
 	}
 	for _, idx := range expectedIndexes {
 		var name string
@@ -139,6 +146,36 @@ func TestMigrate_Idempotent(t *testing.T) {
 		`INSERT INTO domains (id, learner_id, name, graph_json, personal_goal, archived, value_framings_json, last_value_axis) VALUES ('d1','m1','dn','{}','goal',0,'','')`,
 	); err != nil {
 		t.Fatalf("insert with domain framing columns: %v", err)
+	}
+}
+
+func TestVerifySQLiteSchemaCurrentIsReadOnlyAndFailsClosed(t *testing.T) {
+	n := testDBCounter.Add(1)
+	dsn := fmt.Sprintf("file:verify_schema_%d?mode=memory&cache=shared", n+40000)
+	raw, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { raw.Close() })
+	if err := Migrate(raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifySQLiteSchemaCurrent(context.Background(), raw); err != nil {
+		t.Fatalf("current schema rejected: %v", err)
+	}
+	last := buildMigrations()[len(buildMigrations())-1]
+	if _, err := raw.Exec(`DELETE FROM schema_migrations WHERE version = ?`, last.Version); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifySQLiteSchemaCurrent(context.Background(), raw); err == nil || !strings.Contains(err.Error(), "is missing") {
+		t.Fatalf("missing migration verification = %v", err)
+	}
+	var count int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version = ?`, last.Version).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("schema verifier mutated the ledger")
 	}
 }
 
@@ -710,6 +747,107 @@ func TestSessionMigrations_PreserveLegacyRowsWithoutInventingAssociations(t *tes
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestLegacyEnrollmentMigrationBackfillsAndQuarantinesWithoutGuessing(t *testing.T) {
+	n := testDBCounter.Add(1)
+	dsn := fmt.Sprintf("file:migrate_enrollment_legacy_%d?mode=memory&cache=shared", n+30000)
+	raw, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { raw.Close() })
+	if _, err := raw.Exec(`PRAGMA foreign_keys=ON`); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureSchemaMigrationsTable(raw); err != nil {
+		t.Fatal(err)
+	}
+
+	var enrollmentMigration migration
+	for _, candidate := range buildMigrations() {
+		if candidate.Version == "0050_legacy_enrollment_backfill" {
+			enrollmentMigration = candidate
+			break
+		}
+		if err := applyMigration(raw, candidate); err != nil {
+			t.Fatalf("apply %s: %v", candidate.Version, err)
+		}
+	}
+	if enrollmentMigration.Version == "" {
+		t.Fatal("0050_legacy_enrollment_backfill not found")
+	}
+
+	now := time.Now().UTC()
+	if _, err := raw.Exec(`INSERT INTO learners
+		(id, email, password_hash, objective, created_at, email_verified_at,
+		 tenant_id, user_id, membership_id)
+		VALUES ('legacy-learning', 'legacy-learning@test', 'h', 'o', ?, ?,
+		        'tenant_legacy', 'legacy-learning', 'membership_legacy_legacy-learning')`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`INSERT INTO domains
+		(id, learner_id, name, personal_goal, graph_json, created_at, tenant_id)
+		VALUES ('domain-a', 'legacy-learning', 'Domain A', 'goal',
+		        '{"concepts":["mapped","evidence-only"]}', ?, 'tenant_legacy')`, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`INSERT INTO concept_states
+		(learner_id, domain_id, concept, tenant_id, updated_at)
+		VALUES
+		('legacy-learning', 'domain-a', 'mapped', 'tenant_legacy', ?),
+		('legacy-learning', '', 'ambiguous', 'tenant_legacy', ?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`INSERT INTO interactions
+		(learner_id, domain_id, concept, activity_type, success, tenant_id, created_at)
+		VALUES ('legacy-learning', 'domain-a', 'evidence-only', 'PRACTICE', 1, 'tenant_legacy', ?)`, now); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := applyMigration(raw, enrollmentMigration); err != nil {
+		t.Fatalf("apply %s: %v", enrollmentMigration.Version, err)
+	}
+
+	assertScope := func(query, wantEnrollment string) {
+		t.Helper()
+		var enrollmentID, conceptID string
+		if err := raw.QueryRow(query).Scan(&enrollmentID, &conceptID); err != nil {
+			t.Fatal(err)
+		}
+		if enrollmentID != wantEnrollment || conceptID == "" {
+			t.Fatalf("scope = (%q,%q), want enrollment %q and a concept", enrollmentID, conceptID, wantEnrollment)
+		}
+	}
+	assertScope(`SELECT enrollment_id, formation_concept_id FROM concept_states
+		WHERE learner_id = 'legacy-learning' AND domain_id = 'domain-a'`, "legacy_enrollment_domain-a")
+	assertScope(`SELECT enrollment_id, formation_concept_id FROM interactions
+		WHERE learner_id = 'legacy-learning' AND concept = 'evidence-only'`, "legacy_enrollment_domain-a")
+	assertScope(`SELECT enrollment_id, formation_concept_id FROM concept_states
+		WHERE learner_id = 'legacy-learning' AND domain_id = ''`, "legacy_recovery_enrollment_legacy-learning")
+
+	var quarantined int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM tenant_migration_quarantine
+		WHERE source_table = 'concept_states' AND reason = 'missing_or_ambiguous_domain'`).Scan(&quarantined); err != nil {
+		t.Fatal(err)
+	}
+	if quarantined != 1 {
+		t.Fatalf("quarantine rows = %d, want 1", quarantined)
+	}
+	var published, concepts int
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM formation_versions WHERE status = 'published'`).Scan(&published); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM formation_concepts`).Scan(&concepts); err != nil {
+		t.Fatal(err)
+	}
+	if published != 2 || concepts != 5 {
+		t.Fatalf("published versions/concepts = %d/%d, want 2/5", published, concepts)
+	}
+	if _, err := raw.Exec(`UPDATE formation_concepts SET label = 'mutated'
+		WHERE tenant_id = 'tenant_legacy'`); err == nil {
+		t.Fatal("published migrated content was mutable")
 	}
 }
 

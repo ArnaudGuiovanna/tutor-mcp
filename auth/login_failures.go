@@ -7,6 +7,7 @@ package auth
 import (
 	"container/list"
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -15,7 +16,7 @@ import (
 )
 
 // LoginFailureBackend is an optional shared store the LoginFailureTracker
-// delegates to so per-account brute-force lockout is enforced across a fleet
+// delegates to so per-account brute-force signals are shared across a fleet
 // instead of independently per process. Implemented in package db
 // (Postgres-backed); nil means the in-memory default.
 //
@@ -25,9 +26,8 @@ import (
 type LoginFailureBackend = storeport.LoginFailureBackend
 
 // LoginFailureTracker counts password-mismatch attempts per email over a
-// sliding time window. Issue #36 part 4: per-account lockout in addition to
-// the per-IP rate limit. Once `threshold` failures occur within `window`,
-// Allow() returns false until the oldest failure decays out.
+// bounded time window. It drives progressive Retry-After responses after a
+// failed bcrypt comparison; it must never prevent checking a correct password.
 //
 // Email is the bucket key (case-folded by the caller). Successful logins call
 // Reset to clear the history.
@@ -49,7 +49,7 @@ type loginFailureBucket struct {
 const maxLoginFailureBuckets = 10_000
 
 // NewLoginFailureTracker constructs a tracker with the given threshold and
-// rolling window. Threshold ≤ 0 disables the tracker (Allow always true).
+// rolling window. Threshold ≤ 0 disables the tracker.
 func NewLoginFailureTracker(threshold int, window time.Duration) *LoginFailureTracker {
 	return &LoginFailureTracker{
 		fails:     make(map[string]*loginFailureBucket),
@@ -60,7 +60,7 @@ func NewLoginFailureTracker(threshold int, window time.Duration) *LoginFailureTr
 }
 
 // SetBackend installs a shared backend after construction so per-account
-// lockout is enforced fleet-wide. Passing nil restores the in-memory default.
+// failure signals are fleet-wide. Passing nil restores the in-memory default.
 func (t *LoginFailureTracker) SetBackend(backend LoginFailureBackend) {
 	if t == nil {
 		return
@@ -73,19 +73,25 @@ func (t *LoginFailureTracker) SetBackend(backend LoginFailureBackend) {
 // Allow returns true if the email is below the threshold of recent failures.
 // Stale entries (older than `window`) are pruned in passing.
 func (t *LoginFailureTracker) Allow(email string) bool {
+	return t.AllowContext(context.Background(), email)
+}
+
+// AllowContext is retained for callers that need to inspect the threshold.
+// Login handlers intentionally do not call it before bcrypt: doing so would
+// let an attacker lock the legitimate account owner out.
+func (t *LoginFailureTracker) AllowContext(parent context.Context, email string) bool {
 	if t == nil || t.threshold <= 0 {
 		return true
 	}
 	backend := t.getBackend()
 	if backend != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), authBackendTimeout)
+		ctx, cancel := loginFailureBackendContext(parent)
 		n, err := backend.CountInWindow(ctx, email, t.window, time.Now())
 		cancel()
 		if err != nil {
 			// Degrade to the process-local account bucket. This cannot reproduce
-			// fleet-wide state, but it avoids both a global lockout and a complete
-			// bypass of per-account brute-force protection.
-			slog.Warn("login failure backend error on Allow, using local fallback", "err", err)
+			// fleet-wide state, but it preserves a bounded local abuse signal.
+			slog.Warn("login failure backend error on Allow, using local fallback", "error_type", fmt.Sprintf("%T", err))
 			return t.allowLocal(email, time.Now())
 		}
 		return n < t.threshold
@@ -109,16 +115,22 @@ func (t *LoginFailureTracker) allowLocal(email string, now time.Time) bool {
 // Record stamps a new failure for the email and returns the resulting count
 // within the window. Stale entries are pruned at the same time.
 func (t *LoginFailureTracker) Record(email string) int {
+	return t.RecordContext(context.Background(), email)
+}
+
+// RecordContext records one failed credential check while preserving the
+// request cancellation/deadline for a shared persistence backend.
+func (t *LoginFailureTracker) RecordContext(parent context.Context, email string) int {
 	if t == nil || t.threshold <= 0 {
 		return 0
 	}
 	backend := t.getBackend()
 	if backend != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), authBackendTimeout)
+		ctx, cancel := loginFailureBackendContext(parent)
 		n, err := backend.Record(ctx, email, time.Now())
 		cancel()
 		if err != nil {
-			slog.Warn("login failure backend error on Record, using local fallback", "err", err)
+			slog.Warn("login failure backend error on Record, using local fallback", "error_type", fmt.Sprintf("%T", err))
 			return t.recordLocal(email, time.Now())
 		}
 		return n
@@ -142,6 +154,16 @@ func (t *LoginFailureTracker) recordLocal(email string, now time.Time) int {
 	} else {
 		t.lru.MoveToFront(bucket.elem)
 	}
+	// Counts above threshold+5 all map to the same capped Retry-After value;
+	// retaining more timestamps would let one address grow memory without bound.
+	stampCap := t.threshold + 6
+	if stampCap < 1 {
+		stampCap = 1
+	}
+	if len(bucket.stamps) >= stampCap {
+		copy(bucket.stamps, bucket.stamps[len(bucket.stamps)-stampCap+1:])
+		bucket.stamps = bucket.stamps[:stampCap-1]
+	}
 	bucket.stamps = append(bucket.stamps, now)
 	return len(bucket.stamps)
 }
@@ -149,21 +171,59 @@ func (t *LoginFailureTracker) recordLocal(email string, now time.Time) int {
 // Reset clears the failure history for an email — call on a successful login
 // so a learner who eventually authenticates is not penalised by earlier typos.
 func (t *LoginFailureTracker) Reset(email string) {
+	t.ResetContext(context.Background(), email)
+}
+
+// ResetContext clears failure history after successful authentication.
+func (t *LoginFailureTracker) ResetContext(parent context.Context, email string) {
 	if t == nil {
 		return
 	}
 	backend := t.getBackend()
 	if backend != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), authBackendTimeout)
+		ctx, cancel := loginFailureBackendContext(parent)
 		err := backend.Reset(ctx, email)
 		cancel()
 		if err != nil {
-			slog.Warn("login failure backend error on Reset", "err", err)
+			slog.Warn("login failure backend error on Reset", "error_type", fmt.Sprintf("%T", err))
 		}
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.removeBucketLocked(email)
+}
+
+// Threshold exposes the transition point without exposing account state.
+func (t *LoginFailureTracker) Threshold() int {
+	if t == nil {
+		return 0
+	}
+	return t.threshold
+}
+
+// RetryAfter returns a bounded, progressive, non-blocking penalty. Callers
+// advertise it only after a failed password comparison; the server never
+// sleeps and a subsequent correct credential is always checked immediately.
+func (t *LoginFailureTracker) RetryAfter(count int) time.Duration {
+	if t == nil || t.threshold <= 0 || count < t.threshold {
+		return 0
+	}
+	exponent := count - t.threshold
+	if exponent > 5 {
+		exponent = 5
+	}
+	seconds := 1 << exponent
+	if seconds > 30 {
+		seconds = 30
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func loginFailureBackendContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithTimeout(parent, authBackendTimeout)
 }
 
 func (t *LoginFailureTracker) getBackend() LoginFailureBackend {

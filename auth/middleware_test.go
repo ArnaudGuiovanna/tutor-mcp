@@ -6,6 +6,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -256,8 +257,10 @@ func TestBearerMiddleware_PopulatesMCPTokenInfo(t *testing.T) {
 		if info == nil {
 			t.Fatal("official MCP TokenInfo missing from request context")
 		}
-		if info.UserID != learnerID {
-			t.Errorf("TokenInfo.UserID = %q, want %q", info.UserID, learnerID)
+		wantPrincipal := models.LegacyPrincipal(learnerID)
+		wantPrincipal.Scopes = []string{models.OAuthScopeLearnerRead}
+		if info.UserID != wantPrincipal.SessionBindingID() {
+			t.Errorf("TokenInfo.UserID = %q, want tenant-aware session binding %q", info.UserID, wantPrincipal.SessionBindingID())
 		}
 		if len(info.Scopes) != 1 || info.Scopes[0] != models.OAuthScopeLearnerRead {
 			t.Errorf("TokenInfo.Scopes = %v, want [%s]", info.Scopes, models.OAuthScopeLearnerRead)
@@ -267,6 +270,13 @@ func TestBearerMiddleware_PopulatesMCPTokenInfo(t *testing.T) {
 		}
 		if got := GetLearnerID(r.Context()); got != learnerID {
 			t.Errorf("GetLearnerID = %q, want %q", got, learnerID)
+		}
+		principal, ok := GetPrincipal(r.Context())
+		if !ok {
+			t.Fatal("typed principal missing from request context")
+		}
+		if principal.TenantID != models.LegacyTenantID || principal.MembershipID != wantPrincipal.MembershipID {
+			t.Errorf("principal = %#v, want legacy tenant membership %#v", principal, wantPrincipal)
 		}
 		if got := GetOAuthScope(r.Context()); got != models.OAuthScopeLearnerRead {
 			t.Errorf("GetOAuthScope = %q, want %q", got, models.OAuthScopeLearnerRead)
@@ -447,5 +457,52 @@ func TestGetLearnerID_StringValueReturned(t *testing.T) {
 	ctx := context.WithValue(context.Background(), LearnerIDKey, "abc-123")
 	if got := GetLearnerID(ctx); got != "abc-123" {
 		t.Fatalf("GetLearnerID = %q, want abc-123", got)
+	}
+}
+
+func TestWithPrincipalRejectsMissingTenant(t *testing.T) {
+	principal := models.LegacyPrincipal("learner-1")
+	principal.TenantID = ""
+	if _, err := WithPrincipal(context.Background(), principal); err == nil {
+		t.Fatal("principal without tenant must not enter the business context")
+	}
+}
+
+type rejectingPrincipalValidator struct {
+	called bool
+}
+
+func (v *rejectingPrincipalValidator) ValidatePrincipal(context.Context, models.Principal) error {
+	v.called = true
+	return errors.New("membership suspended")
+}
+
+func TestBearerMiddlewareRejectsSuspendedMembership(t *testing.T) {
+	setTestSecret(t)
+	validator := &rejectingPrincipalValidator{}
+	token, err := GenerateJWT("https://test.example", "learner-suspended")
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })
+	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	BearerMiddlewareWithPrincipalValidator("https://test.example", models.OAuthScopeLearner, validator, next).ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized || called || !validator.called {
+		t.Fatalf("status=%d next=%v validator=%v, want 401/false/true", rec.Code, called, validator.called)
+	}
+}
+
+func TestGetLearnerIDPrefersValidatedPrincipal(t *testing.T) {
+	principal := models.LegacyPrincipal("principal-learner")
+	ctx, err := WithPrincipal(context.Background(), principal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx = context.WithValue(ctx, LearnerIDKey, "spoofed-legacy-value")
+	if got := GetLearnerID(ctx); got != principal.LearnerID {
+		t.Fatalf("GetLearnerID = %q, want principal value %q", got, principal.LearnerID)
 	}
 }

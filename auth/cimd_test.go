@@ -5,14 +5,18 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -59,6 +63,276 @@ func TestResolveOAuthClientFromCIMDAndCachesDocument(t *testing.T) {
 	if calls.Load() != 1 {
 		t.Fatalf("CIMD fetch calls = %d, want 1", calls.Load())
 	}
+}
+
+func TestCIMDCacheEvictsLeastRecentlyUsedAtCapacity(t *testing.T) {
+	s, _ := newTestServer(t)
+	var callsMu sync.Mutex
+	calls := make(map[string]int)
+	s.cimdHTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		callsMu.Lock()
+		calls[req.URL.String()]++
+		callsMu.Unlock()
+		return cimdResponse(req.URL.String(), "public, max-age=3600"), nil
+	})}
+
+	clientID := func(i int) string {
+		return fmt.Sprintf("https://client.example/oauth/metadata-%03d.json", i)
+	}
+	for i := range cimdCacheCapacity {
+		if _, err := s.fetchCIMDClient(context.Background(), clientID(i)); err != nil {
+			t.Fatalf("prime cache entry %d: %v", i, err)
+		}
+	}
+	// Refresh entry zero so entry one becomes the least recently used.
+	if _, err := s.fetchCIMDClient(context.Background(), clientID(0)); err != nil {
+		t.Fatalf("refresh first cache entry: %v", err)
+	}
+	if _, err := s.fetchCIMDClient(context.Background(), clientID(cimdCacheCapacity)); err != nil {
+		t.Fatalf("insert overflow cache entry: %v", err)
+	}
+
+	s.cimdMu.Lock()
+	cacheLen := len(s.cimdCache)
+	_, keptRecent := s.cimdCache[clientID(0)]
+	_, evictedOldest := s.cimdCache[clientID(1)]
+	_, keptNew := s.cimdCache[clientID(cimdCacheCapacity)]
+	s.cimdMu.Unlock()
+	if cacheLen != cimdCacheCapacity {
+		t.Fatalf("cache entries = %d, want fixed capacity %d", cacheLen, cimdCacheCapacity)
+	}
+	if !keptRecent || evictedOldest || !keptNew {
+		t.Fatalf("unexpected LRU result: recent=%t oldest_present=%t new=%t", keptRecent, evictedOldest, keptNew)
+	}
+
+	if _, err := s.fetchCIMDClient(context.Background(), clientID(1)); err != nil {
+		t.Fatalf("reload evicted cache entry: %v", err)
+	}
+	callsMu.Lock()
+	firstCalls := calls[clientID(0)]
+	evictedCalls := calls[clientID(1)]
+	newCalls := calls[clientID(cimdCacheCapacity)]
+	callsMu.Unlock()
+	if firstCalls != 1 || evictedCalls != 2 || newCalls != 1 {
+		t.Fatalf("fetch counts: recent=%d evicted=%d new=%d", firstCalls, evictedCalls, newCalls)
+	}
+}
+
+func TestCIMDCachePrunesExpiredDocument(t *testing.T) {
+	s, _ := newTestServer(t)
+	const clientID = "https://client.example/oauth/expiring-metadata.json"
+	var calls atomic.Int32
+	s.cimdHTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return cimdResponse(clientID, "max-age=3600"), nil
+	})}
+
+	if _, err := s.fetchCIMDClient(context.Background(), clientID); err != nil {
+		t.Fatalf("prime expiring cache entry: %v", err)
+	}
+	s.cimdMu.Lock()
+	cached := s.cimdCache[clientID]
+	cached.expiresAt = time.Now().Add(-time.Second)
+	s.cimdCache[clientID] = cached
+	s.cimdMu.Unlock()
+	if _, err := s.fetchCIMDClient(context.Background(), clientID); err != nil {
+		t.Fatalf("refresh expired cache entry: %v", err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("CIMD fetch calls = %d, want 2 after expiry", calls.Load())
+	}
+}
+
+type cimdFetchResult struct {
+	clientID string
+	err      error
+}
+
+func waitForCIMDWaiters(t *testing.T, s *OAuthServer, clientID string, want int32) *cimdFlight {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		s.cimdMu.Lock()
+		cached, ok := s.cimdCache[clientID]
+		s.cimdMu.Unlock()
+		if ok && cached.flight != nil && cached.flight.waiters.Load() >= want {
+			return cached.flight
+		}
+		runtime.Gosched()
+	}
+	t.Fatalf("CIMD flight did not reach %d waiters", want)
+	return nil
+}
+
+func waitForNoCIMDWaiters(t *testing.T, flight *cimdFlight) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if flight.waiters.Load() == 0 {
+			return
+		}
+		runtime.Gosched()
+	}
+	t.Fatalf("CIMD flight retained %d waiters", flight.waiters.Load())
+}
+
+func waitForCIMDFetchCalls(t *testing.T, calls *atomic.Int32, want int32) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if calls.Load() == want {
+			return
+		}
+		runtime.Gosched()
+	}
+	t.Fatalf("CIMD fetch calls = %d, want %d", calls.Load(), want)
+}
+
+func TestCIMDConcurrentNoStoreFetchIsDeduplicatedButNotCached(t *testing.T) {
+	s, _ := newTestServer(t)
+	const clientID = "https://client.example/oauth/no-store-metadata.json"
+	const workers = 24
+	var calls atomic.Int32
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+	s.cimdHTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		<-release
+		return cimdResponse(clientID, "no-store"), nil
+	})}
+
+	results := make(chan cimdFetchResult, workers)
+	start := make(chan struct{})
+	for range workers {
+		go func() {
+			<-start
+			client, err := s.fetchCIMDClient(context.Background(), clientID)
+			result := cimdFetchResult{err: err}
+			if client != nil {
+				result.clientID = client.ClientID
+			}
+			results <- result
+		}()
+	}
+	close(start)
+	flight := waitForCIMDWaiters(t, s, clientID, workers)
+	waitForCIMDFetchCalls(t, &calls, 1)
+	releaseOnce.Do(func() { close(release) })
+	for range workers {
+		result := <-results
+		if result.err != nil || result.clientID != clientID {
+			t.Fatalf("shared CIMD result = %#v", result)
+		}
+	}
+	waitForNoCIMDWaiters(t, flight)
+	s.cimdMu.Lock()
+	_, cached := s.cimdCache[clientID]
+	s.cimdMu.Unlock()
+	if cached {
+		t.Fatal("Cache-Control: no-store document was persisted")
+	}
+
+	// A later, non-overlapping request must fetch the no-store document again.
+	if _, err := s.fetchCIMDClient(context.Background(), clientID); err != nil {
+		t.Fatalf("refetch no-store document: %v", err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("no-store CIMD fetch calls = %d, want 2", calls.Load())
+	}
+}
+
+func TestCIMDFlightSharesErrorThenAllowsRetry(t *testing.T) {
+	s, _ := newTestServer(t)
+	const clientID = "https://client.example/oauth/retry-metadata.json"
+	const workers = 12
+	wantErr := errors.New("temporary upstream failure")
+	var calls atomic.Int32
+	releaseFailure := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(releaseFailure) })
+	s.cimdHTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		if calls.Add(1) == 1 {
+			<-releaseFailure
+			return nil, wantErr
+		}
+		return cimdResponse(clientID, "max-age=3600"), nil
+	})}
+
+	errs := make(chan error, workers)
+	for range workers {
+		go func() {
+			_, err := s.fetchCIMDClient(context.Background(), clientID)
+			errs <- err
+		}()
+	}
+	flight := waitForCIMDWaiters(t, s, clientID, workers)
+	releaseOnce.Do(func() { close(releaseFailure) })
+	for range workers {
+		if err := <-errs; !errors.Is(err, wantErr) {
+			t.Fatalf("shared CIMD error = %v, want %v", err, wantErr)
+		}
+	}
+	waitForNoCIMDWaiters(t, flight)
+	if calls.Load() != 1 {
+		t.Fatalf("failed concurrent CIMD fetch calls = %d, want 1", calls.Load())
+	}
+	if _, err := s.fetchCIMDClient(context.Background(), clientID); err != nil {
+		t.Fatalf("retry CIMD after shared error: %v", err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("CIMD calls after retry = %d, want 2", calls.Load())
+	}
+}
+
+func TestCIMDWaiterCancellationDoesNotCancelSharedFetch(t *testing.T) {
+	s, _ := newTestServer(t)
+	const clientID = "https://client.example/oauth/cancel-metadata.json"
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+	outboundContext := make(chan context.Context, 1)
+	s.cimdHTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		outboundContext <- req.Context()
+		<-release
+		return cimdResponse(clientID, "max-age=3600"), nil
+	})}
+
+	leaderResult := make(chan cimdFetchResult, 1)
+	go func() {
+		client, err := s.fetchCIMDClient(context.Background(), clientID)
+		result := cimdFetchResult{err: err}
+		if client != nil {
+			result.clientID = client.ClientID
+		}
+		leaderResult <- result
+	}()
+	flight := waitForCIMDWaiters(t, s, clientID, 1)
+	fetchContext := <-outboundContext
+
+	waiterContext, cancelWaiter := context.WithCancel(context.Background())
+	waiterResult := make(chan error, 1)
+	go func() {
+		_, err := s.fetchCIMDClient(waiterContext, clientID)
+		waiterResult <- err
+	}()
+	waitForCIMDWaiters(t, s, clientID, 2)
+	cancelWaiter()
+	if err := <-waiterResult; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled waiter error = %v, want context.Canceled", err)
+	}
+	select {
+	case <-fetchContext.Done():
+		t.Fatalf("one waiter cancelled shared CIMD fetch: %v", fetchContext.Err())
+	default:
+	}
+
+	releaseOnce.Do(func() { close(release) })
+	result := <-leaderResult
+	if result.err != nil || result.clientID != clientID {
+		t.Fatalf("leader result after waiter cancellation = %#v", result)
+	}
+	waitForNoCIMDWaiters(t, flight)
 }
 
 func TestResolveOAuthClientRejectsMismatchedCIMDIdentity(t *testing.T) {

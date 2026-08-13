@@ -9,6 +9,12 @@ import (
 	"time"
 )
 
+const (
+	NotificationDeliveryStateReserved        = "reserved"
+	NotificationDeliveryStateDelivered       = "delivered"
+	NotificationDeliveryStateDeliveryUnknown = "delivery_unknown"
+)
+
 // IsIntrusiveWebhookKind classifies proactive suggestions. Unknown kinds fail
 // closed as intrusive; daily recap is the sole informational exception.
 func IsIntrusiveWebhookKind(kind string) bool {
@@ -124,4 +130,20 @@ type WebhookPushLog struct {
 	OpenedSessionAt   *time.Time `json:"opened_session_at,omitempty"`
 	ConceptAddressed  bool       `json:"concept_addressed"`
 	CreatedAt         time.Time  `json:"created_at"`
+}
+
+// WebhookDeliveryTransition is an operator-facing, payload-free state change.
+// EventID remains stable across every retry of one queue message; AttemptCount
+// distinguishes individual delivery attempts without exposing the webhook URL
+// or learner-authored content.
+type WebhookDeliveryTransition struct {
+	ID           int64     `json:"id"`
+	QueueID      int64     `json:"queue_id"`
+	EventID      string    `json:"event_id"`
+	LearnerID    string    `json:"learner_id"`
+	AttemptCount int       `json:"attempt_count"`
+	FromStatus   string    `json:"from_status,omitempty"`
+	ToStatus     string    `json:"to_status"`
+	Reason       string    `json:"reason"`
+	OccurredAt   time.Time `json:"occurred_at"`
 }

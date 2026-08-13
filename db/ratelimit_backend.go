@@ -115,10 +115,9 @@ func NewLoginFailureBackend(s *Store) storeport.LoginFailureBackend {
 	return &loginFailureBackend{s: s}
 }
 
-// Record inserts a failure stamp and returns the count of failures within the
-// default window. (The port keeps Record window-free so it stays a cheap
-// insert; the authoritative lockout decision is made by Allow→CountInWindow
-// with the tracker's real window.)
+// Record atomically increments the account's bounded failure window and
+// returns its capped count. The port keeps Record window-free, so the shared
+// backend uses the same ten-minute window as the production tracker.
 func (b *loginFailureBackend) Record(ctx context.Context, key string, now time.Time) (int, error) {
 	return b.s.recordLoginFailure(ctx, key, now)
 }
@@ -131,46 +130,72 @@ func (b *loginFailureBackend) Reset(ctx context.Context, key string) error {
 	return b.s.resetLoginFailures(ctx, key)
 }
 
-// defaultLoginWindow bounds the count Record returns. Record has no window
-// parameter (the auth port keeps Record window-free so it stays a cheap insert),
-// so it reports failures within this fixed lookback. It matches the tracker's
-// default 10-minute window (auth.NewLoginFailureTracker in oauth.go); the
-// authoritative lockout decision is made by Allow→CountInWindow with the
-// tracker's real window, so a mismatch here would only affect the integer
-// returned to the (unused) Record caller, never the lockout threshold.
-const defaultLoginWindow = 10 * time.Minute
+const (
+	defaultLoginWindow        = 10 * time.Minute
+	maxLoginFailuresPerWindow = 100
+)
 
 func (s *Store) recordLoginFailure(ctx context.Context, key string, now time.Time) (int, error) {
 	now = now.UTC()
-	if _, err := s.exec(ctx,
-		`INSERT INTO login_failures (account_key, attempted_at) VALUES (?, ?)`,
-		key, now,
-	); err != nil {
+	cutoff := now.Add(-defaultLoginWindow)
+	var count int
+	err := s.queryRow(ctx,
+		`INSERT INTO login_failure_windows
+		    (account_key, window_started_at, last_attempt_at, failure_count, updated_at)
+		 VALUES (?, ?, ?, 1, ?)
+		 ON CONFLICT (account_key) DO UPDATE SET
+		    window_started_at = CASE
+		        WHEN login_failure_windows.window_started_at <= ? THEN excluded.window_started_at
+		        ELSE login_failure_windows.window_started_at END,
+		    last_attempt_at = CASE
+		        WHEN login_failure_windows.last_attempt_at < excluded.last_attempt_at THEN excluded.last_attempt_at
+		        ELSE login_failure_windows.last_attempt_at END,
+		    failure_count = CASE
+		        WHEN login_failure_windows.window_started_at <= ? THEN 1
+		        WHEN login_failure_windows.failure_count >= ? THEN ?
+		        ELSE login_failure_windows.failure_count + 1 END,
+		    updated_at = CASE
+		        WHEN login_failure_windows.updated_at < excluded.updated_at THEN excluded.updated_at
+		        ELSE login_failure_windows.updated_at END
+		 RETURNING failure_count`,
+		key, now, now, now, cutoff, cutoff,
+		maxLoginFailuresPerWindow, maxLoginFailuresPerWindow,
+	).Scan(&count)
+	if err != nil {
 		return 0, fmt.Errorf("record login failure: %w", err)
 	}
-	return s.countLoginFailuresInWindow(ctx, key, defaultLoginWindow, now)
+	return count, nil
 }
 
 func (s *Store) countLoginFailuresInWindow(ctx context.Context, key string, window time.Duration, now time.Time) (int, error) {
+	if window <= 0 {
+		return 0, nil
+	}
 	cutoff := now.UTC().Add(-window)
 	var count int
-	if err := s.queryRow(ctx,
-		`SELECT COUNT(*) FROM login_failures WHERE account_key = ? AND attempted_at > ?`,
+	err := s.queryRow(ctx,
+		`SELECT failure_count
+		 FROM login_failure_windows
+		 WHERE account_key = ? AND window_started_at > ?`,
 		key, cutoff,
-	).Scan(&count); err != nil {
+	).Scan(&count)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
 		return 0, fmt.Errorf("count login failures: %w", err)
 	}
 	return count, nil
 }
 
 func (s *Store) resetLoginFailures(ctx context.Context, key string) error {
-	if _, err := s.exec(ctx, `DELETE FROM login_failures WHERE account_key = ?`, key); err != nil {
+	if _, err := s.exec(ctx, `DELETE FROM login_failure_windows WHERE account_key = ?`, key); err != nil {
 		return fmt.Errorf("reset login failures: %w", err)
 	}
 	return nil
 }
 
-// CleanupRateLimitState deletes stale shared buckets and login-failure stamps.
+// CleanupRateLimitState deletes stale shared buckets and login-failure windows.
 // It is intentionally a DB method rather than a scheduler dependency so an
 // operator or future maintenance loop can invoke it without coupling auth
 // state to webhook scheduling.
@@ -190,7 +215,7 @@ func (s *Store) CleanupRateLimitState(ctx context.Context, bucketCutoff, failure
 		}
 
 		failureResult, err := txs.exec(ctx,
-			`DELETE FROM login_failures WHERE attempted_at < ?`,
+			`DELETE FROM login_failure_windows WHERE last_attempt_at < ?`,
 			failureCutoff.UTC(),
 		)
 		if err != nil {
@@ -200,6 +225,20 @@ func (s *Store) CleanupRateLimitState(ctx context.Context, bucketCutoff, failure
 		if err != nil {
 			return fmt.Errorf("cleanup login failures count: %w", err)
 		}
+		// Legacy rows are no longer written after migration. Clean any row
+		// manually restored from an older backup so the retired journal cannot
+		// grow or unexpectedly influence a future rollback.
+		legacyResult, err := txs.exec(ctx,
+			`DELETE FROM login_failures WHERE attempted_at < ?`, failureCutoff.UTC(),
+		)
+		if err != nil {
+			return fmt.Errorf("cleanup legacy login failures: %w", err)
+		}
+		legacyDeleted, err := legacyResult.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("cleanup legacy login failures count: %w", err)
+		}
+		failuresDeleted += legacyDeleted
 		return nil
 	})
 	if err != nil {

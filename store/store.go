@@ -18,9 +18,24 @@ import (
 // when the per-deployment client cap is hit.
 var ErrOAuthClientLimitReached = errors.New("oauth client limit reached")
 
+// DCR capability errors deliberately avoid distinguishing unknown, expired,
+// and revoked tokens at the public HTTP boundary.
+var ErrDCRInvalidInitialAccessToken = errors.New("invalid DCR initial access token")
+var ErrDCRInitialAccessTokenQuota = errors.New("DCR initial access token quota reached")
+var ErrDCRReplaySecretUnavailable = errors.New("DCR replay secret unavailable")
+
 // ErrInvalidAccountToken deliberately collapses unknown, expired, consumed,
 // and wrong-purpose email capabilities into one public failure.
 var ErrInvalidAccountToken = errors.New("invalid account token")
+
+// ErrInvalidLoginChallenge collapses unknown, expired, consumed, and replayed
+// adaptive-login capabilities into one non-enumerating result.
+var ErrInvalidLoginChallenge = errors.New("invalid login challenge")
+
+// ErrInvalidPrincipal deliberately collapses unknown, inactive, stale-version
+// and role-mismatched memberships at the bearer boundary.
+var ErrInvalidPrincipal = errors.New("invalid tenant principal")
+var ErrAmbiguousIdentity = errors.New("ambiguous global identity")
 
 // ErrInvalidAuthCode deliberately collapses unknown, expired, client-bound and
 // already-consumed authorization codes into OAuth's invalid_grant response.
@@ -109,6 +124,8 @@ var ErrIdempotencyResponseExpired = errors.New("mutation already completed; cach
 // ErrAvailabilityVersionConflict prevents two clients from silently
 // overwriting learner-controlled notification or accessibility preferences.
 var ErrAvailabilityVersionConflict = errors.New("availability version conflict")
+var ErrCohortCapacityReached = errors.New("cohort capacity reached")
+var ErrFormationVersionImmutable = errors.New("formation version is immutable")
 
 // RateLimitBackend is the optional shared, fleet-wide store the auth
 // RateLimiter delegates token accounting to (opt-in via RATELIMIT_BACKEND).
@@ -142,22 +159,49 @@ type LearnerStore interface {
 	GetLearnerByID(ctx context.Context, id string) (*models.Learner, error)
 	GetLearnerByEmail(ctx context.Context, email string) (*models.Learner, error)
 	UpdateLastActive(ctx context.Context, id string) error
-	GetActiveLearners(ctx context.Context) ([]*models.Learner, error)
+	ListWebhookDispatchTargetsPage(ctx context.Context, afterLearnerID string, limit int) ([]models.WebhookDispatchTarget, error)
 	// UpdateLearnerProfile atomically persists declared profile preferences and,
 	// when objective is non-nil, the canonical learner objective.
 	UpdateLearnerProfile(ctx context.Context, learnerID, profileJSON string, objective *string) error
+}
+
+// IdentityStore owns global users and tenant-local authorization. Business
+// callers never resolve a membership by a bare ID: every lookup includes the
+// tenant and global user asserted by the signed principal.
+type IdentityStore interface {
+	GetLocalUserByEmail(ctx context.Context, normalizedEmail string) (*models.User, error)
+	GetPrincipalForLearner(ctx context.Context, learnerID string, scopes []string) (models.Principal, error)
+	GetPrincipal(ctx context.Context, scope models.TenantScope, scopes []string) (models.Principal, error)
+	ValidatePrincipal(ctx context.Context, principal models.Principal) error
+	ListMembershipsForUser(ctx context.Context, userID string) ([]models.TenantMembership, error)
+	ListActiveMembershipsForUser(ctx context.Context, userID string) ([]models.TenantMembership, error)
+	SetMembershipAuthorization(ctx context.Context, scope models.TenantScope, status string, roles []string) (int64, error)
+	RecordMembershipMFAVerification(ctx context.Context, scope models.TenantScope, verifiedAt time.Time) (int64, error)
+	CreateTenantInvitation(ctx context.Context, actor models.Principal, email string, roles []string, expiresAt time.Time) (*models.TenantInvitation, string, error)
+	AcceptTenantInvitation(ctx context.Context, rawToken, userID string) (*models.TenantMembership, error)
+	LinkExternalIdentity(ctx context.Context, userID string, identity models.ExternalIdentityInput) (*models.ExternalIdentity, error)
+	AppendAuditEvent(ctx context.Context, actor models.Principal, event models.AuditEvent) error
+}
+
+// IntegrationSecretStore keeps credential access out of the general learner
+// profile port. Scheduler code resolves a credential only at the final HTTP
+// delivery boundary.
+type IntegrationSecretStore interface {
+	GetWebhookDispatchURL(ctx context.Context, learnerID string) (string, error)
 }
 
 // AuthStore manages OAuth2/refresh-token and auth-code state.
 type AuthStore interface {
 	CreateRefreshToken(ctx context.Context, learnerID, clientID, resource string) (*models.RefreshToken, error)
 	CreateRefreshTokenWithScope(ctx context.Context, learnerID, clientID, resource, scope string) (*models.RefreshToken, error)
+	CreateRefreshTokenForPrincipal(ctx context.Context, principal models.Principal, clientID, resource, scope string) (*models.RefreshToken, error)
 	GetRefreshToken(ctx context.Context, token string) (*models.RefreshToken, error)
 	DeleteRefreshToken(ctx context.Context, token string) error
 	RotateRefreshToken(ctx context.Context, token, clientID, resource string) (*models.RefreshToken, error)
 	RotateRefreshTokenWithScope(ctx context.Context, token, clientID, resource, requestedScope string) (*models.RefreshToken, error)
 	CreateAuthCodeWithBinding(ctx context.Context, code, learnerID, codeChallenge, codeChallengeMethod, clientID, redirectURI, resource string, expiresAt time.Time) error
 	CreateAuthCodeWithBindingAndScope(ctx context.Context, code, learnerID, codeChallenge, codeChallengeMethod, clientID, redirectURI, resource, scope string, expiresAt time.Time) error
+	CreateAuthCodeForPrincipal(ctx context.Context, code string, principal models.Principal, codeChallenge, codeChallengeMethod, clientID, redirectURI, resource, scope string, expiresAt time.Time) error
 	GetAuthCode(ctx context.Context, code, clientID string) (*models.AuthCode, error)
 	ConsumeAuthCode(ctx context.Context, code, clientID string) (*models.AuthCode, error)
 	ExchangeAuthCodeForRefreshToken(ctx context.Context, code, clientID string) (*models.AuthCode, *models.RefreshToken, error)
@@ -165,11 +209,19 @@ type AuthStore interface {
 	CreateOAuthClientWithSecret(ctx context.Context, clientID, clientName, redirectURIs, secretHash string) error
 	CreateOAuthClientWithSecretCapped(ctx context.Context, clientID, clientName, redirectURIs, secretHash string, maxClients int) error
 	CreateOAuthClientWithSecretCappedTTL(ctx context.Context, clientID, clientName, redirectURIs, secretHash string, maxClients int, expiresAt time.Time) error
+	EnsureDCRInitialAccessToken(ctx context.Context, tokenID, tokenHash, label string, maxRegistrations int, now time.Time) error
+	GetActiveDCRInitialAccessToken(ctx context.Context, tokenHash string, now time.Time) (*models.DCRInitialAccessToken, error)
+	RegisterDynamicOAuthClient(ctx context.Context, registration models.DynamicClientRegistration) (*models.DynamicClientRegistrationResult, error)
 	CleanupExpiredOAuthClients(ctx context.Context) (int64, error)
 	CreateAccountToken(ctx context.Context, token *models.AccountToken) error
 	GetAccountToken(ctx context.Context, tokenHash, purpose string) (*models.AccountToken, error)
 	ActivateLearnerAndCreateAuthCode(ctx context.Context, tokenHash, passwordHash, code string, codeExpiresAt time.Time, persistClientApproval bool) (*models.AccountToken, error)
 	ResetPasswordWithToken(ctx context.Context, tokenHash, passwordHash string) (string, error)
+	CreateLoginChallenge(ctx context.Context, challenge *models.LoginChallenge) (bool, error)
+	GetLoginChallenge(ctx context.Context, tokenHash string, now time.Time) (*models.LoginChallenge, error)
+	ConsumeLoginChallenge(ctx context.Context, tokenHash string, now, trustedUntil time.Time) (*models.LoginChallenge, error)
+	DeleteLoginChallenge(ctx context.Context, tokenHash string) error
+	IsTrustedLoginDevice(ctx context.Context, learnerID, tokenHash string, now time.Time) (bool, error)
 	CleanupExpiredAccountTokens(ctx context.Context) (int64, error)
 	CountOAuthClients(ctx context.Context) (int, error)
 	GetOAuthClient(ctx context.Context, clientID string) (*models.OAuthClient, error)
@@ -391,12 +443,23 @@ type WebhookQueueStore interface {
 	EnqueueWebhookMessage(ctx context.Context, learnerID, kind, content string, scheduledFor, expiresAt time.Time, priority int) (int64, error)
 	EnqueueWebhookMessageWithMaxAttempts(ctx context.Context, learnerID, kind, content string, scheduledFor, expiresAt time.Time, priority, maxAttempts int) (int64, error)
 	EnqueueWebhookMessageOncePerDay(ctx context.Context, learnerID, kind, alertType, content string, scheduledFor, expiresAt time.Time, priority int) (int64, bool, error)
+	EnqueueClaimedWebhookPayloadOncePerDay(ctx context.Context, learnerID, kind, alertType, domainID, content string, intrusive bool, scheduledFor, expiresAt time.Time, priority int) (*models.WebhookQueueItem, bool, error)
 	CreateWebhookPushLog(ctx context.Context, learnerID string, queueID int64, brief *models.WebhookBrief, pushedAt time.Time) (int64, error)
 	GetLatestOpenWebhookPush(ctx context.Context, learnerID, domainID string, since time.Time) (*models.WebhookPushLog, error)
 	MarkWebhookPushSessionOpened(ctx context.Context, learnerID string, openedAt, since time.Time) error
 	MarkWebhookPushConceptAddressed(ctx context.Context, learnerID, domainID, concept string, addressedAt, since time.Time) error
 	ClaimNextPendingWebhook(ctx context.Context, learnerID, kind string, now time.Time, window time.Duration) (*models.WebhookQueueItem, error)
+	HasLiveWebhookMessageKind(ctx context.Context, learnerID, kind string, now time.Time) (bool, error)
 	IsWebhookClaimActive(ctx context.Context, id int64, learnerID string) (bool, error)
+	PrepareWebhookDelivery(ctx context.Context, learnerID, alertType, domainID string, intrusive bool, queueIDs []int64, at time.Time) (reservationID int64, prepared bool, err error)
+	BeginWebhookDelivery(ctx context.Context, learnerID string, queueIDs []int64, reservationID int64, at time.Time) error
+	CompleteWebhookDelivery(ctx context.Context, learnerID string, queueIDs []int64, reservationID int64, at time.Time) error
+	RecordKnownWebhookDeliveryFailure(ctx context.Context, learnerID string, queueIDs []int64, reservationID int64, reason string, at time.Time) (deadLettered int, err error)
+	MarkWebhookDeliveryUnknown(ctx context.Context, learnerID string, queueIDs []int64, reservationID int64, reason string, at time.Time) error
+	ReleasePreparedWebhookDelivery(ctx context.Context, learnerID string, queueIDs []int64, reservationID int64, reason string, at time.Time) error
+	GetWebhookDeliveryUnknown(ctx context.Context, learnerID string, limit int) ([]*models.WebhookQueueItem, error)
+	GetWebhookDeliveryTransitions(ctx context.Context, learnerID, eventID string, limit int) ([]models.WebhookDeliveryTransition, error)
+	ResolveWebhookDeliveryUnknown(ctx context.Context, id int64, learnerID string, delivered bool, at time.Time) error
 	MarkWebhookSent(ctx context.Context, id int64, learnerID string, now time.Time) error
 	MarkWebhookFailed(ctx context.Context, id int64, learnerID string) error
 	RecordWebhookFailure(ctx context.Context, id int64, learnerID, reason string, now time.Time) (deadLettered bool, err error)
@@ -410,7 +473,7 @@ type WebhookQueueStore interface {
 // ConsolidationStore manages periodic consolidation records.
 type ConsolidationStore interface {
 	UpsertPendingConsolidation(ctx context.Context, learnerID, periodType, periodKey string, now time.Time) error
-	GetLearnerIDsForConsolidation(ctx context.Context) ([]string, error)
+	ListLearnerIDsForConsolidationPage(ctx context.Context, afterLearnerID string, limit int) ([]string, error)
 	GetPendingConsolidations(ctx context.Context, learnerID string) ([]*models.PendingConsolidation, error)
 	ClaimPendingConsolidations(ctx context.Context, learnerID string, now time.Time) ([]*models.PendingConsolidation, error)
 	ReleaseConsolidationClaims(ctx context.Context, learnerID string, ids []int64) error
@@ -425,11 +488,117 @@ type SnapshotStore interface {
 	GetPedagogicalSnapshots(ctx context.Context, learnerID, domainID, concept string, limit int) ([]*models.PedagogicalSnapshot, error)
 }
 
+// ScheduledJobRunRef is the durable identity of a runnable cron window. The
+// payload is deliberately not persisted here: scheduler jobs are a fixed,
+// versioned registry and the name resolves to code in the worker process.
+type ScheduledJobRunRef struct {
+	Name      string
+	WindowKey string
+}
+
 // SchedulerStore manages distributed scheduler job-run leases (Phase 4).
 type SchedulerStore interface {
+	// ClaimJobRun is retained for compatibility with old single-shot callers.
+	// New distributed workers must use AcquireJobRunLease and explicitly finish
+	// the resulting processing state.
 	ClaimJobRun(ctx context.Context, name, windowKey string) (bool, error)
+	AcquireJobRunLease(ctx context.Context, name, windowKey, owner string, now time.Time, leaseDuration time.Duration, maxAttempts int) (bool, error)
+	RenewJobRunLease(ctx context.Context, name, windowKey, owner string, now time.Time, leaseDuration time.Duration) (bool, error)
+	CompleteJobRun(ctx context.Context, name, windowKey, owner string, completedAt time.Time) (bool, error)
+	FailJobRun(ctx context.Context, name, windowKey, owner string, failedAt, nextAttemptAt time.Time, errorClass string) (bool, error)
+	ListRunnableJobRuns(ctx context.Context, now time.Time, limit int) ([]ScheduledJobRunRef, error)
 	PurgeJobRunsBefore(ctx context.Context, cutoff time.Time) (int64, error)
 	CleanupRateLimitState(ctx context.Context, bucketCutoff, failureCutoff time.Time) (int64, int64, error)
+}
+
+// LearnerContextLearner is the deliberately narrow learner projection used by
+// get_learner_context. Authentication credentials and integration secrets must
+// never be loaded on this read path.
+type LearnerContextLearner struct {
+	ID          string
+	Objective   string
+	ProfileJSON string
+	CreatedAt   time.Time
+	LastActive  time.Time
+}
+
+// LearnerContextDomain contains only the domain fields needed to route and
+// render session-opening context. CreatedAt is retained for the historical
+// "most recent domain" fallback and is not exposed directly to MCP clients.
+type LearnerContextDomain struct {
+	ID           string
+	Name         string
+	Graph        models.KnowledgeSpace
+	Archived     bool
+	HighStakes   bool
+	PriorityRank *int
+	CreatedAt    time.Time
+}
+
+// LearnerContextConceptState is the minimal cognitive-state projection needed
+// for priority retention and the learner-facing progress narrative.
+type LearnerContextConceptState struct {
+	DomainID   string
+	Concept    string
+	Stability  float64
+	CardState  string
+	LastReview *time.Time
+	PMastery   float64
+}
+
+// LearnerContextInteractionCount is a grouped count rather than a materialized
+// interaction row. DomainID is empty for legacy observations that pre-date
+// domain scoping; the tool resolves those only when the concept is unambiguous.
+type LearnerContextInteractionCount struct {
+	DomainID string
+	Concept  string
+	Count    int
+}
+
+// LearnerContextOverview is the three-query session-opening read model: one
+// narrow learner/domain projection, one minimal state projection, and today's
+// interactions grouped by domain/concept.
+type LearnerContextOverview struct {
+	Learner           LearnerContextLearner
+	Domains           []LearnerContextDomain
+	ConceptStates     []LearnerContextConceptState
+	TodayInteractions []LearnerContextInteractionCount
+}
+
+// LearnerContextConceptHistory combines the two historical aggregates used by
+// the progress narrative so the tool does not reload concept states or scan
+// interaction rows once per narrative signal.
+type LearnerContextConceptHistory struct {
+	Concept          string
+	TotalBefore      int
+	SuccessfulBefore int
+	RecentSuccess    bool
+}
+
+// LearnerContextNarrativeSignals is returned by one bounded query. Affect
+// scores remain newest-first to preserve the existing autonomy-trend contract.
+type LearnerContextNarrativeSignals struct {
+	ConceptHistory       []LearnerContextConceptHistory
+	SessionStreak        int
+	RecentAutonomyScores []float64
+}
+
+// LearnerContextReadStore provides the specialized read model for
+// get_learner_context. now is supplied by the caller so every calendar/window
+// boundary in one response is derived from the same UTC instant.
+type LearnerContextReadStore interface {
+	GetLearnerContextOverview(ctx context.Context, learnerID string, now time.Time) (*LearnerContextOverview, error)
+	GetLearnerContextNarrativeSignals(ctx context.Context, learnerID, domainID string, concepts []string, now time.Time) (*LearnerContextNarrativeSignals, error)
+}
+
+type CatalogStore interface {
+	CreateFormationDraft(ctx context.Context, actor models.Principal, name, description string) (*models.Formation, *models.FormationVersion, error)
+	AddFormationModule(ctx context.Context, actor models.Principal, versionID string, input models.FormationModuleInput) (string, error)
+	AddFormationConcept(ctx context.Context, actor models.Principal, versionID string, input models.FormationConceptInput) (string, error)
+	PublishFormationVersion(ctx context.Context, actor models.Principal, versionID string) (*models.FormationVersion, error)
+	CreateCohort(ctx context.Context, actor models.Principal, formationVersionID, name string, capacity int, startsAt, endsAt *time.Time) (*models.Cohort, error)
+	AssignCohortTrainer(ctx context.Context, actor models.Principal, cohortID, trainerMembershipID string) error
+	EnrollMembership(ctx context.Context, actor models.Principal, cohortID, membershipID, objectivesJSON string) (*models.Enrollment, error)
 }
 
 // ---------------------------------------------------------------------------
@@ -440,6 +609,8 @@ type SchedulerStore interface {
 // sub-interfaces; a future PostgresStore can do the same.
 type Store interface {
 	LearnerStore
+	IdentityStore
+	IntegrationSecretStore
 	AuthStore
 	DomainStore
 	ConceptStateStore
@@ -457,9 +628,15 @@ type Store interface {
 	ConsolidationStore
 	SnapshotStore
 	SchedulerStore
+	LearnerContextReadStore
+	CatalogStore
 
 	// Lifecycle methods — implemented on *db.Store in the next task.
 	WithTx(ctx context.Context, fn func(s Store) error) error
+	// WithTenantTx is the only business entry point for tenant-owned data on
+	// PostgreSQL. It binds SET LOCAL settings to one transaction and passes the
+	// transaction context to every nested Store call.
+	WithTenantTx(ctx context.Context, scope models.TenantScope, fn func(context.Context, Store) error) error
 	Migrate(ctx context.Context) error
 	Ping(ctx context.Context) error
 	Close() error

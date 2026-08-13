@@ -153,7 +153,7 @@ func TestClaimPendingConsolidations_ConcurrentSingleDelivery(t *testing.T) {
 	}
 }
 
-func TestGetLearnerIDsForConsolidationIncludesLearnersWithoutWebhook(t *testing.T) {
+func TestListLearnerIDsForConsolidationPageIncludesLearnersWithoutWebhook(t *testing.T) {
 	store := setupTestDB(t)
 	now := time.Now().UTC()
 	if _, err := store.root.Exec(
@@ -162,7 +162,7 @@ func TestGetLearnerIDsForConsolidationIncludesLearnersWithoutWebhook(t *testing.
 	); err != nil {
 		t.Fatal(err)
 	}
-	ids, err := store.GetLearnerIDsForConsolidation(context.Background())
+	ids, err := store.ListLearnerIDsForConsolidationPage(context.Background(), "", 10)
 	if err != nil {
 		t.Fatal(err)
 	}

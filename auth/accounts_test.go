@@ -264,7 +264,7 @@ func TestResetPasswordHTTPIsSingleUse(t *testing.T) {
 	}
 }
 
-func TestUnverifiedLoginResendsProofWithoutIssuingCode(t *testing.T) {
+func TestUnverifiedLoginIsUniformCredentialFailure(t *testing.T) {
 	s, dbStore := newTestServer(t)
 	seedClient(t, dbStore, "cid", "https://good.example/cb")
 	hash, err := bcrypt.GenerateFromPassword([]byte("correct-password"), bcrypt.MinCost)
@@ -287,8 +287,11 @@ func TestUnverifiedLoginResendsProofWithoutIssuingCode(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "login-csrf"})
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
-	if rec.Code != http.StatusAccepted || len(s.emailSender.(*testEmailSender).verificationLinks) != 1 {
-		t.Fatalf("pending login status=%d deliveries=%d", rec.Code, len(s.emailSender.(*testEmailSender).verificationLinks))
+	if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Body.String(), "Invalid email or password.") {
+		t.Fatalf("pending login status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if deliveries := len(s.emailSender.(*testEmailSender).verificationLinks); deliveries != 0 {
+		t.Fatalf("pending login leaked account state through %d verification deliveries", deliveries)
 	}
 	var codeCount int
 	if err := dbStore.RawDB().QueryRow(`SELECT COUNT(*) FROM oauth_codes WHERE learner_id = ?`, learner.ID).Scan(&codeCount); err != nil && err != sql.ErrNoRows {

@@ -68,6 +68,10 @@ func (k *IntegrationSecretKeyring) encrypt(learnerID, plaintext string) (string,
 	if plaintext == "" {
 		return "", nil
 	}
+	return k.encryptWithAAD(plaintext, integrationSecretAAD(learnerID))
+}
+
+func (k *IntegrationSecretKeyring) encryptWithAAD(plaintext string, aad []byte) (string, error) {
 	block, err := aes.NewCipher(k.keys[k.currentID])
 	if err != nil {
 		return "", fmt.Errorf("initialize integration secret cipher: %w", err)
@@ -80,11 +84,15 @@ func (k *IntegrationSecretKeyring) encrypt(learnerID, plaintext string) (string,
 	if _, err := rand.Read(nonce); err != nil {
 		return "", fmt.Errorf("generate integration secret nonce: %w", err)
 	}
-	sealed := gcm.Seal(nonce, nonce, []byte(plaintext), integrationSecretAAD(learnerID))
+	sealed := gcm.Seal(nonce, nonce, []byte(plaintext), aad)
 	return integrationSecretPrefix + k.currentID + ":" + base64.RawURLEncoding.EncodeToString(sealed), nil
 }
 
 func (k *IntegrationSecretKeyring) decrypt(learnerID, envelope string) (string, error) {
+	return k.decryptWithAAD(envelope, integrationSecretAAD(learnerID))
+}
+
+func (k *IntegrationSecretKeyring) decryptWithAAD(envelope string, aad []byte) (string, error) {
 	if envelope == "" {
 		return "", nil
 	}
@@ -114,7 +122,7 @@ func (k *IntegrationSecretKeyring) decrypt(learnerID, envelope string) (string, 
 	if len(sealed) < gcm.NonceSize() {
 		return "", fmt.Errorf("malformed integration secret ciphertext")
 	}
-	plaintext, err := gcm.Open(nil, sealed[:gcm.NonceSize()], sealed[gcm.NonceSize():], integrationSecretAAD(learnerID))
+	plaintext, err := gcm.Open(nil, sealed[:gcm.NonceSize()], sealed[gcm.NonceSize():], aad)
 	if err != nil {
 		return "", fmt.Errorf("decrypt integration secret: authentication failed")
 	}
@@ -156,9 +164,10 @@ func (s *Store) decryptIntegrationSecret(learnerID, stored string) (string, erro
 	return s.secretKeyring.decrypt(learnerID, stored)
 }
 
-// RotateIntegrationSecrets upgrades plaintext legacy rows and envelopes made
-// with older retained keys to the current key. All values are validated and
-// decrypted before the write transaction, so one bad row leaves the DB intact.
+// RotateIntegrationSecrets upgrades plaintext legacy webhook rows and DCR
+// replay-secret envelopes made with older retained keys to the current key.
+// All values are authenticated before the write transaction, so one bad row
+// leaves every integration-secret family intact.
 func (s *Store) RotateIntegrationSecrets(ctx context.Context) (int64, error) {
 	if s.secretKeyring == nil {
 		return 0, fmt.Errorf("integration secret keyring is not configured")
@@ -175,9 +184,6 @@ func (s *Store) RotateIntegrationSecrets(ctx context.Context) (int64, error) {
 			_ = rows.Close()
 			return 0, fmt.Errorf("scan integration secret: %w", err)
 		}
-		if integrationSecretKeyID(stored) == s.secretKeyring.currentID {
-			continue
-		}
 		plaintext := stored
 		if strings.HasPrefix(stored, integrationSecretPrefix) {
 			plaintext, err = s.secretKeyring.decrypt(learnerID, stored)
@@ -185,9 +191,15 @@ func (s *Store) RotateIntegrationSecrets(ctx context.Context) (int64, error) {
 				_ = rows.Close()
 				return 0, err
 			}
-		} else if !webhookurl.IsSafeWebhookURL(plaintext) {
+		}
+		if !webhookurl.IsSafeWebhookURL(plaintext) {
 			_ = rows.Close()
-			return 0, fmt.Errorf("legacy integration secret is invalid")
+			return 0, fmt.Errorf("integration secret is invalid")
+		}
+		// Authenticate current-key envelopes too. Skipping before decrypt would
+		// let a tampered GCM tag survive startup and fail only during delivery.
+		if integrationSecretKeyID(stored) == s.secretKeyring.currentID {
+			continue
 		}
 		ciphertext, err := s.secretKeyring.encrypt(learnerID, plaintext)
 		if err != nil {
@@ -203,7 +215,49 @@ func (s *Store) RotateIntegrationSecrets(ctx context.Context) (int64, error) {
 	if err := rows.Close(); err != nil {
 		return 0, fmt.Errorf("close integration secret rows: %w", err)
 	}
-	if len(rotations) == 0 {
+
+	type dcrRotation struct {
+		clientID, fingerprint, previous, ciphertext string
+	}
+	var dcrRotations []dcrRotation
+	dcrRows, err := s.query(ctx,
+		`SELECT client_id, registration_fingerprint, registration_secret_ciphertext
+		 FROM oauth_clients WHERE registration_secret_ciphertext <> ''`,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("list DCR replay secrets: %w", err)
+	}
+	for dcrRows.Next() {
+		var clientID, fingerprint, stored string
+		if err := dcrRows.Scan(&clientID, &fingerprint, &stored); err != nil {
+			_ = dcrRows.Close()
+			return 0, fmt.Errorf("scan DCR replay secret: %w", err)
+		}
+		plaintext, err := s.secretKeyring.decryptWithAAD(stored, dcrRegistrationSecretAAD(clientID, fingerprint))
+		if err != nil || plaintext == "" {
+			_ = dcrRows.Close()
+			return 0, fmt.Errorf("authenticate DCR replay secret")
+		}
+		if integrationSecretKeyID(stored) == s.secretKeyring.currentID {
+			continue
+		}
+		ciphertext, err := s.secretKeyring.encryptWithAAD(plaintext, dcrRegistrationSecretAAD(clientID, fingerprint))
+		if err != nil {
+			_ = dcrRows.Close()
+			return 0, fmt.Errorf("encrypt DCR replay secret: %w", err)
+		}
+		dcrRotations = append(dcrRotations, dcrRotation{
+			clientID: clientID, fingerprint: fingerprint, previous: stored, ciphertext: ciphertext,
+		})
+	}
+	if err := dcrRows.Err(); err != nil {
+		_ = dcrRows.Close()
+		return 0, fmt.Errorf("iterate DCR replay secrets: %w", err)
+	}
+	if err := dcrRows.Close(); err != nil {
+		return 0, fmt.Errorf("close DCR replay secret rows: %w", err)
+	}
+	if len(rotations) == 0 && len(dcrRotations) == 0 {
 		return 0, nil
 	}
 	err = s.inTx(ctx, nil, func(txs *Store) error {
@@ -212,7 +266,21 @@ func (s *Store) RotateIntegrationSecrets(ctx context.Context) (int64, error) {
 				return fmt.Errorf("rotate integration secret: %w", err)
 			}
 		}
+		for _, item := range dcrRotations {
+			result, err := txs.exec(ctx,
+				`UPDATE oauth_clients SET registration_secret_ciphertext = ?
+				 WHERE client_id = ? AND registration_fingerprint = ?
+				   AND registration_secret_ciphertext = ?`,
+				item.ciphertext, item.clientID, item.fingerprint, item.previous,
+			)
+			if err != nil {
+				return fmt.Errorf("rotate DCR replay secret: %w", err)
+			}
+			if rows, _ := result.RowsAffected(); rows != 1 {
+				return fmt.Errorf("rotate DCR replay secret: concurrent modification")
+			}
+		}
 		return nil
 	})
-	return int64(len(rotations)), err
+	return int64(len(rotations) + len(dcrRotations)), err
 }

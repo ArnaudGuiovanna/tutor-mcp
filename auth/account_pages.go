@@ -10,18 +10,19 @@ import (
 )
 
 type accountPageData struct {
-	Title            string
-	Message          string
-	Token            string
-	CSRFToken        string
-	ClientName       string
-	ClientID         string
-	RedirectOrigin   string
-	ScopeDescription string
-	ShowVerify       bool
-	ShowRecover      bool
-	ShowReset        bool
-	ShowBackToLogin  bool
+	Title              string
+	Message            string
+	Token              string
+	CSRFToken          string
+	ClientName         string
+	ClientID           string
+	RedirectOrigin     string
+	ScopeDescription   string
+	ShowVerify         bool
+	ShowRecover        bool
+	ShowReset          bool
+	ShowLoginChallenge bool
+	ShowBackToLogin    bool
 }
 
 var accountTmpl = template.Must(template.New("account").Parse(`<!doctype html>
@@ -87,6 +88,18 @@ var accountTmpl = template.Must(template.New("account").Parse(`<!doctype html>
     <label for="password-confirm">Confirm password</label>
     <input id="password-confirm" name="password_confirm" type="password" autocomplete="new-password" minlength="12" maxlength="72" required>
     <button type="submit">Reset password</button>
+  </form>
+  {{end}}
+  {{if .ShowLoginChallenge}}
+  <form method="post" action="/login-challenge">
+    <input type="hidden" name="token" value="{{.Token}}">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+    <div class="client">
+      Client ID: {{.ClientID}}<br>
+      Authorization code destination: {{.RedirectOrigin}}
+    </div>
+    <p>Approve this device only if you just entered your password for this exact client and destination.</p>
+    <button type="submit">Approve this device and return to sign in</button>
   </form>
   {{end}}
   {{if .ShowBackToLogin}}<p><a href="/authorize">Return to sign in</a></p>{{end}}

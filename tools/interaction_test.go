@@ -24,15 +24,18 @@ import (
 )
 
 // setupFileBackedToolsTest opens a real file-based SQLite DB with the
-// production DSN (WAL + busy_timeout + foreign_keys). Required for
-// concurrency tests because shared in-memory cache mode raises
+// production transaction shape (WAL + BEGIN IMMEDIATE + foreign_keys).
+// The lock timeout is deliberately longer than production's five seconds:
+// 50 race-instrumented writers must all queue during this stress test, while
+// production OpenDB pins SQLite to one connection and queues them in Go.
+// Required for concurrency tests because shared in-memory cache mode raises
 // SQLITE_LOCKED on conflicting writers (instead of SQLITE_BUSY) and
 // SQLITE_LOCKED is not retried by the busy handler — making the
 // in-memory helper unfit for real contention scenarios.
 func setupFileBackedToolsTest(t *testing.T) (*db.Store, *Deps) {
 	t.Helper()
 	tempDir := t.TempDir()
-	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)&_txlock=immediate", filepath.Join(tempDir, "test.db"))
+	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(60000)&_pragma=foreign_keys(on)&_txlock=immediate", filepath.Join(tempDir, "test.db"))
 	raw, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		t.Fatal(err)
@@ -771,7 +774,7 @@ func TestRecordInteraction_DomainIDIsPersistedOnRow(t *testing.T) {
 func TestRecordInteraction_DomainIDRejectsForeignDomain(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	makeOwnerDomain(t, store, "L_owner", "math")
-	foreign, err := store.CreateDomain(context.Background(), "L_other", "shared", "", models.KnowledgeSpace{
+	foreign, err := store.CreateDomain(context.Background(), "L_attacker", "shared", "", models.KnowledgeSpace{
 		Concepts: []string{"a"},
 	})
 	if err != nil {

@@ -4,9 +4,22 @@ Practical recipes for running the server. Companion to the README, which describ
 
 ## Database backend
 
-The supported MVP profile stores the relational state (interactions, OLM, BKT/FSRS/IRT state, refresh tokens, calibration history) in a single SQLite file at `${DB_PATH:-./data/runtime.db}` and runs one server process. Narrative memory is stored separately under `${TUTOR_MCP_MEMORY_ROOT:-~/.tutor-mcp}`. Back up both locations if narrative memory is enabled.
+The supported local profile stores relational state in a single SQLite file at
+`${DB_PATH:-./data/runtime.db}` and runs one server process. With the `local`
+narrative backend, Markdown remains below
+`${TUTOR_MCP_MEMORY_ROOT:-~/.tutor-mcp}` and both locations must be backed up.
+The PostgreSQL `database` backend instead stores encrypted/versioned narrative
+objects in PostgreSQL; retain the keyring with database backups. See
+[`docs/narrative-memory-operations.md`](./docs/narrative-memory-operations.md).
 
-An **experimental PostgreSQL** backend is available with `DB_DRIVER=postgres`; production uses a `DATABASE_URL` with verified TLS as described below. It is exercised in CI for backend conformance. The original consolidated schema is frozen behind its checksum; ordered, immutable incremental migrations upgrade existing databases under the same advisory lock. Edit neither an applied migration nor `schema_pg.sql`: checksum drift intentionally stops startup for operator intervention. Tune the pool with `DB_MAX_CONNS` (default 10).
+PostgreSQL with `DB_DRIVER=postgres` is the supported horizontal SaaS backend;
+production uses a `DATABASE_URL` with verified TLS as described below. SQLite
+remains the simpler supported local profile. The original consolidated schema
+is frozen behind its checksum; ordered, immutable incremental migrations
+upgrade existing databases under the same advisory lock. Edit neither an
+applied migration nor `schema_pg.sql`: checksum drift intentionally stops
+startup for operator intervention. Tune the pool with `DB_MAX_CONNS` (default
+10) and follow the [SaaS runtime runbook](./docs/saas-runtime-operations.md).
 
 ## Production security profile
 
@@ -29,7 +42,9 @@ as `INTEGRATION_SECRET_KEYS=v1:<base64-key>` and
 secret manager, not a checked-in environment file. The database stores only
 AES-256-GCM envelopes bound to the learner row. At startup, plaintext legacy
 rows and envelopes using a retained old key are re-encrypted with the current
-key before traffic is accepted.
+key before traffic is accepted. General learner-profile reads and scheduler
+audience pages never select or decrypt this credential; the scheduler resolves
+it only inside the final durable-delivery boundary immediately before HTTP.
 
 ### Key rotation and rollback
 
@@ -45,21 +60,41 @@ same rotation pass re-encrypt the rows. Never restore an older database backup
 without also restoring the keyring versions needed by that backup. The
 database restore procedure below remains the data rollback path.
 
-### Experimental multi-node profile
+### Horizontal SaaS profile
 
-Multi-node operation is not part of the robust MVP support target. For controlled testing, every instance must use:
+For multi-node production, every instance must use:
 
-- `JWT_SECRET` **identical** on every instance (tokens are verified anywhere).
+- `JWT_ED25519_KEYS` identical on every issuer instance, with exactly one active
+  Ed25519 private key and the previous public key retained through the maximum
+  access-token TTL. Verification keys are published at `/.well-known/jwks.json`.
 - `DB_DRIVER=postgres` and the same `DATABASE_URL`.
 - `SCHEDULER_MODE=distributed` — each scheduled run slot has at most one lease winner across the fleet.
 - `RATELIMIT_BACKEND=postgres` — rate-limit and login-failure counters live in the shared database.
-- `TUTOR_MCP_MEMORY_ENABLED=off` — Markdown memory is node-local and would otherwise diverge.
+- `TUTOR_MCP_MEMORY_BACKEND=database` (or
+  `TUTOR_MCP_MEMORY_ENABLED=off`) — narrative state must be shared.
 
-Startup rejects incomplete or unknown distributed settings. This makes configuration errors visible; it does not make the profile production-ready. The scheduler lease has no running/done state, expiry, heartbeat, or crash recovery, and webhook delivery is not exactly-once. Do not describe these instances as stateless while any node-local feature is enabled.
+Startup rejects incomplete or unknown distributed settings. Scheduler runs
+use durable states, fenced leases, heartbeat, bounded retry
+and DLQ. Direct Discord delivery remains explicitly at-least-once: ambiguous
+transport outcomes are quarantined as `delivery_unknown` for operator
+reconciliation because Discord cannot deduplicate the internal `event_id`.
+Do not describe these instances as stateless while narrative memory or another
+node-local feature is enabled.
 
 ## Database backup
 
-The SQLite profile keeps all state in `${DB_PATH:-./data/runtime.db}`. Loss of that file resets every learner to `PMastery=0.1` and erases trend windows. Backup posture is part of the product premise, not an afterthought. (On Postgres, use your standard `pg_dump`/PITR posture instead of the SQLite recipes below.)
+The SQLite profile keeps relational state in `${DB_PATH:-./data/runtime.db}`;
+the local narrative backend remains a separate tree. Loss of either loses part
+of learner state. With PostgreSQL/database narrative memory, use a coordinated
+`pg_dump`/PITR posture and retain the encryption key versions required by the
+backup instead of the SQLite recipes below.
+
+For SaaS, use the encrypted streaming backup, full restore, real WAL replay and
+logical tenant procedures in
+[`tenant-restore-runbook.md`](./docs/tenant-restore-runbook.md). The scripts are
+`deploy/postgres-backup.sh`, `deploy/postgres-full-restore-exercise.sh`,
+`deploy/pitr-restore-exercise.sh`, `deploy/tenant-logical-backup.sh` and
+`deploy/tenant-logical-restore-exercise.sh`.
 
 ### What ships in the repo
 
@@ -210,13 +245,22 @@ DB_PATH=/home/ubuntu/mcp/data/runtime.db ./tutor-retention \
   --memory-days=180
 ```
 
-The JSON report separates `eligible` rows from `applied` mutations. In a
-dry-run every `applied` value is zero. Review the report, take a fresh backup,
-then repeat the exact command with `--apply`. Apply mode is one database
-transaction: any category failure rolls the whole run back.
+The JSON report separates policy-matching `eligible` objects, actual `applied`
+mutations, and objects preserved by an active legal hold in `held`. In a
+dry-run every `applied` value is zero. Preserve the exact command and report,
+review them, then take a fresh backup. A new apply job is rejected unless its
+operator-supplied backup timestamp is at most 24 hours older than the immutable
+job cutoff.
 
 ```bash
 systemctl --user start tutor-mcp-backup.service
+
+# Replace these examples with the identifier, reference and completion time
+# recorded by the backup system. The job ID must be unique to this policy run.
+RETENTION_JOB_ID=retention-20260811-1200
+RETENTION_BACKUP_REFERENCE=/home/ubuntu/backups/tutor-mcp/runtime-2026-08-11T11-58-00Z.db
+RETENTION_BACKUP_CREATED_AT=2026-08-11T11:58:00Z
+
 DB_PATH=/home/ubuntu/mcp/data/runtime.db ./tutor-retention \
   --webhook-days=30 \
   --webhook-live-days=14 \
@@ -227,13 +271,75 @@ DB_PATH=/home/ubuntu/mcp/data/runtime.db ./tutor-retention \
   --event-days=90 \
   --consolidation-days=180 \
   --memory-days=180 \
+  --job-id="$RETENTION_JOB_ID" \
+  --actor=operator@example.com \
+  --backup-reference="$RETENTION_BACKUP_REFERENCE" \
+  --backup-created-at="$RETENTION_BACKUP_CREATED_AT" \
   --apply
 ```
+
+Apply mode persists the policy, cutoff, backup proof and phase reports under
+`job-id`. The relational phase and its checkpoint commit in one transaction;
+the narrative phase follows and is idempotent. A category failure rolls the
+relational transaction back. A process crash, expired 30-minute lease, or
+narrative failure leaves a durable partial status. Inspect it with:
+
+```bash
+DB_PATH=/home/ubuntu/mcp/data/runtime.db ./tutor-retention \
+  --action=job-status --job-id="$RETENTION_JOB_ID"
+```
+
+Resume by repeating the apply command with the same job ID and exact policy,
+backup reference and backup timestamp. Completed phases are not replayed. A
+different manifest is rejected; create a new job ID only for a deliberately
+new policy run. Keep the final JSON report with the change record: its category
+and phase counters prove which objects were eligible, mutated or held, while
+`last_error` preserves a partial failure. Do not run two operators against the
+same job; the durable lease admits only one owner.
+
+### Retention legal holds
+
+Create a hold before the dry-run. Omit `--apply` to preview the record, then
+repeat with `--apply` after review:
+
+```bash
+DB_PATH=/home/ubuntu/mcp/data/runtime.db ./tutor-retention \
+  --action=hold-create \
+  --hold-id=case-2026-0042 \
+  --learner=L123 \
+  --reason='litigation preservation request 2026-0042' \
+  --actor=legal@example.com \
+  --apply
+
+DB_PATH=/home/ubuntu/mcp/data/runtime.db ./tutor-retention \
+  --action=hold-list --limit=100
+```
+
+An active hold preserves that learner's objects in every supported relational
+category and in either the local or database narrative backend; they appear in
+`held`, never `eligible` or `applied`. Releasing a hold is a separate audited,
+one-way action. Preview first by omitting `--apply`:
+
+```bash
+DB_PATH=/home/ubuntu/mcp/data/runtime.db ./tutor-retention \
+  --action=hold-release \
+  --hold-id=case-2026-0042 \
+  --reason='written release received 2026-09-01' \
+  --actor=legal@example.com \
+  --apply
+```
+
+Never reuse a released hold ID. Create a new hold record if preservation is
+required again. Retention after release requires a new dry-run, fresh backup
+and new job.
 
 The command refuses to create a missing SQLite file and does not run schema
 migrations. Point it only at a database already migrated by the matching server
 binary. For PostgreSQL, set `DB_DRIVER=postgres` and `DATABASE_URL`; do not put
-the DSN on the command line where process listings can expose it.
+the DSN on the command line where process listings can expose it. Set
+`TUTOR_MCP_MEMORY_BACKEND=database` (the PostgreSQL default), or pass the same
+`--memory-backend=local|database` value used by the server, so the narrative
+phase targets the correct storage system.
 
 SQLite dry-run opens the main database with `mode=ro` and `query_only=ON`; it
 does not run a write transaction or change journal mode. SQLite may still
@@ -271,8 +377,13 @@ Deleting it changes the learner model and requires a separate product/legal
 decision. Expired OAuth codes and refresh-token families continue to use their
 existing security-specific cleanup and are intentionally not duplicated here.
 Run maintenance during a low-write window if the dry-run counts must match the
-subsequent apply exactly. Also align backup-object retention with the same
-privacy policy: deleting live rows does not erase older backup copies.
+subsequent apply exactly. Align backup-object retention, off-host copies and
+encryption-key destruction with the same privacy policy: deleting live rows
+does not erase older backup copies. Restoring a backup taken before a retention
+job can reintroduce deleted data. Record completed job reports outside the live
+database, reconcile holds after restore, run a new dry-run, take a new backup,
+and apply a new retention job before returning the restored service to normal
+traffic.
 
 ## Webhook retry and dead-letter lifecycle
 
@@ -368,15 +479,21 @@ journalctl --user -u tutor-mcp --since "1 hour ago" \
 - **No `interaction recorded` logs while exercises are happening** — the LLM is generating activities but not closing the loop with `record_interaction`. Cohérence-of-rule-3 problem in the system prompt.
 - **Repeated `phase fallback (NoFringe)` for the same domain** — the candidate pool is empty. Likely cause: missing `goal_relevance` on a domain where the strict contract is enforced (partial vector). Run `set_goal_relevance` to repair.
 
-## Operational constraints
+## Operational profiles
 
-The recommended profile is a **single process on a single host**:
+The local profile is a **single process on a single host**:
 
 - With `RATELIMIT_BACKEND=memory`, token buckets and login-failure counters reset on restart.
 - With `SCHEDULER_MODE=inprocess`, a second process would run the same scheduled jobs.
-- With narrative memory enabled (the default), Markdown files are local to one host and concurrent read-modify-write operations are not coordinated across processes.
+- With `TUTOR_MCP_MEMORY_BACKEND=local`, Markdown files are local to one host and concurrent read-modify-write operations are not coordinated across processes.
 
-PostgreSQL-backed rate limits and scheduler leases address only the first two points. They do not provide a shared narrative-memory backend, crash-safe job recovery, or an exactly-once webhook outbox. Until those gaps are closed and load/failure tests exist, treat multi-node as experimental and use single-node SQLite for the robust MVP.
+The supported SaaS profile uses PostgreSQL, shared rate limits, recoverable
+fenced job leases, durable outbox/webhook state and the encrypted/versioned
+`database` narrative backend. Direct Discord delivery cannot be exactly-once:
+an ambiguous outcome remains quarantined for operator reconciliation. Tenant SaaS
+webhooks use their separate signed, deduplicable contract. See the
+[runtime](./docs/saas-runtime-operations.md), [SLO](./docs/saas-slo.md) and
+[restore](./docs/tenant-restore-runbook.md) runbooks.
 
 For the single-node profile, avoid restart storms while a login lockout is actively protecting an account and include `${TUTOR_MCP_MEMORY_ROOT:-~/.tutor-mcp}` in the off-host backup plan.
 

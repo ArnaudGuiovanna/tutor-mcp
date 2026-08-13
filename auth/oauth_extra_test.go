@@ -1277,6 +1277,7 @@ func TestVerifyClientAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("hash: %v", err)
 	}
+	budget := mustBcryptBudget(1)
 	cases := []struct {
 		name    string
 		client  *models.OAuthClient
@@ -1291,7 +1292,7 @@ func TestVerifyClientAuth(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := verifyClientAuth(tc.client, tc.secret)
+			err := verifyClientAuthWithBudget(context.Background(), budget, tc.client, tc.secret)
 			if tc.wantErr && err == nil {
 				t.Fatalf("expected error")
 			}
@@ -2024,9 +2025,10 @@ func TestAuthorizePost_LoginEmailIsCaseInsensitive(t *testing.T) {
 	}
 }
 
-// Failure accounting is case-normalized, but reaching the threshold must not
-// let an attacker lock the rightful owner out: correct credentials still win.
-func TestAuthorizePost_LoginFailureThresholdDoesNotLockOutOwner(t *testing.T) {
+// Failure accounting is case-normalized. A correct password at the threshold
+// does not grant a code to an unfamiliar device: mailbox confirmation creates
+// a bounded trusted-device cookie, after which the owner can sign in normally.
+func TestAuthorizePost_LoginFailureThresholdRequiresRecoverableDeviceChallenge(t *testing.T) {
 	s, store := newTestServer(t)
 	seedClient(t, store, "cid", "https://good.example/cb")
 	seedLearner(t, store, "bob@x.com", "correct-password")
@@ -2046,7 +2048,7 @@ func TestAuthorizePost_LoginFailureThresholdDoesNotLockOutOwner(t *testing.T) {
 		form.Set("approve_client", "yes")
 		return form
 	}
-	postLogin := func(form url.Values) *httptest.ResponseRecorder {
+	postLogin := func(form url.Values, cookies ...*http.Cookie) *httptest.ResponseRecorder {
 		csrf, err := generateCSRFToken()
 		if err != nil {
 			t.Fatalf("generate csrf: %v", err)
@@ -2055,6 +2057,9 @@ func TestAuthorizePost_LoginFailureThresholdDoesNotLockOutOwner(t *testing.T) {
 		req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		req.AddCookie(&http.Cookie{Name: "csrf_token", Value: csrf})
+		for _, cookie := range cookies {
+			req.AddCookie(cookie)
+		}
 		rec := httptest.NewRecorder()
 		s.HandleAuthorizePost(rec, req)
 		return rec
@@ -2063,19 +2068,90 @@ func TestAuthorizePost_LoginFailureThresholdDoesNotLockOutOwner(t *testing.T) {
 	// Burn the 5-failure budget on the mixed-case form.
 	for i := 0; i < 5; i++ {
 		rec := postLogin(mkForm("Bob@x.com", "wrong-password"))
-		if rec.Code != http.StatusUnauthorized {
-			t.Fatalf("attempt %d: status = %d, want 401; body=%q", i+1, rec.Code, rec.Body.String())
+		wantStatus := http.StatusUnauthorized
+		if i == 4 {
+			wantStatus = http.StatusTooManyRequests
+		}
+		if rec.Code != wantStatus {
+			t.Fatalf("attempt %d: status = %d, want %d; body=%q", i+1, rec.Code, wantStatus, rec.Body.String())
 		}
 		if !strings.Contains(rec.Body.String(), "Invalid email or password") {
 			t.Fatalf("attempt %d: expected invalid-credentials message; body=%q", i+1, rec.Body.String())
 		}
+		if i == 4 && rec.Header().Get("Retry-After") != "1" {
+			t.Fatalf("attempt %d: Retry-After=%q, want 1", i+1, rec.Header().Get("Retry-After"))
+		}
 	}
 
-	// A sixth attempt under a different case with the correct password must
-	// succeed and reset the shared failure bucket.
+	// Correct credentials now trigger a mailbox challenge rather than a global
+	// account lockout or an immediate authorization grant.
 	rec := postLogin(mkForm("BOB@x.com", "correct-password"))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("adaptive challenge status=%d, want 202; body=%q", rec.Code, rec.Body.String())
+	}
+	sender := s.emailSender.(*testEmailSender)
+	if len(sender.challengeLinks) != 1 || len(sender.challengeTo) != 1 || sender.challengeTo[0] != "bob@x.com" {
+		t.Fatalf("security challenge deliveries=%v recipients=%v", sender.challengeLinks, sender.challengeTo)
+	}
+	challengeURL, err := url.Parse(sender.challengeLinks[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawToken := challengeURL.Query().Get("token")
+	getRec := httptest.NewRecorder()
+	s.HandleLoginChallengeGet(getRec, httptest.NewRequest(http.MethodGet, challengeURL.String(), nil))
+	if getRec.Code != http.StatusOK || !strings.Contains(getRec.Body.String(), "Confirm this sign-in") {
+		t.Fatalf("challenge confirmation status=%d body=%q", getRec.Code, getRec.Body.String())
+	}
+	var accountCookie *http.Cookie
+	for _, cookie := range getRec.Result().Cookies() {
+		if cookie.Name == accountCSRFCookieName {
+			accountCookie = cookie
+			break
+		}
+	}
+	if accountCookie == nil {
+		t.Fatal("challenge confirmation omitted CSRF cookie")
+	}
+	confirm := url.Values{"token": {rawToken}, "csrf_token": {accountCookie.Value}}
+	confirmReq := httptest.NewRequest(http.MethodPost, "/login-challenge", strings.NewReader(confirm.Encode()))
+	confirmReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	confirmReq.AddCookie(accountCookie)
+	confirmRec := httptest.NewRecorder()
+	s.HandleLoginChallengePost(confirmRec, confirmReq)
+	if confirmRec.Code != http.StatusFound || !strings.Contains(confirmRec.Header().Get("Location"), "/authorize?") {
+		t.Fatalf("challenge confirmation status=%d location=%q", confirmRec.Code, confirmRec.Header().Get("Location"))
+	}
+	var trustedCookie *http.Cookie
+	for _, cookie := range confirmRec.Result().Cookies() {
+		if cookie.Name == trustedLoginDeviceCookieName {
+			trustedCookie = cookie
+			break
+		}
+	}
+	if trustedCookie == nil || !trustedCookie.HttpOnly || !trustedCookie.Secure || trustedCookie.MaxAge <= 0 {
+		t.Fatalf("trusted-device cookie=%+v", trustedCookie)
+	}
+
+	// The confirmed device succeeds immediately and clears the failure signal.
+	rec = postLogin(mkForm("BOB@x.com", "correct-password"), trustedCookie)
 	if rec.Code != http.StatusFound {
-		t.Fatalf("correct owner credentials were locked out; status=%d, body=%q", rec.Code, rec.Body.String())
+		t.Fatalf("confirmed owner sign-in status=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if !s.loginFailures.Allow("bob@x.com") {
+		t.Fatal("successful challenged sign-in did not reset the account failure signal")
+	}
+
+	// A copied email link cannot be consumed twice.
+	replayCSRF := "challenge-replay-csrf"
+	replayForm := url.Values{"token": {rawToken}, "csrf_token": {replayCSRF}}
+	replayReq := httptest.NewRequest(http.MethodPost, "/login-challenge", strings.NewReader(replayForm.Encode()))
+	replayReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	replayReq.AddCookie(&http.Cookie{Name: accountCSRFCookieName, Value: replayCSRF})
+	replayRec := httptest.NewRecorder()
+	s.HandleLoginChallengePost(replayRec, replayReq)
+	if replayRec.Code != http.StatusBadRequest {
+		t.Fatalf("challenge replay status=%d, want 400", replayRec.Code)
 	}
 }
 

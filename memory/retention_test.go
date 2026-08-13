@@ -4,7 +4,9 @@
 package memory
 
 import (
+	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -41,5 +43,47 @@ func TestRunRetentionDryRunThenApply(t *testing.T) {
 	}
 	if _, err := os.Stat(freshPath); err != nil {
 		t.Fatalf("fresh memory was removed: %v", err)
+	}
+}
+
+func TestRunRetentionResumesAfterPartialFilesystemFailure(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("TUTOR_MCP_MEMORY_ROOT", root)
+	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
+	for _, learnerID := range []string{"L1", "L2"} {
+		if err := Write(WriteRequest{LearnerID: learnerID, Scope: ScopeMemory, Operation: OpReplaceFile, Content: "old"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now().UTC()
+	for _, learnerID := range []string{"L1", "L2"} {
+		path, _ := PathForRead(learnerID, ScopeMemory, "")
+		if err := os.Chtimes(path, now.Add(-60*24*time.Hour), now.Add(-60*24*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	originalRemove := removeRetentionFile
+	removals := 0
+	removeRetentionFile = func(path string) error {
+		removals++
+		if removals == 2 {
+			return errors.New("injected crash boundary")
+		}
+		return os.Remove(path)
+	}
+	t.Cleanup(func() { removeRetentionFile = originalRemove })
+	partial, err := RunRetention(now.Add(-30*24*time.Hour), true)
+	if err == nil || partial.Applied != 1 {
+		t.Fatalf("partial retention=%+v err=%v", partial, err)
+	}
+	removeRetentionFile = originalRemove
+	resumed, err := RunRetention(now.Add(-30*24*time.Hour), true)
+	if err != nil || resumed.Eligible != 1 || resumed.Applied != 1 {
+		t.Fatalf("resumed retention=%+v err=%v", resumed, err)
+	}
+	for _, learnerID := range []string{"L1", "L2"} {
+		if _, err := os.Stat(filepath.Join(root, "learners", learnerID, "MEMORY.md")); !os.IsNotExist(err) {
+			t.Fatalf("old narrative for %s remains: %v", learnerID, err)
+		}
 	}
 }

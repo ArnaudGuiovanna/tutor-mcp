@@ -6,10 +6,12 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 )
 
 func TestGetLearnerContext_NoAuth(t *testing.T) {
@@ -244,18 +246,140 @@ func TestGetLearnerContext_DomainsExposePriorityRank(t *testing.T) {
 	}
 }
 
-func TestBuildProgressNarrative_ReturnsNilWhenNoData(t *testing.T) {
+func TestGetLearnerContextUsesSpecializedReadModel(t *testing.T) {
 	store, deps := setupToolsTest(t)
+	domain := makeOwnerDomain(t, store, "L_owner", "math")
+	counting := &learnerContextReadCountingStore{Store: store}
+	deps.Store = counting
+
+	res := callTool(t, deps, registerGetLearnerContext, "L_owner", "get_learner_context", map[string]any{
+		"domain_id": domain.ID,
+	})
+	if res.IsError {
+		t.Fatalf("get learner context: %q", resultText(res))
+	}
+	if got := counting.overview.Load(); got != 1 {
+		t.Fatalf("overview read-model calls = %d, want 1", got)
+	}
+	if got := counting.narrative.Load(); got != 1 {
+		t.Fatalf("narrative read-model calls = %d, want 1", got)
+	}
+	if got := counting.legacy.Load(); got != 0 {
+		t.Fatalf("legacy broad/sequential context reads = %d, want 0", got)
+	}
+}
+
+func TestGetLearnerContextScopesGroupedTodayCountsToActiveDomains(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	active := makeOwnerDomain(t, store, "L_owner", "active")
+	archived, err := store.CreateDomain(context.Background(), "L_owner", "archived", "", models.KnowledgeSpace{
+		Concepts:      []string{"archived-concept"},
+		Prerequisites: map[string][]string{},
+	})
+	if err != nil {
+		t.Fatalf("create archived domain: %v", err)
+	}
+	if err := store.ArchiveDomain(context.Background(), archived.ID, "L_owner"); err != nil {
+		t.Fatalf("archive domain: %v", err)
+	}
+	now := time.Now().UTC()
+	for _, row := range []struct {
+		domainID string
+		concept  string
+	}{
+		{domainID: active.ID, concept: "a"},
+		{domainID: archived.ID, concept: "archived-concept"},
+		{domainID: "deleted-or-foreign", concept: "ghost"},
+		{domainID: "", concept: "a"}, // legacy, uniquely attributable to active
+		{domainID: "", concept: "ghost"},
+	} {
+		if _, err := store.RawDB().ExecContext(context.Background(), `INSERT INTO interactions
+			(learner_id, domain_id, concept, activity_type, success, created_at)
+			VALUES (?, ?, ?, 'PRACTICE', 1, ?)`, "L_owner", row.domainID, row.concept, now); err != nil {
+			t.Fatalf("insert interaction %+v: %v", row, err)
+		}
+	}
+
+	res := callTool(t, deps, registerGetLearnerContext, "L_owner", "get_learner_context", map[string]any{
+		"domain_id": active.ID,
+	})
+	if res.IsError {
+		t.Fatalf("get context: %q", resultText(res))
+	}
+	out := decodeResult(t, res)
+	if out["interactions_today"] != float64(2) {
+		t.Fatalf("interactions_today = %v, want active scoped + unique legacy only", out["interactions_today"])
+	}
+}
+
+func TestBuildProgressNarrative_ReturnsNilWhenNoData(t *testing.T) {
+	store, _ := setupToolsTest(t)
 	d := makeOwnerDomain(t, store, "L_owner", "math")
-	learner, err := store.GetLearnerByID(context.Background(), "L_owner")
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, err := buildProgressNarrative(context.Background(), deps, "L_owner", learner, d)
-	if err != nil {
-		t.Fatalf("build progress narrative: %v", err)
-	}
+	got := buildProgressNarrative(
+		time.Now().UTC(),
+		time.Time{},
+		&storeport.LearnerContextDomain{ID: d.ID, Graph: d.Graph},
+		nil,
+		&storeport.LearnerContextNarrativeSignals{},
+	)
 	if got != nil {
 		t.Fatalf("expected nil narrative when no signals, got %+v", got)
 	}
+}
+
+type learnerContextReadCountingStore struct {
+	storeport.Store
+	overview  atomic.Int64
+	narrative atomic.Int64
+	legacy    atomic.Int64
+}
+
+func (s *learnerContextReadCountingStore) GetLearnerContextOverview(ctx context.Context, learnerID string, now time.Time) (*storeport.LearnerContextOverview, error) {
+	s.overview.Add(1)
+	return s.Store.GetLearnerContextOverview(ctx, learnerID, now)
+}
+
+func (s *learnerContextReadCountingStore) GetLearnerContextNarrativeSignals(ctx context.Context, learnerID, domainID string, concepts []string, now time.Time) (*storeport.LearnerContextNarrativeSignals, error) {
+	s.narrative.Add(1)
+	return s.Store.GetLearnerContextNarrativeSignals(ctx, learnerID, domainID, concepts, now)
+}
+
+func (s *learnerContextReadCountingStore) GetLearnerByID(ctx context.Context, learnerID string) (*models.Learner, error) {
+	s.legacy.Add(1)
+	return s.Store.GetLearnerByID(ctx, learnerID)
+}
+
+func (s *learnerContextReadCountingStore) GetDomainsByLearner(ctx context.Context, learnerID string, includeArchived bool) ([]*models.Domain, error) {
+	s.legacy.Add(1)
+	return s.Store.GetDomainsByLearner(ctx, learnerID, includeArchived)
+}
+
+func (s *learnerContextReadCountingStore) GetConceptStatesByLearner(ctx context.Context, learnerID string) ([]*models.ConceptState, error) {
+	s.legacy.Add(1)
+	return s.Store.GetConceptStatesByLearner(ctx, learnerID)
+}
+
+func (s *learnerContextReadCountingStore) GetInteractionsSince(ctx context.Context, learnerID string, since time.Time) ([]*models.Interaction, error) {
+	s.legacy.Add(1)
+	return s.Store.GetInteractionsSince(ctx, learnerID, since)
+}
+
+func (s *learnerContextReadCountingStore) ConceptMasteryDeltaInDomain(ctx context.Context, learnerID, domainID string, concepts []string, since time.Time, limit int) ([]models.ConceptDelta, error) {
+	s.legacy.Add(1)
+	return s.Store.ConceptMasteryDeltaInDomain(ctx, learnerID, domainID, concepts, since, limit)
+}
+
+func (s *learnerContextReadCountingStore) CountLearnerSessionStreak(ctx context.Context, learnerID string) (int, error) {
+	s.legacy.Add(1)
+	return s.Store.CountLearnerSessionStreak(ctx, learnerID)
+}
+
+func (s *learnerContextReadCountingStore) MilestonesInWindowInDomain(ctx context.Context, learnerID, domainID string, concepts []string, since time.Time) ([]string, error) {
+	s.legacy.Add(1)
+	return s.Store.MilestonesInWindowInDomain(ctx, learnerID, domainID, concepts, since)
+}
+
+func (s *learnerContextReadCountingStore) GetRecentAffectStates(ctx context.Context, learnerID string, limit int) ([]*models.AffectState, error) {
+	s.legacy.Add(1)
+	return s.Store.GetRecentAffectStates(ctx, learnerID, limit)
 }

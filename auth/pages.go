@@ -47,6 +47,12 @@ type authPageData struct {
 	ScopeDescription    string
 	Resource            string
 	CSRFToken           string
+	TenantOptions       []tenantOption
+}
+
+type tenantOption struct {
+	ID   string
+	Name string
 }
 
 // generateNonce returns a fresh base64 nonce for CSP script-src.
@@ -244,7 +250,8 @@ var authTmpl = template.Must(template.New("auth").Parse(`<!DOCTYPE html>
     label:first-of-type { margin-top: 0; }
 
     input[type="email"],
-    input[type="password"] {
+	input[type="password"],
+	select {
       width: 100%;
       background: rgba(255, 255, 255, 0.85);
       border: 1px solid rgba(122, 115, 112, 0.3);
@@ -259,7 +266,7 @@ var authTmpl = template.Must(template.New("auth").Parse(`<!DOCTYPE html>
     input[type="email"]::placeholder,
     input[type="password"]::placeholder { color: rgba(122, 115, 112, 0.55); }
 
-    input:focus {
+	input:focus, select:focus {
       border-color: var(--terracotta);
       background: #fff;
       box-shadow: 0 0 0 3px rgba(232, 128, 74, 0.18);
@@ -383,6 +390,14 @@ var authTmpl = template.Must(template.New("auth").Parse(`<!DOCTYPE html>
           <label for="login-password">Password</label>
           <input id="login-password" type="password" name="password" placeholder="••••••••" required autocomplete="current-password" />
 
+          {{if .Data.TenantOptions}}
+          <label for="login-tenant">Organization</label>
+          <select id="login-tenant" name="tenant_id" required>
+            <option value="">Choose an organization</option>
+            {{range .Data.TenantOptions}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
+          </select>
+          {{end}}
+
           <div class="consent-box">
             <p><strong>{{.Data.ClientName}}</strong> wants access to your tutor/mcp learner account.</p>
 			<p><strong>Requested permissions:</strong> {{.Data.ScopeDescription}}</p>
@@ -460,6 +475,17 @@ type tmplData struct {
 }
 
 func renderAuthPage(w http.ResponseWriter, data authPageData, errMsg string, mode string) {
+	status := http.StatusOK
+	if errMsg != "" {
+		status = http.StatusUnauthorized
+	}
+	renderAuthPageStatus(w, status, data, errMsg, mode)
+}
+
+// renderAuthPageStatus keeps security and transient failures on the same HTML
+// path while allowing callers to distinguish invalid credentials (401),
+// progressive backpressure (429), and exhausted bcrypt capacity (503).
+func renderAuthPageStatus(w http.ResponseWriter, status int, data authPageData, errMsg string, mode string) {
 	if data.ClientName == "" {
 		data.ClientName = data.ClientID
 	}
@@ -493,8 +519,8 @@ func renderAuthPage(w http.ResponseWriter, data authPageData, errMsg string, mod
 		nonce, formAction,
 	))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if errMsg != "" {
-		w.WriteHeader(http.StatusUnauthorized)
+	if status != http.StatusOK {
+		w.WriteHeader(status)
 	}
 	if mode == "" {
 		mode = "login"

@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -148,33 +149,64 @@ func TestUpdateLastActive_AndProfile(t *testing.T) {
 	}
 }
 
-func TestGetActiveLearners(t *testing.T) {
+func TestListWebhookDispatchTargetsPageIsKeysetBoundedAndNarrow(t *testing.T) {
 	store := setupTestDB(t)
-	// L1 (no webhook from setupTestDB) won't appear. Add two with webhooks.
-	if _, err := store.root.Exec(
-		rb(store, `INSERT INTO learners (id, email, password_hash, objective, webhook_url, created_at) VALUES ('L2','b@b','h','o','https://discord.com/x', ?)`),
-		time.Now(),
-	); err != nil {
-		t.Fatalf("insert L2: %v", err)
-	}
-	if _, err := store.root.Exec(
-		rb(store, `INSERT INTO learners (id, email, password_hash, objective, webhook_url, created_at) VALUES ('L3','c@c','h','o','https://discord.com/y', ?)`),
-		time.Now(),
-	); err != nil {
-		t.Fatalf("insert L3: %v", err)
-	}
-	got, err := store.GetActiveLearners(context.Background())
-	if err != nil {
-		t.Fatalf("active: %v", err)
-	}
-	if len(got) != 2 {
-		t.Errorf("expected 2 active learners, got %d", len(got))
-	}
-	// Each must have a non-empty webhook URL.
-	for _, l := range got {
-		if l.WebhookURL == "" {
-			t.Errorf("expected non-empty webhook for %s", l.ID)
+	now := time.Now().UTC()
+	for _, id := range []string{"page-A", "page-B", "page-C", "page-D", "page-E"} {
+		if _, err := store.root.Exec(
+			store.rebind(`INSERT INTO learners
+			    (id, email, password_hash, objective, webhook_url, created_at, email_verified_at)
+			 VALUES (?, ?, 'must-not-leak', 'must-not-load', ?, ?, ?)`),
+			id, id+"@example.com", "https://discord.com/api/webhooks/1/"+id, now, now,
+		); err != nil {
+			t.Fatal(err)
 		}
+	}
+	custom := models.DefaultAvailability("page-C")
+	custom.NotificationConsent = true
+	custom.NotificationFrequency = models.NotificationFrequencyAsScheduled
+	custom.MaxNotificationsPerDay = 7
+	if err := store.UpsertAvailability(context.Background(), custom); err != nil {
+		t.Fatal(err)
+	}
+
+	var got []models.WebhookDispatchTarget
+	after := ""
+	for {
+		page, err := store.ListWebhookDispatchTargetsPage(context.Background(), after, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, page...)
+		if len(page) < 2 {
+			break
+		}
+		after = page[len(page)-1].LearnerID
+	}
+	if len(got) != 5 {
+		t.Fatalf("targets=%d, want 5", len(got))
+	}
+	for index, target := range got {
+		wantID := fmt.Sprintf("page-%c", 'A'+index)
+		if target.Availability == nil || target.LearnerID != wantID {
+			t.Fatalf("target[%d]=%+v, want %s", index, target, wantID)
+		}
+		if target.Availability.LearnerID != wantID {
+			t.Fatalf("incomplete target: %+v", target)
+		}
+		credential, err := store.GetWebhookDispatchURL(context.Background(), wantID)
+		if err != nil || credential != "https://discord.com/api/webhooks/1/"+wantID {
+			t.Fatalf("late credential lookup for %s: value=%q err=%v", wantID, credential, err)
+		}
+	}
+	if !got[2].Availability.NotificationConsent || got[2].Availability.MaxNotificationsPerDay != 7 {
+		t.Fatalf("joined custom availability=%+v", got[2].Availability)
+	}
+	if got[0].Availability.NotificationConsent || got[0].Availability.MaxNotificationsPerDay != 1 {
+		t.Fatalf("default availability=%+v", got[0].Availability)
+	}
+	if _, err := store.ListWebhookDispatchTargetsPage(context.Background(), "", 0); err == nil {
+		t.Fatal("zero page limit accepted")
 	}
 }
 
@@ -457,6 +489,9 @@ func TestDeleteDomainCleansAuxiliaryRowsAndKeepsPedagogicalHistory(t *testing.T)
 		now,
 	); err != nil {
 		t.Fatalf("insert L2: %v", err)
+	}
+	if err := store.EnsureRecoveryEnrollment(context.Background(), "L2"); err != nil {
+		t.Fatalf("create L2 recovery enrollment: %v", err)
 	}
 
 	d, err := store.CreateDomain(context.Background(), "L1", "go", "ship feature", makeKS("Goroutines"))
@@ -1054,29 +1089,32 @@ func TestGetConceptsDueForReview_ExcludesArchivedDomain(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	// Active domain with concept "active_c".
-	if _, err := store.root.Exec(
-		rb(store, `INSERT INTO domains (id, learner_id, name, graph_json, personal_goal, archived, value_framings_json, last_value_axis, created_at)
-		 VALUES ('d_active','L2','active','{"concepts":["active_c"],"prerequisites":{}}','goal',0,'','',?)`),
-		now,
-	); err != nil {
+	activeDomain, err := store.CreateDomain(context.Background(), "L2", "active", "goal", makeKS("active_c"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	// Archived domain with concept "archived_c".
-	if _, err := store.root.Exec(
-		rb(store, `INSERT INTO domains (id, learner_id, name, graph_json, personal_goal, archived, value_framings_json, last_value_axis, created_at)
-		 VALUES ('d_arch','L2','arch','{"concepts":["archived_c"],"prerequisites":{}}','goal',1,'','',?)`),
-		now,
-	); err != nil {
+	archivedDomain, err := store.CreateDomain(context.Background(), "L2", "arch", "goal", makeKS("archived_c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ArchiveDomain(context.Background(), archivedDomain.ID, "L2"); err != nil {
 		t.Fatal(err)
 	}
 	// Concept states: BOTH due, BOTH non-new.
-	for _, c := range []string{"active_c", "archived_c"} {
-		if _, err := store.root.Exec(
-			rb(store, `INSERT INTO concept_states (learner_id, concept, p_mastery, stability, difficulty, elapsed_days, scheduled_days, reps, lapses, card_state, last_review, next_review, p_learn, p_forget, p_slip, p_guess, theta)
-			 VALUES (?, ?, 0.5, 5, 5, 1, 1, 1, 0, 'review', ?, ?, 0.15, 0.1, 0.1, 0.2, 0)`),
-			"L2", c, past, past,
-		); err != nil {
+	for _, item := range []struct{ concept, domainID string }{
+		{"active_c", activeDomain.ID}, {"archived_c", archivedDomain.ID},
+	} {
+		state := models.NewConceptStateInDomain("L2", item.domainID, item.concept)
+		state.PMastery = 0.5
+		state.Stability = 5
+		state.Difficulty = 5
+		state.ElapsedDays = 1
+		state.ScheduledDays = 1
+		state.Reps = 1
+		state.CardState = "review"
+		state.LastReview = &past
+		state.NextReview = &past
+		if err := store.UpsertConceptState(context.Background(), state); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1175,11 +1213,15 @@ func TestGetActivityStreak(t *testing.T) {
 
 	// Learner with 3 consecutive days (today, -1, -2) → 3
 	mustExec(`INSERT INTO learners (id,email,password_hash,objective,created_at) VALUES ('L3','3@t.com','h','o',?)`, now)
+	if err := store.EnsureRecoveryEnrollment(context.Background(), "L3"); err != nil {
+		t.Fatalf("create L3 recovery enrollment: %v", err)
+	}
 	for _, off := range []int{0, -1, -2} {
-		mustExec(
-			`INSERT INTO interactions (learner_id, concept, activity_type, success, created_at) VALUES (?,'c','RECALL',1,?)`,
-			"L3", day(off),
-		)
+		if err := store.CreateInteraction(context.Background(), &models.Interaction{
+			LearnerID: "L3", Concept: "c", ActivityType: "RECALL", Success: true, CreatedAt: day(off),
+		}); err != nil {
+			t.Fatalf("create L3 interaction: %v", err)
+		}
 	}
 	got, err = store.GetActivityStreak(context.Background(), "L3")
 	if err != nil {
@@ -1191,11 +1233,15 @@ func TestGetActivityStreak(t *testing.T) {
 
 	// Learner with a hole (today + day -2 but missing -1) → 1
 	mustExec(`INSERT INTO learners (id,email,password_hash,objective,created_at) VALUES ('Lhole','h@t.com','h','o',?)`, now)
+	if err := store.EnsureRecoveryEnrollment(context.Background(), "Lhole"); err != nil {
+		t.Fatalf("create Lhole recovery enrollment: %v", err)
+	}
 	for _, off := range []int{0, -2} {
-		mustExec(
-			`INSERT INTO interactions (learner_id, concept, activity_type, success, created_at) VALUES (?,'c','RECALL',1,?)`,
-			"Lhole", day(off),
-		)
+		if err := store.CreateInteraction(context.Background(), &models.Interaction{
+			LearnerID: "Lhole", Concept: "c", ActivityType: "RECALL", Success: true, CreatedAt: day(off),
+		}); err != nil {
+			t.Fatalf("create Lhole interaction: %v", err)
+		}
 	}
 	got, err = store.GetActivityStreak(context.Background(), "Lhole")
 	if err != nil {

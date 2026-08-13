@@ -15,8 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/crypto/bcrypt"
-
 	"tutor-mcp/models"
 	storeport "tutor-mcp/store"
 )
@@ -26,12 +24,22 @@ const (
 	accountTokenMaxLen                  = 512
 	emailVerificationTTL                = 30 * time.Minute
 	passwordResetTTL                    = 15 * time.Minute
+	loginChallengeTTL                   = 10 * time.Minute
+	trustedLoginDeviceTTL               = 30 * 24 * time.Hour
 	accountCSRFCookieName               = "account_csrf"
+	trustedLoginDeviceCookieName        = "tutor_trusted_device"
 	accountTokenEmailVerification       = "email_verification"
 	accountTokenPasswordReset           = "password_reset"
 )
 
 func (s *OAuthServer) SetEmailSender(sender EmailSender) { s.emailSender = sender }
+
+func renderBcryptBusyAccountPage(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", bcryptBusyRetryAfter)
+	renderAccountPage(w, http.StatusServiceUnavailable, accountPageData{
+		Title: "Temporarily busy", Message: "Password processing is at capacity. Please try again shortly.",
+	})
+}
 
 func accountTokenHash(raw string) string {
 	sum := sha256.Sum256([]byte(raw))
@@ -60,7 +68,7 @@ func (s *OAuthServer) validateAccountCSRF(r *http.Request) bool {
 		subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(formToken)) != 1 {
 		return false
 	}
-	return s.consumeCSRF(formToken)
+	return s.consumeCSRF(r.Context(), formToken)
 }
 
 func oauthContinuation(data authPageData) *models.AccountToken {
@@ -172,6 +180,122 @@ func (s *OAuthServer) sendPasswordReset(ctx context.Context, learner *models.Lea
 	return nil
 }
 
+func (s *OAuthServer) sendLoginChallenge(ctx context.Context, learner *models.Learner, data authPageData) (bool, error) {
+	sender, ok := s.emailSender.(LoginChallengeEmailSender)
+	if !ok || sender == nil {
+		return false, fmt.Errorf("login challenge delivery is not configured")
+	}
+	raw, err := generateCode()
+	if err != nil {
+		return false, fmt.Errorf("generate login challenge: %w", err)
+	}
+	now := time.Now().UTC()
+	challenge := &models.LoginChallenge{
+		TokenHash: accountTokenHash(raw), LearnerID: learner.ID,
+		ClientID: data.ClientID, RedirectURI: data.RedirectURI,
+		Resource: data.Resource, State: data.State, Scope: data.Scope,
+		CodeChallenge: data.CodeChallenge, CodeChallengeMethod: data.CodeChallengeMethod,
+		CreatedAt: now, ExpiresAt: now.Add(loginChallengeTTL),
+	}
+	created, err := s.store.CreateLoginChallenge(ctx, challenge)
+	if err != nil || !created {
+		return created, err
+	}
+	link := s.baseURL + "/login-challenge?" + url.Values{"token": []string{raw}}.Encode()
+	if err := sender.SendLoginChallenge(ctx, learner.Email, link); err != nil {
+		_ = s.store.DeleteLoginChallenge(ctx, challenge.TokenHash)
+		return false, fmt.Errorf("send login challenge: %w", err)
+	}
+	return true, nil
+}
+
+func (s *OAuthServer) isTrustedLoginDevice(ctx context.Context, r *http.Request, learnerID string) (bool, error) {
+	cookie, err := r.Cookie(trustedLoginDeviceCookieName)
+	if err != nil || !validRawAccountToken(cookie.Value) {
+		return false, nil
+	}
+	return s.store.IsTrustedLoginDevice(ctx, learnerID, accountTokenHash(cookie.Value), time.Now().UTC())
+}
+
+func setTrustedLoginDeviceCookie(w http.ResponseWriter, raw string) {
+	http.SetCookie(w, &http.Cookie{
+		Name: trustedLoginDeviceCookieName, Value: raw, Path: "/authorize",
+		MaxAge: int(trustedLoginDeviceTTL / time.Second), HttpOnly: true,
+		Secure: true, SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func (s *OAuthServer) HandleLoginChallengeGet(w http.ResponseWriter, r *http.Request) {
+	raw := r.URL.Query().Get("token")
+	if !validRawAccountToken(raw) {
+		renderAccountPage(w, http.StatusBadRequest, accountPageData{Title: "Invalid link", Message: "This sign-in confirmation link is invalid or expired."})
+		return
+	}
+	challenge, err := s.store.GetLoginChallenge(r.Context(), accountTokenHash(raw), time.Now().UTC())
+	if err != nil {
+		renderAccountPage(w, http.StatusBadRequest, accountPageData{Title: "Invalid link", Message: "This sign-in confirmation link is invalid or expired."})
+		return
+	}
+	csrfToken, err := generateCSRFToken()
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	setAccountCSRFCookie(w, csrfToken, "/login-challenge", int(loginChallengeTTL/time.Second))
+	renderAccountPage(w, http.StatusOK, accountPageData{
+		Title: "Confirm this sign-in", Message: "Unusual failed sign-in activity was detected before a correct password was entered.",
+		Token: raw, CSRFToken: csrfToken, ClientID: challenge.ClientID,
+		RedirectOrigin: formActionOriginFromRedirectURI(challenge.RedirectURI), ShowLoginChallenge: true,
+	})
+}
+
+func (s *OAuthServer) HandleLoginChallengePost(w http.ResponseWriter, r *http.Request) {
+	if !parseLimitedForm(w, r, accountFormBodyLimitBytes) {
+		return
+	}
+	if !s.validateAccountCSRF(r) {
+		http.Error(w, "forbidden: csrf check failed", http.StatusForbidden)
+		return
+	}
+	raw := r.FormValue("token")
+	if !validRawAccountToken(raw) {
+		renderAccountPage(w, http.StatusBadRequest, accountPageData{Title: "Invalid link", Message: "This sign-in confirmation link is invalid or expired."})
+		return
+	}
+	now := time.Now().UTC()
+	challenge, err := s.store.ConsumeLoginChallenge(
+		r.Context(), accountTokenHash(raw), now, now.Add(trustedLoginDeviceTTL),
+	)
+	if err != nil {
+		renderAccountPage(w, http.StatusBadRequest, accountPageData{Title: "Invalid link", Message: "This sign-in confirmation link is invalid or expired."})
+		return
+	}
+	continuation, err := url.Parse(s.baseURL + "/authorize")
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	query := continuation.Query()
+	query.Set("client_id", challenge.ClientID)
+	query.Set("redirect_uri", challenge.RedirectURI)
+	query.Set("response_type", "code")
+	query.Set("resource", challenge.Resource)
+	if challenge.State != "" {
+		query.Set("state", challenge.State)
+	}
+	if challenge.Scope != "" {
+		query.Set("scope", challenge.Scope)
+	}
+	if challenge.CodeChallenge != "" {
+		query.Set("code_challenge", challenge.CodeChallenge)
+		query.Set("code_challenge_method", challenge.CodeChallengeMethod)
+	}
+	continuation.RawQuery = query.Encode()
+	setTrustedLoginDeviceCookie(w, raw)
+	setAccountCSRFCookie(w, "", "/login-challenge", -1)
+	http.Redirect(w, r, continuation.String(), http.StatusFound)
+}
+
 func (s *OAuthServer) renderVerificationPending(w http.ResponseWriter) {
 	renderAccountPage(w, http.StatusAccepted, accountPageData{
 		Title:   "Check your email",
@@ -215,8 +339,15 @@ func (s *OAuthServer) HandleVerifyEmailPost(w http.ResponseWriter, r *http.Reque
 			"Explicit client approval is required. If you do not recognize this request, close the page.")
 		return
 	}
-	passwordHash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
+	passwordHash, err := s.bcrypt.Generate(r.Context(), []byte(password), bcryptCost)
 	if err != nil {
+		if errors.Is(err, ErrBcryptBusy) {
+			renderBcryptBusyAccountPage(w)
+			return
+		}
+		if r.Context().Err() != nil {
+			return
+		}
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -331,8 +462,15 @@ func (s *OAuthServer) HandleResetPasswordPost(w http.ResponseWriter, r *http.Req
 		renderAccountPage(w, http.StatusBadRequest, accountPageData{Title: "Could not reset password", Message: "The link or password is invalid."})
 		return
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
+	hash, err := s.bcrypt.Generate(r.Context(), []byte(password), bcryptCost)
 	if err != nil {
+		if errors.Is(err, ErrBcryptBusy) {
+			renderBcryptBusyAccountPage(w)
+			return
+		}
+		if r.Context().Err() != nil {
+			return
+		}
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}

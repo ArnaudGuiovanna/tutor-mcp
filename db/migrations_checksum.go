@@ -795,9 +795,1114 @@ WHERE scope NOT IN ('learner', 'learner:read', 'learner:write', 'learner:read le
 UPDATE account_tokens
 SET consumed_at = COALESCE(consumed_at, CURRENT_TIMESTAMP)
 WHERE purpose = 'email_verification'
-  AND scope NOT IN ('learner', 'learner:read', 'learner:write', 'learner:read learner:write')`,
+	  AND scope NOT IN ('learner', 'learner:read', 'learner:write', 'learner:read learner:write')`,
+	})
+	// A scheduler claim used to be a permanent tombstone: if the claimant died
+	// after INSERT, that window could never run again. Preserve legacy rows as
+	// completed (replaying them during migration would duplicate notifications),
+	// while giving new rows an explicit, recoverable lease lifecycle.
+	out = append(out, migration{
+		Version: "0036_recoverable_scheduled_job_leases",
+		Body: `ALTER TABLE scheduled_job_runs ADD COLUMN status TEXT NOT NULL DEFAULT 'succeeded';
+ALTER TABLE scheduled_job_runs ADD COLUMN owner TEXT NOT NULL DEFAULT '';
+ALTER TABLE scheduled_job_runs ADD COLUMN leased_until DATETIME;
+ALTER TABLE scheduled_job_runs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE scheduled_job_runs ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 3;
+ALTER TABLE scheduled_job_runs ADD COLUMN next_attempt_at DATETIME;
+ALTER TABLE scheduled_job_runs ADD COLUMN last_error TEXT NOT NULL DEFAULT '';
+ALTER TABLE scheduled_job_runs ADD COLUMN completed_at DATETIME;
+ALTER TABLE scheduled_job_runs ADD COLUMN updated_at DATETIME NOT NULL DEFAULT '1970-01-01 00:00:00';
+UPDATE scheduled_job_runs
+SET completed_at = claimed_at, updated_at = claimed_at
+WHERE status = 'succeeded';
+CREATE INDEX idx_scheduled_job_runs_runnable
+    ON scheduled_job_runs(status, next_attempt_at, leased_until)`,
+	})
+	// A durable outbound event keeps one stable identity across retries and is
+	// linked to its notification reservation. `dispatching` is the persisted
+	// pre-HTTP boundary; a stale row beyond it is quarantined as
+	// delivery_unknown rather than automatically retried. The transition table
+	// intentionally carries no payload or webhook URL.
+	out = append(out, migration{
+		Version: "0037_webhook_delivery_state_machine",
+		Body: `ALTER TABLE scheduled_alerts ADD COLUMN delivery_state TEXT NOT NULL DEFAULT 'reserved';
+UPDATE scheduled_alerts
+SET delivery_state = CASE WHEN sent = 1 THEN 'delivered' ELSE 'reserved' END;
+ALTER TABLE webhook_message_queue ADD COLUMN event_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE webhook_message_queue ADD COLUMN reservation_id INTEGER REFERENCES scheduled_alerts(id);
+ALTER TABLE webhook_message_queue ADD COLUMN dispatch_started_at DATETIME;
+UPDATE webhook_message_queue SET event_id = 'legacy-' || id WHERE event_id = '';
+CREATE UNIQUE INDEX idx_wmq_event_id
+    ON webhook_message_queue(event_id) WHERE event_id <> '';
+CREATE INDEX idx_wmq_delivery_reconcile
+    ON webhook_message_queue(status, claimed_at, dispatch_started_at, id);
+CREATE TABLE webhook_delivery_transitions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    queue_id      INTEGER NOT NULL REFERENCES webhook_message_queue(id) ON DELETE CASCADE,
+    event_id      TEXT NOT NULL,
+    learner_id    TEXT NOT NULL REFERENCES learners(id),
+    attempt_count INTEGER NOT NULL,
+    from_status   TEXT NOT NULL DEFAULT '',
+    to_status     TEXT NOT NULL,
+    reason        TEXT NOT NULL,
+    occurred_at   DATETIME NOT NULL
+);
+CREATE INDEX idx_webhook_delivery_transitions_event
+    ON webhook_delivery_transitions(event_id, id DESC);
+INSERT INTO webhook_delivery_transitions
+    (queue_id, event_id, learner_id, attempt_count, from_status, to_status, reason, occurred_at)
+SELECT id, event_id, learner_id, attempt_count, '', status, 'migration_snapshot',
+       COALESCE(sent_at, claimed_at, created_at)
+FROM webhook_message_queue`,
+	})
+	// Go-authored fallback payloads must enter the same durable state machine as
+	// LLM-authored messages. The explicit format bit lets the scheduler persist
+	// and replay the exact Discord payload without interpreting user-authored
+	// queue content as an internal transport envelope.
+	out = append(out, migration{
+		Version: "0038_webhook_content_format",
+		Body: `ALTER TABLE webhook_message_queue
+    ADD COLUMN content_format TEXT NOT NULL DEFAULT 'message'`,
+	})
+	// Per-attempt login rows grow with attacker traffic and make every count a
+	// range scan. Keep one bounded aggregate per normalized account key instead.
+	// Recent legacy events are folded into the first active ten-minute window;
+	// old events are intentionally discarded and the legacy journal is emptied.
+	out = append(out, migration{
+		Version: "0039_bounded_login_failure_windows",
+		Body: `CREATE TABLE login_failure_windows (
+    account_key       TEXT PRIMARY KEY,
+    window_started_at DATETIME NOT NULL,
+    last_attempt_at   DATETIME NOT NULL,
+    failure_count     INTEGER NOT NULL CHECK (failure_count BETWEEN 1 AND 100),
+    updated_at        DATETIME NOT NULL
+);
+CREATE INDEX idx_login_failure_windows_last_attempt
+    ON login_failure_windows(last_attempt_at);
+INSERT INTO login_failure_windows
+    (account_key, window_started_at, last_attempt_at, failure_count, updated_at)
+SELECT account_key, MIN(attempted_at), MAX(attempted_at),
+       MIN(COUNT(*), 100), MAX(attempted_at)
+FROM login_failures
+WHERE attempted_at > DATETIME(CURRENT_TIMESTAMP, '-10 minutes')
+GROUP BY account_key;
+DELETE FROM login_failures`,
+	})
+	out = append(out, migration{
+		Version: "0040_adaptive_login_challenges",
+		Body: `CREATE TABLE login_challenges (
+    token_hash            TEXT PRIMARY KEY,
+    learner_id            TEXT NOT NULL REFERENCES learners(id),
+    client_id             TEXT NOT NULL,
+    redirect_uri          TEXT NOT NULL,
+    resource              TEXT NOT NULL,
+    state                 TEXT NOT NULL DEFAULT '',
+    scope                 TEXT NOT NULL DEFAULT '',
+    code_challenge        TEXT NOT NULL DEFAULT '',
+    code_challenge_method TEXT NOT NULL DEFAULT '',
+    expires_at            DATETIME NOT NULL,
+    created_at            DATETIME NOT NULL,
+    consumed_at           DATETIME,
+    trusted_until         DATETIME,
+    active                INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1))
+);
+CREATE UNIQUE INDEX idx_login_challenges_one_active
+    ON login_challenges(learner_id) WHERE active = 1;
+CREATE INDEX idx_login_challenges_cleanup
+    ON login_challenges(active, expires_at, trusted_until)`,
+	})
+	// Narrative Markdown becomes a shared, versioned object model. Content is
+	// always an authenticated ciphertext; checksum and size describe plaintext
+	// so corruption and quota drift can be detected without exposing it.
+	out = append(out, migration{
+		Version: "0041_shared_narrative_objects",
+		Body: `CREATE TABLE narrative_objects (
+    learner_id  TEXT NOT NULL REFERENCES learners(id) ON DELETE CASCADE,
+    scope       TEXT NOT NULL CHECK (scope IN ('memory','memory_pending','session','concept','archive')),
+    domain_id   TEXT NOT NULL DEFAULT '',
+    object_key  TEXT NOT NULL DEFAULT '',
+    ciphertext  TEXT NOT NULL,
+    key_id      TEXT NOT NULL,
+    version     INTEGER NOT NULL CHECK (version > 0),
+    checksum    TEXT NOT NULL CHECK (LENGTH(checksum) = 64),
+    size_bytes  INTEGER NOT NULL CHECK (size_bytes >= 0),
+    created_at  DATETIME NOT NULL,
+    updated_at  DATETIME NOT NULL,
+    PRIMARY KEY (learner_id, scope, domain_id, object_key)
+);
+CREATE INDEX idx_narrative_objects_list
+    ON narrative_objects(learner_id, scope, domain_id, object_key DESC);
+CREATE INDEX idx_narrative_objects_retention
+    ON narrative_objects(updated_at, learner_id);
+CREATE TABLE narrative_mutations (
+    learner_id      TEXT NOT NULL REFERENCES learners(id) ON DELETE CASCADE,
+    mutation_id     TEXT NOT NULL,
+    scope           TEXT NOT NULL,
+    domain_id       TEXT NOT NULL DEFAULT '',
+    object_key      TEXT NOT NULL DEFAULT '',
+    mutation_checksum TEXT NOT NULL CHECK (LENGTH(mutation_checksum) = 64),
+    result_version  INTEGER NOT NULL CHECK (result_version > 0),
+    created_at      DATETIME NOT NULL,
+    PRIMARY KEY (learner_id, mutation_id)
+);
+CREATE INDEX idx_narrative_mutations_created
+    ON narrative_mutations(created_at)`,
+	})
+	// Dynamic-registration authority is durable and shared. Token digests are
+	// capabilities; raw IATs never enter the database. A unique effective
+	// metadata fingerprint prevents retry/concurrency fan-out into duplicate
+	// OAuth clients, while the audit table survives client/token retirement.
+	out = append(out, migration{
+		Version: "0042_dcr_token_lifecycle",
+		Body: `CREATE TABLE oauth_dcr_initial_access_tokens (
+    token_id           TEXT PRIMARY KEY,
+    token_hash         TEXT NOT NULL UNIQUE CHECK (LENGTH(token_hash) = 64),
+    label              TEXT NOT NULL,
+    max_registrations  INTEGER NOT NULL CHECK (max_registrations BETWEEN 1 AND 100000),
+    used_registrations INTEGER NOT NULL DEFAULT 0 CHECK (used_registrations >= 0 AND used_registrations <= max_registrations),
+    created_at         DATETIME NOT NULL,
+    expires_at         DATETIME,
+    revoked_at         DATETIME,
+    created_by         TEXT NOT NULL
+);
+CREATE INDEX idx_oauth_dcr_tokens_active
+    ON oauth_dcr_initial_access_tokens(revoked_at, expires_at);
+CREATE TABLE oauth_dcr_audit (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    action      TEXT NOT NULL,
+    actor       TEXT NOT NULL,
+    token_id    TEXT NOT NULL DEFAULT '',
+    client_id   TEXT NOT NULL DEFAULT '',
+    detail_json TEXT NOT NULL DEFAULT '{}',
+    occurred_at DATETIME NOT NULL
+);
+CREATE INDEX idx_oauth_dcr_audit_time
+    ON oauth_dcr_audit(occurred_at DESC, id DESC);
+ALTER TABLE oauth_clients ADD COLUMN registration_fingerprint TEXT NOT NULL DEFAULT '';
+ALTER TABLE oauth_clients ADD COLUMN registration_token_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE oauth_clients ADD COLUMN registration_secret_ciphertext TEXT NOT NULL DEFAULT '';
+CREATE UNIQUE INDEX idx_oauth_clients_registration_fingerprint
+    ON oauth_clients(registration_fingerprint)
+    WHERE registration_fingerprint <> ''`,
+	})
+	// Retention crosses the relational/narrative boundary. Persist an immutable
+	// manifest, recoverable lease and per-phase checkpoints so a crash can be
+	// resumed idempotently. Legal holds are separate durable records and remain
+	// auditable after release.
+	out = append(out, migration{
+		Version: "0043_retention_jobs_and_legal_holds",
+		Body: `CREATE TABLE retention_legal_holds (
+    hold_id        TEXT PRIMARY KEY,
+    learner_id     TEXT NOT NULL REFERENCES learners(id),
+    reason         TEXT NOT NULL,
+    created_by     TEXT NOT NULL,
+    created_at     DATETIME NOT NULL,
+    released_at    DATETIME,
+    released_by    TEXT NOT NULL DEFAULT '',
+    release_reason TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX idx_retention_legal_holds_active
+    ON retention_legal_holds(learner_id, created_at)
+    WHERE released_at IS NULL;
+CREATE TABLE retention_jobs (
+    job_id            TEXT PRIMARY KEY,
+    policy_json       TEXT NOT NULL,
+    policy_hash       TEXT NOT NULL CHECK (LENGTH(policy_hash) = 64),
+    as_of             DATETIME NOT NULL,
+    backup_reference  TEXT NOT NULL,
+    backup_created_at DATETIME NOT NULL,
+    status            TEXT NOT NULL CHECK (status IN ('pending','running','failed','completed')),
+    attempt_count     INTEGER NOT NULL DEFAULT 0,
+    lease_owner       TEXT NOT NULL DEFAULT '',
+    leased_until      DATETIME,
+    created_by        TEXT NOT NULL,
+    created_at        DATETIME NOT NULL,
+    started_at        DATETIME,
+    completed_at      DATETIME,
+    last_error        TEXT NOT NULL DEFAULT '',
+    report_json       TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX idx_retention_jobs_status_lease
+    ON retention_jobs(status, leased_until, created_at);
+CREATE TABLE retention_job_phases (
+    job_id       TEXT NOT NULL REFERENCES retention_jobs(job_id) ON DELETE CASCADE,
+    phase        TEXT NOT NULL CHECK (phase IN ('database','narrative')),
+    position     INTEGER NOT NULL,
+    status       TEXT NOT NULL CHECK (status IN ('pending','running','failed','completed','skipped')),
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    eligible     INTEGER NOT NULL DEFAULT 0,
+    applied      INTEGER NOT NULL DEFAULT 0,
+    held         INTEGER NOT NULL DEFAULT 0,
+    report_json  TEXT NOT NULL DEFAULT '{}',
+    started_at   DATETIME,
+    completed_at DATETIME,
+    last_error   TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (job_id, phase)
+);
+CREATE INDEX idx_retention_job_phases_order
+    ON retention_job_phases(job_id, position)`,
+	})
+	// Expand the legacy account model into global users and tenant-local
+	// memberships. IDs are derived from the existing learner primary key, never
+	// from email, so the migration cannot silently merge identities. The
+	// after-insert trigger preserves compatibility with an older application
+	// binary during a rolling deployment while assigning every new learner to
+	// the real (non-wildcard) legacy tenant.
+	out = append(out, migration{
+		Version: "0044_tenant_identity_foundation",
+		Body: `CREATE TABLE tenants (
+    id          TEXT PRIMARY KEY,
+    slug        TEXT NOT NULL UNIQUE,
+    name        TEXT NOT NULL,
+    status      TEXT NOT NULL CHECK (status IN ('active','suspended','closed')),
+    region      TEXT NOT NULL DEFAULT 'default',
+    policy_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(policy_json)),
+    created_at  DATETIME NOT NULL,
+    updated_at  DATETIME NOT NULL
+);
+INSERT INTO tenants (id, slug, name, status, region, policy_json, created_at, updated_at)
+VALUES ('tenant_legacy', 'legacy', 'Legacy tenant', 'active', 'default', '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+CREATE TABLE users (
+    id                TEXT PRIMARY KEY,
+    email             TEXT NOT NULL,
+    normalized_email  TEXT NOT NULL,
+    password_hash     TEXT NOT NULL,
+    status            TEXT NOT NULL CHECK (status IN ('pending','active','suspended','revoked')),
+    email_verified_at DATETIME,
+    token_version     INTEGER NOT NULL DEFAULT 1 CHECK (token_version >= 1),
+    created_at        DATETIME NOT NULL,
+    updated_at        DATETIME NOT NULL
+);
+CREATE INDEX idx_users_normalized_email ON users(normalized_email);
+CREATE TABLE tenant_memberships (
+    id           TEXT PRIMARY KEY,
+    tenant_id    TEXT NOT NULL REFERENCES tenants(id),
+    user_id      TEXT NOT NULL REFERENCES users(id),
+    learner_id   TEXT REFERENCES learners(id),
+    roles_json   TEXT NOT NULL CHECK (json_valid(roles_json)),
+    status       TEXT NOT NULL CHECK (status IN ('invited','active','suspended','revoked')),
+    version      INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+    created_at   DATETIME NOT NULL,
+    updated_at   DATETIME NOT NULL,
+    UNIQUE (tenant_id, user_id),
+    UNIQUE (tenant_id, id)
+);
+CREATE UNIQUE INDEX idx_tenant_memberships_tenant_learner
+    ON tenant_memberships(tenant_id, learner_id) WHERE learner_id IS NOT NULL;
+CREATE INDEX idx_tenant_memberships_user_status
+    ON tenant_memberships(user_id, status, tenant_id);
+CREATE TABLE external_identities (
+    id            TEXT PRIMARY KEY,
+    user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider      TEXT NOT NULL,
+    issuer        TEXT NOT NULL,
+    subject       TEXT NOT NULL,
+    email_at_link TEXT NOT NULL DEFAULT '',
+    created_at    DATETIME NOT NULL,
+    last_seen_at  DATETIME NOT NULL,
+    UNIQUE (provider, issuer, subject)
+);
+ALTER TABLE learners ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+ALTER TABLE learners ADD COLUMN user_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE learners ADD COLUMN membership_id TEXT NOT NULL DEFAULT '';
+UPDATE learners
+SET tenant_id = 'tenant_legacy', user_id = id, membership_id = 'membership_legacy_' || id
+WHERE tenant_id = 'tenant_legacy' AND (user_id = '' OR membership_id = '');
+INSERT INTO users
+    (id, email, normalized_email, password_hash, status, email_verified_at, token_version, created_at, updated_at)
+SELECT id, email, lower(email), password_hash,
+       CASE WHEN email_verified_at IS NULL THEN 'pending' ELSE 'active' END,
+       email_verified_at, 1, created_at, COALESCE(last_active, created_at)
+FROM learners;
+INSERT INTO tenant_memberships
+    (id, tenant_id, user_id, learner_id, roles_json, status, version, created_at, updated_at)
+SELECT membership_id, tenant_id, user_id, id, '["learner"]',
+       CASE WHEN email_verified_at IS NULL THEN 'invited' ELSE 'active' END,
+       1, created_at, COALESCE(last_active, created_at)
+FROM learners;
+CREATE UNIQUE INDEX idx_learners_tenant_id_id ON learners(tenant_id, id);
+CREATE UNIQUE INDEX idx_learners_tenant_membership ON learners(tenant_id, membership_id);
+CREATE TRIGGER learners_identity_after_insert
+AFTER INSERT ON learners
+BEGIN
+    UPDATE learners
+    SET tenant_id = CASE WHEN NEW.tenant_id = '' THEN 'tenant_legacy' ELSE NEW.tenant_id END,
+        user_id = CASE WHEN NEW.user_id = '' THEN NEW.id ELSE NEW.user_id END,
+        membership_id = CASE WHEN NEW.membership_id = '' THEN 'membership_legacy_' || NEW.id ELSE NEW.membership_id END
+    WHERE id = NEW.id;
+    INSERT OR IGNORE INTO users
+        (id, email, normalized_email, password_hash, status, email_verified_at, token_version, created_at, updated_at)
+    VALUES (
+        CASE WHEN NEW.user_id = '' THEN NEW.id ELSE NEW.user_id END,
+        NEW.email, lower(NEW.email), NEW.password_hash,
+        CASE WHEN NEW.email_verified_at IS NULL THEN 'pending' ELSE 'active' END,
+        NEW.email_verified_at, 1, NEW.created_at, COALESCE(NEW.last_active, NEW.created_at)
+    );
+    INSERT OR IGNORE INTO tenant_memberships
+        (id, tenant_id, user_id, learner_id, roles_json, status, version, created_at, updated_at)
+    VALUES (
+        CASE WHEN NEW.membership_id = '' THEN 'membership_legacy_' || NEW.id ELSE NEW.membership_id END,
+        CASE WHEN NEW.tenant_id = '' THEN 'tenant_legacy' ELSE NEW.tenant_id END,
+        CASE WHEN NEW.user_id = '' THEN NEW.id ELSE NEW.user_id END,
+        NEW.id, '["learner"]',
+        CASE WHEN NEW.email_verified_at IS NULL THEN 'invited' ELSE 'active' END,
+        1, NEW.created_at, COALESCE(NEW.last_active, NEW.created_at)
+    );
+END;
+CREATE TRIGGER learners_identity_after_verification
+AFTER UPDATE OF email_verified_at ON learners
+WHEN OLD.email_verified_at IS NULL AND NEW.email_verified_at IS NOT NULL
+BEGIN
+    UPDATE users
+    SET status = 'active', email_verified_at = NEW.email_verified_at,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = NEW.user_id AND status = 'pending';
+    UPDATE tenant_memberships
+    SET status = 'active', version = version + 1, updated_at = CURRENT_TIMESTAMP
+    WHERE tenant_id = NEW.tenant_id AND id = NEW.membership_id AND status = 'invited';
+END;
+CREATE TRIGGER learners_identity_after_password_change
+AFTER UPDATE OF password_hash ON learners
+WHEN OLD.password_hash <> NEW.password_hash
+BEGIN
+    UPDATE users
+    SET password_hash = NEW.password_hash, token_version = token_version + 1,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = NEW.user_id;
+    UPDATE tenant_memberships
+    SET version = version + 1, updated_at = CURRENT_TIMESTAMP
+    WHERE user_id = NEW.user_id AND status IN ('invited','active');
+END;`,
+	})
+	// SQLite remains the single-node compatibility backend. Tenant columns and
+	// tenant-first indexes mirror the PostgreSQL contract; the stable legacy
+	// default keeps older binaries writable during expand. PostgreSQL owns the
+	// enforced composite FKs and RLS used by SaaS deployments.
+	out = append(out, migration{
+		Version: "0045_expand_tenant_columns",
+		Body: `CREATE TABLE tenant_migration_quarantine (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_table   TEXT NOT NULL,
+    source_key     TEXT NOT NULL,
+    reason         TEXT NOT NULL,
+    content_hash   TEXT NOT NULL,
+    detected_at    DATETIME NOT NULL,
+    resolved_at    DATETIME,
+    resolution     TEXT NOT NULL DEFAULT '',
+    UNIQUE (source_table, source_key, reason)
+);
+ALTER TABLE refresh_tokens ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+ALTER TABLE domains ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+ALTER TABLE concept_states ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+ALTER TABLE interactions ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+ALTER TABLE availability ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+ALTER TABLE scheduled_alerts ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+ALTER TABLE oauth_codes ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+ALTER TABLE learner_approved_clients ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+ALTER TABLE affect_states ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+ALTER TABLE calibration_records ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+ALTER TABLE transfer_records ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+ALTER TABLE implementation_intentions ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+ALTER TABLE webhook_message_queue ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+ALTER TABLE pedagogical_snapshots ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+ALTER TABLE pending_consolidations ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+ALTER TABLE webhook_push_log ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+ALTER TABLE learning_sessions ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+ALTER TABLE assessment_attempts ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+ALTER TABLE curriculum_versions ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+ALTER TABLE curriculum_concepts ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+ALTER TABLE curriculum_metadata_ids ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+ALTER TABLE tool_call_idempotency ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+ALTER TABLE account_tokens ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+ALTER TABLE login_challenges ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+ALTER TABLE narrative_objects ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+ALTER TABLE narrative_mutations ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+ALTER TABLE retention_legal_holds ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+ALTER TABLE webhook_delivery_transitions ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'tenant_legacy';
+CREATE INDEX idx_refresh_tokens_tenant_learner ON refresh_tokens(tenant_id, learner_id);
+CREATE INDEX idx_domains_tenant_learner ON domains(tenant_id, learner_id);
+CREATE INDEX idx_concept_states_tenant_learner ON concept_states(tenant_id, learner_id, domain_id);
+CREATE INDEX idx_interactions_tenant_learner ON interactions(tenant_id, learner_id, created_at);
+CREATE INDEX idx_learning_sessions_tenant_learner ON learning_sessions(tenant_id, learner_id, started_at);
+CREATE INDEX idx_assessment_attempts_tenant_learner ON assessment_attempts(tenant_id, learner_id, created_at);
+CREATE INDEX idx_oauth_codes_tenant_learner ON oauth_codes(tenant_id, learner_id, expires_at);
+CREATE INDEX idx_webhook_queue_tenant_dispatch ON webhook_message_queue(tenant_id, status, next_attempt_at);
+CREATE INDEX idx_narrative_objects_tenant_learner ON narrative_objects(tenant_id, learner_id, scope);
+CREATE INDEX idx_tool_idempotency_tenant_learner ON tool_call_idempotency(tenant_id, learner_id, tool_name);
+CREATE INDEX idx_retention_holds_tenant_learner ON retention_legal_holds(tenant_id, learner_id);
+CREATE TRIGGER domains_tenant_insert_guard BEFORE INSERT ON domains
+WHEN NEW.tenant_id <> (SELECT tenant_id FROM learners WHERE id = NEW.learner_id)
+BEGIN SELECT RAISE(ABORT, 'cross-tenant domains row'); END;
+CREATE TRIGGER concept_states_tenant_insert_guard BEFORE INSERT ON concept_states
+WHEN NEW.tenant_id <> (SELECT tenant_id FROM learners WHERE id = NEW.learner_id)
+BEGIN SELECT RAISE(ABORT, 'cross-tenant concept_states row'); END;
+CREATE TRIGGER interactions_tenant_insert_guard BEFORE INSERT ON interactions
+WHEN NEW.tenant_id <> (SELECT tenant_id FROM learners WHERE id = NEW.learner_id)
+BEGIN SELECT RAISE(ABORT, 'cross-tenant interactions row'); END;
+CREATE TRIGGER learning_sessions_tenant_insert_guard BEFORE INSERT ON learning_sessions
+WHEN NEW.tenant_id <> (SELECT tenant_id FROM learners WHERE id = NEW.learner_id)
+BEGIN SELECT RAISE(ABORT, 'cross-tenant learning_sessions row'); END;`,
+	})
+	// OAuth capabilities need a non-secret global route to select their tenant
+	// before RLS can expose the credential row. Pre-upgrade capabilities are
+	// invalidated because SQLite has no built-in SHA-256 with which to create a
+	// safe route key from their raw values.
+	out = append(out, migration{
+		Version: "0046_tenant_scope_oauth_credentials",
+		Body: `CREATE TABLE credential_tenant_routes (
+    kind           TEXT NOT NULL CHECK (kind IN ('authorization_code','refresh_token','email_verification','password_reset','login_challenge')),
+    credential_key TEXT NOT NULL,
+    tenant_id      TEXT NOT NULL REFERENCES tenants(id),
+    user_id        TEXT NOT NULL REFERENCES users(id),
+    membership_id  TEXT NOT NULL,
+    learner_id     TEXT NOT NULL,
+    expires_at     DATETIME NOT NULL,
+    created_at     DATETIME NOT NULL,
+    PRIMARY KEY (kind, credential_key),
+    FOREIGN KEY (tenant_id, membership_id) REFERENCES tenant_memberships(tenant_id, id),
+    FOREIGN KEY (tenant_id, learner_id) REFERENCES learners(tenant_id, id)
+);
+CREATE INDEX idx_credential_tenant_routes_expiry
+    ON credential_tenant_routes(expires_at, kind);
+ALTER TABLE oauth_codes ADD COLUMN user_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE oauth_codes ADD COLUMN membership_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE oauth_codes ADD COLUMN membership_version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE refresh_tokens ADD COLUMN user_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE refresh_tokens ADD COLUMN membership_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE refresh_tokens ADD COLUMN membership_version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE learner_approved_clients ADD COLUMN user_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE learner_approved_clients ADD COLUMN membership_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE account_tokens ADD COLUMN user_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE account_tokens ADD COLUMN membership_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE login_challenges ADD COLUMN user_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE login_challenges ADD COLUMN membership_id TEXT NOT NULL DEFAULT '';
+UPDATE oauth_codes SET user_id = (SELECT user_id FROM learners WHERE id = oauth_codes.learner_id),
+    membership_id = (SELECT membership_id FROM learners WHERE id = oauth_codes.learner_id);
+UPDATE refresh_tokens SET user_id = (SELECT user_id FROM learners WHERE id = refresh_tokens.learner_id),
+    membership_id = (SELECT membership_id FROM learners WHERE id = refresh_tokens.learner_id);
+UPDATE learner_approved_clients SET user_id = (SELECT user_id FROM learners WHERE id = learner_approved_clients.learner_id),
+    membership_id = (SELECT membership_id FROM learners WHERE id = learner_approved_clients.learner_id);
+UPDATE account_tokens SET user_id = (SELECT user_id FROM learners WHERE id = account_tokens.learner_id),
+    membership_id = (SELECT membership_id FROM learners WHERE id = account_tokens.learner_id);
+UPDATE login_challenges SET user_id = (SELECT user_id FROM learners WHERE id = login_challenges.learner_id),
+    membership_id = (SELECT membership_id FROM learners WHERE id = login_challenges.learner_id);
+DELETE FROM oauth_codes;
+UPDATE refresh_tokens SET revoked_at = COALESCE(revoked_at, CURRENT_TIMESTAMP);
+DELETE FROM account_tokens;
+DELETE FROM login_challenges;
+CREATE INDEX idx_oauth_codes_tenant_membership ON oauth_codes(tenant_id, membership_id, expires_at);
+CREATE INDEX idx_refresh_tokens_tenant_membership ON refresh_tokens(tenant_id, membership_id, expires_at);
+CREATE INDEX idx_approved_clients_tenant_membership ON learner_approved_clients(tenant_id, membership_id);`,
+	})
+	// SQLite has no RLS; keep the migration ledger aligned with PostgreSQL's
+	// identity-selection policy change.
+	out = append(out, migration{
+		Version: "0047_membership_identity_selection_policy",
+		Body:    `SELECT 1`,
+	})
+	out = append(out, migration{
+		Version: "0048_invitations_mfa_services_audit",
+		Body: `CREATE TABLE tenant_invitations (
+    id             TEXT PRIMARY KEY,
+    token_hash     TEXT NOT NULL UNIQUE,
+    tenant_id      TEXT NOT NULL REFERENCES tenants(id),
+    email          TEXT NOT NULL,
+    normalized_email TEXT NOT NULL,
+    roles_json     TEXT NOT NULL CHECK (json_valid(roles_json)),
+    status         TEXT NOT NULL CHECK (status IN ('pending','accepted','revoked','expired')),
+    created_by     TEXT NOT NULL,
+    created_at     DATETIME NOT NULL,
+    expires_at     DATETIME NOT NULL,
+    accepted_at    DATETIME,
+    accepted_user_id TEXT,
+    accepted_membership_id TEXT
+);
+CREATE INDEX idx_tenant_invitations_tenant_status ON tenant_invitations(tenant_id, status, expires_at);
+CREATE TABLE invitation_tenant_routes (
+    token_hash TEXT PRIMARY KEY,
+    tenant_id  TEXT NOT NULL REFERENCES tenants(id),
+    expires_at DATETIME NOT NULL
+);
+CREATE INDEX idx_invitation_tenant_routes_expiry ON invitation_tenant_routes(expires_at);
+CREATE TABLE mfa_credentials (
+    id             TEXT PRIMARY KEY,
+    user_id        TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind           TEXT NOT NULL CHECK (kind IN ('totp','webauthn')),
+    label          TEXT NOT NULL,
+    secret_ciphertext TEXT NOT NULL,
+    key_id         TEXT NOT NULL,
+    credential_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(credential_json)),
+    created_at     DATETIME NOT NULL,
+    last_used_at   DATETIME,
+    revoked_at     DATETIME
+);
+CREATE INDEX idx_mfa_credentials_user_active ON mfa_credentials(user_id, revoked_at);
+ALTER TABLE tenant_memberships ADD COLUMN mfa_required INTEGER NOT NULL DEFAULT 0 CHECK (mfa_required IN (0,1));
+ALTER TABLE tenant_memberships ADD COLUMN mfa_verified_at DATETIME;
+UPDATE tenant_memberships SET mfa_required = 1
+WHERE EXISTS (SELECT 1 FROM json_each(roles_json) WHERE value IN ('owner','admin'));
+CREATE TABLE service_accounts (
+    id            TEXT PRIMARY KEY,
+    tenant_id     TEXT NOT NULL REFERENCES tenants(id),
+    name          TEXT NOT NULL,
+    client_id     TEXT NOT NULL REFERENCES oauth_clients(client_id),
+    roles_json    TEXT NOT NULL CHECK (json_valid(roles_json)),
+    status        TEXT NOT NULL CHECK (status IN ('active','suspended','revoked')),
+    version       INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+    created_by    TEXT NOT NULL,
+    created_at    DATETIME NOT NULL,
+    updated_at    DATETIME NOT NULL,
+    UNIQUE (tenant_id, client_id)
+);
+CREATE TABLE audit_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id       TEXT NOT NULL REFERENCES tenants(id),
+    actor_user_id   TEXT NOT NULL,
+    membership_id   TEXT NOT NULL,
+    action          TEXT NOT NULL,
+    target_type     TEXT NOT NULL,
+    target_id       TEXT NOT NULL,
+    request_id      TEXT NOT NULL DEFAULT '',
+    reason          TEXT NOT NULL DEFAULT '',
+    details_json    TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(details_json)),
+    occurred_at     DATETIME NOT NULL
+);
+CREATE INDEX idx_audit_events_tenant_time ON audit_events(tenant_id, occurred_at DESC, id DESC);
+CREATE TRIGGER audit_events_no_update BEFORE UPDATE ON audit_events
+BEGIN SELECT RAISE(ABORT, 'audit events are append-only'); END;
+CREATE TRIGGER audit_events_no_delete BEFORE DELETE ON audit_events
+BEGIN SELECT RAISE(ABORT, 'audit events are append-only'); END;`,
+	})
+	out = append(out, migration{
+		Version: "0049_formation_catalog_cohorts_enrollments",
+		Body: `CREATE TABLE formations (
+    id          TEXT NOT NULL,
+    tenant_id   TEXT NOT NULL REFERENCES tenants(id),
+    name        TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL CHECK (status IN ('draft','active','archived')),
+    created_by  TEXT NOT NULL,
+    created_at  DATETIME NOT NULL,
+    updated_at  DATETIME NOT NULL,
+    PRIMARY KEY (tenant_id, id)
+);
+CREATE TABLE formation_versions (
+    id             TEXT NOT NULL,
+    tenant_id      TEXT NOT NULL,
+    formation_id   TEXT NOT NULL,
+    version        INTEGER NOT NULL CHECK (version >= 1),
+    status         TEXT NOT NULL CHECK (status IN ('draft','published','superseded')),
+    metadata_json  TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata_json)),
+    created_by     TEXT NOT NULL,
+    created_at     DATETIME NOT NULL,
+    published_at   DATETIME,
+    PRIMARY KEY (tenant_id, id),
+    UNIQUE (tenant_id, formation_id, version),
+    FOREIGN KEY (tenant_id, formation_id) REFERENCES formations(tenant_id, id)
+);
+CREATE TABLE formation_modules (
+    id                   TEXT NOT NULL,
+    tenant_id            TEXT NOT NULL,
+    formation_version_id TEXT NOT NULL,
+    stable_key           TEXT NOT NULL,
+    title                TEXT NOT NULL,
+    position             INTEGER NOT NULL CHECK (position >= 0),
+    metadata_json        TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata_json)),
+    PRIMARY KEY (tenant_id, id),
+    UNIQUE (tenant_id, formation_version_id, stable_key),
+    FOREIGN KEY (tenant_id, formation_version_id) REFERENCES formation_versions(tenant_id, id)
+);
+CREATE TABLE formation_concepts (
+    id                   TEXT NOT NULL,
+    tenant_id            TEXT NOT NULL,
+    formation_version_id TEXT NOT NULL,
+    module_id            TEXT NOT NULL,
+    stable_key           TEXT NOT NULL,
+    label                TEXT NOT NULL,
+    position             INTEGER NOT NULL CHECK (position >= 0),
+    metadata_json        TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata_json)),
+    PRIMARY KEY (tenant_id, id),
+    UNIQUE (tenant_id, formation_version_id, stable_key),
+    FOREIGN KEY (tenant_id, formation_version_id) REFERENCES formation_versions(tenant_id, id),
+    FOREIGN KEY (tenant_id, module_id) REFERENCES formation_modules(tenant_id, id)
+);
+CREATE TABLE concept_prerequisites (
+    tenant_id            TEXT NOT NULL,
+    formation_version_id TEXT NOT NULL,
+    concept_id           TEXT NOT NULL,
+    prerequisite_id      TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, formation_version_id, concept_id, prerequisite_id),
+    FOREIGN KEY (tenant_id, formation_version_id) REFERENCES formation_versions(tenant_id, id),
+    FOREIGN KEY (tenant_id, concept_id) REFERENCES formation_concepts(tenant_id, id),
+    FOREIGN KEY (tenant_id, prerequisite_id) REFERENCES formation_concepts(tenant_id, id),
+    CHECK (concept_id <> prerequisite_id)
+);
+CREATE TABLE cohorts (
+    id                   TEXT NOT NULL,
+    tenant_id            TEXT NOT NULL,
+    formation_version_id TEXT NOT NULL,
+    name                 TEXT NOT NULL,
+    starts_at            DATETIME,
+    ends_at              DATETIME,
+    capacity             INTEGER NOT NULL CHECK (capacity > 0),
+    reserved_seats       INTEGER NOT NULL DEFAULT 0 CHECK (reserved_seats >= 0 AND reserved_seats <= capacity),
+    status               TEXT NOT NULL CHECK (status IN ('planned','open','closed','archived')),
+    version              INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
+    created_by           TEXT NOT NULL,
+    created_at           DATETIME NOT NULL,
+    updated_at           DATETIME NOT NULL,
+    PRIMARY KEY (tenant_id, id),
+    FOREIGN KEY (tenant_id, formation_version_id) REFERENCES formation_versions(tenant_id, id),
+    CHECK (ends_at IS NULL OR starts_at IS NULL OR ends_at > starts_at)
+);
+CREATE TABLE cohort_trainers (
+    tenant_id     TEXT NOT NULL,
+    cohort_id     TEXT NOT NULL,
+    membership_id TEXT NOT NULL,
+    assigned_by   TEXT NOT NULL,
+    assigned_at   DATETIME NOT NULL,
+    PRIMARY KEY (tenant_id, cohort_id, membership_id),
+    FOREIGN KEY (tenant_id, cohort_id) REFERENCES cohorts(tenant_id, id),
+    FOREIGN KEY (tenant_id, membership_id) REFERENCES tenant_memberships(tenant_id, id)
+);
+CREATE TABLE enrollments (
+    id                   TEXT NOT NULL,
+    tenant_id            TEXT NOT NULL,
+    cohort_id            TEXT NOT NULL,
+    formation_version_id TEXT NOT NULL,
+    user_id              TEXT NOT NULL,
+    membership_id        TEXT NOT NULL,
+    learner_id           TEXT,
+    status               TEXT NOT NULL CHECK (status IN ('invited','active','completed','suspended','cancelled')),
+    objectives_json      TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(objectives_json)),
+    seat_reserved        INTEGER NOT NULL DEFAULT 1 CHECK (seat_reserved IN (0,1)),
+    created_at           DATETIME NOT NULL,
+    updated_at           DATETIME NOT NULL,
+    completed_at         DATETIME,
+    PRIMARY KEY (tenant_id, id),
+    UNIQUE (tenant_id, cohort_id, user_id),
+    FOREIGN KEY (tenant_id, cohort_id) REFERENCES cohorts(tenant_id, id),
+    FOREIGN KEY (tenant_id, formation_version_id) REFERENCES formation_versions(tenant_id, id),
+    FOREIGN KEY (tenant_id, membership_id) REFERENCES tenant_memberships(tenant_id, id),
+    FOREIGN KEY (tenant_id, learner_id) REFERENCES learners(tenant_id, id)
+);
+CREATE INDEX idx_formation_versions_tenant_formation ON formation_versions(tenant_id, formation_id, version DESC);
+CREATE INDEX idx_cohorts_tenant_status ON cohorts(tenant_id, status, starts_at);
+CREATE INDEX idx_enrollments_tenant_user ON enrollments(tenant_id, user_id, status);
+CREATE INDEX idx_enrollments_tenant_cohort ON enrollments(tenant_id, cohort_id, status);
+CREATE TRIGGER formation_versions_published_no_update
+BEFORE UPDATE ON formation_versions WHEN OLD.status = 'published'
+BEGIN SELECT RAISE(ABORT, 'published formation versions are immutable'); END;
+CREATE TRIGGER formation_versions_published_no_delete
+BEFORE DELETE ON formation_versions WHEN OLD.status = 'published'
+BEGIN SELECT RAISE(ABORT, 'published formation versions are immutable'); END;
+CREATE TRIGGER formation_modules_published_no_update
+BEFORE UPDATE ON formation_modules
+WHEN EXISTS (SELECT 1 FROM formation_versions v WHERE v.tenant_id = OLD.tenant_id AND v.id = OLD.formation_version_id AND v.status = 'published')
+BEGIN SELECT RAISE(ABORT, 'published formation content is immutable'); END;
+CREATE TRIGGER formation_modules_published_no_delete
+BEFORE DELETE ON formation_modules
+WHEN EXISTS (SELECT 1 FROM formation_versions v WHERE v.tenant_id = OLD.tenant_id AND v.id = OLD.formation_version_id AND v.status = 'published')
+BEGIN SELECT RAISE(ABORT, 'published formation content is immutable'); END;
+CREATE TRIGGER formation_modules_published_no_insert
+BEFORE INSERT ON formation_modules
+WHEN EXISTS (SELECT 1 FROM formation_versions v WHERE v.tenant_id = NEW.tenant_id AND v.id = NEW.formation_version_id AND v.status = 'published')
+BEGIN SELECT RAISE(ABORT, 'published formation content is immutable'); END;
+CREATE TRIGGER formation_concepts_published_no_update
+BEFORE UPDATE ON formation_concepts
+WHEN EXISTS (SELECT 1 FROM formation_versions v WHERE v.tenant_id = OLD.tenant_id AND v.id = OLD.formation_version_id AND v.status = 'published')
+BEGIN SELECT RAISE(ABORT, 'published formation content is immutable'); END;
+CREATE TRIGGER formation_concepts_published_no_delete
+BEFORE DELETE ON formation_concepts
+WHEN EXISTS (SELECT 1 FROM formation_versions v WHERE v.tenant_id = OLD.tenant_id AND v.id = OLD.formation_version_id AND v.status = 'published')
+BEGIN SELECT RAISE(ABORT, 'published formation content is immutable'); END;
+CREATE TRIGGER formation_concepts_published_no_insert
+BEFORE INSERT ON formation_concepts
+WHEN EXISTS (SELECT 1 FROM formation_versions v WHERE v.tenant_id = NEW.tenant_id AND v.id = NEW.formation_version_id AND v.status = 'published')
+BEGIN SELECT RAISE(ABORT, 'published formation content is immutable'); END;
+CREATE TRIGGER concept_prerequisites_published_no_insert
+BEFORE INSERT ON concept_prerequisites
+WHEN EXISTS (SELECT 1 FROM formation_versions v WHERE v.tenant_id = NEW.tenant_id AND v.id = NEW.formation_version_id AND v.status = 'published')
+BEGIN SELECT RAISE(ABORT, 'published formation content is immutable'); END;
+CREATE TRIGGER concept_prerequisites_published_no_update
+BEFORE UPDATE ON concept_prerequisites
+WHEN EXISTS (SELECT 1 FROM formation_versions v WHERE v.tenant_id = OLD.tenant_id AND v.id = OLD.formation_version_id AND v.status = 'published')
+BEGIN SELECT RAISE(ABORT, 'published formation content is immutable'); END;
+CREATE TRIGGER concept_prerequisites_published_no_delete
+BEFORE DELETE ON concept_prerequisites
+WHEN EXISTS (SELECT 1 FROM formation_versions v WHERE v.tenant_id = OLD.tenant_id AND v.id = OLD.formation_version_id AND v.status = 'published')
+BEGIN SELECT RAISE(ABORT, 'published formation content is immutable'); END;`,
+	})
+	out = append(out, migration{
+		Version: "0050_legacy_enrollment_backfill",
+		Body: `CREATE TABLE legacy_domain_enrollments (
+    tenant_id    TEXT NOT NULL,
+    learner_id   TEXT NOT NULL,
+    domain_id    TEXT NOT NULL DEFAULT '',
+    enrollment_id TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, learner_id, domain_id),
+    FOREIGN KEY (tenant_id, enrollment_id) REFERENCES enrollments(tenant_id, id)
+);
+CREATE TABLE legacy_concept_mappings (
+    tenant_id    TEXT NOT NULL,
+    enrollment_id TEXT NOT NULL,
+    domain_id    TEXT NOT NULL DEFAULT '',
+    concept_label TEXT NOT NULL,
+    concept_id   TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, enrollment_id, domain_id, concept_label),
+    FOREIGN KEY (tenant_id, enrollment_id) REFERENCES enrollments(tenant_id, id),
+    FOREIGN KEY (tenant_id, concept_id) REFERENCES formation_concepts(tenant_id, id)
+);
+CREATE TABLE legacy_concept_sources (
+    tenant_id     TEXT NOT NULL,
+    learner_id    TEXT NOT NULL,
+    enrollment_id TEXT NOT NULL,
+    domain_id     TEXT NOT NULL DEFAULT '',
+    concept_label TEXT NOT NULL,
+    concept_id    TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, enrollment_id, domain_id, concept_label),
+    FOREIGN KEY (tenant_id, enrollment_id) REFERENCES enrollments(tenant_id, id)
+);
+INSERT INTO formations
+    (id, tenant_id, name, description, status, created_by, created_at, updated_at)
+SELECT 'legacy_formation_' || d.id, d.tenant_id, d.name, d.personal_goal,
+       'active', l.user_id, d.created_at, d.created_at
+FROM domains d JOIN learners l ON l.tenant_id = d.tenant_id AND l.id = d.learner_id;
+INSERT INTO formation_versions
+    (id, tenant_id, formation_id, version, status, metadata_json, created_by, created_at, published_at)
+SELECT 'legacy_version_' || d.id, d.tenant_id, 'legacy_formation_' || d.id,
+       1, 'draft', '{}', l.user_id, d.created_at, NULL
+FROM domains d JOIN learners l ON l.tenant_id = d.tenant_id AND l.id = d.learner_id;
+INSERT INTO formation_modules
+    (id, tenant_id, formation_version_id, stable_key, title, position, metadata_json)
+SELECT 'legacy_module_' || d.id, d.tenant_id, 'legacy_version_' || d.id,
+       'legacy', d.name, 0, '{}'
+FROM domains d;
+INSERT INTO cohorts
+    (id, tenant_id, formation_version_id, name, capacity, reserved_seats, status,
+     version, created_by, created_at, updated_at)
+SELECT 'legacy_cohort_' || d.id, d.tenant_id, 'legacy_version_' || d.id,
+       'Legacy individual enrollment', 1, 1, 'open', 1, l.user_id, d.created_at, d.created_at
+FROM domains d JOIN learners l ON l.tenant_id = d.tenant_id AND l.id = d.learner_id;
+INSERT INTO enrollments
+    (id, tenant_id, cohort_id, formation_version_id, user_id, membership_id,
+     learner_id, status, objectives_json, seat_reserved, created_at, updated_at)
+SELECT 'legacy_enrollment_' || d.id, d.tenant_id, 'legacy_cohort_' || d.id,
+       'legacy_version_' || d.id, l.user_id, l.membership_id, l.id, 'active',
+       '{}', 1, d.created_at, d.created_at
+FROM domains d JOIN learners l ON l.tenant_id = d.tenant_id AND l.id = d.learner_id;
+INSERT INTO legacy_domain_enrollments (tenant_id, learner_id, domain_id, enrollment_id)
+SELECT d.tenant_id, d.learner_id, d.id, 'legacy_enrollment_' || d.id FROM domains d;
+INSERT INTO formations
+    (id, tenant_id, name, description, status, created_by, created_at, updated_at)
+SELECT 'legacy_recovery_formation_' || l.id, l.tenant_id, 'Legacy recovery',
+       'Quarantined evidence with no unambiguous historical domain', 'active',
+       l.user_id, l.created_at, l.created_at FROM learners l;
+INSERT INTO formation_versions
+    (id, tenant_id, formation_id, version, status, metadata_json, created_by, created_at, published_at)
+SELECT 'legacy_recovery_version_' || l.id, l.tenant_id,
+       'legacy_recovery_formation_' || l.id, 1, 'draft', '{"quarantine":true}',
+       l.user_id, l.created_at, NULL FROM learners l;
+INSERT INTO formation_modules
+    (id, tenant_id, formation_version_id, stable_key, title, position, metadata_json)
+SELECT 'legacy_recovery_module_' || l.id, l.tenant_id,
+       'legacy_recovery_version_' || l.id, 'recovery', 'Recovery', 0, '{"quarantine":true}'
+FROM learners l;
+INSERT INTO cohorts
+    (id, tenant_id, formation_version_id, name, capacity, reserved_seats, status,
+     version, created_by, created_at, updated_at)
+SELECT 'legacy_recovery_cohort_' || l.id, l.tenant_id,
+       'legacy_recovery_version_' || l.id, 'Legacy recovery', 1, 1, 'archived',
+       1, l.user_id, l.created_at, l.created_at FROM learners l;
+INSERT INTO enrollments
+    (id, tenant_id, cohort_id, formation_version_id, user_id, membership_id,
+     learner_id, status, objectives_json, seat_reserved, created_at, updated_at)
+SELECT 'legacy_recovery_enrollment_' || l.id, l.tenant_id,
+       'legacy_recovery_cohort_' || l.id, 'legacy_recovery_version_' || l.id,
+       l.user_id, l.membership_id, l.id, 'completed', '{"quarantine":true}', 1,
+       l.created_at, l.created_at FROM learners l;
+INSERT INTO legacy_domain_enrollments (tenant_id, learner_id, domain_id, enrollment_id)
+SELECT l.tenant_id, l.id, '', 'legacy_recovery_enrollment_' || l.id FROM learners l;
+INSERT OR IGNORE INTO legacy_concept_sources
+    (tenant_id, learner_id, enrollment_id, domain_id, concept_label, concept_id)
+SELECT source.tenant_id, source.learner_id, mapping.enrollment_id, source.domain_id,
+       source.concept_label,
+       'legacy_concept_' || lower(hex(mapping.enrollment_id || char(31) || source.concept_label))
+FROM (
+    SELECT tenant_id, learner_id, domain_id, concept AS concept_label FROM concept_states
+    UNION
+    SELECT tenant_id, learner_id, COALESCE(domain_id, ''), concept FROM interactions
+    UNION
+    SELECT tenant_id, learner_id, domain_id, concept_id FROM assessment_attempts
+) source
+JOIN legacy_domain_enrollments mapping
+  ON mapping.tenant_id = source.tenant_id
+ AND mapping.learner_id = source.learner_id
+ AND mapping.domain_id = source.domain_id
+WHERE source.concept_label <> '';
+INSERT OR IGNORE INTO legacy_concept_sources
+    (tenant_id, learner_id, enrollment_id, domain_id, concept_label, concept_id)
+SELECT mapping.tenant_id, mapping.learner_id, mapping.enrollment_id, mapping.domain_id, '',
+       'legacy_unmapped_' || lower(hex(mapping.enrollment_id))
+FROM legacy_domain_enrollments mapping;
+INSERT INTO formation_concepts
+    (id, tenant_id, formation_version_id, module_id, stable_key, label, position, metadata_json)
+SELECT source.concept_id, source.tenant_id, enrollment.formation_version_id,
+       module.id,
+       CASE WHEN source.concept_label = '' THEN 'legacy_unmapped'
+            ELSE 'legacy_' || lower(hex(source.concept_label)) END,
+       CASE WHEN source.concept_label = '' THEN 'Unmapped legacy evidence'
+            ELSE source.concept_label END,
+       ROW_NUMBER() OVER (
+           PARTITION BY source.tenant_id, enrollment.formation_version_id
+           ORDER BY source.concept_label
+       ) - 1,
+       CASE WHEN source.domain_id = '' OR source.concept_label = ''
+            THEN '{"quarantine":true,"unmapped":true}' ELSE '{}' END
+FROM legacy_concept_sources source
+JOIN enrollments enrollment
+  ON enrollment.tenant_id = source.tenant_id AND enrollment.id = source.enrollment_id
+JOIN formation_modules module
+  ON module.tenant_id = enrollment.tenant_id
+ AND module.formation_version_id = enrollment.formation_version_id;
+INSERT INTO legacy_concept_mappings
+    (tenant_id, enrollment_id, domain_id, concept_label, concept_id)
+SELECT tenant_id, enrollment_id, domain_id, concept_label, concept_id
+FROM legacy_concept_sources;
+UPDATE formation_versions
+SET status = 'published', published_at = created_at
+WHERE status = 'draft'
+  AND (id IN (SELECT 'legacy_version_' || id FROM domains)
+       OR id IN (SELECT 'legacy_recovery_version_' || id FROM learners));
+INSERT OR IGNORE INTO tenant_migration_quarantine
+    (source_table, source_key, reason, content_hash, detected_at)
+SELECT 'concept_states', CAST(id AS TEXT), 'missing_or_ambiguous_domain',
+       'legacy-concept-state-' || id, CURRENT_TIMESTAMP FROM concept_states WHERE domain_id = '';
+ALTER TABLE concept_states ADD COLUMN enrollment_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE concept_states ADD COLUMN formation_concept_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE learning_sessions ADD COLUMN enrollment_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE interactions ADD COLUMN enrollment_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE interactions ADD COLUMN formation_concept_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE assessment_attempts ADD COLUMN enrollment_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE assessment_attempts ADD COLUMN formation_concept_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE affect_states ADD COLUMN enrollment_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE calibration_records ADD COLUMN enrollment_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE transfer_records ADD COLUMN enrollment_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE implementation_intentions ADD COLUMN enrollment_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE pedagogical_snapshots ADD COLUMN enrollment_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE narrative_objects ADD COLUMN enrollment_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE narrative_mutations ADD COLUMN enrollment_id TEXT NOT NULL DEFAULT '';
+UPDATE concept_states SET enrollment_id = COALESCE((SELECT enrollment_id FROM legacy_domain_enrollments m
+    WHERE m.tenant_id = concept_states.tenant_id AND m.learner_id = concept_states.learner_id AND m.domain_id = concept_states.domain_id), ''),
+    formation_concept_id = COALESCE((SELECT concept_id FROM legacy_concept_sources source
+        WHERE source.tenant_id = concept_states.tenant_id
+          AND source.learner_id = concept_states.learner_id
+          AND source.domain_id = concept_states.domain_id
+          AND source.concept_label = concept_states.concept), '');
+UPDATE learning_sessions SET enrollment_id = COALESCE((SELECT enrollment_id FROM legacy_domain_enrollments m
+    WHERE m.tenant_id = learning_sessions.tenant_id AND m.learner_id = learning_sessions.learner_id
+      AND m.domain_id = COALESCE(learning_sessions.domain_id, '')), 'legacy_recovery_enrollment_' || learner_id);
+UPDATE interactions SET enrollment_id = COALESCE((SELECT enrollment_id FROM legacy_domain_enrollments m
+    WHERE m.tenant_id = interactions.tenant_id AND m.learner_id = interactions.learner_id
+      AND m.domain_id = COALESCE(interactions.domain_id, '')), 'legacy_recovery_enrollment_' || learner_id);
+UPDATE interactions SET formation_concept_id = COALESCE((SELECT concept_id FROM legacy_concept_mappings m
+    WHERE m.tenant_id = interactions.tenant_id AND m.enrollment_id = interactions.enrollment_id
+      AND m.domain_id = COALESCE(interactions.domain_id, '') AND m.concept_label = interactions.concept), '');
+UPDATE assessment_attempts SET enrollment_id = COALESCE((SELECT enrollment_id FROM legacy_domain_enrollments m
+    WHERE m.tenant_id = assessment_attempts.tenant_id AND m.learner_id = assessment_attempts.learner_id
+      AND m.domain_id = assessment_attempts.domain_id), 'legacy_recovery_enrollment_' || learner_id);
+UPDATE assessment_attempts SET formation_concept_id = COALESCE((SELECT concept_id FROM legacy_concept_mappings m
+    WHERE m.tenant_id = assessment_attempts.tenant_id AND m.enrollment_id = assessment_attempts.enrollment_id
+      AND m.domain_id = assessment_attempts.domain_id AND m.concept_label = assessment_attempts.concept_id), '');
+UPDATE affect_states SET enrollment_id = COALESCE((SELECT ls.enrollment_id FROM learning_sessions ls
+    WHERE ls.tenant_id = affect_states.tenant_id AND ls.learner_id = affect_states.learner_id AND ls.id = affect_states.session_id),
+    'legacy_recovery_enrollment_' || learner_id);
+UPDATE calibration_records SET enrollment_id = COALESCE((SELECT enrollment_id FROM legacy_domain_enrollments m
+    WHERE m.tenant_id = calibration_records.tenant_id AND m.learner_id = calibration_records.learner_id
+      AND m.domain_id = calibration_records.domain_id), 'legacy_recovery_enrollment_' || learner_id);
+UPDATE transfer_records SET enrollment_id = COALESCE((SELECT enrollment_id FROM legacy_domain_enrollments m
+    WHERE m.tenant_id = transfer_records.tenant_id AND m.learner_id = transfer_records.learner_id
+      AND m.domain_id = transfer_records.domain_id), 'legacy_recovery_enrollment_' || learner_id);
+UPDATE implementation_intentions SET enrollment_id = COALESCE((SELECT enrollment_id FROM legacy_domain_enrollments m
+    WHERE m.tenant_id = implementation_intentions.tenant_id AND m.learner_id = implementation_intentions.learner_id
+      AND m.domain_id = implementation_intentions.domain_id), 'legacy_recovery_enrollment_' || learner_id);
+UPDATE pedagogical_snapshots SET enrollment_id = COALESCE((SELECT enrollment_id FROM legacy_domain_enrollments m
+    WHERE m.tenant_id = pedagogical_snapshots.tenant_id AND m.learner_id = pedagogical_snapshots.learner_id
+      AND m.domain_id = pedagogical_snapshots.domain_id), 'legacy_recovery_enrollment_' || learner_id);
+UPDATE narrative_objects SET enrollment_id = COALESCE((SELECT enrollment_id FROM legacy_domain_enrollments m
+    WHERE m.tenant_id = narrative_objects.tenant_id AND m.learner_id = narrative_objects.learner_id
+      AND m.domain_id = narrative_objects.domain_id), 'legacy_recovery_enrollment_' || learner_id);
+UPDATE narrative_mutations SET enrollment_id = COALESCE((SELECT enrollment_id FROM legacy_domain_enrollments m
+    WHERE m.tenant_id = narrative_mutations.tenant_id AND m.learner_id = narrative_mutations.learner_id
+      AND m.domain_id = narrative_mutations.domain_id), 'legacy_recovery_enrollment_' || learner_id);
+CREATE INDEX idx_concept_states_enrollment_concept ON concept_states(tenant_id, enrollment_id, formation_concept_id);
+CREATE INDEX idx_interactions_enrollment_created ON interactions(tenant_id, enrollment_id, created_at);
+CREATE INDEX idx_sessions_enrollment_started ON learning_sessions(tenant_id, enrollment_id, started_at);
+CREATE INDEX idx_assessment_enrollment_concept ON assessment_attempts(tenant_id, enrollment_id, formation_concept_id);
+CREATE TRIGGER concept_states_learning_scope_after_insert AFTER INSERT ON concept_states
+WHEN NEW.enrollment_id = '' BEGIN
+    UPDATE concept_states SET enrollment_id = COALESCE((SELECT enrollment_id FROM legacy_domain_enrollments m
+        WHERE m.tenant_id = NEW.tenant_id AND m.learner_id = NEW.learner_id AND m.domain_id = NEW.domain_id),
+        'legacy_recovery_enrollment_' || NEW.learner_id),
+        formation_concept_id = COALESCE((SELECT concept_id FROM legacy_concept_mappings m
+        WHERE m.tenant_id = NEW.tenant_id
+          AND m.enrollment_id = COALESCE((SELECT enrollment_id FROM legacy_domain_enrollments d
+              WHERE d.tenant_id = NEW.tenant_id AND d.learner_id = NEW.learner_id AND d.domain_id = NEW.domain_id), '')
+          AND m.domain_id = NEW.domain_id AND m.concept_label = NEW.concept), '')
+    WHERE id = NEW.id;
+END;
+CREATE TRIGGER interactions_learning_scope_after_insert AFTER INSERT ON interactions
+WHEN NEW.enrollment_id = '' BEGIN
+    UPDATE interactions SET enrollment_id = COALESCE((SELECT enrollment_id FROM legacy_domain_enrollments m
+        WHERE m.tenant_id = NEW.tenant_id AND m.learner_id = NEW.learner_id AND m.domain_id = COALESCE(NEW.domain_id, '')),
+        'legacy_recovery_enrollment_' || NEW.learner_id),
+        formation_concept_id = COALESCE((SELECT concept_id FROM legacy_concept_mappings m
+        WHERE m.tenant_id = NEW.tenant_id
+          AND m.enrollment_id = COALESCE((SELECT enrollment_id FROM legacy_domain_enrollments d
+              WHERE d.tenant_id = NEW.tenant_id AND d.learner_id = NEW.learner_id
+                AND d.domain_id = COALESCE(NEW.domain_id, '')), '')
+          AND m.domain_id = COALESCE(NEW.domain_id, '') AND m.concept_label = NEW.concept), '')
+    WHERE id = NEW.id;
+END;
+CREATE TRIGGER learning_sessions_learning_scope_after_insert AFTER INSERT ON learning_sessions
+WHEN NEW.enrollment_id = '' BEGIN
+    UPDATE learning_sessions SET enrollment_id = COALESCE((SELECT enrollment_id FROM legacy_domain_enrollments m
+        WHERE m.tenant_id = NEW.tenant_id AND m.learner_id = NEW.learner_id
+          AND m.domain_id = COALESCE(NEW.domain_id, '')), 'legacy_recovery_enrollment_' || NEW.learner_id)
+    WHERE id = NEW.id;
+END;
+CREATE TRIGGER assessment_attempts_learning_scope_after_insert AFTER INSERT ON assessment_attempts
+WHEN NEW.enrollment_id = '' BEGIN
+    UPDATE assessment_attempts SET enrollment_id = COALESCE((SELECT enrollment_id FROM legacy_domain_enrollments m
+        WHERE m.tenant_id = NEW.tenant_id AND m.learner_id = NEW.learner_id AND m.domain_id = NEW.domain_id),
+        'legacy_recovery_enrollment_' || NEW.learner_id),
+        formation_concept_id = COALESCE((SELECT concept_id FROM legacy_concept_mappings m
+        WHERE m.tenant_id = NEW.tenant_id
+          AND m.enrollment_id = COALESCE((SELECT enrollment_id FROM legacy_domain_enrollments d
+              WHERE d.tenant_id = NEW.tenant_id AND d.learner_id = NEW.learner_id AND d.domain_id = NEW.domain_id), '')
+          AND m.domain_id = NEW.domain_id AND m.concept_label = NEW.concept_id), '')
+    WHERE id = NEW.id;
+END;
+CREATE TRIGGER affect_states_learning_scope_after_insert AFTER INSERT ON affect_states
+WHEN NEW.enrollment_id = '' BEGIN
+    UPDATE affect_states SET enrollment_id = COALESCE((SELECT enrollment_id FROM learning_sessions s
+        WHERE s.tenant_id = NEW.tenant_id AND s.learner_id = NEW.learner_id AND s.id = NEW.session_id),
+        'legacy_recovery_enrollment_' || NEW.learner_id) WHERE id = NEW.id;
+END;
+CREATE TRIGGER calibration_records_learning_scope_after_insert AFTER INSERT ON calibration_records
+WHEN NEW.enrollment_id = '' BEGIN
+    UPDATE calibration_records SET enrollment_id = COALESCE((SELECT enrollment_id FROM legacy_domain_enrollments m
+        WHERE m.tenant_id = NEW.tenant_id AND m.learner_id = NEW.learner_id AND m.domain_id = NEW.domain_id),
+        'legacy_recovery_enrollment_' || NEW.learner_id) WHERE prediction_id = NEW.prediction_id;
+END;
+CREATE TRIGGER transfer_records_learning_scope_after_insert AFTER INSERT ON transfer_records
+WHEN NEW.enrollment_id = '' BEGIN
+    UPDATE transfer_records SET enrollment_id = COALESCE((SELECT enrollment_id FROM legacy_domain_enrollments m
+        WHERE m.tenant_id = NEW.tenant_id AND m.learner_id = NEW.learner_id AND m.domain_id = NEW.domain_id),
+        'legacy_recovery_enrollment_' || NEW.learner_id) WHERE id = NEW.id;
+END;
+CREATE TRIGGER implementation_intentions_learning_scope_after_insert AFTER INSERT ON implementation_intentions
+WHEN NEW.enrollment_id = '' BEGIN
+    UPDATE implementation_intentions SET enrollment_id = COALESCE((SELECT enrollment_id FROM legacy_domain_enrollments m
+        WHERE m.tenant_id = NEW.tenant_id AND m.learner_id = NEW.learner_id AND m.domain_id = NEW.domain_id),
+        'legacy_recovery_enrollment_' || NEW.learner_id) WHERE id = NEW.id;
+END;
+CREATE TRIGGER pedagogical_snapshots_learning_scope_after_insert AFTER INSERT ON pedagogical_snapshots
+WHEN NEW.enrollment_id = '' BEGIN
+    UPDATE pedagogical_snapshots SET enrollment_id = COALESCE((SELECT enrollment_id FROM legacy_domain_enrollments m
+        WHERE m.tenant_id = NEW.tenant_id AND m.learner_id = NEW.learner_id AND m.domain_id = NEW.domain_id),
+        'legacy_recovery_enrollment_' || NEW.learner_id) WHERE id = NEW.id;
+END;
+CREATE TRIGGER narrative_objects_learning_scope_after_insert AFTER INSERT ON narrative_objects
+WHEN NEW.enrollment_id = '' BEGIN
+    UPDATE narrative_objects SET enrollment_id = COALESCE((SELECT enrollment_id FROM legacy_domain_enrollments m
+        WHERE m.tenant_id = NEW.tenant_id AND m.learner_id = NEW.learner_id AND m.domain_id = NEW.domain_id),
+        'legacy_recovery_enrollment_' || NEW.learner_id)
+    WHERE learner_id = NEW.learner_id AND scope = NEW.scope
+      AND domain_id = NEW.domain_id AND object_key = NEW.object_key;
+END;
+CREATE TRIGGER narrative_mutations_learning_scope_after_insert AFTER INSERT ON narrative_mutations
+WHEN NEW.enrollment_id = '' BEGIN
+    UPDATE narrative_mutations SET enrollment_id = COALESCE((SELECT enrollment_id FROM legacy_domain_enrollments m
+        WHERE m.tenant_id = NEW.tenant_id AND m.learner_id = NEW.learner_id AND m.domain_id = NEW.domain_id),
+        'legacy_recovery_enrollment_' || NEW.learner_id)
+    WHERE learner_id = NEW.learner_id AND mutation_id = NEW.mutation_id;
+END;`,
+	})
+	out = append(out, migration{
+		Version: "0051_saas_runtime_control_plane",
+		Body:    sqliteSaaSControlPlaneMigration,
+	})
+	out = append(out, migration{
+		Version: "0052_service_account_credentials",
+		Body:    sqliteServiceAccountCredentialMigration,
+	})
+	out = append(out, migration{
+		Version: "0053_enrollment_learning_state",
+		Body:    sqliteEnrollmentLearningStateMigration,
+	})
+	out = append(out, migration{
+		Version: "0054_identity_federation",
+		Body:    sqliteIdentityFederationMigration,
+	})
+	out = append(out, migration{
+		Version: "0055_support_access",
+		Body:    sqliteSupportAccessMigration,
+	})
+	out = append(out, migration{
+		Version: "0056_catalog_admin_api",
+		Body:    sqliteCatalogAdminMigration,
+	})
+	out = append(out, migration{
+		Version: "0057_shared_oauth_csrf",
+		Body:    sqliteOAuthCSRFMigration,
+	})
+	out = append(out, migration{
+		Version: "0058_worker_tenant_runs",
+		Body:    sqliteWorkerTenantMigration,
+	})
+	out = append(out, migration{
+		Version: "0059_tenant_integration_secret_history",
+		Body:    sqliteTenantIntegrationSecretHistoryMigration,
+	})
+	out = append(out, migration{
+		Version: "0060_saas_commercial_invariants",
+		Body:    sqliteSaaSCommercialMigration,
+	})
+	out = append(out, migration{
+		Version: "0061_saas_governance",
+		Body:    sqliteSaaSGovernanceMigration,
+	})
+	out = append(out, migration{
+		Version: "0062_canonical_narrative_keys",
+		Body:    sqliteCanonicalNarrativeKeyMigration,
+	})
+	out = append(out, migration{
+		Version: "0063_platform_audit",
+		Body:    sqlitePlatformAuditMigration,
 	})
 	return out
+}
+
+// VerifySQLiteSchemaCurrent is the read-only startup gate used by API and
+// worker processes. Only the dedicated migrator may apply DDL in production.
+func VerifySQLiteSchemaCurrent(ctx context.Context, database *sql.DB) error {
+	return verifyMigrationLedger(ctx, database, buildMigrations())
+}
+
+func verifyMigrationLedger(ctx context.Context, database *sql.DB, expected []migration) error {
+	for _, item := range expected {
+		var checksum string
+		err := database.QueryRowContext(ctx,
+			`SELECT checksum FROM schema_migrations WHERE version = ?`, item.Version).Scan(&checksum)
+		if err != nil {
+			return fmt.Errorf("schema compatibility: migration %s is missing: %w", item.Version, err)
+		}
+		if checksum != item.checksum() {
+			return fmt.Errorf("schema compatibility: migration %s checksum mismatch", item.Version)
+		}
+	}
+	return nil
 }
 
 // alterShortName extracts a short, stable token from a SQL statement to make

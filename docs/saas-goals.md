@@ -8,13 +8,21 @@ Il complète les backlogs détaillés :
 - [`backlog-multitenant-saas.md`](./backlog-multitenant-saas.md) pour le modèle
   tenant, l'isolation des données et le plan de contrôle SaaS.
 
+Dernier point de reprise :
+[`goal-saas-handoff-2026-08-11.md`](./goal-saas-handoff-2026-08-11.md). Ce
+handoff est la photographie de reprise ; l'état courant et les preuves de
+clôture de chaque lot sont tenus dans les backlogs détaillés ci-dessus.
+
 Les Goals sont exécutés dans l'ordre. Un Goal n'est clôturé que lorsque son gate
 est prouvé par les tests et artefacts indiqués ; le suivant ne doit pas masquer
 une dette du précédent.
 
 ## Goal 1 — Sécurité actuelle et conformité MCP/OAuth
 
-**Statut : `IN_PROGRESS` — démarré le 2026-08-09.**
+**Statut : `DONE` — démarré le 2026-08-09, clôturé le 2026-08-12.**
+
+Audit de sortie :
+[`goal1-final-audit-2026-08-12.md`](./goal1-final-audit-2026-08-12.md).
 
 ### Résultat attendu
 
@@ -62,7 +70,10 @@ ne crée pas encore le modèle tenant ni la RLS.
 
 ## Goal 2 — Fondations tenant et isolation PostgreSQL
 
-**Statut : `PENDING`.**
+**Statut : `DONE` — démarré et clôturé le 2026-08-12.**
+
+Audit de sortie :
+[`goal2-final-audit-2026-08-12.md`](./goal2-final-audit-2026-08-12.md).
 
 Ce Goal livre explicitement les jalons **M0 à M3** du backlog multitenant.
 Introduire utilisateurs globaux, identités externes, tenants, memberships,
@@ -77,17 +88,23 @@ pool, ainsi qu'une migration legacy réconciliée sans association silencieuse.
 
 ## Goal 3 — Runtime horizontal et données partagées
 
-**Statut : `PENDING`.**
+**Statut : `DONE` — clôturé le 2026-08-12.**
+
+Audit de sortie :
+[`goal3-final-audit-2026-08-12.md`](./goal3-final-audit-2026-08-12.md).
 
 Ce Goal livre le jalon **M4**. Séparer API/MCP, worker et migrateur ; déplacer
-la mémoire narrative vers un stockage partagé versionné ; introduire outbox,
-queue, leases récupérables, workers idempotents, DLQ et cache/rate limits
-partagés. Le gate exige du round-robin sans affinité, reprise après perte de
-nœud et tests de redelivery.
+les rôles de déploiement autour du stockage narratif partagé versionné livré au
+Goal 1 ; généraliser outbox, queue, leases récupérables, workers idempotents,
+DLQ et cache/rate limits partagés. Le gate exige du round-robin sans affinité,
+reprise après perte de nœud et tests de redelivery.
 
 ## Goal 4 — SaaS exploitable et commercialisable
 
-**Statut : `PENDING`.**
+**Statut : `DONE` — clôturé le 2026-08-13 après gates finaux.**
+
+Audit de sortie :
+[`goal4-final-audit-2026-08-12.md`](./goal4-final-audit-2026-08-12.md).
 
 Ce Goal livre le jalon **M5**. Livrer portail/control plane, plans,
 entitlements, quotas durables, événements d'usage idempotents, billing

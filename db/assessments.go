@@ -57,12 +57,18 @@ func (s *Store) CreateAssessmentAttempt(ctx context.Context, a *models.Assessmen
 	if a.CreatedAt.IsZero() {
 		a.CreatedAt = time.Now().UTC()
 	}
-	_, err := s.exec(ctx, `INSERT INTO assessment_attempts
-        (id, learner_id, domain_id, concept_id, session_id, activity_id,
-         activity_version, activity_type, observable, task_text,
-         task_content_hash, rubric_json, passing_score, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		a.ID, a.LearnerID, a.DomainID, a.ConceptID, nullString(a.SessionID),
+	scope, err := s.resolveLearningScope(ctx, a.LearnerID, a.DomainID, a.ConceptID)
+	if err != nil {
+		return err
+	}
+	_, err = s.exec(ctx, `INSERT INTO assessment_attempts
+		(id, learner_id, domain_id, concept_id, tenant_id, enrollment_id, formation_concept_id,
+		 session_id, activity_id,
+		 activity_version, activity_type, observable, task_text,
+		 task_content_hash, rubric_json, passing_score, status, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.ID, a.LearnerID, a.DomainID, a.ConceptID,
+		scope.TenantID, scope.EnrollmentID, scope.FormationConceptID, nullString(a.SessionID),
 		a.ActivityID, a.ActivityVersion, a.ActivityType, a.Observable,
 		nullString(a.TaskText), a.TaskContentHash, a.RubricJSON, a.PassingScore,
 		string(a.Status), a.CreatedAt.UTC())

@@ -6,10 +6,10 @@ Source-of-truth tracker for the five MVP categories defined in the agent routine
 > planned. ❌ = not addressed. N/A = deliberately outside the server
 > architecture.
 >
-> **Deployment target.** The MVP gate covers the SQLite single-node profile.
-> PostgreSQL is exercised for conformance, while multi-node operation remains
-> experimental until shared narrative memory and crash-safe jobs/outbox
-> delivery exist.
+> **Deployment targets.** The local gate covers SQLite single-node. The SaaS
+> gate covers PostgreSQL with separate API/worker/migrator, forced RLS, shared
+> narrative memory, crash-safe outbox/jobs, quotas, audit and recovery. The
+> detailed proof is in `goal1-final-audit-2026-08-12.md` and the Goal 2–4 audits.
 
 ## 1. Fonctionnel
 
@@ -55,18 +55,29 @@ Source-of-truth tracker for the five MVP categories defined in the agent routine
 | Messages d'erreur explicites et actionnables | 🟡 | `errorResult(...)` everywhere; mixed-language gap tracked by issue #90 (not addressed) |
 | Latence p95 < 2 s (tools sans LLM) | ✅ | Opt-in CI/release gate in `tools/activity_pair_perf_test.go` covers `get_pending_alerts` + `get_next_activity`; observed p95 17.98 ms at 200 active learners with `MCP_PERF_BUDGET=1 MCP_PERF_ACTIVE_LEARNERS=200` |
 | Latence p95 < 8 s (tools avec sampling) | N/A | Tutor MCP does not sample an LLM server-side; host-model latency belongs to the MCP client |
-| README à jour avec quickstart vérifié | ✅ | Documentation matches the supported single-node profile; the generic-client quickstart path is exercised by `TestStreamableHTTPClientCompletesTutoringLoop` |
+| README à jour avec quickstart vérifié | ✅ | Documentation distinguishes local and SaaS profiles; `TestStreamableHTTPClientCompletesTutoringLoop` exercises the generic-client path |
+
+## 6. SaaS multi-tenant
+
+| Item | Status | Evidence |
+|------|--------|----------|
+| Identité tenant, RBAC, MFA/fédération et révocation | ✅ | `models/principal_test.go`, `db/identity*_test.go`, `db/mfa_test.go`, `auth/client_credentials_test.go` |
+| FK composites et `FORCE RLS` A/B | ✅ | migrations PostgreSQL, `db/tenant_tx_test.go`, `db/tenant_scope_guard_test.go` |
+| Formation/version/cohorte/enrollment canoniques | ✅ | `db/catalog*_test.go`, `db/enrollment_learning_state_test.go` |
+| API stateless, outbox/jobs et reprise worker | ✅ | round-robin MCP, `db/saas_runtime_test.go`, `engine/saas_worker_test.go` |
+| Quotas, usage, billing et audit | ✅ | `db/saas_commercial_test.go`, `db/saas_governance_test.go`, control-plane CLI |
+| SLO, noisy neighbour et reprise | ✅ | `saas-slo.md`, charge PostgreSQL, `tenant-restore-runbook.md`, exercices PITR/logical restore |
 
 ## Decision gates
 
-- The automated code gate for the supported SQLite single-node profile is
-  green. A release still requires a documented staging smoke test with at
+- The automated gates cover SQLite local and PostgreSQL SaaS. A release still
+  requires a documented staging smoke test with at
   least one external MCP host, because the server cannot force a host LLM to
   load the prompt or close the `get_next_activity` → `record_interaction`
   loop.
 - Mixed-language errors and the remaining legacy tool descriptions are
   hardening work, not data-integrity blockers.
-- PostgreSQL multi-node is outside this MVP gate until shared narrative memory,
-  crash-safe jobs/outbox delivery, and load/failure tests exist.
+- Partitionnement avancé, entrepôt analytique et architecture cellulaire restent
+  post-MVP jusqu'à ce que les mesures de capacité les rendent nécessaires.
 - Version bumps, tags, and the `staging` → `main` promotion remain human-only
   release steps.

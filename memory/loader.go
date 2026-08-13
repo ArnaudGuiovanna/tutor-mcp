@@ -4,8 +4,8 @@
 package memory
 
 import (
+	"context"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -344,15 +344,11 @@ func contextSize(ec *EpisodicContext) int {
 }
 
 func modifiedAt(learnerID string, scope Scope, key string) time.Time {
-	path, err := PathForRead(learnerID, scope, key)
+	objectKey, err := narrativeKeyForRead(learnerID, scope, key)
 	if err != nil {
 		return time.Time{}
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		return time.Time{}
-	}
-	return info.ModTime().UTC()
+	return NarrativeModifiedAt(context.Background(), objectKey)
 }
 
 func truthy(v any) bool {

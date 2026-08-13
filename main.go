@@ -25,11 +25,13 @@ import (
 	"syscall"
 	"time"
 
+	"tutor-mcp/adminapi"
 	"tutor-mcp/auth"
 	"tutor-mcp/db"
 	"tutor-mcp/engine"
 	"tutor-mcp/memory"
 	"tutor-mcp/models"
+	"tutor-mcp/observability"
 	"tutor-mcp/tools"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -64,6 +66,28 @@ func main() {
 		logger.Error("invalid startup configuration", "err", err)
 		os.Exit(1)
 	}
+	shutdownTelemetry, err := observability.Setup(context.Background(), mcpVersion(), logger)
+	if err != nil {
+		logger.Error("initialize OpenTelemetry", "error_type", "otel_initialization")
+		os.Exit(1)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTelemetry(ctx); err != nil {
+			logger.Error("shutdown OpenTelemetry", "error_type", "otel_shutdown")
+		}
+	}()
+	runsAPI := cfg.ProcessRole == "api" || cfg.ProcessRole == "all"
+	runsWorker := cfg.ProcessRole == "worker" || cfg.ProcessRole == "all"
+	runsMigrations := cfg.ProcessRole == "migrator" || cfg.ProcessRole == "all"
+	if runsAPI {
+		if err := auth.ConfigureBcryptMaxConcurrent(cfg.AuthBcryptMaxConcurrent); err != nil {
+			logger.Error("configure bcrypt concurrency budget", "err", err)
+			os.Exit(1)
+		}
+		logger.Info("bcrypt concurrency budget", "max_concurrent", cfg.AuthBcryptMaxConcurrent)
+	}
 	dbPath := cfg.DBPath
 	dbDriver := cfg.DBDriver
 	baseURL := cfg.BaseURL
@@ -85,9 +109,11 @@ func main() {
 	)
 
 	// Init JWT
-	if err := auth.LoadJWTSecret(); err != nil {
-		logger.Error("failed to load JWT secret", "err", err)
-		os.Exit(1)
+	if runsAPI {
+		if err := auth.LoadJWTSecret(); err != nil {
+			logger.Error("failed to load JWT secret", "err", err)
+			os.Exit(1)
+		}
 	}
 
 	// Open the store. Default: single-node SQLite (no external deps). Set
@@ -106,9 +132,26 @@ func main() {
 			os.Exit(1)
 		}
 		defer database.Close()
-		if err := db.MigratePostgres(context.Background(), database); err != nil {
-			logger.Error("failed to migrate postgres", "err", err)
+		unregisterPoolMetrics, err := observability.RegisterDBPool(database)
+		if err != nil {
+			logger.Error("register database pool metrics", "error_type", "otel_db_pool")
 			os.Exit(1)
+		}
+		defer func() { _ = unregisterPoolMetrics() }()
+		if runsMigrations {
+			if err := db.MigratePostgres(context.Background(), database); err != nil {
+				logger.Error("failed to migrate postgres", "err", err)
+				os.Exit(1)
+			}
+		} else if err := db.VerifyPostgresSchemaCurrent(context.Background(), database); err != nil {
+			logger.Error("incompatible postgres schema; run the migrator first", "err", err)
+			os.Exit(1)
+		}
+		if !runsMigrations && cfg.DeploymentProfile == "production" {
+			if err := db.VerifyPostgresRuntimeRole(context.Background(), database); err != nil {
+				logger.Error("unsafe postgres runtime credentials", "err", err)
+				os.Exit(1)
+			}
 		}
 		store = db.NewStoreWithDialect(database, db.DialectPostgres)
 		logger.Info("database ready", "driver", "postgres")
@@ -123,8 +166,19 @@ func main() {
 			os.Exit(1)
 		}
 		defer database.Close()
-		if err := db.Migrate(database); err != nil {
-			logger.Error("failed to migrate database", "err", err)
+		unregisterPoolMetrics, err := observability.RegisterDBPool(database)
+		if err != nil {
+			logger.Error("register database pool metrics", "error_type", "otel_db_pool")
+			os.Exit(1)
+		}
+		defer func() { _ = unregisterPoolMetrics() }()
+		if runsMigrations {
+			if err := db.Migrate(database); err != nil {
+				logger.Error("failed to migrate database", "err", err)
+				os.Exit(1)
+			}
+		} else if err := db.VerifySQLiteSchemaCurrent(context.Background(), database); err != nil {
+			logger.Error("incompatible SQLite schema; run the migrator first", "err", err)
 			os.Exit(1)
 		}
 		store = db.NewStore(database)
@@ -133,6 +187,16 @@ func main() {
 		logger.Error("unknown DB_DRIVER (want sqlite|postgres)", "driver", dbDriver)
 		os.Exit(1)
 	}
+	if cfg.ProcessRole == "migrator" {
+		logger.Info("database migrations complete", "driver", dbDriver)
+		return
+	}
+	if err := db.ConfigureTenantIntegrationAllowedHosts(store, cfg.TenantIntegrationHosts); err != nil {
+		logger.Error("invalid tenant integration allowlist", "err", err)
+		os.Exit(1)
+	}
+	integrationEncryptionEnabled := false
+	var narrativeSecretsRotated int64
 	if encodedKeys := strings.TrimSpace(os.Getenv("INTEGRATION_SECRET_KEYS")); encodedKeys != "" {
 		keyring, err := db.NewIntegrationSecretKeyring(encodedKeys, os.Getenv("INTEGRATION_SECRET_CURRENT_KEY_ID"))
 		if err != nil {
@@ -140,6 +204,7 @@ func main() {
 			os.Exit(1)
 		}
 		store.SetIntegrationSecretKeyring(keyring)
+		integrationEncryptionEnabled = true
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		rotated, err := store.RotateIntegrationSecrets(ctx)
 		cancel()
@@ -148,8 +213,44 @@ func main() {
 			os.Exit(1)
 		}
 		logger.Info("integration secret encryption enabled", "rotated_records", rotated)
+		narrativeRotateCtx, narrativeRotateCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		narrativeSecretsRotated, err = store.RotateNarrativeSecrets(narrativeRotateCtx)
+		narrativeRotateCancel()
+		if err != nil {
+			logger.Error("failed to authenticate or rotate narrative objects", "err", err)
+			os.Exit(1)
+		}
 	} else {
 		logger.Warn("integration secret encryption disabled; webhook credentials remain plaintext")
+	}
+	if memory.Enabled() && cfg.NarrativeMemoryBackend == "database" {
+		if !integrationEncryptionEnabled {
+			logger.Error("database narrative memory requires the integration secret keyring")
+			os.Exit(1)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		backfill, backfillErr := memory.BackfillLocalNarratives(ctx, store, memory.Root())
+		cancel()
+		if backfillErr != nil {
+			logger.Error("failed to reconcile local narrative memory", "err", backfillErr,
+				"scanned", backfill.Scanned, "imported", backfill.Imported,
+				"reconciled", backfill.Reconciled, "conflicts", backfill.Conflicts,
+			)
+			os.Exit(1)
+		}
+		memory.ConfigureNarrativeStore(store)
+		logger.Info("narrative memory backend ready",
+			"backend", "database", "encrypted", true, "rotated", narrativeSecretsRotated,
+			"backfill_scanned", backfill.Scanned, "backfill_imported", backfill.Imported,
+			"backfill_reconciled", backfill.Reconciled,
+		)
+	} else {
+		memory.ConfigureNarrativeStore(nil)
+		logger.Info("narrative memory backend ready", "backend", cfg.NarrativeMemoryBackend, "enabled", memory.Enabled())
+	}
+	if cfg.ProcessRole == "worker" {
+		runWorkerUntilSignal(store, logger, cfg.SchedulerMode)
+		return
 	}
 
 	// Create MCP server
@@ -210,6 +311,11 @@ func main() {
 	// OAuth server
 	oauthServer := auth.NewOAuthServer(store, baseURL, logger)
 	oauthServer.SetGranularScopesEnabled(cfg.OAuthGranularScopes)
+	if err := oauthServer.ConfigureDynamicClientRegistration(cfg.OAuthDCRMode, cfg.OAuthDCRInitialTokenHash); err != nil {
+		logger.Error("configure dynamic client registration", "err", err)
+		os.Exit(1)
+	}
+	logger.Info("dynamic client registration policy", "mode", cfg.OAuthDCRMode)
 	if smtpAddress := strings.TrimSpace(os.Getenv("SMTP_ADDR")); smtpAddress != "" {
 		emailSender, err := auth.NewSMTPEmailSender(auth.SMTPConfig{
 			Address:    smtpAddress,
@@ -254,7 +360,7 @@ func main() {
 
 	// RATELIMIT_BACKEND=postgres (alias "db") opts every rate limiter and the
 	// per-account login-failure tracker into a shared, DB-backed store so a
-	// multi-instance fleet enforces one combined view of throttling/lockout
+	// multi-instance fleet enforces one combined view of throttling/risk
 	// instead of independent per-process counters. Default "memory" leaves the
 	// in-process behaviour byte-for-byte unchanged (single-node deployments).
 	switch cfg.RateLimitBackend {
@@ -284,16 +390,19 @@ func main() {
 	// OAuth routes — rate-limit sensitive endpoints
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", oauthServer.HandleAuthServerMetadata)
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource", oauthServer.HandleProtectedResourceMetadata)
+	mux.HandleFunc("GET /.well-known/jwks.json", auth.HandleJWKS)
 	mux.Handle("GET /authorize", auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleAuthorizeGet)))
 	mux.Handle("POST /authorize", auth.RateLimitMiddleware(loginLimiter, http.HandlerFunc(oauthServer.HandleAuthorizePost)))
 	mux.Handle("POST /token", auth.RateLimitMiddleware(tokenLimiter, http.HandlerFunc(oauthServer.HandleToken)))
-	mux.Handle("POST /register", auth.RateLimitMiddleware(registerLimiter, http.HandlerFunc(oauthServer.HandleRegister)))
+	mountDynamicClientRegistration(mux, cfg.OAuthDCRMode, oauthServer, registerLimiter)
 	mux.Handle("GET /verify-email", auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleVerifyEmailGet)))
 	mux.Handle("POST /verify-email", auth.RateLimitMiddleware(accountLimiter, http.HandlerFunc(oauthServer.HandleVerifyEmailPost)))
 	mux.Handle("GET /recover", auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleRecoverGet)))
 	mux.Handle("POST /recover", auth.RateLimitMiddleware(accountLimiter, http.HandlerFunc(oauthServer.HandleRecoverPost)))
 	mux.Handle("GET /reset-password", auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleResetPasswordGet)))
 	mux.Handle("POST /reset-password", auth.RateLimitMiddleware(accountLimiter, http.HandlerFunc(oauthServer.HandleResetPasswordPost)))
+	mux.Handle("GET /login-challenge", auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleLoginChallengeGet)))
+	mux.Handle("POST /login-challenge", auth.RateLimitMiddleware(accountLimiter, http.HandlerFunc(oauthServer.HandleLoginChallengePost)))
 
 	// MCP route: per-IP shield before auth, then per-learner limiting after auth.
 	// The body limit runs after both guards so rejected callers cannot make the
@@ -304,7 +413,7 @@ func main() {
 	}
 	mcpProtectedHandler := auth.RateLimitMiddleware(
 		mcpIPLimiter,
-		auth.BearerMiddlewareWithScopeHint(baseURL, initialOAuthScope,
+		auth.BearerMiddlewareWithPrincipalValidator(baseURL, initialOAuthScope, store,
 			auth.LearnerRateLimitMiddleware(mcpLearnerLimiter,
 				mcpConcurrencyLimiter.Middleware(
 					mcpHandler,
@@ -317,29 +426,25 @@ func main() {
 	// this response's deadline through ResponseController; requestLogger's
 	// writer exposes Unwrap so the controller can reach net/http's writer.
 	mux.Handle("/mcp", withoutWriteTimeout(mcpProtectedHandler))
+	adminHandler := auth.BearerMiddlewareWithPrincipalValidator(
+		baseURL, initialOAuthScope, store, adminapi.New(store, logger).Handler(),
+	)
+	mux.Handle("/admin/catalog/", adminHandler)
 
-	// Start scheduler. SCHEDULER_MODE=distributed uses a DB lease so at most
-	// one fleet instance wins each run slot; it is not crash-safe exactly-once
-	// delivery. The default "inprocess" mode runs every cron tick locally.
-	scheduler := engine.NewScheduler(store, logger)
-	if cfg.SchedulerMode == "distributed" {
-		scheduler = engine.NewDistributedScheduler(store, logger)
-		logger.Info("scheduler mode", "mode", "distributed")
+	if runsWorker {
+		// Development PROCESS_ROLE=all preserves the one-process experience.
+		scheduler := startSchedulerOrExit(store, logger, cfg.SchedulerMode)
+		defer scheduler.Stop()
 	}
-	if err := scheduler.Start(); err != nil {
-		logger.Error("failed to start scheduler", "err", err)
-		os.Exit(1)
-	}
-	defer scheduler.Stop()
 
 	// Wrap with recovery + request logging + security headers + CORS.
 	// Order: recovery outermost so panics in any inner middleware are caught.
 	// CORS: allow chat-side origins (claude.ai, baseURL) by exact match.
-	handler := recoveryMiddleware(logger, requestLogger(logger, securityHeaders(baseURL, corsMiddleware(
+	handler := observability.HTTPHandler(recoveryMiddleware(logger, requestLogger(logger, securityHeaders(baseURL, corsMiddleware(
 		[]string{"https://claude.ai", baseURL},
 		nil,
 		mux,
-	))))
+	)))))
 
 	server := &http.Server{
 		Addr:              ":" + port,
@@ -373,6 +478,49 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("server stopped cleanly")
+}
+
+func startSchedulerOrExit(store *db.Store, logger *slog.Logger, mode string) *engine.Scheduler {
+	scheduler := engine.NewScheduler(store, logger)
+	if mode == "distributed" {
+		scheduler = engine.NewDistributedScheduler(store, logger)
+	}
+	if err := scheduler.Start(); err != nil {
+		logger.Error("failed to start worker scheduler", "mode", mode, "err", err)
+		os.Exit(1)
+	}
+	logger.Info("worker scheduler ready", "mode", mode)
+	return scheduler
+}
+
+func runWorkerUntilSignal(store *db.Store, logger *slog.Logger, mode string) {
+	if mode != "distributed" {
+		logger.Error("dedicated tenant worker requires distributed scheduler mode")
+		os.Exit(1)
+	}
+	scheduler := engine.NewTenantDistributedScheduler(store, logger, "saas_worker")
+	if err := scheduler.Start(); err != nil {
+		logger.Error("failed to start tenant worker scheduler", "err", err)
+		os.Exit(1)
+	}
+	logger.Info("tenant worker scheduler ready")
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	sig := <-sigCh
+	logger.Info("worker drain requested", "signal", sig.String())
+	scheduler.Stop()
+	logger.Info("worker drained")
+}
+
+func mountDynamicClientRegistration(mux *http.ServeMux, mode string, oauthServer *auth.OAuthServer, limiter *auth.RateLimiter) {
+	if mode == auth.DCRModeDisabled {
+		return
+	}
+	// IAT admission deliberately wraps the limiter: an anonymous invalid
+	// request must not mutate the shared PostgreSQL rate-limit backend.
+	mux.Handle("POST /register", oauthServer.DynamicClientRegistrationAdmission(
+		auth.RateLimitMiddleware(limiter, http.HandlerFunc(oauthServer.HandleRegister)),
+	))
 }
 
 var pseudonymizedLogKeys = map[string]struct{}{
@@ -443,6 +591,10 @@ type readinessPinger interface {
 	Ping(context.Context) error
 }
 
+type schemaCompatibilityVerifier interface {
+	VerifySchemaCurrent(context.Context) error
+}
+
 func livenessHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -458,6 +610,13 @@ func readinessHandler(pinger readinessPinger) http.HandlerFunc {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_, _ = w.Write([]byte(`{"status":"not_ready","error":"database unreachable"}`))
 			return
+		}
+		if verifier, ok := pinger.(schemaCompatibilityVerifier); ok {
+			if err := verifier.VerifySchemaCurrent(ctx); err != nil {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(`{"status":"not_ready","error":"schema incompatible"}`))
+				return
+			}
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ready"}`))
@@ -593,13 +752,17 @@ func requestLogger(logger *slog.Logger, next http.Handler) http.Handler {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: 200}
 		next.ServeHTTP(rec, r)
-		logger.Info("request",
+		attributes := []any{
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", rec.status,
 			"duration_ms", time.Since(start).Milliseconds(),
 			"ua", r.UserAgent(),
-		)
+		}
+		if traceID := observability.TraceID(r.Context()); traceID != "" {
+			attributes = append(attributes, "trace_id", traceID)
+		}
+		logger.Info("request", attributes...)
 	})
 }
 

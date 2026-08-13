@@ -33,6 +33,11 @@ func newJobsTestStore(t *testing.T, webhookURL string) (*db.Store, string) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
+	// Match db.OpenDB's production SQLite configuration. A single connection
+	// serializes write transactions; allowing the test helper to open several
+	// connections makes concurrent scheduler claims fail spuriously with
+	// SQLITE_LOCKED instead of exercising the production claim CAS.
+	rawDB.SetMaxOpenConns(1)
 	t.Cleanup(func() { rawDB.Close() })
 	if err := db.Migrate(rawDB); err != nil {
 		t.Fatalf("migrate: %v", err)
@@ -40,10 +45,10 @@ func newJobsTestStore(t *testing.T, webhookURL string) (*db.Store, string) {
 
 	learnerID := "L1"
 	_, err = rawDB.Exec(
-		`INSERT INTO learners (id, email, password_hash, objective, webhook_url, created_at, last_active)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO learners (id, email, password_hash, objective, webhook_url, created_at, last_active, email_verified_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		learnerID, "test@example.com", "hash", "obj", webhookURL,
-		time.Now().UTC(), time.Now().UTC().Add(-48*time.Hour),
+		time.Now().UTC(), time.Now().UTC().Add(-48*time.Hour), time.Now().UTC(),
 	)
 	if err != nil {
 		t.Fatalf("insert learner: %v", err)
@@ -63,6 +68,7 @@ func rawTestSetup(t *testing.T, webhookURL string) (*sql.DB, *db.Store, string) 
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
+	rawDB.SetMaxOpenConns(1)
 	t.Cleanup(func() { rawDB.Close() })
 	if err := db.Migrate(rawDB); err != nil {
 		t.Fatalf("migrate: %v", err)
@@ -70,10 +76,10 @@ func rawTestSetup(t *testing.T, webhookURL string) (*sql.DB, *db.Store, string) 
 
 	learnerID := "L1"
 	_, err = rawDB.Exec(
-		`INSERT INTO learners (id, email, password_hash, objective, webhook_url, created_at, last_active)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO learners (id, email, password_hash, objective, webhook_url, created_at, last_active, email_verified_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		learnerID, "test@example.com", "hash", "obj", webhookURL,
-		time.Now().UTC(), time.Now().UTC().Add(-48*time.Hour),
+		time.Now().UTC(), time.Now().UTC().Add(-48*time.Hour), time.Now().UTC(),
 	)
 	if err != nil {
 		t.Fatalf("insert learner: %v", err)
@@ -273,7 +279,7 @@ func TestDispatchQueued_FallbackWhenQueueEmpty(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	_, store, _ := rawTestSetup(t, srv.URL)
+	rawDB, store, _ := rawTestSetup(t, srv.URL)
 	s := schedulerForTest(store)
 	s.sendDailyRecap()
 
@@ -282,6 +288,13 @@ func TestDispatchQueued_FallbackWhenQueueEmpty(t *testing.T) {
 	}
 	if !contains(bodies[0], "Tonight") {
 		t.Errorf("fallback payload should mention 'Tonight', got %s", bodies[0])
+	}
+	var status, contentFormat string
+	if err := rawDB.QueryRow(`SELECT status, content_format FROM webhook_message_queue LIMIT 1`).Scan(&status, &contentFormat); err != nil {
+		t.Fatal(err)
+	}
+	if status != models.WebhookStatusSent || contentFormat != models.WebhookContentFormatDiscordPayload {
+		t.Fatalf("fallback queue status=%q format=%q, want sent/discord_payload", status, contentFormat)
 	}
 }
 
@@ -354,8 +367,8 @@ func TestDispatchQueued_RequeuesAfterWebhookError(t *testing.T) {
 	if !nextAttemptAt.Valid || !nextAttemptAt.Time.After(now) {
 		t.Errorf("next_attempt_at = %v, want a persisted retry after %v", nextAttemptAt, now)
 	}
-	if lastError != "delivery_failed" {
-		t.Errorf("last_error = %q, want delivery_failed", lastError)
+	if lastError != "http_500" {
+		t.Errorf("last_error = %q, want http_500", lastError)
 	}
 	if deadLetteredAt.Valid {
 		t.Errorf("dead_lettered_at = %v, want NULL before durable retry budget is exhausted", deadLetteredAt.Time)
@@ -363,8 +376,8 @@ func TestDispatchQueued_RequeuesAfterWebhookError(t *testing.T) {
 }
 
 func TestDispatchQueued_NoActiveLearners(t *testing.T) {
-	// Learner without webhook_url is filtered by GetActiveLearners → no panic,
-	// no hits.
+	// Learner without webhook_url is filtered by the scheduler projection: no
+	// panic and no delivery attempt.
 	_, store, _ := rawTestSetup(t, "")
 	s := schedulerForTest(store)
 	s.sendDailyMotivation()

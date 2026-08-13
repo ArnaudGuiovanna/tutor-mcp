@@ -27,6 +27,17 @@ func (failingLoginFailureBackend) Reset(context.Context, string) error {
 	return errors.New("backend unavailable")
 }
 
+type contextLoginFailureBackend struct{ seen chan error }
+
+func (b contextLoginFailureBackend) Record(ctx context.Context, _ string, _ time.Time) (int, error) {
+	b.seen <- ctx.Err()
+	return 0, ctx.Err()
+}
+func (contextLoginFailureBackend) CountInWindow(context.Context, string, time.Duration, time.Time) (int, error) {
+	return 0, nil
+}
+func (contextLoginFailureBackend) Reset(context.Context, string) error { return nil }
+
 // Issue #36 part 4: per-account login failure lockout. The tracker is
 // thread-safe, time-windowed, and resettable on success.
 
@@ -142,5 +153,39 @@ func TestLoginFailureTrackerBoundsUniqueAccountState(t *testing.T) {
 	}
 	if tk.lru.Len() != maxLoginFailureBuckets {
 		t.Fatalf("LRU entries=%d, want cap %d", tk.lru.Len(), maxLoginFailureBuckets)
+	}
+}
+
+func TestLoginFailureTrackerProgressivePenaltyAndBoundedPerAccountState(t *testing.T) {
+	tk := NewLoginFailureTracker(3, time.Hour)
+	want := []time.Duration{0, 0, time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second, 30 * time.Second}
+	for i, wantDelay := range want {
+		count := tk.Record("learner@example.test")
+		if got := tk.RetryAfter(count); got != wantDelay {
+			t.Fatalf("failure %d: RetryAfter=%v, want %v", i+1, got, wantDelay)
+		}
+	}
+	for i := 0; i < 100; i++ {
+		tk.Record("learner@example.test")
+	}
+	tk.mu.Lock()
+	retained := len(tk.fails["learner@example.test"].stamps)
+	tk.mu.Unlock()
+	if retained != tk.threshold+6 {
+		t.Fatalf("retained timestamps=%d, want bounded %d", retained, tk.threshold+6)
+	}
+}
+
+func TestLoginFailureTrackerPropagatesRequestCancellation(t *testing.T) {
+	seen := make(chan error, 1)
+	tk := NewLoginFailureTracker(3, time.Minute)
+	tk.SetBackend(contextLoginFailureBackend{seen: seen})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := tk.RecordContext(ctx, "learner@example.test"); got != 1 {
+		t.Fatalf("local fallback count=%d, want 1", got)
+	}
+	if err := <-seen; !errors.Is(err, context.Canceled) {
+		t.Fatalf("backend context error=%v, want context.Canceled", err)
 	}
 }

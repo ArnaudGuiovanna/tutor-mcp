@@ -8,7 +8,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -26,11 +28,21 @@ import (
 )
 
 type options struct {
-	Driver   string
-	DBPath   string
-	MaxConns int
-	Apply    bool
-	Policy   db.RetentionPolicy
+	Driver          string
+	DBPath          string
+	MaxConns        int
+	MemoryBackend   string
+	Action          string
+	Apply           bool
+	Policy          db.RetentionPolicy
+	JobID           string
+	Actor           string
+	BackupReference string
+	BackupCreatedAt time.Time
+	HoldID          string
+	LearnerID       string
+	Reason          string
+	Limit           int
 }
 
 func main() {
@@ -48,12 +60,6 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) er
 	if err != nil {
 		return err
 	}
-	if err := opts.Policy.Validate(); err != nil {
-		return err
-	}
-	if !opts.Policy.Enabled() {
-		return fmt.Errorf("all retention categories are disabled; set at least one *_DAYS value above zero")
-	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -62,26 +68,170 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) er
 		return err
 	}
 	defer store.Close()
-
-	report, err := store.RunDataRetention(ctx, opts.Policy, timeNowUTC(), opts.Apply)
-	if err != nil {
-		return err
-	}
-	if opts.Policy.NarrativeMemoryDays > 0 {
-		memoryResult, memoryErr := memory.RunRetention(
-			timeNowUTC().AddDate(0, 0, -opts.Policy.NarrativeMemoryDays), opts.Apply,
-		)
-		if memoryErr != nil {
-			return memoryErr
-		}
-		report.NarrativeMemoryFiles = db.RetentionMetric{
-			Eligible: memoryResult.Eligible,
-			Applied:  memoryResult.Applied,
-		}
+	if opts.MemoryBackend == "database" {
+		memory.ConfigureNarrativeStore(store)
+		defer memory.ConfigureNarrativeStore(nil)
 	}
 	encoder := json.NewEncoder(stdout)
 	encoder.SetIndent("", "  ")
-	return encoder.Encode(report)
+
+	switch opts.Action {
+	case "hold-list":
+		holds, err := store.ListRetentionLegalHolds(ctx, false, opts.Limit)
+		if err != nil {
+			return err
+		}
+		return encoder.Encode(map[string]any{"action": opts.Action, "holds": holds})
+	case "hold-create":
+		hold := db.RetentionLegalHold{
+			HoldID: opts.HoldID, LearnerID: opts.LearnerID,
+			Reason: opts.Reason, CreatedBy: opts.Actor, CreatedAt: timeNowUTC(),
+		}
+		if opts.Apply {
+			if err := store.CreateRetentionLegalHold(ctx, hold); err != nil {
+				return err
+			}
+		}
+		return encoder.Encode(map[string]any{"action": opts.Action, "applied": opts.Apply, "hold": hold})
+	case "hold-release":
+		applied := false
+		if opts.Apply {
+			applied, err = store.ReleaseRetentionLegalHold(ctx, opts.HoldID, opts.Actor, opts.Reason, timeNowUTC())
+			if err != nil {
+				return err
+			}
+		}
+		return encoder.Encode(map[string]any{"action": opts.Action, "applied": applied, "hold_id": opts.HoldID})
+	case "job-status":
+		job, err := store.GetRetentionJob(ctx, opts.JobID)
+		if err != nil {
+			return err
+		}
+		return encoder.Encode(job)
+	case "run":
+	default:
+		return fmt.Errorf("unsupported retention action %q", opts.Action)
+	}
+
+	if err := opts.Policy.Validate(); err != nil {
+		return err
+	}
+	if !opts.Policy.Enabled() {
+		return fmt.Errorf("all retention categories are disabled; set at least one *_DAYS value above zero")
+	}
+	asOf := timeNowUTC()
+	if !opts.Apply {
+		report, err := store.RunDataRetention(ctx, opts.Policy, asOf, false)
+		if err != nil {
+			return err
+		}
+		if opts.Policy.NarrativeMemoryDays > 0 {
+			heldLearners, err := store.ActiveRetentionLegalHoldLearners(ctx)
+			if err != nil {
+				return err
+			}
+			memoryResult, err := memory.RunRetentionWithLegalHolds(
+				asOf.AddDate(0, 0, -opts.Policy.NarrativeMemoryDays), false, heldLearners,
+			)
+			if err != nil {
+				return err
+			}
+			report.NarrativeMemoryFiles = db.RetentionMetric{
+				Eligible: memoryResult.Eligible, Applied: memoryResult.Applied, Held: memoryResult.Held,
+			}
+		}
+		return encoder.Encode(report)
+	}
+
+	existing, existingErr := store.GetRetentionJob(ctx, opts.JobID)
+	if existingErr == nil {
+		asOf = existing.AsOf
+		if opts.BackupReference == "" {
+			opts.BackupReference = existing.BackupReference
+			opts.BackupCreatedAt = existing.BackupCreatedAt
+		}
+	} else if !errors.Is(existingErr, sql.ErrNoRows) {
+		return existingErr
+	}
+	if opts.BackupReference == "" || opts.BackupCreatedAt.IsZero() {
+		return fmt.Errorf("a new apply job requires backup-reference and backup-created-at")
+	}
+	job, err := store.CreateOrResumeRetentionJob(
+		ctx, opts.JobID, opts.Policy, asOf, opts.BackupReference,
+		opts.BackupCreatedAt, opts.Actor, timeNowUTC(),
+	)
+	if err != nil {
+		return err
+	}
+	if job.Status == "completed" {
+		return encoder.Encode(job)
+	}
+	ownerSuffix, err := randomOwnerSuffix()
+	if err != nil {
+		return err
+	}
+	owner := "retention:" + ownerSuffix
+	job, err = store.ClaimRetentionJob(ctx, opts.JobID, owner, timeNowUTC())
+	if err != nil {
+		return err
+	}
+
+	if started, err := store.StartRetentionJobPhase(ctx, opts.JobID, owner, db.RetentionPhaseDatabase, timeNowUTC()); err != nil {
+		return err
+	} else if started {
+		_, phaseErr := store.ApplyRetentionDatabaseJobPhase(ctx, opts.JobID, owner, opts.Policy, timeNowUTC())
+		if phaseErr != nil {
+			_ = store.FailRetentionJobPhase(ctx, opts.JobID, owner, db.RetentionPhaseDatabase, phaseErr, timeNowUTC())
+			return phaseErr
+		}
+	}
+
+	if started, err := store.StartRetentionJobPhase(ctx, opts.JobID, owner, db.RetentionPhaseNarrative, timeNowUTC()); err != nil {
+		return err
+	} else if started {
+		heldLearners, phaseErr := store.ActiveRetentionLegalHoldLearners(ctx)
+		if phaseErr != nil {
+			_ = store.FailRetentionJobPhase(ctx, opts.JobID, owner, db.RetentionPhaseNarrative, phaseErr, timeNowUTC())
+			return phaseErr
+		}
+		memoryResult, phaseErr := memory.RunRetentionWithLegalHolds(
+			job.AsOf.AddDate(0, 0, -opts.Policy.NarrativeMemoryDays), true, heldLearners,
+		)
+		if phaseErr != nil {
+			_ = store.FailRetentionJobPhase(ctx, opts.JobID, owner, db.RetentionPhaseNarrative, phaseErr, timeNowUTC())
+			return phaseErr
+		}
+		phaseJSON, _ := json.Marshal(memoryResult)
+		if err := store.CompleteRetentionJobPhase(
+			ctx, opts.JobID, owner, db.RetentionPhaseNarrative,
+			memoryResult.Eligible, memoryResult.Applied, memoryResult.Held,
+			string(phaseJSON), timeNowUTC(),
+		); err != nil {
+			return err
+		}
+	}
+
+	checkpointed, err := store.GetRetentionJob(ctx, opts.JobID)
+	if err != nil {
+		return err
+	}
+	finalJSON, _ := json.Marshal(checkpointed.Phases)
+	if err := store.CompleteRetentionJob(ctx, opts.JobID, owner, string(finalJSON), timeNowUTC()); err != nil {
+		return err
+	}
+	completed, err := store.GetRetentionJob(ctx, opts.JobID)
+	if err != nil {
+		return err
+	}
+	return encoder.Encode(completed)
+}
+
+func randomOwnerSuffix() (string, error) {
+	value := make([]byte, 12)
+	if _, err := rand.Read(value); err != nil {
+		return "", fmt.Errorf("generate retention lease owner: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(value), nil
 }
 
 // timeNowUTC is a seam for deterministic command tests without allowing an
@@ -131,9 +281,13 @@ func parseOptions(args []string, stderr io.Writer, getenv func(string) string) (
 	}
 
 	opts := options{
-		Driver:   strings.ToLower(strings.TrimSpace(getenv("DB_DRIVER"))),
-		DBPath:   strings.TrimSpace(getenv("DB_PATH")),
-		MaxConns: maxConns,
+		Driver:          strings.ToLower(strings.TrimSpace(getenv("DB_DRIVER"))),
+		DBPath:          strings.TrimSpace(getenv("DB_PATH")),
+		MaxConns:        maxConns,
+		Action:          "run",
+		Actor:           strings.TrimSpace(getenv("RETENTION_ACTOR")),
+		BackupReference: strings.TrimSpace(getenv("RETENTION_BACKUP_REFERENCE")),
+		Limit:           100,
 		Policy: db.RetentionPolicy{
 			WebhookTerminalDays:        webhookDays,
 			WebhookLiveDays:            webhookLiveDays,
@@ -152,13 +306,31 @@ func parseOptions(args []string, stderr io.Writer, getenv func(string) string) (
 	if opts.DBPath == "" {
 		opts.DBPath = "./data/runtime.db"
 	}
+	if raw := strings.TrimSpace(getenv("TUTOR_MCP_MEMORY_BACKEND")); raw != "" {
+		opts.MemoryBackend = strings.ToLower(raw)
+	} else if opts.Driver == "postgres" {
+		opts.MemoryBackend = "database"
+	} else {
+		opts.MemoryBackend = "local"
+	}
 
 	fs := flag.NewFlagSet("tutor-retention", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.StringVar(&opts.Driver, "db-driver", opts.Driver, "database driver: sqlite or postgres")
 	fs.StringVar(&opts.DBPath, "db-path", opts.DBPath, "existing SQLite database path")
 	fs.IntVar(&opts.MaxConns, "db-max-conns", opts.MaxConns, "PostgreSQL pool size")
+	fs.StringVar(&opts.MemoryBackend, "memory-backend", opts.MemoryBackend, "narrative backend: local or database")
+	fs.StringVar(&opts.Action, "action", opts.Action, "action: run, job-status, hold-list, hold-create, or hold-release")
 	fs.BoolVar(&opts.Apply, "apply", false, "apply mutations; omitted means read-only dry-run")
+	fs.StringVar(&opts.JobID, "job-id", "", "durable apply job ID or job-status target")
+	fs.StringVar(&opts.Actor, "actor", opts.Actor, "operator identity recorded in the manifest/audit")
+	fs.StringVar(&opts.BackupReference, "backup-reference", opts.BackupReference, "operator-verifiable backup ID/path/PITR marker")
+	backupCreatedAt := strings.TrimSpace(getenv("RETENTION_BACKUP_CREATED_AT"))
+	fs.StringVar(&backupCreatedAt, "backup-created-at", backupCreatedAt, "backup timestamp in RFC3339")
+	fs.StringVar(&opts.HoldID, "hold-id", "", "legal-hold identifier")
+	fs.StringVar(&opts.LearnerID, "learner", "", "learner protected by a legal hold")
+	fs.StringVar(&opts.Reason, "reason", "", "legal-hold creation/release reason")
+	fs.IntVar(&opts.Limit, "limit", opts.Limit, "maximum hold rows returned (1..1000)")
 	fs.IntVar(&opts.Policy.WebhookTerminalDays, "webhook-days", webhookDays, "delete terminal webhook queue rows older than N days")
 	fs.IntVar(&opts.Policy.WebhookLiveDays, "webhook-live-days", webhookLiveDays, "terminalize pending/processing webhook rows older than N days")
 	fs.IntVar(&opts.Policy.AssessmentPlaintextDays, "assessment-plaintext-days", assessmentDays, "redact safely hashed terminal assessment plaintext older than N days")
@@ -175,11 +347,62 @@ func parseOptions(args []string, stderr io.Writer, getenv func(string) string) (
 		return options{}, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
 	}
 	opts.Driver = strings.ToLower(strings.TrimSpace(opts.Driver))
+	opts.MemoryBackend = strings.ToLower(strings.TrimSpace(opts.MemoryBackend))
+	opts.Action = strings.ToLower(strings.TrimSpace(opts.Action))
+	opts.JobID = strings.TrimSpace(opts.JobID)
+	opts.Actor = strings.TrimSpace(opts.Actor)
+	opts.BackupReference = strings.TrimSpace(opts.BackupReference)
+	opts.HoldID = strings.TrimSpace(opts.HoldID)
+	opts.LearnerID = strings.TrimSpace(opts.LearnerID)
+	opts.Reason = strings.TrimSpace(opts.Reason)
 	if opts.Driver != "sqlite" && opts.Driver != "postgres" {
 		return options{}, fmt.Errorf("unknown database driver %q", opts.Driver)
 	}
 	if opts.MaxConns <= 0 {
 		return options{}, fmt.Errorf("db-max-conns must be greater than zero")
+	}
+	if opts.MemoryBackend != "local" && opts.MemoryBackend != "database" {
+		return options{}, fmt.Errorf("memory-backend must be local or database")
+	}
+	if opts.Limit < 1 || opts.Limit > 1000 {
+		return options{}, fmt.Errorf("limit must be between 1 and 1000")
+	}
+	if backupCreatedAt != "" {
+		parsed, err := time.Parse(time.RFC3339, backupCreatedAt)
+		if err != nil {
+			return options{}, fmt.Errorf("backup-created-at must be RFC3339: %w", err)
+		}
+		opts.BackupCreatedAt = parsed.UTC()
+	}
+	switch opts.Action {
+	case "run":
+		if opts.HoldID != "" || opts.LearnerID != "" || opts.Reason != "" {
+			return options{}, fmt.Errorf("run does not accept legal-hold flags")
+		}
+		if opts.Apply && (opts.JobID == "" || opts.Actor == "") {
+			return options{}, fmt.Errorf("apply requires job-id and actor")
+		}
+	case "job-status":
+		if opts.JobID == "" || opts.Apply {
+			return options{}, fmt.Errorf("job-status requires job-id and is read-only")
+		}
+	case "hold-list":
+		if opts.Apply || opts.HoldID != "" || opts.LearnerID != "" || opts.Reason != "" {
+			return options{}, fmt.Errorf("hold-list is read-only and does not accept hold mutation flags")
+		}
+	case "hold-create":
+		if opts.HoldID == "" || opts.LearnerID == "" || opts.Reason == "" || opts.Actor == "" {
+			return options{}, fmt.Errorf("hold-create requires hold-id, learner, reason, and actor")
+		}
+	case "hold-release":
+		if opts.HoldID == "" || opts.Reason == "" || opts.Actor == "" {
+			return options{}, fmt.Errorf("hold-release requires hold-id, reason, and actor")
+		}
+		if opts.LearnerID != "" {
+			return options{}, fmt.Errorf("hold-release does not accept learner")
+		}
+	default:
+		return options{}, fmt.Errorf("unknown retention action %q", opts.Action)
 	}
 	return opts, nil
 }

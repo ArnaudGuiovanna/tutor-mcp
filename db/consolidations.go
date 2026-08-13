@@ -14,17 +14,22 @@ import (
 	"tutor-mcp/models"
 )
 
-// GetLearnerIDsForConsolidation returns every registered learner. Periodic
-// consolidation is a memory concern and must not depend on webhook opt-in or
-// recent activity, unlike the scheduler's notification audience queries.
-func (s *Store) GetLearnerIDsForConsolidation(ctx context.Context) ([]string, error) {
-	rows, err := s.query(ctx, `SELECT id FROM learners ORDER BY id ASC`)
+// ListLearnerIDsForConsolidationPage keyset-pages every registered learner.
+// Periodic consolidation must not depend on webhook opt-in or recent activity,
+// but it must also never materialize the full learner population in memory.
+func (s *Store) ListLearnerIDsForConsolidationPage(ctx context.Context, afterLearnerID string, limit int) ([]string, error) {
+	if limit < 1 || limit > 1000 {
+		return nil, fmt.Errorf("list learners for consolidation: limit must be between 1 and 1000")
+	}
+	rows, err := s.query(ctx,
+		`SELECT id FROM learners WHERE id > ? ORDER BY id ASC LIMIT ?`,
+		afterLearnerID, limit,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("get learners for consolidation: %w", err)
+		return nil, fmt.Errorf("list learners for consolidation: %w", err)
 	}
 	defer rows.Close()
-
-	var ids []string
+	ids := make([]string, 0, limit)
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {

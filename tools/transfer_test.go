@@ -338,7 +338,7 @@ func TestRecordTransferResult_AllowsKnownContextTypes(t *testing.T) {
 func TestRecordTransferResult_DomainIDRejectsForeignDomain(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	makeOwnerDomain(t, store, "L_owner", "math")
-	foreign, err := store.CreateDomain(context.Background(), "L_other", "shared", "", models.KnowledgeSpace{
+	foreign, err := store.CreateDomain(context.Background(), "L_attacker", "shared", "", models.KnowledgeSpace{
 		Concepts: []string{"a"},
 	})
 	if err != nil {

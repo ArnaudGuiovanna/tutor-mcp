@@ -92,7 +92,7 @@ jobs:
   postgres-test:
     name: Test (PostgreSQL 17)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     services:
       postgres:
@@ -122,7 +122,11 @@ jobs:
       - name: Test full package matrix with PostgreSQL integration enabled
         env:
           TUTOR_TEST_PG_DSN: postgres://tutor:tutor_test@localhost:5432/tutor_test?sslmode=disable
-        run: go test -race -count=1 -timeout 10m ./...
+          # Unlike the opt-in 10k/100k staging benchmarks, this bounded
+          # 50-learner/2k-write gate belongs on every change: it catches lost
+          # updates, pool starvation and dialect drift under concurrent load.
+          TUTOR_LOAD_TEST: "1"
+        run: go test -race -count=1 -timeout 12m ./...
 
   build:
     name: Build (${{ matrix.goos }}/${{ matrix.goarch }})

@@ -59,8 +59,8 @@ func TestSendOLM_DispatchesFallbackWhenQueueEmpty(t *testing.T) {
 
 	store, raw := newOLMTestStore(t)
 	if _, err := raw.Exec(
-		`INSERT INTO learners (id, email, password_hash, objective, webhook_url, last_active, created_at) VALUES (?,?,?,?,?,?,?)`,
-		"L1", "l1@t.com", "h", "obj", srv.URL, time.Now().UTC(), time.Now().UTC(),
+		`INSERT INTO learners (id, email, password_hash, objective, webhook_url, last_active, created_at, email_verified_at) VALUES (?,?,?,?,?,?,?,?)`,
+		"L1", "l1@t.com", "h", "obj", srv.URL, time.Now().UTC(), time.Now().UTC(), time.Now().UTC(),
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -85,6 +85,17 @@ func TestSendOLM_DispatchesFallbackWhenQueueEmpty(t *testing.T) {
 	}
 	if push == nil {
 		t.Fatalf("OLM dispatch should record a push log")
+	}
+	var queueStatus, contentFormat string
+	var dispatchTransitions int
+	if err := raw.QueryRow(`SELECT status, content_format FROM webhook_message_queue LIMIT 1`).Scan(&queueStatus, &contentFormat); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.QueryRow(`SELECT COUNT(*) FROM webhook_delivery_transitions WHERE to_status = 'dispatching'`).Scan(&dispatchTransitions); err != nil {
+		t.Fatal(err)
+	}
+	if queueStatus != models.WebhookStatusSent || contentFormat != models.WebhookContentFormatDiscordPayload || dispatchTransitions != 1 {
+		t.Fatalf("OLM fallback queue=%q format=%q dispatch transitions=%d", queueStatus, contentFormat, dispatchTransitions)
 	}
 }
 
@@ -172,8 +183,8 @@ func TestSendOLM_SkipsWhenNothingActionable(t *testing.T) {
 
 	store, raw := newOLMTestStore(t)
 	if _, err := raw.Exec(
-		`INSERT INTO learners (id, email, password_hash, objective, webhook_url, last_active, created_at) VALUES (?,?,?,?,?,?,?)`,
-		"L1", "l1@t.com", "h", "obj", srv.URL, time.Now().UTC(), time.Now().UTC(),
+		`INSERT INTO learners (id, email, password_hash, objective, webhook_url, last_active, created_at, email_verified_at) VALUES (?,?,?,?,?,?,?,?)`,
+		"L1", "l1@t.com", "h", "obj", srv.URL, time.Now().UTC(), time.Now().UTC(), time.Now().UTC(),
 	); err != nil {
 		t.Fatal(err)
 	}

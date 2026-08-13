@@ -8,6 +8,8 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"tutor-mcp/models"
 )
 
 // ReserveNotificationDelivery atomically applies the latest learner-owned
@@ -66,25 +68,9 @@ func (s *Store) reserveNotificationDeliveryLocked(
 	intrusive bool,
 	at time.Time,
 ) (int64, bool, error) {
-	availability, err := s.GetAvailability(ctx, learnerID)
-	if err != nil {
+	availability, allowed, err := s.notificationPolicyAllowsLocked(ctx, learnerID, domainID, intrusive, at)
+	if err != nil || !allowed {
 		return 0, false, err
-	}
-	allowed, err := availability.AllowsNotificationAt(at)
-	if err != nil {
-		return 0, false, fmt.Errorf("evaluate notification availability: %w", err)
-	}
-	if !allowed {
-		return 0, false, nil
-	}
-	if intrusive {
-		allowed, err = s.highStakesNotificationAllowed(ctx, learnerID, domainID)
-		if err != nil {
-			return 0, false, err
-		}
-		if !allowed {
-			return 0, false, nil
-		}
 	}
 
 	bounds, err := availability.NotificationBounds(at)
@@ -141,10 +127,43 @@ func (s *Store) reserveNotificationDeliveryLocked(
 	return id, true, nil
 }
 
+// notificationPolicyAllowsLocked re-evaluates mutable learner consent and
+// high-stakes policy while the learner notification lock is held. Delivery
+// preparations that reuse an enqueue-time reservation call this helper so a
+// later consent revocation still wins before the HTTP boundary.
+func (s *Store) notificationPolicyAllowsLocked(
+	ctx context.Context,
+	learnerID, domainID string,
+	intrusive bool,
+	at time.Time,
+) (*models.Availability, bool, error) {
+	availability, err := s.GetAvailability(ctx, learnerID)
+	if err != nil {
+		return nil, false, err
+	}
+	allowed, err := availability.AllowsNotificationAt(at)
+	if err != nil {
+		return nil, false, fmt.Errorf("evaluate notification availability: %w", err)
+	}
+	if !allowed {
+		return availability, false, nil
+	}
+	if intrusive {
+		allowed, err = s.highStakesNotificationAllowed(ctx, learnerID, domainID)
+		if err != nil {
+			return nil, false, err
+		}
+		if !allowed {
+			return availability, false, nil
+		}
+	}
+	return availability, true, nil
+}
+
 func (s *Store) CompleteNotificationDelivery(ctx context.Context, reservationID int64, learnerID string) error {
 	result, err := s.exec(ctx,
-		`UPDATE scheduled_alerts SET sent = 1
-		 WHERE id = ? AND learner_id = ? AND sent = 0`,
+		`UPDATE scheduled_alerts SET sent = 1, delivery_state = 'delivered'
+		 WHERE id = ? AND learner_id = ? AND sent = 0 AND delivery_state = 'reserved'`,
 		reservationID, learnerID,
 	)
 	if err != nil {
@@ -165,7 +184,8 @@ func (s *Store) ReleaseNotificationDelivery(ctx context.Context, reservationID i
 		return nil
 	}
 	_, err := s.exec(ctx,
-		`DELETE FROM scheduled_alerts WHERE id = ? AND learner_id = ? AND sent = 0`,
+		`DELETE FROM scheduled_alerts
+		 WHERE id = ? AND learner_id = ? AND sent = 0 AND delivery_state = 'reserved'`,
 		reservationID, learnerID,
 	)
 	if err != nil {

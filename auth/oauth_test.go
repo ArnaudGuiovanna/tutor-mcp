@@ -14,7 +14,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,7 +29,11 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-var testDBCounter int
+var authTestDBTemplate struct {
+	sync.Once
+	data []byte
+	err  error
+}
 
 const testOAuthResource = "https://test.example/mcp"
 
@@ -35,6 +42,8 @@ type testEmailSender struct {
 	verificationLinks []string
 	resetTo           []string
 	resetLinks        []string
+	challengeTo       []string
+	challengeLinks    []string
 }
 
 func (s *testEmailSender) SendVerification(_ context.Context, to, link string) error {
@@ -49,17 +58,30 @@ func (s *testEmailSender) SendPasswordReset(_ context.Context, to, link string) 
 	return nil
 }
 
+func (s *testEmailSender) SendLoginChallenge(_ context.Context, to, link string) error {
+	s.challengeTo = append(s.challengeTo, to)
+	s.challengeLinks = append(s.challengeLinks, link)
+	return nil
+}
+
 func newTestServer(t *testing.T) (*OAuthServer, *db.Store) {
 	t.Helper()
-	testDBCounter++
-	dsn := fmt.Sprintf("file:oauth_memdb_%s_%d?mode=memory&cache=shared", t.Name(), testDBCounter)
-	sqldb, err := sql.Open("sqlite", dsn)
+	template, err := authTestDBTemplateBytes()
+	if err != nil {
+		t.Fatalf("build auth test database template: %v", err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "auth-test.db")
+	if err := os.WriteFile(dbPath, template, 0o600); err != nil {
+		t.Fatalf("copy auth test database template: %v", err)
+	}
+	sqldb, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if err := db.Migrate(sqldb); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	// Mirror db.OpenDB: SQLite is a single-writer profile. Keeping one
+	// connection makes concurrent auth mutations queue instead of surfacing
+	// shared-cache table locks that production never exposes.
+	sqldb.SetMaxOpenConns(1)
 	t.Cleanup(func() { sqldb.Close() })
 
 	store := db.NewStore(sqldb)
@@ -67,6 +89,34 @@ func newTestServer(t *testing.T) (*OAuthServer, *db.Store) {
 	server := NewOAuthServer(store, "https://test.example", logger)
 	server.SetEmailSender(&testEmailSender{})
 	return server, store
+}
+
+func authTestDBTemplateBytes() ([]byte, error) {
+	authTestDBTemplate.Do(func() {
+		dir, err := os.MkdirTemp("", "tutor-mcp-auth-test-template-")
+		if err != nil {
+			authTestDBTemplate.err = err
+			return
+		}
+		defer os.RemoveAll(dir)
+		path := filepath.Join(dir, "template.db")
+		raw, err := sql.Open("sqlite", path)
+		if err != nil {
+			authTestDBTemplate.err = err
+			return
+		}
+		if err := db.Migrate(raw); err != nil {
+			_ = raw.Close()
+			authTestDBTemplate.err = err
+			return
+		}
+		if err := raw.Close(); err != nil {
+			authTestDBTemplate.err = err
+			return
+		}
+		authTestDBTemplate.data, authTestDBTemplate.err = os.ReadFile(path)
+	})
+	return authTestDBTemplate.data, authTestDBTemplate.err
 }
 
 func seedClient(t *testing.T, store *db.Store, clientID, redirectURI string) {
@@ -404,6 +454,39 @@ func TestAuthorizePost_RotatesCSRFAndRejectsReplay(t *testing.T) {
 
 	if replay := post("one-time-token"); replay.Code != http.StatusForbidden {
 		t.Fatalf("replay status = %d, want 403; body=%q", replay.Code, replay.Body.String())
+	}
+}
+
+func TestAuthorizePost_CSRFReplayRejectedAcrossNodes(t *testing.T) {
+	firstNode, store := newTestServer(t)
+	secondNode := NewOAuthServer(store, "https://test.example", firstNode.logger)
+	seedClient(t, store, "cid-fleet-csrf", "https://good.example/cb")
+	seedLearner(t, store, "fleet-csrf@example.com", "correct-password")
+	form := url.Values{
+		"csrf_token":            {"fleet-one-time-token"},
+		"mode":                  {"login"},
+		"client_id":             {"cid-fleet-csrf"},
+		"redirect_uri":          {"https://good.example/cb"},
+		"response_type":         {"code"},
+		"resource":              {testOAuthResource},
+		"code_challenge":        {"abc"},
+		"code_challenge_method": {"S256"},
+		"email":                 {"fleet-csrf@example.com"},
+		"password":              {"wrong-password"},
+	}
+	post := func(server *OAuthServer) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/authorize", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "fleet-one-time-token"})
+		rec := httptest.NewRecorder()
+		server.HandleAuthorizePost(rec, req)
+		return rec
+	}
+	if first := post(firstNode); first.Code != http.StatusUnauthorized {
+		t.Fatalf("first node status=%d body=%s", first.Code, first.Body.String())
+	}
+	if replay := post(secondNode); replay.Code != http.StatusForbidden {
+		t.Fatalf("second node replay status=%d body=%s", replay.Code, replay.Body.String())
 	}
 }
 

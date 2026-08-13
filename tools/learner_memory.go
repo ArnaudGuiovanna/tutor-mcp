@@ -114,6 +114,10 @@ func registerUpdateLearnerMemory(server *mcp.Server, deps *Deps) {
 			Operation:   op,
 			Content:     params.Content,
 			SectionKey:  params.SectionKey,
+			MutationID:  params.IdempotencyKey,
+		}
+		if writeReq.MutationID == "" {
+			writeReq.MutationID = idempotencyKeyFromContext(ctx)
 		}
 		var degradedComponents []string
 		if err := writeLearnerMemory(writeReq); err != nil {
@@ -263,7 +267,7 @@ func registerGetMemoryState(server *mcp.Server, deps *Deps) {
 		}
 
 		var memorySizeValue any
-		memorySize, sizeErr := learnerMemorySize(learnerID, concepts, archives, sessions)
+		memorySize, narrativeStats, sizeErr := learnerMemorySize(learnerID, concepts, archives, sessions)
 		if sizeErr != nil {
 			logMemoryStateDegradation(deps, "memory_statistics", sizeErr)
 			degradedComponents = append(degradedComponents, "memory_statistics")
@@ -291,13 +295,17 @@ func registerGetMemoryState(server *mcp.Server, deps *Deps) {
 			newest = sessions[0]
 			oldest = sessions[len(sessions)-1]
 		}
+		conceptCount := len(concepts)
+		if narrativeStats.ScopeCounts != nil {
+			conceptCount = narrativeStats.ScopeCounts[memory.ScopeConcept]
+		}
 		payload := map[string]any{
 			"ok":                          true,
 			"memory_size_bytes":           memorySizeValue,
 			"pending_count":               countPendingMemoryItems(pending),
 			"session_count":               len(sessions),
 			"archive_count":               len(archives),
-			"concept_count":               len(concepts),
+			"concept_count":               conceptCount,
 			"oldest_session":              oldest,
 			"newest_session":              newest,
 			"consolidation_lag_days":      consolidationLagValue,
@@ -540,12 +548,16 @@ func countPendingMemoryItems(content string) int {
 	return count
 }
 
-func learnerMemorySize(learnerID string, concepts, archives []string, sessions []time.Time) (int64, error) {
+func learnerMemorySize(learnerID string, concepts, archives []string, sessions []time.Time) (int64, memory.NarrativeStats, error) {
+	if memory.UsingSharedNarrativeStore() {
+		stats, err := memory.NarrativeState(context.Background(), learnerID)
+		return stats.TotalBytes, stats, err
+	}
 	var total int64
 	for _, scope := range []memory.Scope{memory.ScopeMemory, memory.ScopeMemoryPending} {
 		info, exists, err := learnerMemoryFileInfo(learnerID, scope, "")
 		if err != nil {
-			return 0, err
+			return 0, memory.NarrativeStats{}, err
 		}
 		if exists {
 			total += info.Size()
@@ -554,7 +566,7 @@ func learnerMemorySize(learnerID string, concepts, archives []string, sessions [
 	for _, concept := range concepts {
 		info, exists, err := learnerMemoryFileInfo(learnerID, memory.ScopeConcept, concept)
 		if err != nil {
-			return 0, err
+			return 0, memory.NarrativeStats{}, err
 		}
 		if exists {
 			total += info.Size()
@@ -563,7 +575,7 @@ func learnerMemorySize(learnerID string, concepts, archives []string, sessions [
 	for _, archive := range archives {
 		info, exists, err := learnerMemoryFileInfo(learnerID, memory.ScopeArchive, archive)
 		if err != nil {
-			return 0, err
+			return 0, memory.NarrativeStats{}, err
 		}
 		if exists {
 			total += info.Size()
@@ -572,13 +584,13 @@ func learnerMemorySize(learnerID string, concepts, archives []string, sessions [
 	for _, ts := range sessions {
 		info, exists, err := learnerMemoryFileInfo(learnerID, memory.ScopeSession, ts.Format(time.RFC3339))
 		if err != nil {
-			return 0, err
+			return 0, memory.NarrativeStats{}, err
 		}
 		if exists {
 			total += info.Size()
 		}
 	}
-	return total, nil
+	return total, memory.NarrativeStats{}, nil
 }
 
 func consolidationLagDays(learnerID string, sessions []time.Time, archives []string) (int, error) {
@@ -587,6 +599,18 @@ func consolidationLagDays(learnerID string, sessions []time.Time, archives []str
 	}
 	var newestArchive time.Time
 	for _, archive := range archives {
+		if memory.UsingSharedNarrativeStore() {
+			updatedAt, err := memory.NarrativeUpdatedAt(context.Background(), memory.NarrativeKey{
+				LearnerID: learnerID, Scope: memory.ScopeArchive, Key: archive,
+			})
+			if err != nil {
+				return 0, err
+			}
+			if updatedAt.After(newestArchive) {
+				newestArchive = updatedAt
+			}
+			continue
+		}
 		info, exists, err := learnerMemoryFileInfo(learnerID, memory.ScopeArchive, archive)
 		if err != nil {
 			return 0, err

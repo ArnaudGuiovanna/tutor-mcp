@@ -23,6 +23,13 @@ type EmailSender interface {
 	SendPasswordReset(ctx context.Context, to, link string) error
 }
 
+// LoginChallengeEmailSender is an optional extension used for adaptive sign-in
+// verification. Production SMTP implements it; keeping it separate preserves
+// compatibility with custom verification/reset senders until they opt in.
+type LoginChallengeEmailSender interface {
+	SendLoginChallenge(ctx context.Context, to, link string) error
+}
+
 type SMTPConfig struct {
 	Address    string
 	ServerName string
@@ -82,6 +89,10 @@ func (s *SMTPEmailSender) SendVerification(ctx context.Context, to, link string)
 
 func (s *SMTPEmailSender) SendPasswordReset(ctx context.Context, to, link string) error {
 	return s.send(ctx, to, "Reset your tutor/mcp password", "Use this link to reset your tutor/mcp password:\n\n"+link+"\n\nThis link expires shortly and can be used only once. If you did not request it, ignore this email.\n")
+}
+
+func (s *SMTPEmailSender) SendLoginChallenge(ctx context.Context, to, link string) error {
+	return s.send(ctx, to, "Confirm a tutor/mcp sign-in", "A correct password was entered after unusual failed sign-in activity. Confirm this device only if it was you:\n\n"+link+"\n\nThe link expires shortly and can be used only once. If this was not you, reset your password.\n")
 }
 
 func (s *SMTPEmailSender) send(ctx context.Context, to, subject, body string) error {

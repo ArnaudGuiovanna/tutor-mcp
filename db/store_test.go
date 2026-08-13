@@ -96,6 +96,12 @@ func TestConsumeAuthCode_ConcurrentSingleWinner(t *testing.T) {
 func TestExchangeAuthCodeForRefreshTokenRollsBackConsumeOnInsertFailure(t *testing.T) {
 	s := setupTestDB(t)
 	ctx := context.Background()
+	if err := s.CreateOAuthClientWithSecretCappedTTL(
+		ctx, "client-A", "Ephemeral", `["https://a.example/cb"]`, "", 10,
+		time.Now().UTC().Add(time.Hour),
+	); err != nil {
+		t.Fatalf("create ephemeral client: %v", err)
+	}
 	if err := s.CreateAuthCodeWithBinding(
 		ctx, "code-exchange-rollback", "L1", "challenge", "S256", "client-A",
 		"https://a.example/cb", testOAuthResource, time.Now().Add(time.Minute),
@@ -130,8 +136,146 @@ func TestExchangeAuthCodeForRefreshTokenRollsBackConsumeOnInsertFailure(t *testi
 	if _, _, err := s.ExchangeAuthCodeForRefreshToken(ctx, "code-exchange-rollback", "client-A"); err == nil {
 		t.Fatal("exchange unexpectedly succeeded")
 	}
+	var expiresAt sql.NullTime
+	if err := s.root.QueryRow(rb(s, `SELECT expires_at FROM oauth_clients WHERE client_id = ?`), "client-A").Scan(&expiresAt); err != nil || !expiresAt.Valid {
+		t.Fatalf("client activated despite rolled-back exchange: expires=%v err=%v", expiresAt, err)
+	}
 	if _, err := s.ConsumeAuthCode(ctx, "code-exchange-rollback", "client-A"); err != nil {
 		t.Fatalf("authorization code was consumed despite rolled-back refresh insert: %v", err)
+	}
+}
+
+func TestExchangeAuthCodeActivatesDynamicClientIdempotently(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+	const clientID = "activate-dcr"
+	if err := s.CreateOAuthClientWithSecretCappedTTL(
+		ctx, clientID, "Dynamic", `["https://client.example/cb"]`, "", 10,
+		time.Now().UTC().Add(time.Hour),
+	); err != nil {
+		t.Fatal(err)
+	}
+	exchange := func(code string) {
+		t.Helper()
+		if err := s.CreateAuthCodeWithBinding(
+			ctx, code, "L1", "challenge", "S256", clientID,
+			"https://client.example/cb", testOAuthResource, time.Now().UTC().Add(time.Minute),
+		); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := s.ExchangeAuthCodeForRefreshToken(ctx, code, clientID); err != nil {
+			t.Fatalf("exchange %q: %v", code, err)
+		}
+		var expiresAt sql.NullTime
+		if err := s.root.QueryRow(rb(s, `SELECT expires_at FROM oauth_clients WHERE client_id = ?`), clientID).Scan(&expiresAt); err != nil {
+			t.Fatal(err)
+		}
+		if expiresAt.Valid {
+			t.Fatalf("exchange %q left dynamic expiry %v", code, expiresAt.Time)
+		}
+	}
+	exchange("activate-code-1")
+	exchange("activate-code-2")
+}
+
+func TestExchangeAuthCodeRollsBackCredentialsOnActivationFailure(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+	const clientID = "activation-failure"
+	if err := s.CreateOAuthClientWithSecretCappedTTL(
+		ctx, clientID, "Dynamic", `["https://client.example/cb"]`, "", 10,
+		time.Now().UTC().Add(time.Hour),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateAuthCodeWithBinding(
+		ctx, "activation-failure-code", "L1", "challenge", "S256", clientID,
+		"https://client.example/cb", testOAuthResource, time.Now().UTC().Add(time.Minute),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if s.dialect == DialectPostgres {
+		if _, err := s.root.Exec(`
+			CREATE FUNCTION fail_oauth_client_activation() RETURNS trigger
+			LANGUAGE plpgsql AS $$
+			BEGIN
+				RAISE EXCEPTION 'injected activation failure';
+			END
+			$$`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.root.Exec(`
+			CREATE TRIGGER fail_oauth_client_activation
+			BEFORE UPDATE OF expires_at ON oauth_clients
+			FOR EACH ROW WHEN (OLD.client_id = 'activation-failure')
+			EXECUTE FUNCTION fail_oauth_client_activation()`); err != nil {
+			t.Fatal(err)
+		}
+	} else if _, err := s.root.Exec(`
+		CREATE TRIGGER fail_oauth_client_activation
+		BEFORE UPDATE OF expires_at ON oauth_clients
+		WHEN OLD.client_id = 'activation-failure'
+		BEGIN
+			SELECT RAISE(ABORT, 'injected activation failure');
+		END`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := s.ExchangeAuthCodeForRefreshToken(ctx, "activation-failure-code", clientID); err == nil {
+		t.Fatal("exchange unexpectedly survived activation failure")
+	}
+	var refreshCount int
+	if err := s.root.QueryRow(rb(s, `SELECT COUNT(*) FROM refresh_tokens WHERE client_id = ?`), clientID).Scan(&refreshCount); err != nil || refreshCount != 0 {
+		t.Fatalf("refresh insert was not rolled back: count=%d err=%v", refreshCount, err)
+	}
+	if _, err := s.ConsumeAuthCode(ctx, "activation-failure-code", clientID); err != nil {
+		t.Fatalf("authorization code was consumed despite activation rollback: %v", err)
+	}
+}
+
+func TestExchangeAuthCodeActivationAllowsUnpersistedCIMDClient(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+	const clientID = "https://client.example/oauth-client.json"
+	if err := s.CreateAuthCodeWithBinding(
+		ctx, "cimd-code", "L1", "challenge", "S256", clientID,
+		"https://client.example/cb", testOAuthResource, time.Now().UTC().Add(time.Minute),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, rt, err := s.ExchangeAuthCodeForRefreshToken(ctx, "cimd-code", clientID); err != nil || rt.ClientID != clientID {
+		t.Fatalf("CIMD exchange rt=%+v err=%v", rt, err)
+	}
+}
+
+func TestExchangeAuthCodeActivatesClientThatExpiresAfterAuthorization(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+	const clientID = "expires-between-authorize-and-token"
+	if err := s.CreateOAuthClientWithSecretCappedTTL(
+		ctx, clientID, "Boundary", `["https://client.example/cb"]`, "", 10,
+		time.Now().UTC().Add(time.Hour),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateAuthCodeWithBinding(
+		ctx, "boundary-code", "L1", "challenge", "S256", clientID,
+		"https://client.example/cb", testOAuthResource, time.Now().UTC().Add(time.Minute),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.root.Exec(
+		rb(s, `UPDATE oauth_clients SET expires_at = ? WHERE client_id = ?`),
+		time.Now().UTC().Add(-time.Second), clientID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.ExchangeAuthCodeForRefreshToken(ctx, "boundary-code", clientID); err != nil {
+		t.Fatal(err)
+	}
+	var expiresAt sql.NullTime
+	if err := s.root.QueryRow(rb(s, `SELECT expires_at FROM oauth_clients WHERE client_id = ?`), clientID).Scan(&expiresAt); err != nil || expiresAt.Valid {
+		t.Fatalf("boundary client not activated: expires=%v err=%v", expiresAt, err)
 	}
 }
 

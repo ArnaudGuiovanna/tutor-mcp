@@ -10,9 +10,11 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"tutor-mcp/auth"
 	"tutor-mcp/models"
+	"tutor-mcp/observability"
 	storeport "tutor-mcp/store"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -185,15 +187,27 @@ func addTool[In, Out any](server *mcp.Server, tool *mcp.Tool, handler mcp.ToolHa
 	}}
 	scopedHandler := func(ctx context.Context, req *mcp.CallToolRequest, input In) (*mcp.CallToolResult, Out, error) {
 		var zero Out
+		startedAt := time.Now()
+		principal, _ := auth.GetPrincipal(ctx)
+		outcome := "succeeded"
+		defer func() {
+			observability.RecordMCPTool(ctx, principal.TenantID, principal.MembershipID,
+				"", tool.Name, outcome, time.Since(startedAt))
+		}()
 		// Leave missing authentication to the handler's existing canonical path,
 		// but fail closed when a principal exists without the capability required
 		// by this exact tool. The bounded legacy learner grant is accepted by
 		// OAuthScopeAllows and cannot silently cover future scope families.
 		if auth.GetLearnerID(ctx) != "" && !hasRequiredOAuthScopes(ctx, requiredScopes) {
+			outcome = "denied"
 			result := insufficientOAuthScopeResult(ctx, "", requiredScopes, granular)
 			return result, zero, nil
 		}
-		return handler(ctx, req, input)
+		result, output, err := handler(ctx, req, input)
+		if err != nil || (result != nil && result.IsError) {
+			outcome = "failed"
+		}
+		return result, output, err
 	}
 	mcp.AddTool(server, tool, scopedHandler)
 }
@@ -377,5 +391,53 @@ func RegisterTools(server *mcp.Server, deps *Deps) {
 	if deps != nil {
 		baseURL = deps.BaseURL
 	}
-	server.AddReceivingMiddleware(toolOAuthScopeMiddleware(baseURL, granularScopes))
+	server.AddReceivingMiddleware(
+		toolOAuthScopeMiddleware(baseURL, granularScopes),
+		toolTenantTransactionMiddleware(deps),
+	)
+}
+
+func toolTenantTransactionMiddleware(deps *Deps) mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method != "tools/call" || deps == nil || deps.Store == nil {
+				return next(ctx, method, req)
+			}
+			principal, ok := auth.GetPrincipal(ctx)
+			if !ok {
+				result, _ := errorResult("authenticated tenant principal is required")
+				return result, nil
+			}
+			if !principal.Authorize(models.PermissionLearningSelf, models.AuthorizationResource{
+				TenantID: principal.TenantID, OwnerUserID: principal.UserID,
+			}) {
+				result, _ := errorResult("tenant principal is not authorized for learner tools")
+				return result, nil
+			}
+			var result mcp.Result
+			var callErr error
+			err := deps.Store.WithTenantTx(ctx, principal.TenantScope(), func(txCtx context.Context, _ storeport.Store) error {
+				result, callErr = next(txCtx, method, req)
+				return callErr
+			})
+			if err != nil {
+				if callErr != nil {
+					return nil, callErr
+				}
+				if deps.Logger != nil {
+					deps.Logger.Error("tenant tool transaction failed", "err", err, "tool", toolNameFromRequest(req))
+				}
+				failure, _ := errorResult("tenant-scoped persistence failed")
+				return failure, nil
+			}
+			return result, nil
+		}
+	}
+}
+
+func toolNameFromRequest(req mcp.Request) string {
+	if call, ok := req.(*mcp.CallToolRequest); ok && call.Params != nil {
+		return call.Params.Name
+	}
+	return ""
 }

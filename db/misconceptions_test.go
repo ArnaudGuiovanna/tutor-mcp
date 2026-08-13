@@ -2,7 +2,9 @@ package db
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -42,6 +44,9 @@ func seedLearner(t *testing.T, s *Store, id string) {
 	if err != nil {
 		t.Fatalf("seed learner %q: %v", id, err)
 	}
+	if err := s.EnsureRecoveryEnrollment(context.Background(), id); err != nil {
+		t.Fatalf("seed recovery enrollment %q: %v", id, err)
+	}
 }
 
 // setupTestDB returns a fresh, migrated Store seeded with learner 'L1'. By
@@ -70,6 +75,10 @@ func setupTestDB(t *testing.T) *Store {
 	// Mirror production OpenDB: a single connection serializes writers so
 	// concurrent BEGIN IMMEDIATE transactions queue instead of deadlocking.
 	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(`PRAGMA foreign_keys=ON`); err != nil {
+		db.Close()
+		t.Fatalf("enable SQLite foreign keys: %v", err)
+	}
 	t.Cleanup(func() { db.Close() })
 	return NewStore(db)
 }
@@ -97,6 +106,11 @@ func sqliteTestDBTemplateBytes() ([]byte, error) {
 		now := time.Now().UTC()
 		if _, err := raw.Exec(`INSERT INTO learners (id, email, password_hash, objective, created_at, email_verified_at)
 			VALUES ('L1', 'test@test.com', 'hash', 'test', ?, ?)`, now, now); err != nil {
+			_ = raw.Close()
+			sqliteTestDBTemplate.err = err
+			return
+		}
+		if err := NewStore(raw).EnsureRecoveryEnrollment(context.Background(), "L1"); err != nil {
 			_ = raw.Close()
 			sqliteTestDBTemplate.err = err
 			return
@@ -141,7 +155,14 @@ func setupTestPG(t *testing.T, baseDSN string) *Store {
 		admin.Close()
 		t.Fatalf("pg open: %v", err)
 	}
-	if err := MigratePostgres(context.Background(), db); err != nil {
+	// Match OpenPostgres rather than database/sql's unbounded default. This
+	// makes the contention tests exercise queueing and connection reuse without
+	// exhausting PostgreSQL's global max_connections setting.
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(2)
+	db.SetConnMaxLifetime(30 * time.Minute)
+	db.SetConnMaxIdleTime(5 * time.Minute)
+	if err := migratePostgresTestSchema(context.Background(), db); err != nil {
 		db.Close()
 		admin.Close()
 		t.Fatalf("pg migrate: %v", err)
@@ -152,12 +173,59 @@ func setupTestPG(t *testing.T, baseDSN string) *Store {
 		admin.Close()
 		t.Fatalf("pg seed L1: %v", err)
 	}
+	store := NewStoreWithDialect(db, DialectPostgres)
+	if err := store.EnsureRecoveryEnrollment(context.Background(), "L1"); err != nil {
+		db.Close()
+		admin.Close()
+		t.Fatalf("pg seed L1 recovery enrollment: %v", err)
+	}
 	t.Cleanup(func() {
 		db.Close()
 		admin.Exec("DROP SCHEMA " + schema + " CASCADE")
 		admin.Close()
 	})
-	return NewStoreWithDialect(db, DialectPostgres)
+	return store
+}
+
+// migratePostgresTestSchema materializes the exact current PostgreSQL schema
+// and checksum ledger in one transaction. setupTestDB calls this for every
+// isolated business-test schema; replaying the production migrator's advisory
+// lock, lookup and transaction boundaries hundreds of times made the race CI
+// spend most of its budget provisioning fixtures. Dedicated migration tests
+// still call MigratePostgres and therefore retain coverage of those boundaries.
+func migratePostgresTestSchema(ctx context.Context, database *sql.DB) error {
+	tx, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, statement := range splitSQLStatements(postgresSchema) {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("apply PostgreSQL test base schema: %w", err)
+		}
+	}
+	baseHash := sha256.Sum256([]byte(postgresSchema))
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO schema_migrations (version, checksum) VALUES ($1, $2)`,
+		"postgres_schema", hex.EncodeToString(baseHash[:]),
+	); err != nil {
+		return fmt.Errorf("record PostgreSQL test base schema: %w", err)
+	}
+	for _, migration := range postgresMigrations {
+		for _, statement := range splitSQLStatements(migration.Body) {
+			if _, err := tx.ExecContext(ctx, statement); err != nil && !migration.IgnoreExecErrors {
+				return fmt.Errorf("apply PostgreSQL test migration %s: %w", migration.Version, err)
+			}
+		}
+		hash := sha256.Sum256([]byte(migration.Body))
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO schema_migrations (version, checksum) VALUES ($1, $2)`,
+			migration.Version, hex.EncodeToString(hash[:]),
+		); err != nil {
+			return fmt.Errorf("record PostgreSQL test migration %s: %w", migration.Version, err)
+		}
+	}
+	return tx.Commit()
 }
 
 func insertInteraction(t *testing.T, store *Store, concept string, success bool, miscType, miscDetail string, createdAt time.Time) {

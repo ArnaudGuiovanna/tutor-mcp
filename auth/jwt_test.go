@@ -5,11 +5,16 @@
 package auth
 
 import (
+	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/json"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"tutor-mcp/models"
 
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -35,6 +40,104 @@ func TestVerifyJWT_AcceptsValidIssuerAndAudience(t *testing.T) {
 	}
 	if sub != "learner-1" {
 		t.Fatalf("subject = %q, want learner-1", sub)
+	}
+}
+
+func TestGenerateJWTCarriesSingleTenantPrincipal(t *testing.T) {
+	setTestSecret(t)
+	principal := models.Principal{
+		UserID:       "user-global",
+		TenantID:     "tenant-a",
+		MembershipID: "membership-a",
+		LearnerID:    "learner-a",
+		Roles:        []string{models.RoleLearner},
+		TokenVersion: 7,
+	}
+	token, err := GenerateJWTForPrincipalAndScope(
+		"https://issuer.example", MCPResource("https://issuer.example"),
+		"oauth-client-a", principal, models.OAuthScopeLearnerRead,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := VerifyJWTClaims(token, "https://issuer.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := claims.Principal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UserID != principal.UserID || got.TenantID != principal.TenantID ||
+		got.MembershipID != principal.MembershipID || got.TokenVersion != principal.TokenVersion {
+		t.Fatalf("principal = %#v, want identity %#v", got, principal)
+	}
+	if claims.AuthorizedParty != "oauth-client-a" || claims.ID == "" {
+		t.Fatalf("azp/jti missing from claims: %#v", claims)
+	}
+	if len(got.Scopes) != 1 || got.Scopes[0] != models.OAuthScopeLearnerRead {
+		t.Fatalf("scopes = %v, want learner:read", got.Scopes)
+	}
+}
+
+func TestVerifyJWTClaimsRejectsTenantlessAndOldTokens(t *testing.T) {
+	setTestSecret(t)
+	base := Claims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   "user-1",
+			Issuer:    "https://issuer.example",
+			Audience:  jwt.ClaimStrings{MCPResource("https://issuer.example")},
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			ID:        "jti-1",
+		},
+		TenantID:        "tenant-a",
+		MembershipID:    "membership-a",
+		LearnerID:       "learner-a",
+		Roles:           []string{models.RoleLearner},
+		Scope:           models.OAuthScopeLearnerRead,
+		AuthorizedParty: "client-a",
+		TokenVersion:    1,
+	}
+	for name, mutate := range map[string]func(*Claims){
+		"tenantless":  func(c *Claims) { c.TenantID = "" },
+		"membership":  func(c *Claims) { c.MembershipID = "" },
+		"old version": func(c *Claims) { c.TokenVersion = 0 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := base
+			mutate(&candidate)
+			token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, candidate).SignedString(jwtSecret)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := VerifyJWTClaims(token, "https://issuer.example"); err == nil {
+				t.Fatal("expected fail-closed claim rejection")
+			}
+		})
+	}
+}
+
+func TestGenerateJWTUsesUniqueJTI(t *testing.T) {
+	setTestSecret(t)
+	one, err := GenerateJWT("https://issuer.example", "learner-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := GenerateJWT("https://issuer.example", "learner-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oneClaims, err := VerifyJWTClaims(one, "https://issuer.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	twoClaims, err := VerifyJWTClaims(two, "https://issuer.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if oneClaims.ID == twoClaims.ID {
+		t.Fatal("separately issued access tokens must not share a jti")
 	}
 }
 
@@ -212,8 +315,94 @@ func TestLoadJWTSecret_AcceptsStrongDecodedSecret(t *testing.T) {
 	}
 }
 
+func TestEd25519KeyRotationKeepsPreviousTokensValid(t *testing.T) {
+	savedSecret := append([]byte(nil), jwtSecret...)
+	signingKeys.RLock()
+	savedKID := signingKeys.activeKID
+	savedPrivate := append(ed25519.PrivateKey(nil), signingKeys.private...)
+	savedPublic := make(map[string]ed25519.PublicKey, len(signingKeys.public))
+	for kid, key := range signingKeys.public {
+		savedPublic[kid] = append(ed25519.PublicKey(nil), key...)
+	}
+	signingKeys.RUnlock()
+	t.Cleanup(func() {
+		jwtSecret = savedSecret
+		signingKeys.Lock()
+		signingKeys.activeKID, signingKeys.private, signingKeys.public = savedKID, savedPrivate, savedPublic
+		signingKeys.Unlock()
+	})
+	seedOne := make([]byte, ed25519.SeedSize)
+	seedTwo := make([]byte, ed25519.SeedSize)
+	for index := range seedOne {
+		seedOne[index] = byte(index + 1)
+		seedTwo[index] = byte(index + 33)
+	}
+	privateOne := ed25519.NewKeyFromSeed(seedOne)
+	privateTwo := ed25519.NewKeyFromSeed(seedTwo)
+	config := func(active string, includeOne bool) string {
+		keys := []ed25519KeyConfig{{
+			KID: "key-2", PublicKey: base64.StdEncoding.EncodeToString(privateTwo.Public().(ed25519.PublicKey)),
+			Active: active == "key-2",
+		}}
+		if active == "key-2" {
+			keys[0].PrivateKey = base64.StdEncoding.EncodeToString(seedTwo)
+		}
+		if includeOne {
+			one := ed25519KeyConfig{
+				KID: "key-1", PublicKey: base64.StdEncoding.EncodeToString(privateOne.Public().(ed25519.PublicKey)),
+				Active: active == "key-1",
+			}
+			if one.Active {
+				one.PrivateKey = base64.StdEncoding.EncodeToString(seedOne)
+			}
+			keys = append(keys, one)
+		}
+		raw, _ := json.Marshal(keys)
+		return string(raw)
+	}
+
+	t.Setenv("JWT_ED25519_KEYS", config("key-1", true))
+	if err := LoadJWTSecret(); err != nil {
+		t.Fatal(err)
+	}
+	oldToken, err := GenerateJWT("https://issuer.example", "learner-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("JWT_ED25519_KEYS", config("key-2", true))
+	if err := LoadJWTSecret(); err != nil {
+		t.Fatal(err)
+	}
+	newToken, err := GenerateJWT("https://issuer.example", "learner-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyJWTClaims(oldToken, "https://issuer.example"); err != nil {
+		t.Fatalf("previous key token failed during overlap: %v", err)
+	}
+	if _, err := VerifyJWTClaims(newToken, "https://issuer.example"); err != nil {
+		t.Fatalf("active key token failed: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	HandleJWKS(recorder, httptest.NewRequest("GET", "/.well-known/jwks.json", nil))
+	if body := recorder.Body.String(); strings.Contains(body, base64.StdEncoding.EncodeToString(seedTwo)) ||
+		!strings.Contains(body, `"kid":"key-1"`) || !strings.Contains(body, `"kid":"key-2"`) {
+		t.Fatalf("JWKS private/public rotation material invalid: %s", body)
+	}
+
+	t.Setenv("JWT_ED25519_KEYS", config("key-2", false))
+	if err := LoadJWTSecret(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyJWTClaims(oldToken, "https://issuer.example"); err == nil {
+		t.Fatal("retired verification key still accepted")
+	}
+}
+
 func TestMain(m *testing.M) {
 	// Ensure tests don't accidentally inherit a JWT_SECRET from the host env.
 	os.Unsetenv("JWT_SECRET")
+	os.Unsetenv("JWT_ED25519_KEYS")
 	os.Exit(m.Run())
 }

@@ -61,6 +61,7 @@ func TestVersionLine(t *testing.T) {
 
 type readinessTestPinger struct {
 	err             error
+	schemaErr       error
 	deadlinePresent bool
 }
 
@@ -68,6 +69,8 @@ func (p *readinessTestPinger) Ping(ctx context.Context) error {
 	_, p.deadlinePresent = ctx.Deadline()
 	return p.err
 }
+
+func (p *readinessTestPinger) VerifySchemaCurrent(context.Context) error { return p.schemaErr }
 
 func TestLiveAndReadyHealthContracts(t *testing.T) {
 	live := httptest.NewRecorder()
@@ -87,6 +90,12 @@ func TestLiveAndReadyHealthContracts(t *testing.T) {
 	readinessHandler(pinger)(ready, httptest.NewRequest(http.MethodGet, "/ready", nil))
 	if ready.Code != http.StatusOK || ready.Body.String() != `{"status":"ready"}` {
 		t.Fatalf("ready success status=%d body=%q", ready.Code, ready.Body.String())
+	}
+	pinger.schemaErr = errors.New("missing migration")
+	ready = httptest.NewRecorder()
+	readinessHandler(pinger)(ready, httptest.NewRequest(http.MethodGet, "/ready", nil))
+	if ready.Code != http.StatusServiceUnavailable || !strings.Contains(ready.Body.String(), "schema incompatible") {
+		t.Fatalf("schema readiness status=%d body=%q", ready.Code, ready.Body.String())
 	}
 }
 

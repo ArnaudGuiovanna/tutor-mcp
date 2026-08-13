@@ -4,11 +4,16 @@
 package main
 
 import (
+	"crypto/sha256"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"tutor-mcp/auth"
 )
 
 func TestLoadStartupConfigDefaults(t *testing.T) {
@@ -27,7 +32,7 @@ func TestLoadStartupConfigDefaults(t *testing.T) {
 	if cfg.SchedulerMode != "inprocess" || cfg.RateLimitBackend != "memory" {
 		t.Fatalf("unexpected runtime defaults: %+v", cfg)
 	}
-	if cfg.DeploymentProfile != "development" || cfg.MCPMaxConcurrent != 128 || cfg.MCPMaxConcurrentUser != 8 {
+	if cfg.DeploymentProfile != "development" || cfg.ProcessRole != "all" || cfg.MCPMaxConcurrent != 128 || cfg.MCPMaxConcurrentUser != 8 {
 		t.Fatalf("unexpected safety defaults: %+v", cfg)
 	}
 	if cfg.OAuthGranularScopes {
@@ -38,6 +43,85 @@ func TestLoadStartupConfigDefaults(t *testing.T) {
 	}
 	if cfg.MCPToolCallTimeout != 30*time.Second {
 		t.Fatalf("MCPToolCallTimeout=%v, want 30s", cfg.MCPToolCallTimeout)
+	}
+	if cfg.AuthBcryptMaxConcurrent != 4 {
+		t.Fatalf("AuthBcryptMaxConcurrent=%d, want 4", cfg.AuthBcryptMaxConcurrent)
+	}
+	if cfg.OAuthDCRMode != "open" || cfg.OAuthDCRInitialTokenHash != ([sha256.Size]byte{}) {
+		t.Fatalf("unexpected development DCR defaults: mode=%q hash_present=%v", cfg.OAuthDCRMode, cfg.OAuthDCRInitialTokenHash != ([sha256.Size]byte{}))
+	}
+}
+
+func TestDisabledDCRRouteIsNotMounted(t *testing.T) {
+	mux := http.NewServeMux()
+	mountDynamicClientRegistration(mux, auth.DCRModeDisabled, nil, nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/register", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("disabled /register status=%d, want 404", rec.Code)
+	}
+}
+
+func TestLoadStartupConfigDCRPolicy(t *testing.T) {
+	strongToken := strings.Repeat("A", 43)
+	tests := []struct {
+		name      string
+		mode      string
+		token     string
+		wantMode  string
+		wantHash  bool
+		wantError string
+	}{
+		{name: "open", mode: "open", wantMode: "open"},
+		{name: "disabled", mode: "disabled", wantMode: "disabled"},
+		{name: "normalized token", mode: " TOKEN ", token: strongToken, wantMode: "token", wantHash: true},
+		{name: "unknown mode", mode: "profiles", wantError: "unknown OAUTH_DCR_MODE"},
+		{name: "token missing", mode: "token", wantError: "requires OAUTH_DCR_INITIAL_ACCESS_TOKEN"},
+		{name: "token weak", mode: "token", token: "short", wantError: "unpadded base64url"},
+		{name: "token padded", mode: "token", token: strongToken + "=", wantError: "unpadded base64url"},
+		{name: "token whitespace", mode: "token", token: " " + strongToken, wantError: "unpadded base64url"},
+		{name: "unused token", mode: "disabled", token: strongToken, wantError: "only valid"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			clearStartupEnv(t)
+			t.Setenv("OAUTH_DCR_MODE", tc.mode)
+			if tc.token != "" {
+				t.Setenv("OAUTH_DCR_INITIAL_ACCESS_TOKEN", tc.token)
+			}
+			cfg, err := loadStartupConfig("3000")
+			if tc.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+					t.Fatalf("error=%v, want %q", err, tc.wantError)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.OAuthDCRMode != tc.wantMode {
+				t.Fatalf("mode=%q, want %q", cfg.OAuthDCRMode, tc.wantMode)
+			}
+			wantHash := [sha256.Size]byte{}
+			if tc.wantHash {
+				wantHash = sha256.Sum256([]byte(strongToken))
+			}
+			if cfg.OAuthDCRInitialTokenHash != wantHash {
+				t.Fatal("unexpected initial token hash")
+			}
+		})
+	}
+}
+
+func TestLoadStartupConfigBcryptConcurrency(t *testing.T) {
+	clearStartupEnv(t)
+	t.Setenv("AUTH_BCRYPT_MAX_CONCURRENT", "7")
+	cfg, err := loadStartupConfig("3000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AuthBcryptMaxConcurrent != 7 {
+		t.Fatalf("AuthBcryptMaxConcurrent=%d, want 7", cfg.AuthBcryptMaxConcurrent)
 	}
 }
 
@@ -136,11 +220,14 @@ func TestLoadStartupConfigRejectsInvalidValues(t *testing.T) {
 		{name: "MCP body limit is zero", env: map[string]string{"MCP_MAX_REQUEST_BODY_BYTES": "0"}, wantErr: "MCP_MAX_REQUEST_BODY_BYTES must be between"},
 		{name: "MCP body limit exceeds ceiling", env: map[string]string{"MCP_MAX_REQUEST_BODY_BYTES": "67108865"}, wantErr: "MCP_MAX_REQUEST_BODY_BYTES must be between"},
 		{name: "MCP concurrency invalid", env: map[string]string{"MCP_MAX_CONCURRENT": "0"}, wantErr: "MCP_MAX_CONCURRENT must be between"},
+		{name: "bcrypt concurrency invalid", env: map[string]string{"AUTH_BCRYPT_MAX_CONCURRENT": "0"}, wantErr: "AUTH_BCRYPT_MAX_CONCURRENT must be between"},
+		{name: "bcrypt concurrency too high", env: map[string]string{"AUTH_BCRYPT_MAX_CONCURRENT": "129"}, wantErr: "AUTH_BCRYPT_MAX_CONCURRENT must be between"},
 		{name: "MCP per learner exceeds global", env: map[string]string{"MCP_MAX_CONCURRENT": "2", "MCP_MAX_CONCURRENT_PER_LEARNER": "3"}, wantErr: "must not exceed"},
 		{name: "MCP tool timeout is not an integer", env: map[string]string{"MCP_TOOL_CALL_TIMEOUT_SECONDS": "slow"}, wantErr: "MCP_TOOL_CALL_TIMEOUT_SECONDS must be an integer"},
 		{name: "MCP tool timeout is zero", env: map[string]string{"MCP_TOOL_CALL_TIMEOUT_SECONDS": "0"}, wantErr: "MCP_TOOL_CALL_TIMEOUT_SECONDS must be between"},
 		{name: "MCP tool timeout exceeds ceiling", env: map[string]string{"MCP_TOOL_CALL_TIMEOUT_SECONDS": "601"}, wantErr: "MCP_TOOL_CALL_TIMEOUT_SECONDS must be between"},
 		{name: "deployment profile", env: map[string]string{"DEPLOYMENT_PROFILE": "staging"}, wantErr: "unknown DEPLOYMENT_PROFILE"},
+		{name: "process role", env: map[string]string{"PROCESS_ROLE": "cron"}, wantErr: "unknown PROCESS_ROLE"},
 	}
 
 	for _, tt := range tests {
@@ -160,6 +247,7 @@ func TestLoadStartupConfigRejectsInvalidValues(t *testing.T) {
 func productionEnv() map[string]string {
 	return map[string]string{
 		"DEPLOYMENT_PROFILE":                "production",
+		"PROCESS_ROLE":                      "api",
 		"BASE_URL":                          "https://tutor.example",
 		"DB_DRIVER":                         "postgres",
 		"RATELIMIT_BACKEND":                 "postgres",
@@ -168,7 +256,10 @@ func productionEnv() map[string]string {
 		"SMTP_FROM":                         "tutor@example.com",
 		"INTEGRATION_SECRET_KEYS":           "k1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 		"INTEGRATION_SECRET_CURRENT_KEY_ID": "k1",
+		"TENANT_INTEGRATION_ALLOWED_HOSTS":  "hooks.customer.example",
 		"TRUSTED_PROXY_CIDRS":               "10.0.0.0/8",
+		"OAUTH_DCR_MODE":                    "disabled",
+		"JWT_ED25519_KEYS":                  `[{"kid":"k1","public_key":"configured-at-runtime","private_key":"configured-at-runtime","active":true}]`,
 	}
 }
 
@@ -177,6 +268,7 @@ func TestProductionProfileFailsClosed(t *testing.T) {
 		name, key, value, want string
 	}{
 		{name: "happy path"},
+		{name: "symmetric signing only", key: "JWT_ED25519_KEYS", value: "", want: "JWT_ED25519_KEYS"},
 		{name: "HTTP", key: "BASE_URL", value: "http://tutor.example", want: "HTTPS BASE_URL"},
 		{name: "SQLite", key: "DB_DRIVER", value: "sqlite", want: "DB_DRIVER=postgres"},
 		{name: "local rate limits", key: "RATELIMIT_BACKEND", value: "memory", want: "RATELIMIT_BACKEND=postgres"},
@@ -184,7 +276,10 @@ func TestProductionProfileFailsClosed(t *testing.T) {
 		{name: "missing CA", key: "DATABASE_URL", value: "postgres://db.example/tutor?sslmode=verify-full", want: "sslrootcert"},
 		{name: "missing SMTP", key: "SMTP_ADDR", value: "", want: "SMTP_ADDR"},
 		{name: "missing encryption keys", key: "INTEGRATION_SECRET_KEYS", value: "", want: "encryption keys"},
+		{name: "local narrative backend", key: "TUTOR_MCP_MEMORY_BACKEND", value: "local", want: "MEMORY_BACKEND=database"},
 		{name: "spoofable proxy", key: "TRUSTED_PROXY_CIDRS", value: "0.0.0.0/0", want: "catch-all"},
+		{name: "anonymous DCR", key: "OAUTH_DCR_MODE", value: "open", want: "OAUTH_DCR_MODE=token or disabled"},
+		{name: "implicit DCR", key: "OAUTH_DCR_MODE", value: "", want: "explicit OAUTH_DCR_MODE"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -206,6 +301,38 @@ func TestProductionProfileFailsClosed(t *testing.T) {
 				t.Fatalf("error=%v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestProductionProfileAcceptsTokenDCR(t *testing.T) {
+	clearStartupEnv(t)
+	for key, value := range productionEnv() {
+		t.Setenv(key, value)
+	}
+	token := strings.Repeat("A", 43)
+	t.Setenv("OAUTH_DCR_MODE", "token")
+	t.Setenv("OAUTH_DCR_INITIAL_ACCESS_TOKEN", token)
+	cfg, err := loadStartupConfig("3000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OAuthDCRMode != "token" || cfg.OAuthDCRInitialTokenHash != sha256.Sum256([]byte(token)) {
+		t.Fatal("production token DCR policy was not retained as a digest")
+	}
+}
+
+func TestProductionMigratorNeedsOnlyDatabaseAuthority(t *testing.T) {
+	clearStartupEnv(t)
+	t.Setenv("DEPLOYMENT_PROFILE", "production")
+	t.Setenv("PROCESS_ROLE", "migrator")
+	t.Setenv("DB_DRIVER", "postgres")
+	t.Setenv("DATABASE_URL", "postgres://owner:pass@db.example/tutor?sslmode=verify-full&sslrootcert=%2Fetc%2Ftutor%2Fca.pem")
+	cfg, err := loadStartupConfig("3000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ProcessRole != "migrator" || cfg.OAuthDCRMode != "disabled" {
+		t.Fatalf("migrator config = %+v", cfg)
 	}
 }
 
@@ -236,11 +363,12 @@ func TestLoadStartupConfigDistributedPrerequisites(t *testing.T) {
 		{
 			name: "local narrative memory rejected",
 			env: map[string]string{
-				"DB_DRIVER":         "postgres",
-				"SCHEDULER_MODE":    "distributed",
-				"RATELIMIT_BACKEND": "postgres",
+				"DB_DRIVER":                "postgres",
+				"SCHEDULER_MODE":           "distributed",
+				"RATELIMIT_BACKEND":        "postgres",
+				"TUTOR_MCP_MEMORY_BACKEND": "local",
 			},
-			wantErr: "requires TUTOR_MCP_MEMORY_ENABLED=off",
+			wantErr: "requires TUTOR_MCP_MEMORY_BACKEND=database",
 		},
 		{
 			name: "consistent experimental profile",
@@ -249,6 +377,16 @@ func TestLoadStartupConfigDistributedPrerequisites(t *testing.T) {
 				"SCHEDULER_MODE":           "distributed",
 				"RATELIMIT_BACKEND":        "postgres",
 				"TUTOR_MCP_MEMORY_ENABLED": "off",
+			},
+		},
+		{
+			name: "shared narrative memory accepted",
+			env: map[string]string{
+				"DB_DRIVER":                "postgres",
+				"SCHEDULER_MODE":           "distributed",
+				"RATELIMIT_BACKEND":        "postgres",
+				"TUTOR_MCP_MEMORY_ENABLED": "on",
+				"TUTOR_MCP_MEMORY_BACKEND": "database",
 			},
 		},
 	}
@@ -304,6 +442,7 @@ func clearStartupEnv(t *testing.T) {
 	for _, name := range []string{
 		"BASE_URL",
 		"DEPLOYMENT_PROFILE",
+		"PROCESS_ROLE",
 		"DB_DRIVER",
 		"DATABASE_URL",
 		"DB_PATH",
@@ -311,15 +450,21 @@ func clearStartupEnv(t *testing.T) {
 		"MCP_MAX_CONCURRENT",
 		"MCP_MAX_CONCURRENT_PER_LEARNER",
 		"MCP_TOOL_CALL_TIMEOUT_SECONDS",
+		"AUTH_BCRYPT_MAX_CONCURRENT",
 		"OAUTH_GRANULAR_SCOPES",
+		"OAUTH_DCR_MODE",
+		"OAUTH_DCR_INITIAL_ACCESS_TOKEN",
 		"RATELIMIT_BACKEND",
 		"SMTP_ADDR",
 		"SMTP_FROM",
 		"INTEGRATION_SECRET_KEYS",
 		"INTEGRATION_SECRET_CURRENT_KEY_ID",
+		"TENANT_INTEGRATION_ALLOWED_HOSTS",
 		"TRUSTED_PROXY_CIDRS",
 		"SCHEDULER_MODE",
 		"TUTOR_MCP_MEMORY_ENABLED",
+		"TUTOR_MCP_MEMORY_BACKEND",
+		"JWT_ED25519_KEYS",
 	} {
 		t.Setenv(name, "")
 	}

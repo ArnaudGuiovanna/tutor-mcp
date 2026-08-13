@@ -171,30 +171,41 @@ const (
 
 // Webhook queue statuses.
 const (
-	WebhookStatusPending    = "pending"
-	WebhookStatusProcessing = "processing"
-	WebhookStatusSent       = "sent"
-	WebhookStatusExpired    = "expired"
-	WebhookStatusFailed     = "failed"
+	WebhookStatusPending         = "pending"
+	WebhookStatusProcessing      = "processing"
+	WebhookStatusDispatching     = "dispatching"
+	WebhookStatusDeliveryUnknown = "delivery_unknown"
+	WebhookStatusSent            = "sent"
+	WebhookStatusExpired         = "expired"
+	WebhookStatusFailed          = "failed"
+)
+
+const (
+	WebhookContentFormatMessage        = "message"
+	WebhookContentFormatDiscordPayload = "discord_payload"
 )
 
 // WebhookQueueItem represents a scheduled, LLM-authored webhook nudge.
 type WebhookQueueItem struct {
-	ID             int64      `json:"id"`
-	LearnerID      string     `json:"learner_id"`
-	Kind           string     `json:"kind"`
-	DomainID       string     `json:"domain_id,omitempty"`
-	ScheduledFor   time.Time  `json:"scheduled_for"`
-	ExpiresAt      *time.Time `json:"expires_at,omitempty"`
-	Content        string     `json:"content"`
-	Priority       int        `json:"priority"`
-	Status         string     `json:"status"`
-	CreatedAt      time.Time  `json:"created_at"`
-	ClaimedAt      *time.Time `json:"claimed_at,omitempty"`
-	SentAt         *time.Time `json:"sent_at,omitempty"`
-	AttemptCount   int        `json:"attempt_count"`
-	MaxAttempts    int        `json:"max_attempts"`
-	NextAttemptAt  *time.Time `json:"next_attempt_at,omitempty"`
-	LastError      string     `json:"last_error,omitempty"`
-	DeadLetteredAt *time.Time `json:"dead_lettered_at,omitempty"`
+	ID                int64      `json:"id"`
+	EventID           string     `json:"event_id"`
+	LearnerID         string     `json:"learner_id"`
+	Kind              string     `json:"kind"`
+	DomainID          string     `json:"domain_id,omitempty"`
+	ScheduledFor      time.Time  `json:"scheduled_for"`
+	ExpiresAt         *time.Time `json:"expires_at,omitempty"`
+	Content           string     `json:"content"`
+	ContentFormat     string     `json:"content_format"`
+	Priority          int        `json:"priority"`
+	Status            string     `json:"status"`
+	CreatedAt         time.Time  `json:"created_at"`
+	ClaimedAt         *time.Time `json:"claimed_at,omitempty"`
+	DispatchStartedAt *time.Time `json:"dispatch_started_at,omitempty"`
+	SentAt            *time.Time `json:"sent_at,omitempty"`
+	ReservationID     *int64     `json:"reservation_id,omitempty"`
+	AttemptCount      int        `json:"attempt_count"`
+	MaxAttempts       int        `json:"max_attempts"`
+	NextAttemptAt     *time.Time `json:"next_attempt_at,omitempty"`
+	LastError         string     `json:"last_error,omitempty"`
+	DeadLetteredAt    *time.Time `json:"dead_lettered_at,omitempty"`
 }

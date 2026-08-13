@@ -22,6 +22,10 @@
   `MT-OPS` exploitation et `MT-MIG` migration.
 - Une tâche n'est `DONE` qu'après critères d'acceptation, tests d'isolation,
   métriques et procédure de rollback.
+- Les preuves de clôture M0–M3, M4 et M5 sont respectivement dans
+  [`goal2-final-audit-2026-08-12.md`](./goal2-final-audit-2026-08-12.md),
+  [`goal3-final-audit-2026-08-12.md`](./goal3-final-audit-2026-08-12.md) et
+  [`goal4-final-audit-2026-08-12.md`](./goal4-final-audit-2026-08-12.md).
 
 ## Décisions structurantes
 
@@ -106,15 +110,15 @@ si tous leurs critères d'acceptation sont satisfaits.
 | M1 — identité/RBAC | Identités, memberships, tenant actif et autorisations centralisées | MT-IAM-01 à 05 |
 | M2 — données isolées | Backfill terminé, FK composites et RLS forcées | MT-DATA-01 à 05, MT-MIG-01 |
 | M3 — catalogue partagé | Formation versionnée, cohorte et enrollment | MT-LRN-01 à 05, MT-MIG-02 |
-| M4 — runtime horizontal | API stateless, workers, outbox, object storage | MT-RUN-01 à 06 |
+| M4 — runtime horizontal | API stateless, workers, outbox, stockage narratif partagé | MT-RUN-01 à 06 |
 | M5 — SaaS exploitable | Quotas, usage, billing, audit, SLO et restauration | MT-CTL-01 à 05, MT-OPS-01 à 04, MT-OPS-08 |
-| M6 — industrialisation | Cellules, analytics et restauration tenant | MT-OPS-05 à 07, MT-MIG-03 |
+| M6 — industrialisation | Cellules, analytics et DDL online avancé | MT-OPS-05 à 07, MT-MIG-03 |
 
 ## Fondations et contrat de scope
 
 ### MT-FND-01 — Inventorier la propriété de chaque table
 
-- **Statut / effort :** `TODO` / `M`
+- **Statut / effort :** `DONE (2026-08-12)` / `M`
 - **Actions :** produire une matrice table → propriétaire → volumétrie →
   politique de rétention → stratégie de backfill. Classer chaque table en
   globale, tenant-owned ou dérivée.
@@ -124,7 +128,7 @@ si tous leurs critères d'acceptation sont satisfaits.
 
 ### MT-FND-02 — Introduire `Principal` et `TenantScope`
 
-- **Statut / effort :** `TODO` / `M`
+- **Statut / effort :** `DONE (2026-08-12)` / `M`
 - **Cible :** remplacer le seul `learner_id` de `auth/middleware.go` par une
   structure telle que :
 
@@ -148,7 +152,7 @@ type Principal struct {
 
 ### MT-FND-03 — Interdire les accès Store non scopés
 
-- **Statut / effort :** `TODO` / `L`
+- **Statut / effort :** `DONE (2026-08-12)` / `L`
 - **Actions :** interfaces étroites recevant `TenantScope`, méthodes SQL dont
   les prédicats commencent par `tenant_id`, garde/linter de revue pour toute
   nouvelle méthode globale.
@@ -160,7 +164,7 @@ type Principal struct {
 
 ### MT-IAM-01 — Créer tenants, users, memberships et identités externes
 
-- **Statut / effort :** `TODO` / `L`
+- **Statut / effort :** `DONE (2026-08-12)` / `L`
 - **Actions :** posséder le schéma des tables `tenants`, `users`,
   `external_identities` et `tenant_memberships` ; états `invited`, `active`,
   `suspended`, `revoked` et version de membership. MT-DATA-01 possède ensuite
@@ -171,7 +175,7 @@ type Principal struct {
 
 ### MT-IAM-02 — Émettre des tokens tenant-aware et rotatifs
 
-- **Statut / effort :** `TODO` / `L`
+- **Statut / effort :** `DONE (2026-08-12)` / `L`
 - **Actions :** sélection explicite du tenant, claims `tid`, `membership_id`,
   `roles`, `scope`, `azp`, `jti`, `token_version`; clés asymétriques rotatives
   avec `kid`/JWKS ou IdP externe.
@@ -181,7 +185,7 @@ type Principal struct {
 
 ### MT-IAM-03 — Centraliser RBAC et portée cohorte
 
-- **Statut / effort :** `TODO` / `L`
+- **Statut / effort :** `DONE (2026-08-12)` / `L`
 - **Rôles initiaux :** owner, admin, responsable pédagogique, formateur,
   auditeur, billing admin, apprenant.
 - **Actions :** permissions par action (`formation:write`, `cohort:manage`,
@@ -192,7 +196,7 @@ type Principal struct {
 
 ### MT-IAM-04 — Invitations, MFA, SSO et provisioning
 
-- **Statut / effort :** `TODO` / `XL`, livrable par incréments
+- **Statut / effort :** `DONE (2026-08-12)` / `XL`, livré par incréments
 - **Actions :** invitations tenant, email vérifié et MFA pour owners/admins ;
   OIDC/SAML ensuite, puis SCIM pour clients enterprise ; service accounts et
   accès support break-glass audité.
@@ -201,7 +205,7 @@ type Principal struct {
 
 ### MT-IAM-05 — Scoper clients OAuth et service accounts au tenant
 
-- **Statut / effort :** `TODO` / `M`
+- **Statut / effort :** `DONE (2026-08-12)` / `M`
 - **Actions :** distinguer l'identité globale ou d'installation des clients
   partagés Claude/ChatGPT de l'autorité tenant ; scoper grants, consentements,
   authorization codes et refresh tokens au tenant/membership/resource. Les
@@ -215,7 +219,7 @@ type Principal struct {
 
 ### MT-DATA-01 — Provisionner le tenant legacy et backfiller les identités
 
-- **Statut / effort :** `TODO` / `M`
+- **Statut / effort :** `DONE (2026-08-12)` / `M`
 - **Dépendance :** MT-IAM-01 possède le schéma tenants/users/memberships.
 - **Actions :** provisionner un tenant `legacy` stable, puis mapper chaque
   learner courant vers les users/memberships déjà définis.
@@ -224,7 +228,7 @@ type Principal struct {
 
 ### MT-DATA-02 — Ajouter `tenant_id` en mode expand
 
-- **Statut / effort :** `TODO` / `XL`
+- **Statut / effort :** `DONE (2026-08-12)` / `XL`
 - **Actions :** colonnes nullable, index tenant-first créés en ligne, triggers ou
   dual-write contrôlé et backfill par clé primaire en lots.
 - **Critères d'acceptation :** pas de long verrou bloquant ; progression et
@@ -233,7 +237,7 @@ type Principal struct {
 
 ### MT-DATA-03 — Ajouter les contraintes composites
 
-- **Statut / effort :** `TODO` / `L`
+- **Statut / effort :** `DONE (2026-08-12)` / `L`
 - **Actions :** uniques `(tenant_id,id)`, FK composites `NOT VALID`, correction
   des anomalies puis `VALIDATE CONSTRAINT`; passer ensuite `tenant_id NOT NULL`.
 - **Critères d'acceptation :** impossible d'associer session, interaction,
@@ -242,7 +246,7 @@ type Principal struct {
 
 ### MT-DATA-04 — Activer et forcer RLS
 
-- **Statut / effort :** `TODO` / `L`
+- **Statut / effort :** `DONE (2026-08-12)` / `L`
 - **Actions :** politiques `USING`/`WITH CHECK`, `FORCE ROW LEVEL SECURITY`,
   rôle runtime non propriétaire et transaction wrapper exécutant `SET LOCAL`.
 - **Critères d'acceptation :** tenant A ne voit/modifie jamais B, y compris via
@@ -253,7 +257,7 @@ type Principal struct {
 
 ### MT-DATA-05 — Séparer rôles runtime, worker et migration
 
-- **Statut / effort :** `TODO` / `M`
+- **Statut / effort :** `DONE (2026-08-12)` / `M`
 - **Actions :** credentials et privilèges minimaux ; le migrateur ne tourne
   plus automatiquement dans chaque instance API ; accès cross-tenant worker
   explicite et audité.
@@ -264,7 +268,7 @@ type Principal struct {
 
 ### MT-LRN-01 — Modéliser formations et versions immuables
 
-- **Statut / effort :** `TODO` / `XL`
+- **Statut / effort :** `DONE (2026-08-12)` / `XL`
 - **Actions :** `formations`, `formation_versions`, modules, concepts et
   prérequis normalisés ; JSONB uniquement pour métadonnées flexibles.
 - **Critères d'acceptation :** draft éditable, publication atomique, version
@@ -272,7 +276,7 @@ type Principal struct {
 
 ### MT-LRN-02 — Créer cohortes et affectations formateurs
 
-- **Statut / effort :** `TODO` / `L`
+- **Statut / effort :** `DONE (2026-08-12)` / `L`
 - **Actions :** `cohorts/course_runs`, dates, capacité, statut, formateurs et
   version de formation.
 - **Critères d'acceptation :** capacité atomique ; formateur limité à ses
@@ -280,7 +284,7 @@ type Principal struct {
 
 ### MT-LRN-03 — Créer enrollments
 
-- **Statut / effort :** `TODO` / `L`
+- **Statut / effort :** `DONE (2026-08-12)` / `L`
 - **Actions :** inscription d'un user à une cohorte/version, états invited,
   active, completed, suspended, cancelled et objectifs personnalisés séparés.
 - **Critères d'acceptation :** unicité tenant/cohorte/user ; version figée ;
@@ -288,7 +292,7 @@ type Principal struct {
 
 ### MT-LRN-04 — Re-cléer l'état cognitif par enrollment
 
-- **Statut / effort :** `TODO` / `XL`
+- **Statut / effort :** `DONE (2026-08-12)` / `XL`
 - **Actions :** migrer concept states, sessions, interactions, évaluations,
   intentions et snapshots vers `(tenant_id,enrollment_id,concept_id)`.
 - **Critères d'acceptation :** deux inscriptions du même user ne mélangent
@@ -298,7 +302,7 @@ type Principal struct {
 
 ### MT-LRN-05 — API de catalogue et administration pédagogique
 
-- **Statut / effort :** `TODO` / `XL`
+- **Statut / effort :** `DONE (2026-08-12)` / `XL`
 - **Actions :** endpoints/portail pour drafts, publication, cohortes,
   inscriptions, formateurs, exports et reporting agrégé.
 - **Critères d'acceptation :** autorisation objet systématique, pagination,
@@ -308,7 +312,7 @@ type Principal struct {
 
 ### MT-RUN-01 — Séparer bootstrap API, worker et migrateur
 
-- **Statut / effort :** `TODO` / `L`
+- **Statut / effort :** `DONE (2026-08-12)` / `L`
 - **Actions :** packages de composition réutilisables et binaires distincts ;
   API/MCP sans cron fan-out ni migration DDL au démarrage.
 - **Critères d'acceptation :** API remplaçable horizontalement ; worker drainable ;
@@ -316,7 +320,7 @@ type Principal struct {
 
 ### MT-RUN-02 — Déployer MCP stateless
 
-- **Statut / effort :** `TODO` / `M`
+- **Statut / effort :** `DONE (2026-08-12)` / `M`
 - **Dépendance :** étend P1-MCP-01 avec le scope tenant-aware.
 - **Actions :** migration SDK/protocole, identité vérifiée à chaque requête et
   aucun état métier conservé dans la session transport.
@@ -325,7 +329,7 @@ type Principal struct {
 
 ### MT-RUN-03 — Introduire outbox, jobs et workers
 
-- **Statut / effort :** `TODO` / `XL`
+- **Statut / effort :** `DONE (2026-08-12)` / `XL`
 - **Dépendance :** étend P1-JOB-01 à 02 et P1-WEBHOOK-01 à 02 avec des clés et
   quotas tenant-aware ; validation PostgreSQL imposée par P1-TEST-01.
 - **Actions :** outbox transactionnelle, relay, broker/queue, leases expirants,
@@ -333,18 +337,20 @@ type Principal struct {
 - **Critères d'acceptation :** mutation + événement atomiques ; crash à chaque
   frontière sans perte ; lag et DLQ observables ; ordre défini par agrégat si requis.
 
-### MT-RUN-04 — Déplacer la mémoire narrative en object storage
+### MT-RUN-04 — Déplacer la mémoire narrative en stockage partagé
 
-- **Statut / effort :** `TODO` / `L`
+- **Statut / effort :** `DONE (2026-08-12)` / `L`
 - **Dépendance :** étend P1-MEM-02 avec les clés tenant/enrollment.
-- **Actions :** clés tenant/enrollment, version, ETag, checksum, chiffrement,
+- **Décision MVP :** PostgreSQL est le stockage d'objets partagé ; le CAS
+  versionné joue le rôle d'ETag et évite une dépendance objet supplémentaire.
+- **Actions :** clés tenant/enrollment, version/CAS, checksum, chiffrement,
   lifecycle et index de métadonnées en DB.
 - **Critères d'acceptation :** lecture cohérente multi-nœud, concurrence
   détectée, restauration et effacement ciblé d'un tenant.
 
 ### MT-RUN-05 — Limites instantanées et cache partagé
 
-- **Statut / effort :** `TODO` / `L`
+- **Statut / effort :** `DONE (2026-08-12)` / `L`
 - **Actions :** Redis ou service équivalent pour rate limits par
   `(tenant,user,IP,outil)`, nonce/CSRF partagés et caches avec clés tenant-aware.
 - **Critères d'acceptation :** vue fleet-wide, TTL systématique, stratégie de
@@ -352,7 +358,7 @@ type Principal struct {
 
 ### MT-RUN-06 — Intégrations et webhooks propres au tenant
 
-- **Statut / effort :** `TODO` / `L`
+- **Statut / effort :** `DONE (2026-08-12)` / `L`
 - **Dépendance :** étend P1-WEBHOOK-01 à 02 et P1-SEC-01. Contrairement aux
   notifications Discord directes, ces endpoints SaaS contrôlés peuvent définir
   un contrat de signature et de déduplication.
@@ -367,7 +373,7 @@ type Principal struct {
 
 ### MT-CTL-01 — Plans, entitlements et quotas durables
 
-- **Statut / effort :** `TODO` / `L`
+- **Statut / effort :** `DONE (2026-08-12)` / `L`
 - **Dimensions :** apprenants actifs, enrollments, formations publiées,
   cohortes, sessions simultanées, appels MCP, stockage, notifications et exports.
 - **Critères d'acceptation :** réservation atomique ; dépassement explicite ;
@@ -375,7 +381,7 @@ type Principal struct {
 
 ### MT-CTL-02 — Événements d'usage idempotents
 
-- **Statut / effort :** `TODO` / `L`
+- **Statut / effort :** `DONE (2026-08-12)` / `L`
 - **Actions :** `usage_events` append-only, clé serveur, rollups et job de
   réconciliation.
 - **Critères d'acceptation :** retry MCP facturé une seule fois ; rollup
@@ -383,7 +389,7 @@ type Principal struct {
 
 ### MT-CTL-03 — Abonnement et fournisseur de paiement
 
-- **Statut / effort :** `TODO` / `L`
+- **Statut / effort :** `DONE (2026-08-12)` / `L`
 - **Actions :** subscriptions, webhooks fournisseur signés/dédupliqués,
   périodes d'essai/grâce et portail billing.
 - **Critères d'acceptation :** panne fournisseur sans coupure immédiate d'une
@@ -391,7 +397,7 @@ type Principal struct {
 
 ### MT-CTL-04 — Journal d'audit privilégié
 
-- **Statut / effort :** `TODO` / `M`
+- **Statut / effort :** `DONE (2026-08-12)` / `M`
 - **Actions :** événement append-only avec tenant, acteur, membership, action,
   cible, résultat, raison, trace et horodatage ; stockage distinct des preuves
   pédagogiques.
@@ -400,7 +406,7 @@ type Principal struct {
 
 ### MT-CTL-05 — Plan de contrôle et routage tenant
 
-- **Statut / effort :** `TODO` / `XL`
+- **Statut / effort :** `DONE (2026-08-12)` / `XL`
 - **Actions :** service/module tenant, statut, région/cellule, plan, flags,
   domaine personnalisé et provisioning.
 - **Critères d'acceptation :** création/suspension/réactivation idempotentes ;
@@ -411,7 +417,7 @@ type Principal struct {
 
 ### MT-OPS-01 — OpenTelemetry et SLO
 
-- **Statut / effort :** `TODO` / `L`
+- **Statut / effort :** `DONE (2026-08-12)` / `L`
 - **Actions :** traces, métriques et logs corrélés avec request/trace ID, tenant
   pseudonymisé, membership, outil, version de formation et latence DB/queue.
 - **Critères d'acceptation :** SLO API/MCP et workers ; alertes saturation pool,
@@ -419,7 +425,7 @@ type Principal struct {
 
 ### MT-OPS-02 — Liveness, readiness et déploiements sûrs
 
-- **Statut / effort :** `TODO` / `M`
+- **Statut / effort :** `DONE (2026-08-12)` / `M`
 - **Actions :** `/live`, `/ready`, compatibilité de migration, feature flags,
   canary tenant/cellule et rollback.
 - **Critères d'acceptation :** une instance incompatible ne reçoit pas de trafic ;
@@ -427,7 +433,7 @@ type Principal struct {
 
 ### MT-OPS-03 — RGPD et politiques par tenant
 
-- **Statut / effort :** `TODO` / `XL`
+- **Statut / effort :** `DONE (2026-08-12)` / `XL`
 - **Actions :** export, rectification, effacement, legal hold, rétention par type,
   clés de chiffrement et traitement des backups/object versions.
 - **Critères d'acceptation :** DSAR traçable ; effacement en lots reprenable ;
@@ -435,7 +441,7 @@ type Principal struct {
 
 ### MT-OPS-04 — Tests de charge et noisy neighbours
 
-- **Statut / effort :** `TODO` / `L`
+- **Statut / effort :** `DONE (2026-08-12)` / `L`
 - **Scénarios :** beaucoup de petits tenants, un gros tenant, cohortes massives,
   fan-out de notifications, imports et exports concurrents.
 - **Critères d'acceptation :** budgets p95/p99, pool et queue documentés ; quotas
@@ -467,8 +473,9 @@ type Principal struct {
 
 ### MT-OPS-08 — Sauvegardes, PITR et restauration logique d'un tenant
 
-- **Statut / effort :** `TODO` / `L`, requis pour le MVP SaaS
-- **Actions :** sauvegardes chiffrées, PITR PostgreSQL, inventaire object storage,
+- **Statut / effort :** `DONE (2026-08-12)` / `L`, requis pour le MVP SaaS
+- **Actions :** sauvegardes chiffrées, PITR PostgreSQL, inventaire des objets
+  narratifs partagés,
   RPO/RTO, restauration complète et procédure d'extraction/restauration logique
   d'un seul tenant sans exposer les autres.
 - **Critères d'acceptation :** exercice automatisé en environnement isolé ; RPO
@@ -479,7 +486,7 @@ type Principal struct {
 
 ### MT-MIG-01 — Backfill tenant expand/contract
 
-- **Statut / effort :** `TODO` / `XL`
+- **Statut / effort :** `DONE (2026-08-12)` / `XL`
 - **Séquence :**
   1. créer tenant `legacy` et tables racines ;
   2. ajouter `tenant_id` nullable et index en ligne ;
@@ -494,7 +501,7 @@ type Principal struct {
 
 ### MT-MIG-02 — Convertir domains en formations et enrollments
 
-- **Statut / effort :** `TODO` / `XL`
+- **Statut / effort :** `DONE (2026-08-12)` / `XL`
 - **Règle :** chaque domain existant devient initialement une formation distincte
   avec une version 1 et un enrollment. Ne jamais dédupliquer automatiquement
   par nom ou JSON.
@@ -522,7 +529,7 @@ type Principal struct {
 | Progression | même user dans plusieurs enrollments/tenants sans contamination |
 | Jobs/outbox | crash à chaque frontière, lease expiré, replay, poison job et DLQ |
 | Quotas/billing | concurrence, retry idempotent, période de grâce et réconciliation |
-| Object storage | ETag conflict, objet corrompu, versioning, lifecycle et restauration |
+| Stockage narratif | Conflit CAS, objet corrompu, versioning, lifecycle et restauration |
 | Performance | beaucoup de petits tenants, gros tenant, noisy neighbour et imports concurrents |
 | Continuité | PITR, restauration logique d'un tenant, perte d'un nœud et migration de cellule |
 

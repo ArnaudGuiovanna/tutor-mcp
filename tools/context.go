@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"time"
 
 	"tutor-mcp/algorithms"
@@ -36,50 +37,38 @@ func registerGetLearnerContext(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		learner, err := deps.Store.GetLearnerByID(ctx, learnerID)
+		now := time.Now().UTC()
+		overview, err := deps.Store.GetLearnerContextOverview(ctx, learnerID, now)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "learner not found", err)
 			return r, nil, nil
 		}
 		profile := models.LearnerProfile{}
-		if learner.ProfileJSON != "" && learner.ProfileJSON != "{}" {
-			if err := json.Unmarshal([]byte(learner.ProfileJSON), &profile); err != nil {
+		if overview.Learner.ProfileJSON != "" && overview.Learner.ProfileJSON != "{}" {
+			if err := json.Unmarshal([]byte(overview.Learner.ProfileJSON), &profile); err != nil {
 				deps.Logger.Error("stored learner profile is invalid", "err", err, "learner", learnerID)
 				r, _ := errorResult("stored learner profile is invalid")
 				return r, nil, nil
 			}
 		}
-		now := time.Now().UTC()
 
-		allDomains, err := deps.Store.GetDomainsByLearner(ctx, learnerID, false)
-		if err != nil {
-			r, _ := safeErrorResult(deps.Logger, "failed to load active domains", err)
-			return r, nil, nil
-		}
-		needsDomainSetup := len(allDomains) == 0
-		var domain *models.Domain
-		if !needsDomainSetup || params.DomainID != "" {
-			domain, err = resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
-			if err != nil {
-				if params.DomainID != "" {
-					r, _ := errorResult("domain not found")
-					return r, nil, nil
-				}
-				r, _ := safeErrorResult(deps.Logger, "failed to resolve active domain", err)
-				return r, nil, nil
+		activeDomains := make([]storeport.LearnerContextDomain, 0, len(overview.Domains))
+		archivedDomains := make([]storeport.LearnerContextDomain, 0, len(overview.Domains))
+		for _, candidate := range overview.Domains {
+			if candidate.Archived {
+				archivedDomains = append(archivedDomains, candidate)
+			} else {
+				activeDomains = append(activeDomains, candidate)
 			}
 		}
-
-		states, err := deps.Store.GetConceptStatesByLearner(ctx, learnerID)
-		if err != nil {
-			r, _ := safeErrorResult(deps.Logger, "failed to load concept states", err)
-			return r, nil, nil
-		}
-		startOfTodayUTC := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
-		interactions, err := deps.Store.GetInteractionsSince(ctx, learnerID, startOfTodayUTC)
-		if err != nil {
-			r, _ := safeErrorResult(deps.Logger, "failed to load today's interactions", err)
-			return r, nil, nil
+		needsDomainSetup := len(activeDomains) == 0
+		var domain *storeport.LearnerContextDomain
+		if !needsDomainSetup || params.DomainID != "" {
+			domain = resolveLearnerContextDomain(activeDomains, params.DomainID)
+			if domain == nil {
+				r, _ := errorResult("domain not found")
+				return r, nil, nil
+			}
 		}
 
 		// Filter out orphan states/interactions left over from deleted or
@@ -88,8 +77,8 @@ func registerGetLearnerContext(server *mcp.Server, deps *Deps) {
 		// can reference ghost concepts (see bug report from cosmos client).
 		conceptDomainIDs := make(map[string]string)
 		ambiguousConcepts := make(map[string]bool)
-		activeDomainIDs := make(map[string]bool, len(allDomains))
-		for _, d := range allDomains {
+		activeDomainIDs := make(map[string]bool, len(activeDomains))
+		for _, d := range activeDomains {
 			activeDomainIDs[d.ID] = true
 			for _, c := range d.Graph.Concepts {
 				if existing, ok := conceptDomainIDs[c]; !ok {
@@ -102,30 +91,28 @@ func registerGetLearnerContext(server *mcp.Server, deps *Deps) {
 		for concept := range ambiguousConcepts {
 			delete(conceptDomainIDs, concept)
 		}
-		scopedStates := states[:0]
-		for _, cs := range states {
+		states := make([]storeport.LearnerContextConceptState, 0, len(overview.ConceptStates))
+		for _, cs := range overview.ConceptStates {
 			if (cs.DomainID != "" && activeDomainIDs[cs.DomainID]) ||
 				(cs.DomainID == "" && conceptDomainIDs[cs.Concept] != "") {
-				scopedStates = append(scopedStates, cs)
+				states = append(states, cs)
 			}
 		}
-		states = scopedStates
-		scopedInteractions := interactions[:0]
-		for _, interaction := range interactions {
+		interactionsToday := 0
+		for _, interaction := range overview.TodayInteractions {
 			if (interaction.DomainID != "" && activeDomainIDs[interaction.DomainID]) ||
 				(interaction.DomainID == "" && conceptDomainIDs[interaction.Concept] != "") {
-				scopedInteractions = append(scopedInteractions, interaction)
+				interactionsToday += interaction.Count
 			}
 		}
-		interactions = scopedInteractions
 
 		// Compute day number since account creation (day 1 = creation day)
-		dayNumber := int(math.Floor(now.Sub(learner.CreatedAt).Hours()/24)) + 1
+		dayNumber := int(math.Floor(now.Sub(overview.Learner.CreatedAt).Hours()/24)) + 1
 
 		// Last session info
 		lastSessionInfo := "premiere session"
-		if !learner.LastActive.IsZero() {
-			hoursSince := now.Sub(learner.LastActive).Hours()
+		if !overview.Learner.LastActive.IsZero() {
+			hoursSince := now.Sub(overview.Learner.LastActive).Hours()
 			if hoursSince < 24 {
 				lastSessionInfo = fmt.Sprintf("derniere session il y a %.0fh", hoursSince)
 			} else {
@@ -154,8 +141,8 @@ func registerGetLearnerContext(server *mcp.Server, deps *Deps) {
 
 		// Build opening message
 		openingMessage := fmt.Sprintf("Day %d", dayNumber)
-		if learner.Objective != "" {
-			openingMessage += fmt.Sprintf(" - Goal: %s", learner.Objective)
+		if overview.Learner.Objective != "" {
+			openingMessage += fmt.Sprintf(" - Goal: %s", overview.Learner.Objective)
 		}
 		openingMessage += fmt.Sprintf(" - %s", lastSessionInfo)
 		if priorityConcept != "" {
@@ -164,7 +151,7 @@ func registerGetLearnerContext(server *mcp.Server, deps *Deps) {
 
 		// List active domains for multi-domain awareness
 		var domainList []map[string]interface{}
-		for _, d := range allDomains {
+		for _, d := range activeDomains {
 			var priorityRank interface{}
 			if d.PriorityRank != nil {
 				priorityRank = *d.PriorityRank
@@ -181,20 +168,13 @@ func registerGetLearnerContext(server *mcp.Server, deps *Deps) {
 			domainList = []map[string]interface{}{}
 		}
 
-		// List archived domains so Claude knows they exist
-		archivedDomains, err := deps.Store.GetDomainsByLearner(ctx, learnerID, true)
-		if err != nil {
-			r, _ := safeErrorResult(deps.Logger, "failed to load archived domains", err)
-			return r, nil, nil
-		}
+		// List archived domains so Claude knows they exist.
 		var archivedList []map[string]interface{}
 		for _, d := range archivedDomains {
-			if d.Archived {
-				archivedList = append(archivedList, map[string]interface{}{
-					"domain_id": d.ID,
-					"name":      d.Name,
-				})
-			}
+			archivedList = append(archivedList, map[string]interface{}{
+				"domain_id": d.ID,
+				"name":      d.Name,
+			})
 		}
 		if archivedList == nil {
 			archivedList = []map[string]interface{}{}
@@ -203,21 +183,22 @@ func registerGetLearnerContext(server *mcp.Server, deps *Deps) {
 		// Progress narrative — open learner model surfaced at session start.
 		var narrative *models.ProgressNarrative
 		if !needsDomainSetup && domain != nil {
-			narrative, err = buildProgressNarrative(ctx, deps, learnerID, learner, domain)
-			if err != nil {
-				r, _ := safeErrorResult(deps.Logger, "failed to build progress narrative", err)
+			signals, signalsErr := deps.Store.GetLearnerContextNarrativeSignals(ctx, learnerID, domain.ID, domain.Graph.Concepts, now)
+			if signalsErr != nil {
+				r, _ := safeErrorResult(deps.Logger, "failed to build progress narrative", signalsErr)
 				return r, nil, nil
 			}
+			narrative = buildProgressNarrative(now, overview.Learner.LastActive, domain, overview.ConceptStates, signals)
 		}
 
 		payload := map[string]interface{}{
 			"learner_id":         learnerID,
-			"objective":          learner.Objective,
+			"objective":          overview.Learner.Objective,
 			"profile":            profile,
 			"day_number":         dayNumber,
 			"last_session":       lastSessionInfo,
 			"concepts_count":     len(states),
-			"interactions_today": len(interactions),
+			"interactions_today": interactionsToday,
 			"needs_domain_setup": needsDomainSetup,
 			"opening_message":    openingMessage,
 			"priority_concept":   priorityConcept,
@@ -246,54 +227,103 @@ func registerGetLearnerContext(server *mcp.Server, deps *Deps) {
 	})
 }
 
-// buildProgressNarrative composes the session-opening OLM narrative signals. Returns
-// nil if there's nothing meaningful to narrate (e.g., zero interactions so far).
-func buildProgressNarrative(ctx context.Context, deps *Deps, learnerID string, learner *models.Learner, domain *models.Domain) (*models.ProgressNarrative, error) {
-	window := 30 * 24 * time.Hour
-	since := time.Now().UTC().Add(-window)
+// buildProgressNarrative composes the session-opening OLM narrative from the
+// specialized read model. It performs no storage reads.
+func buildProgressNarrative(now time.Time, lastActive time.Time, domain *storeport.LearnerContextDomain, states []storeport.LearnerContextConceptState, signals *storeport.LearnerContextNarrativeSignals) *models.ProgressNarrative {
+	stateByConcept := make(map[string]storeport.LearnerContextConceptState)
+	for _, state := range states {
+		if state.DomainID == domain.ID {
+			stateByConcept[state.Concept] = state
+		}
+	}
+	historyByConcept := make(map[string]storeport.LearnerContextConceptHistory, len(signals.ConceptHistory))
+	for _, history := range signals.ConceptHistory {
+		historyByConcept[history.Concept] = history
+	}
 
-	deltas, err := deps.Store.ConceptMasteryDeltaInDomain(ctx, learnerID, domain.ID, domain.Graph.Concepts, since, 3)
-	if err != nil {
-		return nil, fmt.Errorf("load mastery trajectory: %w", err)
+	var deltas []models.ConceptDelta
+	var milestones []string
+	for _, concept := range domain.Graph.Concepts {
+		state, ok := stateByConcept[concept]
+		if !ok {
+			continue
+		}
+		history := historyByConcept[concept]
+		masteryWas := 0.1
+		if history.TotalBefore > 0 {
+			masteryWas = float64(history.SuccessfulBefore) / float64(history.TotalBefore)
+		}
+		delta := state.PMastery - masteryWas
+		if delta > 0.05 {
+			deltas = append(deltas, models.ConceptDelta{
+				Concept:    concept,
+				MasteryNow: state.PMastery,
+				MasteryWas: masteryWas,
+				Delta:      delta,
+			})
+		}
+		if state.PMastery >= algorithms.MasteryBKT() && history.RecentSuccess {
+			milestones = append(milestones, concept)
+		}
 	}
-	streak, err := deps.Store.CountLearnerSessionStreak(ctx, learnerID)
-	if err != nil {
-		return nil, fmt.Errorf("load session streak: %w", err)
+	sort.Slice(deltas, func(i, j int) bool { return deltas[i].Delta > deltas[j].Delta })
+	if len(deltas) > 3 {
+		deltas = deltas[:3]
 	}
-	milestones, err := deps.Store.MilestonesInWindowInDomain(ctx, learnerID, domain.ID, domain.Graph.Concepts, time.Now().UTC().Add(-7*24*time.Hour))
-	if err != nil {
-		return nil, fmt.Errorf("load milestones: %w", err)
-	}
+	sort.Strings(milestones)
 
 	trend := "stable"
-	affects, err := deps.Store.GetRecentAffectStates(ctx, learnerID, 5)
-	if err != nil {
-		return nil, fmt.Errorf("load affect trajectory: %w", err)
-	}
-	if len(affects) >= 3 {
-		var scores []float64
-		for _, a := range affects {
-			scores = append(scores, a.AutonomyScore)
-		}
-		trend = engine.ComputeAutonomyTrendExported(scores)
+	if len(signals.RecentAutonomyScores) >= 3 {
+		trend = engine.ComputeAutonomyTrendExported(signals.RecentAutonomyScores)
 	}
 
 	dormancy := false
-	if !learner.LastActive.IsZero() && time.Since(learner.LastActive) > 24*time.Hour {
+	if !lastActive.IsZero() && now.Sub(lastActive) > 24*time.Hour {
 		dormancy = true
 	}
 
 	// Only return a narrative if there's something to say.
-	if len(deltas) == 0 && streak == 0 && len(milestones) == 0 && !dormancy {
-		return nil, nil
+	if len(deltas) == 0 && signals.SessionStreak == 0 && len(milestones) == 0 && !dormancy {
+		return nil
 	}
 
 	return &models.ProgressNarrative{
 		EstimateTrajectory:     deltas,
-		SessionStreak:          streak,
+		SessionStreak:          signals.SessionStreak,
 		AutonomyTrend:          trend,
 		EstimateMilestonesWeek: milestones,
 		DormancyImminent:       dormancy,
 		Instruction:            "Describe the model-estimate trajectory in 1-2 sentences, not a list. Never present an estimate milestone as demonstrated mastery. If dormancy_imminent is true, make the return welcoming and non-blaming.",
-	}, nil
+	}
+}
+
+// resolveLearnerContextDomain preserves resolveDomain's selection contract
+// without re-reading domain rows already present in the overview.
+func resolveLearnerContextDomain(domains []storeport.LearnerContextDomain, requestedID string) *storeport.LearnerContextDomain {
+	if requestedID != "" {
+		for i := range domains {
+			if domains[i].ID == requestedID {
+				return &domains[i]
+			}
+		}
+		return nil
+	}
+	if len(domains) == 0 {
+		return nil
+	}
+	selected := 0
+	for i := 1; i < len(domains); i++ {
+		candidate, current := domains[i], domains[selected]
+		switch {
+		case candidate.PriorityRank != nil && current.PriorityRank == nil:
+			selected = i
+		case candidate.PriorityRank != nil && current.PriorityRank != nil && *candidate.PriorityRank < *current.PriorityRank:
+			selected = i
+		case (candidate.PriorityRank == nil) == (current.PriorityRank == nil) &&
+			(candidate.PriorityRank == nil || *candidate.PriorityRank == *current.PriorityRank) &&
+			candidate.CreatedAt.After(current.CreatedAt):
+			selected = i
+		}
+	}
+	return &domains[selected]
 }

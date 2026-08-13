@@ -18,10 +18,20 @@ import (
 
 type contextKey string
 
+// PrincipalValidator checks current tenant, user, membership status, roles and
+// token version. Production wires the durable identity store here so a
+// suspension or role change revokes an already-issued bearer immediately.
+type PrincipalValidator interface {
+	ValidatePrincipal(context.Context, models.Principal) error
+}
+
 const LearnerIDKey contextKey = "learner_id"
 
+const principalContextKey contextKey = "principal"
+const principalTokenInfoKey = "tutor.principal"
+
 func BearerMiddleware(baseURL string, next http.Handler) http.Handler {
-	return BearerMiddlewareWithScopeHint(baseURL, models.OAuthScopeLearner, next)
+	return bearerMiddleware(baseURL, models.OAuthScopeLearner, nil, next)
 }
 
 // BearerMiddlewareWithScopeHint authenticates every MCP HTTP request while
@@ -30,16 +40,39 @@ func BearerMiddleware(baseURL string, next http.Handler) http.Handler {
 // incorrectly impose one global AND requirement and reject valid write-only or
 // step-up tokens before their target tool is known.
 func BearerMiddlewareWithScopeHint(baseURL, initialScope string, next http.Handler) http.Handler {
-	verifier := func(_ context.Context, token string, _ *http.Request) (*mcpauth.TokenInfo, error) {
+	return bearerMiddleware(baseURL, initialScope, nil, next)
+}
+
+func BearerMiddlewareWithPrincipalValidator(baseURL, initialScope string, validator PrincipalValidator, next http.Handler) http.Handler {
+	if validator == nil {
+		panic("auth: nil principal validator")
+	}
+	return bearerMiddleware(baseURL, initialScope, validator, next)
+}
+
+func bearerMiddleware(baseURL, initialScope string, validator PrincipalValidator, next http.Handler) http.Handler {
+	verifier := func(ctx context.Context, token string, _ *http.Request) (*mcpauth.TokenInfo, error) {
 		claims, err := VerifyJWTClaims(token, baseURL)
 		if err != nil {
 			slog.Debug("jwt verify failed", "err", err)
 			return nil, mcpauth.ErrInvalidToken
 		}
+		principal, err := claims.Principal()
+		if err != nil {
+			slog.Debug("jwt principal invalid", "err", err)
+			return nil, mcpauth.ErrInvalidToken
+		}
+		if validator != nil {
+			if err := validator.ValidatePrincipal(ctx, principal); err != nil {
+				slog.Debug("jwt principal no longer active", "err", err)
+				return nil, mcpauth.ErrInvalidToken
+			}
+		}
 		return &mcpauth.TokenInfo{
-			UserID:     claims.Subject,
+			UserID:     principal.SessionBindingID(),
 			Scopes:     strings.Fields(claims.Scope),
 			Expiration: claims.ExpiresAt.Time,
+			Extra:      map[string]any{principalTokenInfoKey: principal},
 		}, nil
 	}
 
@@ -48,11 +81,20 @@ func BearerMiddlewareWithScopeHint(baseURL, initialScope string, next http.Handl
 	// principal that initialized the session and reject cross-user reuse.
 	withLearnerContext := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tokenInfo := mcpauth.TokenInfoFromContext(r.Context())
-		if tokenInfo == nil || tokenInfo.UserID == "" {
+		if tokenInfo == nil || tokenInfo.UserID == "" || tokenInfo.Extra == nil {
 			http.Error(w, "invalid token", http.StatusUnauthorized)
 			return
 		}
-		ctx := context.WithValue(r.Context(), LearnerIDKey, tokenInfo.UserID)
+		principal, ok := tokenInfo.Extra[principalTokenInfoKey].(models.Principal)
+		if !ok || principal.SessionBindingID() != tokenInfo.UserID {
+			http.Error(w, "invalid token", http.StatusUnauthorized)
+			return
+		}
+		ctx, err := WithPrincipal(r.Context(), principal)
+		if err != nil {
+			http.Error(w, "invalid token", http.StatusUnauthorized)
+			return
+		}
 		ctx = WithOAuthScope(ctx, strings.Join(tokenInfo.Scopes, " "))
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -119,6 +161,26 @@ func appendScopeToBearerChallenge(header http.Header, scope string) {
 }
 
 func GetLearnerID(ctx context.Context) string {
+	if principal, ok := GetPrincipal(ctx); ok {
+		return principal.LearnerID
+	}
 	id, _ := ctx.Value(LearnerIDKey).(string)
 	return id
+}
+
+// WithPrincipal admits only a fully validated, single-tenant identity into a
+// business context.
+func WithPrincipal(ctx context.Context, principal models.Principal) (context.Context, error) {
+	if err := principal.Validate(); err != nil {
+		return nil, err
+	}
+	return context.WithValue(ctx, principalContextKey, principal), nil
+}
+
+func GetPrincipal(ctx context.Context) (models.Principal, bool) {
+	principal, ok := ctx.Value(principalContextKey).(models.Principal)
+	if !ok || principal.Validate() != nil {
+		return models.Principal{}, false
+	}
+	return principal, true
 }

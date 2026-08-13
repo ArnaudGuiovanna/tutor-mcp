@@ -73,6 +73,7 @@ func (p RetentionPolicy) Enabled() bool {
 type RetentionMetric struct {
 	Eligible int64 `json:"eligible"`
 	Applied  int64 `json:"applied"`
+	Held     int64 `json:"held"`
 }
 
 // RetentionReport is stable JSON output for the maintenance command and
@@ -136,8 +137,8 @@ func (s *Store) runDataRetention(ctx context.Context, policy RetentionPolicy, no
 		cutoff := retentionCutoff(now, policy.AssessmentAbandonedDays)
 		eligible := `status IN ('prepared', 'submitted') AND created_at < ?`
 		var err error
-		report.AssessmentAbandonedAttempts.Eligible, err = s.retentionCount(ctx,
-			`SELECT COUNT(*) FROM assessment_attempts WHERE `+eligible, cutoff)
+		report.AssessmentAbandonedAttempts.Eligible, report.AssessmentAbandonedAttempts.Held, err = s.retentionCountsByHold(
+			ctx, "assessment_attempts", eligible, cutoff)
 		if err != nil {
 			return fmt.Errorf("count abandoned assessment attempts: %w", err)
 		}
@@ -147,7 +148,7 @@ func (s *Store) runDataRetention(ctx context.Context, policy RetentionPolicy, no
 				 SET status = 'cancelled', cancelled_at = ?,
 				     task_text = CASE WHEN task_content_hash <> '' THEN NULL ELSE task_text END,
 				     response_text = CASE WHEN response_content_hash <> '' THEN NULL ELSE response_text END
-				 WHERE `+eligible,
+				 WHERE `+eligible+` AND `+retentionHoldClause("assessment_attempts", false),
 				now, cutoff)
 			if err != nil {
 				return fmt.Errorf("cancel abandoned assessment attempts: %w", err)
@@ -159,8 +160,8 @@ func (s *Store) runDataRetention(ctx context.Context, policy RetentionPolicy, no
 		cutoff := retentionCutoff(now, policy.WebhookLiveDays)
 		eligible := `status IN ('pending', 'processing') AND created_at < ?`
 		var err error
-		report.WebhookLiveRowsTerminalized.Eligible, err = s.retentionCount(ctx,
-			`SELECT COUNT(*) FROM webhook_message_queue WHERE `+eligible, cutoff)
+		report.WebhookLiveRowsTerminalized.Eligible, report.WebhookLiveRowsTerminalized.Held, err = s.retentionCountsByHold(
+			ctx, "webhook_message_queue", eligible, cutoff)
 		if err != nil {
 			return fmt.Errorf("count stale live webhook rows: %w", err)
 		}
@@ -169,7 +170,7 @@ func (s *Store) runDataRetention(ctx context.Context, policy RetentionPolicy, no
 				`UPDATE webhook_message_queue
 				 SET status = 'expired', claimed_at = NULL, next_attempt_at = NULL,
 				     last_error = 'retention_expired', dead_lettered_at = NULL
-				 WHERE `+eligible,
+				 WHERE `+eligible+` AND `+retentionHoldClause("webhook_message_queue", false),
 				cutoff)
 			if err != nil {
 				return fmt.Errorf("terminalize stale live webhook rows: %w", err)
@@ -184,8 +185,8 @@ func (s *Store) runDataRetention(ctx context.Context, policy RetentionPolicy, no
 			AND response_text <> ''
 			AND response_expired_at IS NULL`
 		var err error
-		report.IdempotencyResponsePlaintext.Eligible, err = s.retentionCount(ctx,
-			`SELECT COUNT(*) FROM tool_call_idempotency WHERE `+eligible, cutoff)
+		report.IdempotencyResponsePlaintext.Eligible, report.IdempotencyResponsePlaintext.Held, err = s.retentionCountsByHold(
+			ctx, "tool_call_idempotency", eligible, cutoff)
 		if err != nil {
 			return fmt.Errorf("count idempotency response plaintext: %w", err)
 		}
@@ -193,7 +194,7 @@ func (s *Store) runDataRetention(ctx context.Context, policy RetentionPolicy, no
 			report.IdempotencyResponsePlaintext.Applied, err = s.retentionExec(ctx,
 				`UPDATE tool_call_idempotency
 				 SET response_text = '', response_expired_at = ?
-				 WHERE `+eligible,
+				 WHERE `+eligible+` AND `+retentionHoldClause("tool_call_idempotency", false),
 				now, cutoff)
 			if err != nil {
 				return fmt.Errorf("redact idempotency response plaintext: %w", err)
@@ -213,13 +214,13 @@ func (s *Store) runDataRetention(ctx context.Context, policy RetentionPolicy, no
 		)`
 
 		var err error
-		report.AssessmentTaskPlaintext.Eligible, err = s.retentionCount(ctx,
-			`SELECT COUNT(*) FROM assessment_attempts WHERE `+taskEligible, cutoff)
+		report.AssessmentTaskPlaintext.Eligible, report.AssessmentTaskPlaintext.Held, err = s.retentionCountsByHold(
+			ctx, "assessment_attempts", taskEligible, cutoff)
 		if err != nil {
 			return fmt.Errorf("count assessment task plaintext: %w", err)
 		}
-		report.AssessmentResponsePlaintext.Eligible, err = s.retentionCount(ctx,
-			`SELECT COUNT(*) FROM assessment_attempts WHERE `+responseEligible, cutoff)
+		report.AssessmentResponsePlaintext.Eligible, report.AssessmentResponsePlaintext.Held, err = s.retentionCountsByHold(
+			ctx, "assessment_attempts", responseEligible, cutoff)
 		if err != nil {
 			return fmt.Errorf("count assessment response plaintext: %w", err)
 		}
@@ -230,12 +231,12 @@ func (s *Store) runDataRetention(ctx context.Context, policy RetentionPolicy, no
 		}
 		if apply {
 			report.AssessmentTaskPlaintext.Applied, err = s.retentionExec(ctx,
-				`UPDATE assessment_attempts SET task_text = NULL WHERE `+taskEligible, cutoff)
+				`UPDATE assessment_attempts SET task_text = NULL WHERE `+taskEligible+` AND `+retentionHoldClause("assessment_attempts", false), cutoff)
 			if err != nil {
 				return fmt.Errorf("redact assessment task plaintext: %w", err)
 			}
 			report.AssessmentResponsePlaintext.Applied, err = s.retentionExec(ctx,
-				`UPDATE assessment_attempts SET response_text = NULL WHERE `+responseEligible, cutoff)
+				`UPDATE assessment_attempts SET response_text = NULL WHERE `+responseEligible+` AND `+retentionHoldClause("assessment_attempts", false), cutoff)
 			if err != nil {
 				return fmt.Errorf("redact assessment response plaintext: %w", err)
 			}
@@ -247,30 +248,28 @@ func (s *Store) runDataRetention(ctx context.Context, policy RetentionPolicy, no
 		terminal := `status IN ('sent', 'failed', 'expired')
 			AND COALESCE(sent_at, dead_lettered_at, claimed_at, created_at) < ?`
 		var err error
-		report.WebhookTerminalRows.Eligible, err = s.retentionCount(ctx,
-			`SELECT COUNT(*) FROM webhook_message_queue WHERE `+terminal, cutoff)
+		report.WebhookTerminalRows.Eligible, report.WebhookTerminalRows.Held, err = s.retentionCountsByHold(
+			ctx, "webhook_message_queue", terminal, cutoff)
 		if err != nil {
 			return fmt.Errorf("count terminal webhook rows: %w", err)
 		}
-		report.WebhookPushLinksDetached.Eligible, err = s.retentionCount(ctx,
-			`SELECT COUNT(*) FROM webhook_push_log
-			 WHERE queue_id <> 0 AND queue_id IN (
-				SELECT id FROM webhook_message_queue WHERE `+terminal+`
-			 )`, cutoff)
+		pushLinks := `queue_id <> 0 AND queue_id IN (
+				SELECT id FROM webhook_message_queue WHERE ` + terminal + `
+			 )`
+		report.WebhookPushLinksDetached.Eligible, report.WebhookPushLinksDetached.Held, err = s.retentionCountsByHold(
+			ctx, "webhook_push_log", pushLinks, cutoff)
 		if err != nil {
 			return fmt.Errorf("count webhook push links: %w", err)
 		}
 		if apply {
 			report.WebhookPushLinksDetached.Applied, err = s.retentionExec(ctx,
 				`UPDATE webhook_push_log SET queue_id = 0
-				 WHERE queue_id <> 0 AND queue_id IN (
-					SELECT id FROM webhook_message_queue WHERE `+terminal+`
-				 )`, cutoff)
+				 WHERE `+pushLinks+` AND `+retentionHoldClause("webhook_push_log", false), cutoff)
 			if err != nil {
 				return fmt.Errorf("detach webhook push links: %w", err)
 			}
 			report.WebhookTerminalRows.Applied, err = s.retentionExec(ctx,
-				`DELETE FROM webhook_message_queue WHERE `+terminal, cutoff)
+				`DELETE FROM webhook_message_queue WHERE `+terminal+` AND `+retentionHoldClause("webhook_message_queue", false), cutoff)
 			if err != nil {
 				return fmt.Errorf("delete terminal webhook rows: %w", err)
 			}
@@ -280,14 +279,14 @@ func (s *Store) runDataRetention(ctx context.Context, policy RetentionPolicy, no
 	if policy.PedagogicalSnapshotDays > 0 {
 		cutoff := retentionCutoff(now, policy.PedagogicalSnapshotDays)
 		var err error
-		report.PedagogicalSnapshots.Eligible, err = s.retentionCount(ctx,
-			`SELECT COUNT(*) FROM pedagogical_snapshots WHERE created_at < ?`, cutoff)
+		report.PedagogicalSnapshots.Eligible, report.PedagogicalSnapshots.Held, err = s.retentionCountsByHold(
+			ctx, "pedagogical_snapshots", `created_at < ?`, cutoff)
 		if err != nil {
 			return fmt.Errorf("count pedagogical snapshots: %w", err)
 		}
 		if apply {
 			report.PedagogicalSnapshots.Applied, err = s.retentionExec(ctx,
-				`DELETE FROM pedagogical_snapshots WHERE created_at < ?`, cutoff)
+				`DELETE FROM pedagogical_snapshots WHERE created_at < ? AND `+retentionHoldClause("pedagogical_snapshots", false), cutoff)
 			if err != nil {
 				return fmt.Errorf("delete pedagogical snapshots: %w", err)
 			}
@@ -297,28 +296,26 @@ func (s *Store) runDataRetention(ctx context.Context, policy RetentionPolicy, no
 	if policy.OperationalEventLogDays > 0 {
 		cutoff := retentionCutoff(now, policy.OperationalEventLogDays)
 		var err error
-		report.WebhookPushEvents.Eligible, err = s.retentionCount(ctx,
-			`SELECT COUNT(*) FROM webhook_push_log
-			 WHERE created_at < ? AND pushed_at < ?`, cutoff, cutoff)
+		report.WebhookPushEvents.Eligible, report.WebhookPushEvents.Held, err = s.retentionCountsByHold(
+			ctx, "webhook_push_log", `created_at < ? AND pushed_at < ?`, cutoff, cutoff)
 		if err != nil {
 			return fmt.Errorf("count webhook push events: %w", err)
 		}
-		report.ScheduledAlertEvents.Eligible, err = s.retentionCount(ctx,
-			`SELECT COUNT(*) FROM scheduled_alerts
-			 WHERE created_at < ? AND scheduled_at < ?`, cutoff, cutoff)
+		report.ScheduledAlertEvents.Eligible, report.ScheduledAlertEvents.Held, err = s.retentionCountsByHold(
+			ctx, "scheduled_alerts", `created_at < ? AND scheduled_at < ?`, cutoff, cutoff)
 		if err != nil {
 			return fmt.Errorf("count scheduled alert events: %w", err)
 		}
 		if apply {
 			report.WebhookPushEvents.Applied, err = s.retentionExec(ctx,
 				`DELETE FROM webhook_push_log
-				 WHERE created_at < ? AND pushed_at < ?`, cutoff, cutoff)
+				 WHERE created_at < ? AND pushed_at < ? AND `+retentionHoldClause("webhook_push_log", false), cutoff, cutoff)
 			if err != nil {
 				return fmt.Errorf("delete webhook push events: %w", err)
 			}
 			report.ScheduledAlertEvents.Applied, err = s.retentionExec(ctx,
 				`DELETE FROM scheduled_alerts
-				 WHERE created_at < ? AND scheduled_at < ?`, cutoff, cutoff)
+				 WHERE created_at < ? AND scheduled_at < ? AND `+retentionHoldClause("scheduled_alerts", false), cutoff, cutoff)
 			if err != nil {
 				return fmt.Errorf("delete scheduled alert events: %w", err)
 			}
@@ -329,14 +326,14 @@ func (s *Store) runDataRetention(ctx context.Context, policy RetentionPolicy, no
 		cutoff := retentionCutoff(now, policy.CompletedConsolidationDays)
 		eligible := `status = 'completed' AND completed_at IS NOT NULL AND completed_at < ?`
 		var err error
-		report.CompletedConsolidations.Eligible, err = s.retentionCount(ctx,
-			`SELECT COUNT(*) FROM pending_consolidations WHERE `+eligible, cutoff)
+		report.CompletedConsolidations.Eligible, report.CompletedConsolidations.Held, err = s.retentionCountsByHold(
+			ctx, "pending_consolidations", eligible, cutoff)
 		if err != nil {
 			return fmt.Errorf("count completed consolidations: %w", err)
 		}
 		if apply {
 			report.CompletedConsolidations.Applied, err = s.retentionExec(ctx,
-				`DELETE FROM pending_consolidations WHERE `+eligible, cutoff)
+				`DELETE FROM pending_consolidations WHERE `+eligible+` AND `+retentionHoldClause("pending_consolidations", false), cutoff)
 			if err != nil {
 				return fmt.Errorf("delete completed consolidations: %w", err)
 			}
@@ -348,6 +345,61 @@ func (s *Store) runDataRetention(ctx context.Context, policy RetentionPolicy, no
 
 func retentionCutoff(now time.Time, days int) time.Time {
 	return now.AddDate(0, 0, -days).UTC()
+}
+
+func retentionHoldClause(table string, held bool) string {
+	prefix := "NOT "
+	if held {
+		prefix = ""
+	}
+	return prefix + `EXISTS (
+		SELECT 1 FROM retention_legal_holds AS retention_hold
+		WHERE retention_hold.learner_id = ` + table + `.learner_id
+		  AND retention_hold.released_at IS NULL
+	)`
+}
+
+func (s *Store) retentionCountsByHold(ctx context.Context, table, eligible string, args ...any) (int64, int64, error) {
+	selectable, err := s.retentionCount(ctx,
+		`SELECT COUNT(*) FROM `+table+` WHERE (`+eligible+`) AND `+retentionHoldClause(table, false),
+		args...,
+	)
+	if err != nil {
+		return 0, 0, err
+	}
+	held, err := s.retentionCount(ctx,
+		`SELECT COUNT(*) FROM `+table+` WHERE (`+eligible+`) AND `+retentionHoldClause(table, true),
+		args...,
+	)
+	return selectable, held, err
+}
+
+// RetentionReportTotals collapses the per-category proof into phase checkpoint
+// counters while retaining the detailed report JSON alongside it.
+func RetentionReportTotals(report *RetentionReport) (eligible, applied, held int64) {
+	if report == nil {
+		return 0, 0, 0
+	}
+	metrics := []RetentionMetric{
+		report.WebhookTerminalRows,
+		report.WebhookLiveRowsTerminalized,
+		report.WebhookPushLinksDetached,
+		report.AssessmentTaskPlaintext,
+		report.AssessmentResponsePlaintext,
+		report.AssessmentAbandonedAttempts,
+		report.IdempotencyResponsePlaintext,
+		report.PedagogicalSnapshots,
+		report.WebhookPushEvents,
+		report.ScheduledAlertEvents,
+		report.CompletedConsolidations,
+		report.NarrativeMemoryFiles,
+	}
+	for _, metric := range metrics {
+		eligible += metric.Eligible
+		applied += metric.Applied
+		held += metric.Held
+	}
+	return eligible, applied, held
 }
 
 func (s *Store) retentionCount(ctx context.Context, query string, args ...any) (int64, error) {

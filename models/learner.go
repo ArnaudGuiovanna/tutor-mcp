@@ -11,34 +11,45 @@ type Learner struct {
 	Email           string
 	PasswordHash    string
 	Objective       string
-	WebhookURL      string
 	ProfileJSON     string
 	CreatedAt       time.Time
 	LastActive      time.Time
 	EmailVerifiedAt *time.Time
 }
 
+// WebhookDispatchTarget is the narrow scheduler read model. It deliberately
+// excludes the credential itself as well as email, password hashes, profile
+// data, and account timestamps. The credential is decrypted only inside the
+// final delivery boundary.
+type WebhookDispatchTarget struct {
+	LearnerID    string
+	Availability *Availability
+}
+
 type ConceptState struct {
-	ID            int64
-	LearnerID     string
-	DomainID      string
-	Concept       string
-	Stability     float64
-	Difficulty    float64
-	ElapsedDays   int
-	ScheduledDays int
-	Reps          int
-	Lapses        int
-	CardState     string
-	LastReview    *time.Time
-	NextReview    *time.Time
-	PMastery      float64
-	PLearn        float64
-	PForget       float64
-	PSlip         float64
-	PGuess        float64
-	Theta         float64
-	UpdatedAt     time.Time
+	ID                 int64
+	TenantID           string
+	EnrollmentID       string
+	FormationConceptID string
+	LearnerID          string
+	DomainID           string
+	Concept            string
+	Stability          float64
+	Difficulty         float64
+	ElapsedDays        int
+	ScheduledDays      int
+	Reps               int
+	Lapses             int
+	CardState          string
+	LastReview         *time.Time
+	NextReview         *time.Time
+	PMastery           float64
+	PLearn             float64
+	PForget            float64
+	PSlip              float64
+	PGuess             float64
+	Theta              float64
+	UpdatedAt          time.Time
 }
 
 func NewConceptState(learnerID, concept string) *ConceptState {
@@ -99,14 +110,18 @@ type Interaction struct {
 }
 
 type RefreshToken struct {
-	Token     string
-	LearnerID string
-	ClientID  string // optional, blank for pre-issue-#30 tokens
-	Resource  string // exact RFC 8707 protected-resource URI
-	Scope     string // exact canonical OAuth grant; legacy "learner" is bounded
-	FamilyID  string
-	ExpiresAt time.Time
-	CreatedAt time.Time
-	UsedAt    *time.Time
-	RevokedAt *time.Time
+	Token             string
+	UserID            string
+	TenantID          string
+	MembershipID      string
+	MembershipVersion int64
+	LearnerID         string
+	ClientID          string // optional, blank for pre-issue-#30 tokens
+	Resource          string // exact RFC 8707 protected-resource URI
+	Scope             string // exact canonical OAuth grant; legacy "learner" is bounded
+	FamilyID          string
+	ExpiresAt         time.Time
+	CreatedAt         time.Time
+	UsedAt            *time.Time
+	RevokedAt         *time.Time
 }

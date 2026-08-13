@@ -16,7 +16,14 @@
 
 Tell the LLM what you want to learn — *Spanish for travel*, *Go for backend*, *medieval history* — and the runtime orchestrates the journey: what to study next, when to review, when you've mastered a concept, when you need a nudge. The next conversation starts from what the learner has mastered, forgotten, misunderstood, felt, and explicitly committed to do next.
 
-**Status — alpha v0.4.1.** The robust MVP target is a single-tenant, single-node deployment using SQLite and the in-process scheduler. The regulation pipeline (phase FSM + concept/action selectors + gate + threshold resolver) ships default-on; the fade controller is opt-in. PostgreSQL, distributed leases, and shared rate limits are available for testing, but multi-node operation remains **experimental**: narrative memory is local and job leases do not provide crash-safe exactly-once delivery.
+**Status — alpha v0.4.1.** Two profiles are supported: local SQLite with one
+process, and horizontal multi-tenant SaaS on PostgreSQL with separate
+API/worker/migrator roles, forced RLS, durable outbox/jobs, encrypted shared
+narrative memory, quotas, audit and recovery runbooks. The regulation pipeline
+(phase FSM + concept/action selectors + gate + threshold resolver) ships
+default-on; the fade controller is opt-in. Direct Discord remains at-least-once
+with quarantine of ambiguous outcomes; signed SaaS webhooks expose a stable
+deduplication contract.
 
 ## Compatible clients
 
@@ -42,7 +49,7 @@ LLMs can explain. Tutor MCP remembers and decides. The runtime owns the durable 
 
 | Layer | Stored as | What it gives the tutor |
 |---|---|---|
-| **Algorithmic state** | SQLite (recommended) or PostgreSQL (experimental) domains, concept states, interactions, affect, calibration, transfer, intentions | Domains, prerequisites, phase, mastery, retention, ability, review timing, transfer readiness, active misconceptions |
+| **Algorithmic state** | SQLite local or PostgreSQL SaaS: tenant/enrollment-scoped domains, concept states, interactions, affect, calibration, transfer, intentions | Domains, prerequisites, phase, mastery, retention, ability, review timing, transfer readiness, active misconceptions |
 | **Episodic memory** | Markdown `sessions/*.md` with YAML frontmatter | Affect, concepts touched, salient exchanges, mental-model observations, implementation intentions |
 | **Narrative state** | Markdown `MEMORY.md`, `MEMORY_pending.md`, `concepts/*.md`, `archives/*.md` | Stable learner facts, pending observations, concept notes, medium-term trajectory, contradictions to verify |
 | **Operator view** | Pedagogical snapshots + decision replay | Why an activity was selected, why a concept was held back, whether evidence was missing or noisy |
@@ -91,7 +98,7 @@ go build -o tutor-mcp
 ### 2. Run
 
 ```bash
-export JWT_SECRET="$(openssl rand -base64 32)"   # required — must be base64
+export JWT_SECRET="$(openssl rand -base64 32)"   # development compatibility only
 export BASE_URL=https://your.domain              # public origin, no trailing slash
 export SMTP_ADDR=smtp.example.com:587            # STARTTLS is mandatory
 export SMTP_FROM=tutor@your.domain
@@ -233,18 +240,22 @@ Environment variables read at boot:
 
 | Variable | Default | Effect |
 |---|---|---|
-| `JWT_SECRET` | — *(required)* | HS256 secret. Must be valid base64 (plain strings rejected at boot). Use `openssl rand -base64 32` — 32+ decoded bytes recommended for HS256. |
+| `JWT_ED25519_KEYS` | — *(required in production)* | JSON keyring with one active Ed25519 private key and current/previous public keys (`kid`, base64 standard encoding). Enables overlap rotation and JWKS publication. |
+| `JWT_SECRET` | — *(development fallback)* | Legacy HS256 compatibility secret. Base64, 32+ decoded bytes. Rejected as the sole production signing configuration. |
 | `DEPLOYMENT_PROFILE` | `development` | `production` fails closed unless the public origin is HTTPS, PostgreSQL uses verified TLS with an explicit CA, shared rate limits, SMTP, integration-secret encryption and trusted proxy CIDRs are configured. |
+| `PROCESS_ROLE` | `all` in development | `api`, `worker`, or `migrator` is mandatory in production. Only the migrator applies DDL. |
 | `PORT` | `3000` | HTTP listen port |
-| `DB_DRIVER` | `sqlite` | `sqlite` (recommended MVP profile, embedded) or `postgres` (experimental). |
+| `DB_DRIVER` | `sqlite` | `sqlite` for the local profile or `postgres` for horizontal SaaS. |
 | `DB_PATH` | `./data/runtime.db` | SQLite path (ignored when `DB_DRIVER=postgres`) |
 | `DATABASE_URL` | — | Postgres DSN, **required** when `DB_DRIVER=postgres`. Production requires `sslmode=verify-full` and an explicit `sslrootcert` CA. |
 | `DB_MAX_CONNS` | `10` | Postgres connection-pool size per instance (ignored on SQLite). Keep `DB_MAX_CONNS × instances < Postgres max_connections`. |
-| `SCHEDULER_MODE` | `inprocess` | `inprocess` (recommended) or experimental `distributed` (one lease winner per run slot; not crash-safe exactly-once). Distributed mode requires PostgreSQL, PostgreSQL rate limits, and local narrative memory disabled. Unknown values fail at boot. |
+| `SCHEDULER_MODE` | `inprocess` | `inprocess` (recommended) or `distributed` (fenced recoverable leases, heartbeat, retry and DLQ). Distributed mode requires PostgreSQL, PostgreSQL rate limits, and shared database narrative memory or disabled memory. Unknown values fail at boot. |
 | `RATELIMIT_BACKEND` | `memory` | `memory` (per-instance, default) or `postgres`/`db` (shared rate-limit + login-failure store). The PostgreSQL backend requires `DB_DRIVER=postgres`; unknown values fail at boot. |
 | `BASE_URL` | `http://localhost:$PORT` | Public HTTP(S) origin. A trailing `/` is normalized; paths, credentials, query strings, fragments, and non-HTTP schemes fail at boot. Triggers HSTS when `https://`. |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | Enables OTLP traces and metrics; standard trace/metric endpoints, resource attributes, headers and TLS variables are also accepted. |
 | `TRUSTED_PROXY_CIDRS` | — | Comma-separated CIDRs of trusted reverse-proxies. **Required behind a public proxy** — without it every IP-rate-limit collapses under the proxy's loopback bucket. |
+| `AUTH_BCRYPT_MAX_CONCURRENT` | `4` | Process-wide CPU budget shared by password and OAuth client-secret bcrypt work (1–128). Admission is non-blocking; saturation receives HTTP 503 with `Retry-After` instead of an unbounded goroutine queue. |
 | `MCP_RATE_LIMIT_PER_MIN` | `60` | Per-IP and per-learner cap on `/mcp` |
 | `MCP_RATE_LIMIT_BURST` | `60` | Burst allowance |
 | `MCP_MAX_REQUEST_BODY_BYTES` | `1048576` (1 MiB) | Maximum POST body accepted by `/mcp`; values from 1 byte through 64 MiB are accepted. Oversized declared or chunked bodies receive HTTP 413. |
@@ -252,11 +263,15 @@ Environment variables read at boot:
 | `MCP_MAX_CONCURRENT_PER_LEARNER` | `8` | Maximum in-flight MCP calls for one learner; cannot exceed the global limit. |
 | `MCP_TOOL_CALL_TIMEOUT_SECONDS` | `30` | Cooperative server deadline applied only to `tools/call` (1–600 seconds); discovery and long-lived transport responses are unaffected. |
 | `OAUTH_GRANULAR_SCOPES` | **`off`** *(opt-in)* | `on` publishes and issues per-tool `learner:read` / `learner:write` grants; `off` keeps the bounded legacy `learner` compatibility mode. Only `on` and `off` are accepted. Use the [two-phase rollout and rollback runbook](./docs/oauth-granular-scopes-rollout.md). |
+| `OAUTH_DCR_MODE` | `open` in development | `open`, `token`, or `disabled`. Production requires an explicit `token` or `disabled`; `disabled` removes `/register` from discovery and routing. See the [DCR production runbook](./docs/oauth-dcr-production.md). |
+| `OAUTH_DCR_INITIAL_ACCESS_TOKEN` | — | Required only with `OAUTH_DCR_MODE=token`. Must be unpadded base64url encoding at least 32 bytes (for example, 64 hex characters from `openssl rand -hex 32`). Startup registers only its SHA-256 digest in the shared capability registry; changed values overlap until explicit audited revocation with `tutor-dcr-admin`. |
 | `SMTP_ADDR` / `SMTP_FROM` | — | SMTP endpoint and sender for verification/recovery. Delivery requires STARTTLS (TLS 1.2+); public account flows cannot complete when absent. Optional `SMTP_SERVER_NAME`, `SMTP_USERNAME`, `SMTP_PASSWORD`. |
 | `INTEGRATION_SECRET_KEYS` | — | Comma-separated `key_id:base64-32-byte-key` keyring used to encrypt Discord webhook credentials at rest. Supply old and new keys during rotation. |
 | `INTEGRATION_SECRET_CURRENT_KEY_ID` | — | Key ID used for new envelopes; startup atomically re-encrypts legacy/old-key records. Required with `INTEGRATION_SECRET_KEYS`. |
-| `TUTOR_MCP_MEMORY_ENABLED` | `on` | Node-local Markdown learner memory. Runtime concept notes and sessions are domain-scoped; ambiguous legacy/global narratives are excluded from activity generation. Experimental distributed mode requires `off`. |
-| `TUTOR_MCP_MEMORY_ROOT` | `~/.tutor-mcp/` | Memory FS root |
+| `TENANT_INTEGRATION_ALLOWED_HOSTS` | — | Comma-separated HTTPS host allowlist for signed tenant webhooks; mandatory in production. IP literals and non-443 ports are refused. |
+| `TUTOR_MCP_MEMORY_ENABLED` | `on` | Enables narrative learner memory. Runtime concept notes and sessions are domain-scoped; ambiguous legacy/global narratives are excluded from activity generation. |
+| `TUTOR_MCP_MEMORY_BACKEND` | `local` on SQLite, `database` on PostgreSQL | `local` Markdown or encrypted/versioned relational objects. Active distributed and production profiles require `database`. See the [migration and rotation runbook](./docs/narrative-memory-operations.md). |
+| `TUTOR_MCP_MEMORY_ROOT` | `~/.tutor-mcp/` | Local backend root and create-only backfill source when switching to `database`. |
 | `TUTOR_MCP_MEMORY_MAX_WRITE_BYTES` | `262144` | Maximum content supplied to one narrative-memory write. |
 | `TUTOR_MCP_MEMORY_MAX_FILE_BYTES` | `1048576` | Maximum size of one narrative Markdown file, on reads and writes. |
 | `TUTOR_MCP_MEMORY_MAX_LEARNER_BYTES` | `16777216` | Cumulative narrative-memory quota per learner. |
@@ -279,7 +294,11 @@ them.
 Data lifecycle cleanup is opt-in and runs through a separate dry-run-first
 maintenance command; it is never triggered by server startup. See
 [Data retention maintenance](./OPERATIONS.md#data-retention-maintenance) for
-safe defaults, policy variables, backup implications and `--apply` usage.
+safe defaults, durable apply jobs, legal holds, backup proof, crash recovery
+and restoration reconciliation.
+Ambiguous outbound webhook attempts are quarantined and require the separate,
+explicit `tutor-webhook-admin` command; they are never retried automatically.
+See the [webhook delivery runbook](./docs/webhook-delivery-operations.md).
 The product-level evidence, curriculum, session and learner-control invariants
 are specified in the [learning integrity contract](./docs/learning-integrity.md).
 
@@ -301,7 +320,9 @@ The regulation engine is layered: **pure** decision components (`phase_fsm.go`, 
 
 ## Capacity & sizing
 
-The supported MVP profile is intentionally **single-tenant, single-node**: SQLite + in-process scheduler, with no broker or external database required.
+The local profile remains intentionally **single-node**: SQLite + in-process
+scheduler, with no broker or external database. The SaaS profile uses
+PostgreSQL, stateless API replicas and distributed workers.
 
 | Profile | Active / day | Registered | Use case |
 |---|---|---|---|
@@ -310,13 +331,17 @@ The supported MVP profile is intentionally **single-tenant, single-node**: SQLit
 | **Classroom** | 10–50 | up to 150 | Facilitated sessions |
 | **Small org** | 50–200 | up to 600 | Sustained load |
 
-Treat ~200 active learners as a planning ceiling for the default SQLite profile, not a service-level guarantee; measure against your workload. PostgreSQL can be exercised for conformance and multi-node experiments, but it is not yet the production scaling recommendation. See the explicit limitations and fail-fast configuration in [OPERATIONS.md](./OPERATIONS.md).
+Treat ~200 active learners as a planning ceiling for the default SQLite
+profile, not a service-level guarantee. PostgreSQL capacity is quota- and
+workload-dependent; validate it with the noisy-neighbour gate and the
+[SaaS SLO](./docs/saas-slo.md). Deployment, rollback and recovery are in
+[OPERATIONS.md](./OPERATIONS.md).
 
 **Idle footprint**: ~30 MB RSS, ~15 MB binary, ~10 MB initial DB (+50 KB/active learner/month). Tested on Raspberry Pi 4 and €5/mo VPS for personal use.
 
 ## Tech stack
 
-Go 1.25.12+ · [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk) · [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) (pure-Go, no CGO, default) · [jackc/pgx](https://github.com/jackc/pgx) (Postgres, pure-Go, experimental) · [robfig/cron](https://github.com/robfig/cron) · [golang-jwt/jwt](https://github.com/golang-jwt/jwt) · bcrypt.
+Go 1.25.12+ · [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk) · [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) (pure-Go, no CGO, local default) · [jackc/pgx](https://github.com/jackc/pgx) (PostgreSQL SaaS, pure-Go) · OpenTelemetry · [robfig/cron](https://github.com/robfig/cron) · [golang-jwt/jwt](https://github.com/golang-jwt/jwt) · bcrypt.
 
 ## Pedagogical reliability
 
@@ -328,7 +353,10 @@ Stands on the shoulders of: Corbett & Anderson (BKT, 1995), Open-Spaced-Repetiti
 
 ## Operations · Security · Contributing · Roadmap
 
-- **Operations** — backup, restore, off-host copy, systemd-user setup: [OPERATIONS.md](./OPERATIONS.md).
+- **Operations** — local and SaaS deployment: [OPERATIONS.md](./OPERATIONS.md),
+  [runtime horizontal](./docs/saas-runtime-operations.md),
+  [SLO/alerting](./docs/saas-slo.md),
+  [PITR and tenant restore](./docs/tenant-restore-runbook.md).
 - **Security** — private disclosure channels and operator hardening checklist: [SECURITY.md](./SECURITY.md). Do not open public issues for vulnerabilities.
 - **Contributing** — fork, branch from `staging`, conventional commits, test plan in the PR: [CONTRIBUTING.md](./CONTRIBUTING.md). Single-author maintained; small focused changes land fastest.
 - **Roadmap** — tracked on the [issue tracker](https://github.com/ArnaudGuiovanna/tutor-mcp/issues) (`p0` urgent, `p1` sprint, `p2` when convenient). Deferred statistical refinements: [#48](https://github.com/ArnaudGuiovanna/tutor-mcp/issues/48) PFA fidelity and [#52](https://github.com/ArnaudGuiovanna/tutor-mcp/issues/52) FSRS sub-day intervals. Shipped log in [CHANGELOG.md](./CHANGELOG.md).

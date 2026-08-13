@@ -86,12 +86,17 @@ func (s *Store) OpenLearningSession(ctx context.Context, learnerID, domainID, re
 
 	var result *models.LearningSession
 	err := s.inTx(ctx, nil, func(txs *Store) error {
+		scope, err := txs.resolveLearningScope(ctx, learnerID, domainID, "")
+		if err != nil {
+			return fmt.Errorf("resolve session enrollment: %w", err)
+		}
 		if _, err := txs.exec(ctx,
 			`INSERT INTO learning_sessions
-			    (id, learner_id, domain_id, status, started_at, last_active_at)
-			 VALUES (?, ?, ?, ?, ?, ?)
+			    (id, learner_id, domain_id, tenant_id, enrollment_id, status, started_at, last_active_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT DO NOTHING`,
-			requestedID, learnerID, nullString(domainID), models.LearningSessionStatusOpen, now, now,
+			requestedID, learnerID, nullString(domainID), scope.TenantID, scope.EnrollmentID,
+			models.LearningSessionStatusOpen, now, now,
 		); err != nil {
 			return fmt.Errorf("insert learning session: %w", err)
 		}

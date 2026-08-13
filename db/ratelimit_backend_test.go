@@ -141,6 +141,54 @@ func TestLoginFailureBackendWindow(t *testing.T) {
 	}
 }
 
+func TestLoginFailureBackendConcurrentIncrementIsAtomicAndCapped(t *testing.T) {
+	store := setupTestDB(t)
+	backend := NewLoginFailureBackend(store)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
+	const contenders = maxLoginFailuresPerWindow + 24
+	start := make(chan struct{})
+	errs := make(chan error, contenders)
+	var wg sync.WaitGroup
+	for range contenders {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := backend.Record(ctx, "contended@example.com", now)
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Record: %v", err)
+		}
+	}
+
+	count, err := backend.CountInWindow(ctx, "contended@example.com", defaultLoginWindow, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != maxLoginFailuresPerWindow {
+		t.Fatalf("failure count=%d, want capped %d", count, maxLoginFailuresPerWindow)
+	}
+	var rows int
+	if err := store.root.QueryRow(store.rebind(`SELECT COUNT(*) FROM login_failure_windows WHERE account_key = ?`), "contended@example.com").Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 {
+		t.Fatalf("aggregate rows=%d, want exactly one", rows)
+	}
+
+	later := now.Add(defaultLoginWindow + time.Second)
+	if resetCount, err := backend.Record(ctx, "contended@example.com", later); err != nil || resetCount != 1 {
+		t.Fatalf("new window count=%d err=%v, want 1", resetCount, err)
+	}
+}
+
 func TestCleanupRateLimitState(t *testing.T) {
 	store := setupTestDB(t)
 	ctx := context.Background()
@@ -175,7 +223,7 @@ func TestCleanupRateLimitState(t *testing.T) {
 	if err := store.root.QueryRow(`SELECT COUNT(*) FROM rate_limit_buckets`).Scan(&bucketRows); err != nil {
 		t.Fatalf("count buckets: %v", err)
 	}
-	if err := store.root.QueryRow(`SELECT COUNT(*) FROM login_failures`).Scan(&failureRows); err != nil {
+	if err := store.root.QueryRow(`SELECT COUNT(*) FROM login_failure_windows`).Scan(&failureRows); err != nil {
 		t.Fatalf("count failures: %v", err)
 	}
 	if bucketRows != 1 || failureRows != 1 {

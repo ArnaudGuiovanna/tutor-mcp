@@ -91,9 +91,10 @@
 
 ### P1-AUTH-01 — Vérifier l'identité et permettre la récupération
 
-- **Statut / effort :** `IN_PROGRESS` / `L` — rouvert le 2026-08-10 : la
-  vérification pouvait finaliser un compte, un mot de passe et un grant initiés
-  par un tiers.
+- **Statut / effort :** `DONE` / `L` — la création reste inactive jusqu'à la
+  preuve de boîte mail ; le détenteur choisit ensuite lui-même le mot de passe
+  et confirme le client/destination exacts. La récupération révoque codes et
+  familles de refresh tokens dans la même transaction.
 - **Problème :** `auth/oauth.go:425` crée immédiatement un compte à partir
   d'un email non vérifié. Il n'existe pas de récupération de mot de passe.
 - **Actions :**
@@ -112,7 +113,10 @@
 
 ### P1-AUTH-02 — Supprimer l'énumération et l'oracle temporel
 
-- **Statut / effort :** `IN_PROGRESS` / `S`
+- **Statut / effort :** `DONE` / `S` — absent, mauvais mot de passe et compte
+  inactif suivent la même réponse et deux travaux bcrypt sous un budget CPU
+  commun. Un padding complémentaire égalise aussi les anciens hashes à faible
+  coût ; un test médian tolérant répété couvre l'oracle temporel.
 - **Problème :** `auth/oauth.go:443` annonce qu'un email existe et le login
   d'une adresse absente évite bcrypt (`auth/oauth.go:492`).
 - **Actions :** réponse uniforme, hash bcrypt factice à coût courant et
@@ -125,7 +129,15 @@
 
 ### P1-AUTH-03 — Remplacer le verrouillage de compte contrôlable par l'attaquant
 
-- **Statut / effort :** `IN_PROGRESS` / `M`
+- **Statut / effort :** `DONE` / `M` — le login vérifie désormais
+  toujours le bon mot de passe avant la pénalité, avec `Retry-After`
+  progressif sans sommeil serveur. Un budget bcrypt process-wide configurable
+  rejette immédiatement la saturation sur tous les handlers. Les compteurs
+  locaux sont bornés et les contextes HTTP atteignent le backend partagé.
+  PostgreSQL/SQLite conservent une seule fenêtre atomique plafonnée par compte,
+  au lieu d'une ligne par tentative. Après le seuil, un mot de passe correct
+  depuis un appareil inconnu exige un challenge boîte mail à usage unique,
+  confirmé par POST+CSRF ; l'appareil approuvé reste lié au compte et expire.
 - **Problème :** cinq erreurs ciblées bloquent une adresse dix minutes dans
   `auth/login_failures.go` et `auth/oauth.go:483`.
 - **Actions :** délais progressifs, signaux compte/IP/device, challenge ou MFA
@@ -135,22 +147,37 @@
   la victime ; le bruteforce reste borné ; les compteurs expirent.
 - **Tests :** sources multiples, horloge contrôlée, succès après challenge et
   backend partagé indisponible.
+- **Preuves :** incréments concurrents et cap testés sur SQLite/PostgreSQL ;
+  sources IP et compte restent partagées entre nœuds ; expiration, backend
+  indisponible et mémoire locale bornée sont couverts. Le parcours adaptatif
+  teste notification, confirmation, cookie sécurisé lié à l'apprenant, succès
+  après challenge et refus du replay, y compris sous `-race`.
 
 ### P1-OAUTH-01 — Protéger l'enregistrement dynamique des clients
 
-- **Statut / effort :** `IN_PROGRESS` / `M` — le TTL, le cleanup, le cap
-  atomique et le retrait des champs RFC 7592 fictifs sont livrés ; il manque
-  encore la politique d'admission production et l'activation des clients.
-- **Problème :** `/register` reste anonyme en production, les requêtes
-  équivalentes créent plusieurs clients et le TTL expire aussi les clients
-  utilisés. Le cleanup dans le chemin HTTP ajoute en outre une transaction à
-  toute requête invalide (`auth/oauth.go:966`).
+- **Statut / effort :** `DONE` / `M` — modes `open|token|disabled`, capacités
+  IAT hachées et partagées, admission avant corps/rate-limit, discovery/route
+  conditionnelles et activation transactionnelle au premier code exchange
+  sont livrés. Chaque IAT porte quota, expiration et révocation ; les rotations
+  se chevauchent entre nœuds sans ressusciter un token révoqué.
 - **Actions :** initial access token ou software statement, allowlist de modes
   autorisés, TTL des clients jamais utilisés, quotas et commande d'administration.
 - **Critères d'acceptation :** un appel non autorisé ne crée aucun client ; un
   acteur ne peut épuiser la capacité globale ; suppression et rotation sont
   auditées.
 - **Tests :** saturation simulée, concurrence, expiration et suppression.
+- **Preuves :** le registre PostgreSQL/SQLite revalide le token et consomme son
+  quota dans la transaction de création. L'empreinte canonique des métadonnées
+  donne un seul `client_id` à 12 requêtes concurrentes équivalentes et un replay
+  à quota plein ne recompte pas. Les secrets confidentiels rejouables sont des
+  enveloppes AES-256-GCM liées au client/empreinte, authentifiées et rotatives ;
+  sans keyring, le replay est refusé plutôt que dupliqué. Deux serveurs voient
+  simultanément ancien et nouvel IAT, puis la révocation partagée est immédiate.
+  `tutor-dcr-admin` fournit preview, create, rotate, revoke, list et audit ; le
+  secret brut est généré sur stdout une seule fois. Créations, débuts de
+  rotation, révocations, créations de clients et suppressions TTL sont audités
+  durablement, ces dernières dans la transaction de cleanup. Suites complètes
+  auth/db, matrice PostgreSQL et tests ciblés `-race` verts.
 
 ### P1-OAUTH-02 — Unifier le câblage sécurisé des routes OAuth
 
@@ -222,7 +249,12 @@
 
 ### P1-JOB-01 — Remplacer le claim permanent par un lease récupérable
 
-- **Statut / effort :** `TODO` / `L`
+- **Statut / effort :** `DONE` / `L` — le store et le scheduler utilisent
+  désormais des leases clôturables avec fencing par tentative, heartbeat,
+  reprise bornée, backoff, succès terminal et DLQ. Les migrations préservent
+  les anciens claims comme succès pour ne pas dupliquer des notifications.
+  Tous les handlers enregistrés retournent un résultat métier explicite et
+  sanitisé ; un échec partiel suit le même budget de retry borné qu'un crash.
 - **Problème :** `db/scheduler.go:12` insère seulement `(name, window_key)` ;
   un crash après le claim perd le travail.
 - **Actions :** modèle `jobs` avec `status`, `owner`, `leased_until`, heartbeat,
@@ -232,10 +264,17 @@
   échecs dépassant le budget vont en DLQ.
 - **Tests :** crash après claim, horloge contrôlée, workers concurrents,
   redelivery et poison job sur SQLite/PostgreSQL selon les capacités.
+- **Preuves :** reprise après lease expiré, heartbeat concurrent, fencing,
+  succès terminal, panic, échec métier, DLQ et retry webhook sans dépassement
+  du backoff durable sont testés sur SQLite/PostgreSQL et sous `-race`.
 
 ### P1-JOB-02 — Supprimer les scans globaux et le fan-out synchrone
 
-- **Statut / effort :** `TODO` / `L`
+- **Statut / effort :** `DONE` / `L` — les anciennes API de listes globales ont
+  été retirées. Les notifications et consolidations utilisent des projections
+  minimales paginées par keyset (128 lignes par défaut), alimentent un pool
+  borné (8 workers par défaut), propagent une deadline par cible et publient la
+  progression (`page`, `page_size`, `has_more`, `processed`, `failed`).
 - **Problème :** `engine/scheduler.go:238` charge tous les apprenants, effectue
   des N+1 et envoie les webhooks séquentiellement ; les crons peuvent se chevaucher.
 - **Actions :** sélection SQL minimale, pagination keyset, production de jobs
@@ -244,10 +283,20 @@
   bornée ; progression et lag observables ; arrêt gracieux sans perdre les jobs.
 - **Tests :** charge à 10k/100k identités synthétiques, chevauchement, annulation
   et noisy-neighbour.
+- **Preuves :** le gate opt-in
+  `TUTOR_TEST_SCHEDULER_CARDINALITY=10000|100000` passe sur PostgreSQL : 79 puis
+  782 pages, jamais plus de 128 DTO étroits en une page ; au palier 100k, le
+  parcours webhook prend 1,56 s et la consolidation 0,50 s sur l'environnement
+  local du 2026-08-11. Les tests couvrent également la concurrence maximale,
+  l'absence de famine par une cible lente, la deadline, l'arrêt, le
+  `SkipIfStillRunning` et le détecteur de courses. Les suites complètes `db` et
+  `engine` passent sur SQLite et PostgreSQL.
 
 ### P1-WEBHOOK-01 — Unifier réservation, queue et statut de livraison
 
-- **Statut / effort :** `TODO` / `M`
+- **Statut / effort :** `DONE` / `M` — la réservation, la queue et l'historique
+  de transitions partagent désormais une machine d'état transactionnelle ; les
+  fallbacks générés sont eux-mêmes persistés et claimés avant tout appel HTTP.
 - **Problème :** certains messages créent une réservation sans lien durable
   vers la ligne de queue (`db/webhook_queue.go:172`).
 - **Actions :** stocker `reservation_id`, utiliser les états explicites
@@ -259,7 +308,11 @@
 
 ### P1-WEBHOOK-02 — Formaliser l'at-least-once et l'idempotence
 
-- **Statut / effort :** `TODO` / `M`
+- **Statut / effort :** `DONE` / `M` — l'`event_id` reste stable entre les
+  tentatives, les réponses HTTP non-2xx sont des échecs connus, et toute erreur
+  transport après la frontière HTTP passe en `delivery_unknown` sans retry
+  automatique. La réconciliation et la résolution opérateur sont documentées
+  dans `docs/webhook-delivery-operations.md`.
 - **Problème :** un crash après succès HTTP mais avant `MarkWebhookSent` peut
   provoquer une duplication.
 - **Actions :** `event_id` interne stable, backoff, DLQ, historique de livraison
@@ -273,7 +326,11 @@
 
 ### P1-MEM-02 — Abstraire la mémoire narrative hors du disque local
 
-- **Statut / effort :** `TODO` / `L`
+- **Statut / effort :** `DONE` / `L` — le backend `database` stocke des objets
+  narratifs chiffrés et versionnés sous une identité structurée
+  apprenant/domaine/scope/clé. Les écritures utilisent CAS, quotas
+  transactionnels et journal de mutations idempotent ; le profil distribué ou
+  production refuse désormais une mémoire active locale.
 - **Problème :** `memory/store.go:64` utilise fichiers locaux et verrous
   intra-processus, incompatibles avec plusieurs nœuds.
 - **Actions :** interface `NarrativeStore`, implémentation object storage ou DB,
@@ -282,10 +339,24 @@
   écriture idempotente ; migration locale réconciliée par checksum.
 - **Tests :** concurrence multi-writer, retry, objet absent/corrompu et backfill.
 - **Dépendance :** prérequis du backlog multi-tenant pour l'horizontalisation.
+- **Preuves :** deux instances `Store` partagent immédiatement mémoire,
+  pending, sessions et concepts ; un seul multi-writer gagne une version et
+  les appends concurrents sont tous préservés une fois. Les tests SQLite et
+  PostgreSQL couvrent conflit de version et de mutation, replay exact, quotas,
+  ciphertext/checksum/AAD, objet absent ou corrompu, rotation rolling sans
+  modifier la version, et backfill create-only réconcilié par checksum sans
+  suppression de la source. Un test MCP rejoue un append, lit les statistiques
+  partagées et prouve qu'aucun fichier local n'est créé. Les suites ciblées
+  passent aussi sous `-race`; le rollout, les conflits et le rollback sont
+  documentés dans `narrative-memory-operations.md`.
 
 ### P1-QUERY-01 — Borner les requêtes de contexte apprenant
 
-- **Statut / effort :** `TODO` / `M`
+- **Statut / effort :** `DONE` / `M` — le chemin actif est passé de 13 à
+  5 requêtes constantes avec DTO étroits et agrégats SQL. À 100 concepts et
+  5 000 interactions sous SQLite : environ -72 % d'octets, -79 %
+  d'allocations et -22 % de latence médiane ; l'équivalence SQLite/PostgreSQL
+  et l'isolation sont testées.
 - **Problème :** `tools/context.go:52` charge domaines, états et interactions,
   puis filtre en Go.
 - **Actions :** requêtes scopées, agrégations SQL, pagination/limites et DTO
@@ -293,6 +364,15 @@
 - **Critères d'acceptation :** volume lu borné ; plan PostgreSQL indexé ; budget
   p95 défini à 200, 10k et 100k apprenants synthétiques.
 - **Tests :** cardinalités élevées et `EXPLAIN` contrôlé en benchmark/staging.
+- **Preuves :** le gate PostgreSQL isolé
+  `TUTOR_TEST_LEARNER_CONTEXT_CARDINALITY=200|10000|100000` fixe un budget dur
+  de 75 ms pour les cinq lectures, après warmup et sur 50 mesures. Le
+  2026-08-11, les p95 observés sont respectivement 56,6 ms, 59,5 ms et 55,7 ms
+  avec 100 concepts et 5 000 interactions sur la cible. Le test capture
+  `EXPLAIN (ANALYZE, BUFFERS)` sur le SQL exact de production et exige au
+  palier 100k un plan indexé ; celui-ci utilise les index interactions par
+  apprenant/domaine. Les tests d'équivalence et d'isolation restent verts sur
+  SQLite/PostgreSQL.
 
 ### P1-MCP-01 — Préparer le transport MCP stateless récent
 
@@ -310,7 +390,10 @@
 
 ### P1-SEC-01 — Chiffrer et faire tourner les secrets d'intégration
 
-- **Statut / effort :** `IN_PROGRESS` / `M`
+- **Statut / effort :** `DONE` / `M` — les credentials Discord sont des
+  enveloppes AES-256-GCM versionnées, liées par AAD à la ligne apprenant et à
+  la colonne. Le keyring est injecté par le gestionnaire de secrets, obligatoire
+  en production et conserve les anciennes versions pendant une rotation.
 - **Problème :** `learners.webhook_url` contient un secret en clair dans
   `db/schema_pg.sql:10`.
 - **Actions :** chiffrement enveloppe KMS, version de clé, rotation et
@@ -318,6 +401,14 @@
 - **Critères d'acceptation :** dump DB inexploitable seul ; rotation sans
   interruption ; secret absent des logs, erreurs et traces.
 - **Tests :** round-trip, mauvaise clé, rotation et redaction.
+- **Preuves :** le profil `Learner` et la page scheduler ne portent plus le
+  credential ; le point unique de livraison le charge et le déchiffre une fois,
+  après le claim durable et juste avant la frontière HTTP. La rotation
+  authentifie aussi les enveloppes déjà marquées avec la clé courante, valide
+  toutes les lignes avant sa transaction et reste atomique sur secret legacy
+  invalide. Les tests SQLite/PostgreSQL et `-race` couvrent dump sans plaintext,
+  ancienne/mauvaise clé, tag GCM altéré, rotation/rollback, redaction des erreurs
+  transport et redaction des panics/stacks.
 
 ### P1-DEPLOY-01 — Imposer TLS dans les profils de production
 
@@ -331,7 +422,11 @@
 
 ### P1-PRIV-01 — Rendre la rétention idempotente et auditable
 
-- **Statut / effort :** `TODO` / `L`
+- **Statut / effort :** `DONE` / `L` — chaque apply possède un manifeste
+  durable et immuable (politique, cutoff, acteur et preuve de sauvegarde de
+  moins de 24 h), un bail récupérable et des checkpoints `database` puis
+  `narrative`. Les rapports par catégorie distinguent `eligible`, `applied` et
+  `held`; les échecs partiels et leur cause restent interrogeables.
 - **Problème :** DB et fichiers sont supprimés en phases non atomiques ; les
   erreurs partielles sont difficiles à réconcilier (`db/retention.go:101`).
 - **Actions :** manifeste de job, checkpoints, dry-run, phases idempotentes,
@@ -339,12 +434,21 @@
 - **Critères d'acceptation :** reprise après crash ; preuve des objets supprimés
   ou conservés ; aucune suppression hors politique ; restauration documentée.
 - **Tests :** crash à chaque phase, rerun, legal hold et sauvegarde en retard.
+- **Preuves :** migrations SQLite/PostgreSQL pour jobs/phases/legal holds ;
+  mutations relationnelles et checkpoint atomiques ; suppression narrative
+  idempotente après panne partielle ; un seul propriétaire de bail concurrent ;
+  reprise sans rejouer la phase DB ; legal hold relationnel, fichier local et
+  backend narratif partagé ; rejet d'une sauvegarde périmée et d'une dérive de
+  manifeste. Les suites de rétention passent sur SQLite/PostgreSQL et sous
+  `-race`; le runbook documente statut, reprise, release auditée et
+  réconciliation obligatoire après restauration.
 
 ### P1-TEST-01 — Étendre la matrice d'intégration PostgreSQL
 
-- **Statut / effort :** `IN_PROGRESS` / `L` — la CI exécute désormais
-  `go test -race ./...` avec PostgreSQL et couvre les migrations/scopes ; les
-  scénarios crash/lease/redelivery restent liés à P1-JOB/P1-WEBHOOK.
+- **Statut / effort :** `DONE` / `L` — la CI exécute `go test -race ./...`
+  avec PostgreSQL 17, pools bornés et un gate de 2 000 écritures concurrentes.
+  Des parcours dédiés exercent les handlers OAuth, la boucle MCP et la reprise
+  scheduler sur le dialecte réel, en plus de la conformance Store.
 - **Problème :** la CI PostgreSQL couvre principalement `db`, alors que les
   garanties de jobs, outils et scheduler dépendent du comportement réel de
   PostgreSQL et de son pool.
@@ -356,6 +460,13 @@
   PostgreSQL avant clôture de P1-JOB ou des jalons multi-tenant M2/M4.
 - **Tests :** crash worker, lease expiré, redelivery, rollback/panic, saturation
   du pool et suite négative A/B lorsque RLS sera introduite.
+- **Preuves :** la matrice exacte du workflow passe en 9 min 58 s avec
+  `TUTOR_LOAD_TEST=1` : `db` 598,5 s, `engine` 488,2 s, `auth` 394,6 s et
+  `tools` 130,7 s sous race. Le pool de fixture reproduit la borne production
+  et le test de 124 incréments login concurrents ne sature pas PostgreSQL. Les
+  tests de migration, crash/lease/redelivery, rollback/panic et réutilisation
+  du pool sont verts. La suite négative RLS A/B reste le gate du Goal 2, au
+  moment où le schéma tenant et `FORCE RLS` existent réellement.
 
 ## P2 — durcissement et réduction de dette
 
