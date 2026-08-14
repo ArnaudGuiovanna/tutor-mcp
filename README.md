@@ -341,7 +341,7 @@ workload-dependent; validate it with the noisy-neighbour gate and the
 
 ## Tech stack
 
-Go 1.25.12+ · [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk) · [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) (pure-Go, no CGO, local default) · [jackc/pgx](https://github.com/jackc/pgx) (PostgreSQL SaaS, pure-Go) · OpenTelemetry · [robfig/cron](https://github.com/robfig/cron) · [golang-jwt/jwt](https://github.com/golang-jwt/jwt) · bcrypt.
+Go 1.25.13+ · [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk) · [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) (pure-Go, no CGO, local default) · [jackc/pgx](https://github.com/jackc/pgx) (PostgreSQL SaaS, pure-Go) · OpenTelemetry · [robfig/cron](https://github.com/robfig/cron) · [golang-jwt/jwt](https://github.com/golang-jwt/jwt) · bcrypt.
 
 ## Pedagogical reliability
 
