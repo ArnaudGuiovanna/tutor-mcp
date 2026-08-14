@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -57,6 +58,12 @@ type cimdFlight struct {
 }
 
 var cimdCacheUseSequence atomic.Uint64
+
+// Keep the initial URL syntax check explicit at the HTTP boundary. The URL is
+// parsed and its resolved addresses are vetted below as the authoritative SSRF
+// controls; this expression additionally rejects raw whitespace and control
+// characters before net/http sees the request target.
+var cimdHTTPSURLPattern = regexp.MustCompile(`^https://[^\x00-\x20\x7f]+$`)
 
 func newCIMDHTTPClient() *http.Client {
 	dialer := &net.Dialer{Timeout: 3 * time.Second, KeepAlive: 30 * time.Second}
@@ -256,7 +263,14 @@ func (s *OAuthServer) runCIMDFlight(clientID string, flight *cimdFlight) {
 }
 
 func (s *OAuthServer) fetchCIMDDocument(ctx context.Context, clientID string) (*models.OAuthClient, time.Duration, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, clientID, nil)
+	if !cimdHTTPSURLPattern.MatchString(clientID) {
+		return nil, 0, fmt.Errorf("invalid CIMD request URL")
+	}
+	parsedClientID, err := parseCIMDClientID(clientID)
+	if err != nil {
+		return nil, 0, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, parsedClientID.String(), nil)
 	if err != nil {
 		return nil, 0, fmt.Errorf("create CIMD request: %w", err)
 	}

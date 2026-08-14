@@ -66,6 +66,28 @@ func TestResolveOAuthClientFromCIMDAndCachesDocument(t *testing.T) {
 	}
 }
 
+func TestFetchCIMDDocumentRejectsUnsafeURLSyntaxBeforeTransport(t *testing.T) {
+	s, _ := newTestServer(t)
+	var calls atomic.Int32
+	s.cimdHTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return nil, errors.New("transport must not be reached")
+	})}
+
+	for _, clientID := range []string{
+		"http://client.example/oauth/metadata.json",
+		"https://client.example/oauth/meta data.json",
+		"https://client.example/oauth/metadata.json\r\nX-Forged: true",
+	} {
+		if _, _, err := s.fetchCIMDDocument(context.Background(), clientID); err == nil {
+			t.Errorf("fetchCIMDDocument(%q) accepted an unsafe URL", clientID)
+		}
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("unsafe CIMD URL reached transport %d times", calls.Load())
+	}
+}
+
 func TestCIMDCacheEvictsLeastRecentlyUsedAtCapacity(t *testing.T) {
 	s, _ := newTestServer(t)
 	var callsMu sync.Mutex

@@ -376,7 +376,7 @@ func (s *OAuthServer) HandleAuthorizeGet(w http.ResponseWriter, r *http.Request)
 	redirectURI = registeredRedirectURI
 	scope, err := validatedAuthorizationScope(q.Get("response_type"), q.Get("scope"), s.granularScopes)
 	if err != nil {
-		s.logger.Debug("authorize GET: parameters rejected", "error_type", authLogErrorType(err), "client_id", authLogIdentifier(clientID))
+		s.logger.Debug("authorize GET: parameters rejected", "client_id", authLogIdentifier(clientID))
 		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
 		return
 	}
@@ -491,7 +491,7 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 	redirectURI = registeredRedirectURI
 	scope, err := validatedAuthorizationScope(r.FormValue("response_type"), r.FormValue("scope"), s.granularScopes)
 	if err != nil {
-		s.logger.Debug("authorize POST: parameters rejected", "error_type", authLogErrorType(err), "client_id", authLogIdentifier(clientID))
+		s.logger.Debug("authorize POST: parameters rejected", "client_id", authLogIdentifier(clientID))
 		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
 		return
 	}

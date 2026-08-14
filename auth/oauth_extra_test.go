@@ -1087,6 +1087,59 @@ func TestAuthLogIdentifierRemovesRecordDelimitersAndRawSecrets(t *testing.T) {
 	}
 }
 
+func TestAuthorizeParameterErrorsDoNotLogUntrustedScope(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodPost} {
+		t.Run(method, func(t *testing.T) {
+			s, _ := newTestServer(t)
+			var logs bytes.Buffer
+			s.logger = slog.New(slog.NewTextHandler(&logs, nil))
+			const maliciousScope = "unsupported-scope\r\nforged=value"
+
+			var req *http.Request
+			if method == http.MethodGet {
+				q := url.Values{
+					"client_id":             {"cid"},
+					"redirect_uri":          {"https://good.example/cb"},
+					"resource":              {MCPResource(s.baseURL)},
+					"response_type":         {"code"},
+					"scope":                 {maliciousScope},
+					"code_challenge":        {"challenge"},
+					"code_challenge_method": {"S256"},
+				}
+				req = httptest.NewRequest(method, "/authorize?"+q.Encode(), nil)
+			} else {
+				csrf := "csrf-parameter-log-test"
+				form := url.Values{
+					"csrf_token":            {csrf},
+					"client_id":             {"cid"},
+					"redirect_uri":          {"https://good.example/cb"},
+					"resource":              {MCPResource(s.baseURL)},
+					"response_type":         {"code"},
+					"scope":                 {maliciousScope},
+					"code_challenge":        {"challenge"},
+					"code_challenge_method": {"S256"},
+				}
+				req = httptest.NewRequest(method, "/authorize", strings.NewReader(form.Encode()))
+				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+				req.AddCookie(&http.Cookie{Name: "csrf_token", Value: csrf})
+			}
+
+			rec := httptest.NewRecorder()
+			if method == http.MethodGet {
+				s.HandleAuthorizeGet(rec, req)
+			} else {
+				s.HandleAuthorizePost(rec, req)
+			}
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d; body=%q", rec.Code, http.StatusBadRequest, rec.Body.String())
+			}
+			if strings.Contains(logs.String(), maliciousScope) || strings.Contains(logs.String(), "forged=value") {
+				t.Fatalf("untrusted scope reached log: %q", logs.String())
+			}
+		})
+	}
+}
+
 func TestHandleRegister_ConfidentialClient(t *testing.T) {
 	s, _ := newTestServer(t)
 
