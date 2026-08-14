@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -122,6 +123,32 @@ func TestLoadStartupConfigBcryptConcurrency(t *testing.T) {
 	}
 	if cfg.AuthBcryptMaxConcurrent != 7 {
 		t.Fatalf("AuthBcryptMaxConcurrent=%d, want 7", cfg.AuthBcryptMaxConcurrent)
+	}
+}
+
+func TestIntEnvInRangeRejectsOversizedNativeInteger(t *testing.T) {
+	const name = "TEST_NATIVE_INT_LIMIT"
+	for _, value := range []string{"2147483648", "9223372036854775807", "999999999999999999999999999999999999999999"} {
+		t.Setenv(name, value)
+		if _, err := intEnvInRange(name, 4, 1, 4096); err == nil {
+			t.Fatalf("intEnvInRange accepted oversized value %q", value)
+		}
+	}
+}
+
+func TestIntEnvInRangeAcceptsExactBounds(t *testing.T) {
+	const name = "TEST_NATIVE_INT_LIMIT"
+	for _, value := range []string{"1", "4096"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv(name, value)
+			got, err := intEnvInRange(name, 4, 1, 4096)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strconv.Itoa(got) != value {
+				t.Fatalf("value=%d, want %s", got, value)
+			}
+		})
 	}
 }
 

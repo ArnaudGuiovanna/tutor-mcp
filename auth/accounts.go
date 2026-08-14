@@ -99,9 +99,11 @@ func (s *OAuthServer) loadEmailVerificationContext(ctx context.Context, raw stri
 	if err != nil || canonicalScope != token.Scope {
 		return nil, nil, storeport.ErrInvalidAccountToken
 	}
-	if err := s.validateRedirectURI(ctx, token.ClientID, token.RedirectURI); err != nil {
+	registeredRedirectURI, err := s.validateRedirectURI(ctx, token.ClientID, token.RedirectURI)
+	if err != nil {
 		return nil, nil, storeport.ErrInvalidAccountToken
 	}
+	token.RedirectURI = registeredRedirectURI
 	if err := s.requirePKCEForPublicClient(ctx, token.ClientID, token.CodeChallenge, token.CodeChallengeMethod); err != nil {
 		return nil, nil, storeport.ErrInvalidAccountToken
 	}

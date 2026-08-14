@@ -11,9 +11,12 @@ import (
 	"net"
 	"net/mail"
 	"net/smtp"
+	"net/url"
 	"strings"
 	"time"
 )
+
+const emailLinkMaxLen = 4096
 
 // EmailSender deliberately accepts a complete, short-lived link and never a
 // raw token as a separate argument. Implementations must treat the link as a
@@ -46,6 +49,7 @@ type SMTPEmailSender struct {
 	username   string
 	password   string
 	timeout    time.Duration
+	tlsConfig  *tls.Config
 }
 
 // NewSMTPEmailSender creates a sender that requires STARTTLS. Plaintext SMTP
@@ -80,19 +84,42 @@ func NewSMTPEmailSender(cfg SMTPConfig) (*SMTPEmailSender, error) {
 	return &SMTPEmailSender{
 		address: cfg.Address, serverName: serverName, from: from.Address,
 		username: cfg.Username, password: cfg.Password, timeout: cfg.Timeout,
+		tlsConfig: &tls.Config{MinVersion: tls.VersionTLS12, ServerName: serverName},
 	}, nil
 }
 
 func (s *SMTPEmailSender) SendVerification(ctx context.Context, to, link string) error {
+	if err := validateEmailLink(link); err != nil {
+		return err
+	}
 	return s.send(ctx, to, "Verify your tutor/mcp email", "Verify your email to finish connecting tutor/mcp:\n\n"+link+"\n\nThis link expires shortly and can be used only once.\n")
 }
 
 func (s *SMTPEmailSender) SendPasswordReset(ctx context.Context, to, link string) error {
+	if err := validateEmailLink(link); err != nil {
+		return err
+	}
 	return s.send(ctx, to, "Reset your tutor/mcp password", "Use this link to reset your tutor/mcp password:\n\n"+link+"\n\nThis link expires shortly and can be used only once. If you did not request it, ignore this email.\n")
 }
 
 func (s *SMTPEmailSender) SendLoginChallenge(ctx context.Context, to, link string) error {
+	if err := validateEmailLink(link); err != nil {
+		return err
+	}
 	return s.send(ctx, to, "Confirm a tutor/mcp sign-in", "A correct password was entered after unusual failed sign-in activity. Confirm this device only if it was you:\n\n"+link+"\n\nThe link expires shortly and can be used only once. If this was not you, reset your password.\n")
+}
+
+func validateEmailLink(link string) error {
+	if link == "" || len(link) > emailLinkMaxLen || strings.TrimSpace(link) != link ||
+		strings.ContainsAny(link, "\r\n\x00") || strings.Contains(link, "#") {
+		return fmt.Errorf("invalid email link")
+	}
+	u, err := url.ParseRequestURI(link)
+	if err != nil || !u.IsAbs() || (u.Scheme != "https" && u.Scheme != "http") ||
+		u.Host == "" || u.Hostname() == "" || u.User != nil || u.Fragment != "" || u.Opaque != "" {
+		return fmt.Errorf("invalid email link")
+	}
+	return nil
 }
 
 func (s *SMTPEmailSender) send(ctx context.Context, to, subject, body string) error {
@@ -100,7 +127,7 @@ func (s *SMTPEmailSender) send(ctx context.Context, to, subject, body string) er
 	if err != nil || recipient.Address != to || strings.ContainsAny(to, "\r\n") {
 		return fmt.Errorf("invalid recipient address")
 	}
-	if strings.Contains(body, "\r") {
+	if strings.ContainsAny(subject, "\r\n") || strings.Contains(body, "\r") {
 		return fmt.Errorf("invalid message body")
 	}
 
@@ -125,10 +152,7 @@ func (s *SMTPEmailSender) send(ctx context.Context, to, subject, body string) er
 	if ok, _ := client.Extension("STARTTLS"); !ok {
 		return fmt.Errorf("SMTP server does not support required STARTTLS")
 	}
-	if err := client.StartTLS(&tls.Config{
-		MinVersion: tls.VersionTLS12,
-		ServerName: s.serverName,
-	}); err != nil {
+	if err := client.StartTLS(s.tlsConfig.Clone()); err != nil {
 		return fmt.Errorf("secure SMTP: %w", err)
 	}
 	if s.username != "" {
@@ -147,7 +171,10 @@ func (s *SMTPEmailSender) send(ctx context.Context, to, subject, body string) er
 		return fmt.Errorf("SMTP DATA: %w", err)
 	}
 	message := "From: " + s.from + "\r\n" +
-		"To: " + recipient.Address + "\r\n" +
+		// The recipient belongs in the SMTP envelope above, not in the message
+		// headers. Keeping this header constant prevents untrusted account data
+		// from ever becoming email content while retaining a valid RFC 5322 To.
+		"To: undisclosed-recipients:;\r\n" +
 		"Subject: " + subject + "\r\n" +
 		"MIME-Version: 1.0\r\n" +
 		"Content-Type: text/plain; charset=UTF-8\r\n" +

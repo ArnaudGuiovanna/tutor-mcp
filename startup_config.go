@@ -24,7 +24,7 @@ const (
 	defaultMCPToolCallTimeout            = 30 * time.Second
 	maxMCPToolCallTimeoutSeconds   int64 = 600
 	defaultAuthBcryptMaxConcurrent       = 4
-	maxAuthBcryptMaxConcurrent     int64 = 128
+	maxAuthBcryptMaxConcurrent           = 128
 )
 
 type startupConfig struct {
@@ -95,7 +95,7 @@ func loadStartupConfig(port string) (startupConfig, error) {
 	}
 	cfg.OAuthDCRMode = dcrMode
 	cfg.OAuthDCRInitialTokenHash = dcrTokenHash
-	authBcryptMaxConcurrent, err := int64EnvInRange(
+	authBcryptMaxConcurrent, err := intEnvInRange(
 		"AUTH_BCRYPT_MAX_CONCURRENT",
 		defaultAuthBcryptMaxConcurrent,
 		1,
@@ -104,7 +104,7 @@ func loadStartupConfig(port string) (startupConfig, error) {
 	if err != nil {
 		return startupConfig{}, err
 	}
-	cfg.AuthBcryptMaxConcurrent = int(authBcryptMaxConcurrent)
+	cfg.AuthBcryptMaxConcurrent = authBcryptMaxConcurrent
 	mcpBodyLimit, err := int64EnvInRange(
 		"MCP_MAX_REQUEST_BODY_BYTES",
 		defaultMCPMaxRequestBodyBytes,
@@ -115,19 +115,19 @@ func loadStartupConfig(port string) (startupConfig, error) {
 		return startupConfig{}, err
 	}
 	cfg.MCPMaxRequestBodyBytes = mcpBodyLimit
-	mcpMaxConcurrent, err := int64EnvInRange("MCP_MAX_CONCURRENT", 128, 1, 4096)
+	mcpMaxConcurrent, err := intEnvInRange("MCP_MAX_CONCURRENT", 128, 1, 4096)
 	if err != nil {
 		return startupConfig{}, err
 	}
-	mcpMaxConcurrentUser, err := int64EnvInRange("MCP_MAX_CONCURRENT_PER_LEARNER", 8, 1, 4096)
+	mcpMaxConcurrentUser, err := intEnvInRange("MCP_MAX_CONCURRENT_PER_LEARNER", 8, 1, 4096)
 	if err != nil {
 		return startupConfig{}, err
 	}
 	if mcpMaxConcurrentUser > mcpMaxConcurrent {
 		return startupConfig{}, fmt.Errorf("MCP_MAX_CONCURRENT_PER_LEARNER must not exceed MCP_MAX_CONCURRENT")
 	}
-	cfg.MCPMaxConcurrent = int(mcpMaxConcurrent)
-	cfg.MCPMaxConcurrentUser = int(mcpMaxConcurrentUser)
+	cfg.MCPMaxConcurrent = mcpMaxConcurrent
+	cfg.MCPMaxConcurrentUser = mcpMaxConcurrentUser
 	mcpToolCallTimeoutSeconds, err := int64EnvInRange(
 		"MCP_TOOL_CALL_TIMEOUT_SECONDS",
 		int64(defaultMCPToolCallTimeout/time.Second),
@@ -367,6 +367,21 @@ func int64EnvInRange(name string, fallback, min, max int64) (int64, error) {
 		return fallback, nil
 	}
 	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer between %d and %d: %w", name, min, max, err)
+	}
+	if value < min || value > max {
+		return 0, fmt.Errorf("%s must be between %d and %d", name, min, max)
+	}
+	return value, nil
+}
+
+func intEnvInRange(name string, fallback, min, max int) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
 	if err != nil {
 		return 0, fmt.Errorf("%s must be an integer between %d and %d: %w", name, min, max, err)
 	}

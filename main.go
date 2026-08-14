@@ -531,7 +531,7 @@ var pseudonymizedLogKeys = map[string]struct{}{
 	"redirect_uri": {}, "webhook_url": {}, "url": {}, "path": {},
 	"dsn": {}, "database_url": {}, "authorization": {}, "token": {}, "secret": {},
 	"stack": {}, "panic": {}, "panic_value": {},
-	"ua": {}, "client_name": {}, "domain_name": {},
+	"ua": {}, "client": {}, "client_id": {}, "client_name": {}, "domain_name": {},
 }
 
 // newPrivacySafeLogAttr creates process-local, keyed pseudonyms for structured
@@ -568,6 +568,11 @@ func safeLogValueClass(value slog.Value) string {
 		return fmt.Sprintf("%T", value.Any())
 	}
 	return value.Kind().String()
+}
+
+func sanitizeHTTPLogField(value string) string {
+	value = strings.ReplaceAll(value, "\n", "")
+	return strings.ReplaceAll(value, "\r", "")
 }
 
 func shouldPrintVersion(args []string) bool {
@@ -753,14 +758,14 @@ func requestLogger(logger *slog.Logger, next http.Handler) http.Handler {
 		rec := &statusRecorder{ResponseWriter: w, status: 200}
 		next.ServeHTTP(rec, r)
 		attributes := []any{
-			"method", r.Method,
-			"path", r.URL.Path,
+			"method", sanitizeHTTPLogField(r.Method),
+			"path", sanitizeHTTPLogField(r.URL.Path),
 			"status", rec.status,
 			"duration_ms", time.Since(start).Milliseconds(),
-			"ua", r.UserAgent(),
+			"ua", sanitizeHTTPLogField(r.UserAgent()),
 		}
 		if traceID := observability.TraceID(r.Context()); traceID != "" {
-			attributes = append(attributes, "trace_id", traceID)
+			attributes = append(attributes, "trace_id", sanitizeHTTPLogField(traceID))
 		}
 		logger.Info("request", attributes...)
 	})

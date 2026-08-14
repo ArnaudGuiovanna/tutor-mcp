@@ -61,6 +61,40 @@ func configureTestLimits(t *testing.T, limits Limits) {
 	})
 }
 
+func TestMemoryIntLimitEnvBoundsAndOversizedValue(t *testing.T) {
+	const name = "TUTOR_MCP_TEST_NATIVE_INT_LIMIT"
+	for _, tc := range []struct {
+		name    string
+		value   string
+		want    int
+		wantErr bool
+	}{
+		{name: "minimum", value: "1", want: 1},
+		{name: "maximum", value: "100000", want: 100000},
+		{name: "above maximum", value: "100001", wantErr: true},
+		{name: "above int32", value: "2147483648", wantErr: true},
+		{name: "maximum int64", value: "9223372036854775807", wantErr: true},
+		{name: "oversized native integer", value: "999999999999999999999999999999999999999999", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(name, tc.value)
+			got, err := memoryIntLimitEnv(name, 2, 1, 100000)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("value %q accepted as %d", tc.value, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("value=%d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestWriteEnforcesPayloadFileLearnerAndFileCountQuotas(t *testing.T) {
 	t.Setenv("TUTOR_MCP_MEMORY_ROOT", t.TempDir())
 	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")

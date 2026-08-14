@@ -109,16 +109,16 @@ func LimitsFromEnv() (Limits, error) {
 	if limits.MaxLearnerBytes, err = memoryLimitEnv("TUTOR_MCP_MEMORY_MAX_LEARNER_BYTES", limits.MaxLearnerBytes, 1, 4<<30); err != nil {
 		return Limits{}, err
 	}
-	maxFiles, err := memoryLimitEnv("TUTOR_MCP_MEMORY_MAX_FILES_PER_LEARNER", int64(limits.MaxFilesPerLearner), 1, 100_000)
+	maxFiles, err := memoryIntLimitEnv("TUTOR_MCP_MEMORY_MAX_FILES_PER_LEARNER", limits.MaxFilesPerLearner, 1, 100_000)
 	if err != nil {
 		return Limits{}, err
 	}
-	maxConcurrent, err := memoryLimitEnv("TUTOR_MCP_MEMORY_MAX_CONCURRENT_WRITES", int64(limits.MaxConcurrentWrites), 1, 1024)
+	maxConcurrent, err := memoryIntLimitEnv("TUTOR_MCP_MEMORY_MAX_CONCURRENT_WRITES", limits.MaxConcurrentWrites, 1, 1024)
 	if err != nil {
 		return Limits{}, err
 	}
-	limits.MaxFilesPerLearner = int(maxFiles)
-	limits.MaxConcurrentWrites = int(maxConcurrent)
+	limits.MaxFilesPerLearner = maxFiles
+	limits.MaxConcurrentWrites = maxConcurrent
 	if err := validateLimits(limits); err != nil {
 		return Limits{}, err
 	}
@@ -131,6 +131,18 @@ func memoryLimitEnv(name string, fallback, min, max int64) (int64, error) {
 		return fallback, nil
 	}
 	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value < min || value > max {
+		return 0, fmt.Errorf("memory: %s must be an integer between %d and %d", name, min, max)
+	}
+	return value, nil
+}
+
+func memoryIntLimitEnv(name string, fallback, min, max int) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
 	if err != nil || value < min || value > max {
 		return 0, fmt.Errorf("memory: %s must be an integer between %d and %d", name, min, max)
 	}

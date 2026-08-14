@@ -1066,6 +1066,27 @@ func TestHandleRegister_DoesNotLogRedirectURISecrets(t *testing.T) {
 	}
 }
 
+func TestAuthLogIdentifierRemovesRecordDelimitersAndRawSecrets(t *testing.T) {
+	const raw = "https://client.example/id?secret=one\r\nforged=value"
+	first := authLogIdentifier(raw)
+	second := authLogIdentifier(raw)
+	other := authLogIdentifier(raw + "-other")
+	if first != second {
+		t.Fatalf("identifier fingerprint is not deterministic: %q != %q", first, second)
+	}
+	if first == other {
+		t.Fatalf("distinct identifiers share fingerprint %q", first)
+	}
+	for _, forbidden := range []string{"secret=one", "\r", "\n", "forged=value"} {
+		if strings.Contains(first, forbidden) {
+			t.Fatalf("fingerprint %q contains unsafe value %q", first, forbidden)
+		}
+	}
+	if !strings.HasPrefix(first, "sha256:") {
+		t.Fatalf("fingerprint=%q", first)
+	}
+}
+
 func TestHandleRegister_ConfidentialClient(t *testing.T) {
 	s, _ := newTestServer(t)
 
@@ -1798,15 +1819,29 @@ func TestValidateRedirectURI_Branches(t *testing.T) {
 		{"malformed registered uris", "cid-bad", "https://good.example/cb", true},
 		{"ok exact match", "cid", "https://good.example/cb", false},
 		{"mismatch path", "cid", "https://good.example/other", true},
+		{"suffix hostname", "cid", "https://good.example.attacker.example/cb", true},
+		{"userinfo", "cid", "https://good.example@attacker.example/cb", true},
+		{"scheme relative", "cid", "//good.example/cb", true},
+		{"backslash", "cid", `https://good.example\\attacker.example/cb`, true},
+		{"explicit default port", "cid", "https://good.example:443/cb", true},
+		{"trailing dot", "cid", "https://good.example./cb", true},
+		{"extra query", "cid", "https://good.example/cb?next=https://attacker.example", true},
+		{"fragment", "cid", "https://good.example/cb#https://attacker.example", true},
+		{"encoded slash", "cid", "https://good.example%2fattacker.example/cb", true},
+		{"encoded backslash", "cid", "https://good.example%5cattacker.example/cb", true},
+		{"encoded CRLF", "cid", "https://good.example/cb%0d%0aLocation:%20https://attacker.example", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := s.validateRedirectURI(context.Background(), tc.clientID, tc.redirectURI)
+			got, err := s.validateRedirectURI(context.Background(), tc.clientID, tc.redirectURI)
 			if tc.wantErr && err == nil {
-				t.Fatalf("expected error")
+				t.Fatalf("expected error; got %q", got)
 			}
 			if !tc.wantErr && err != nil {
 				t.Fatalf("unexpected error: %v", err)
+			}
+			if !tc.wantErr && got != "https://good.example/cb" {
+				t.Fatalf("registered redirect=%q", got)
 			}
 		})
 	}

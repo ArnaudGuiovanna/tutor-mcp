@@ -127,18 +127,47 @@ func TestPrivacySafeLogAttrPseudonymizesLearningIdentifiers(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&out, &slog.HandlerOptions{
 		ReplaceAttr: newPrivacySafeLogAttr(),
 	}))
-	logger.Info("interaction", "learner", "learner-secret", "concept", "sensitive-topic", "status", "ok")
+	logger.Info("interaction", "learner", "learner-secret", "concept", "sensitive-topic", "client_id", "https://client.example/id?secret=one", "client", "client-secret", "status", "ok")
 	logged := out.String()
-	for _, secret := range []string{"learner-secret", "sensitive-topic"} {
+	for _, secret := range []string{"learner-secret", "sensitive-topic", "secret=one", "client-secret"} {
 		if strings.Contains(logged, secret) {
 			t.Fatalf("sensitive structured attribute leaked in log: %q", logged)
 		}
 	}
-	if !strings.Contains(logged, "learner=anon:") || !strings.Contains(logged, "concept=anon:") {
+	if !strings.Contains(logged, "learner=anon:") || !strings.Contains(logged, "concept=anon:") ||
+		!strings.Contains(logged, "client_id=anon:") || !strings.Contains(logged, "client=anon:") {
 		t.Fatalf("expected correlatable pseudonyms, got %q", logged)
 	}
 	if !strings.Contains(logged, "status=ok") {
 		t.Fatalf("non-sensitive operational attribute was changed: %q", logged)
+	}
+}
+
+func TestRequestLoggerSanitizesAndPseudonymizesRequestFields(t *testing.T) {
+	var out bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&out, &slog.HandlerOptions{
+		ReplaceAttr: newPrivacySafeLogAttr(),
+	}))
+	handler := requestLogger(logger, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "https://tutor.example/ok", nil)
+	req.Method = "GET\r\nforged_method=true"
+	req.URL.Path = "/private\r\nforged_path=true"
+	req.Header.Set("User-Agent", "agent-secret\r\nforged_ua=true")
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	logged := out.String()
+	for _, secret := range []string{"agent-secret", "/private", "\r", "forged_path=true", "forged_ua=true"} {
+		if strings.Contains(logged, secret) {
+			t.Fatalf("request log disclosed or injected %q: %q", secret, logged)
+		}
+	}
+	if strings.Count(logged, "\n") != 1 {
+		t.Fatalf("request produced more than one log record: %q", logged)
+	}
+	if !strings.Contains(logged, "path=anon:") || !strings.Contains(logged, "ua=anon:") {
+		t.Fatalf("request fields were not pseudonymized: %q", logged)
 	}
 }
 

@@ -40,6 +40,30 @@ func NormalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
 }
 
+// sanitizeAuthLogField removes record delimiters before a value reaches any
+// logger. Structured handlers should escape them too, but this keeps embedded
+// OAuthServer users safe even when they supply a plain-text handler.
+func sanitizeAuthLogField(value string) string {
+	value = strings.ReplaceAll(value, "\n", "")
+	return strings.ReplaceAll(value, "\r", "")
+}
+
+func authLogIdentifier(value string) string {
+	clean := sanitizeAuthLogField(value)
+	if clean == "" {
+		return "[empty]"
+	}
+	digest := sha256.Sum256([]byte(clean))
+	return fmt.Sprintf("sha256:%x", digest[:8])
+}
+
+func authLogErrorType(err error) string {
+	if err == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("%T", err)
+}
+
 // bcryptCost is the work factor used for password and client_secret hashes.
 // Bumped from DefaultCost (10) to 12 in 2026-05 (issue #36): at cost 12 a
 // single hash takes ~250 ms on commodity hardware, raising the cost of an
@@ -297,26 +321,27 @@ func (s *OAuthServer) HandleProtectedResourceMetadata(w http.ResponseWriter, r *
 	json.NewEncoder(w).Encode(meta)
 }
 
-// validateRedirectURI checks that the supplied redirectURI is strictly equal
-// to one of the URIs registered for the given clientID. No prefix / wildcard.
-func (s *OAuthServer) validateRedirectURI(ctx context.Context, clientID, redirectURI string) error {
+// validateRedirectURI returns the server-side registered URI that is strictly
+// equal to the supplied redirectURI. Callers must use the returned value for
+// redirects and persisted grants so request data never reaches a redirect sink.
+func (s *OAuthServer) validateRedirectURI(ctx context.Context, clientID, redirectURI string) (string, error) {
 	if clientID == "" || redirectURI == "" {
-		return fmt.Errorf("missing client_id or redirect_uri")
+		return "", fmt.Errorf("missing client_id or redirect_uri")
 	}
 	client, err := s.resolveOAuthClient(ctx, clientID)
 	if err != nil {
-		return fmt.Errorf("unknown client")
+		return "", fmt.Errorf("unknown client")
 	}
 	var registered []string
 	if err := json.Unmarshal([]byte(client.RedirectURIs), &registered); err != nil {
-		return fmt.Errorf("malformed registration")
+		return "", fmt.Errorf("malformed registration")
 	}
 	for _, u := range registered {
 		if u == redirectURI {
-			return nil
+			return u, nil
 		}
 	}
-	return fmt.Errorf("redirect_uri not registered")
+	return "", fmt.Errorf("redirect_uri not registered")
 }
 
 func validatedAuthorizationScope(responseType, scope string, granularEnabled bool) (string, error) {
@@ -342,20 +367,22 @@ func (s *OAuthServer) HandleAuthorizeGet(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := s.validateRedirectURI(ctx, clientID, redirectURI); err != nil {
-		s.logger.Debug("authorize GET: redirect_uri rejected", "err", err, "client_id", clientID)
+	registeredRedirectURI, err := s.validateRedirectURI(ctx, clientID, redirectURI)
+	if err != nil {
+		s.logger.Debug("authorize GET: redirect_uri rejected", "error_type", authLogErrorType(err), "client_id", authLogIdentifier(clientID))
 		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
 		return
 	}
+	redirectURI = registeredRedirectURI
 	scope, err := validatedAuthorizationScope(q.Get("response_type"), q.Get("scope"), s.granularScopes)
 	if err != nil {
-		s.logger.Debug("authorize GET: parameters rejected", "err", err, "client_id", clientID)
+		s.logger.Debug("authorize GET: parameters rejected", "error_type", authLogErrorType(err), "client_id", authLogIdentifier(clientID))
 		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
 		return
 	}
 	client, err := s.resolveOAuthClient(ctx, clientID)
 	if err != nil {
-		s.logger.Debug("authorize GET: client lookup failed", "err", err, "client_id", clientID)
+		s.logger.Debug("authorize GET: client lookup failed", "error_type", authLogErrorType(err), "client_id", authLogIdentifier(clientID))
 		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
 		return
 	}
@@ -363,12 +390,12 @@ func (s *OAuthServer) HandleAuthorizeGet(w http.ResponseWriter, r *http.Request)
 	codeChallenge := q.Get("code_challenge")
 	codeChallengeMethod := q.Get("code_challenge_method")
 	if err := s.requirePKCEForPublicClient(ctx, clientID, codeChallenge, codeChallengeMethod); err != nil {
-		s.logger.Debug("authorize GET: PKCE missing for public client", "err", err, "client_id", clientID)
+		s.logger.Debug("authorize GET: PKCE missing for public client", "error_type", authLogErrorType(err), "client_id", authLogIdentifier(clientID))
 		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
 		return
 	}
 
-	s.logger.Info("authorize GET", "client_id", clientID, "state_len", len(q.Get("state")))
+	s.logger.Info("authorize GET", "client_id", authLogIdentifier(clientID), "state_len", len(q.Get("state")))
 
 	csrfToken, err := generateCSRFToken()
 	if err != nil {
@@ -455,20 +482,22 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
 		return
 	}
-	if err := s.validateRedirectURI(ctx, clientID, redirectURI); err != nil {
-		s.logger.Debug("authorize POST: redirect_uri rejected", "err", err, "client_id", clientID)
+	registeredRedirectURI, err := s.validateRedirectURI(ctx, clientID, redirectURI)
+	if err != nil {
+		s.logger.Debug("authorize POST: redirect_uri rejected", "error_type", authLogErrorType(err), "client_id", authLogIdentifier(clientID))
 		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
 		return
 	}
+	redirectURI = registeredRedirectURI
 	scope, err := validatedAuthorizationScope(r.FormValue("response_type"), r.FormValue("scope"), s.granularScopes)
 	if err != nil {
-		s.logger.Debug("authorize POST: parameters rejected", "err", err, "client_id", clientID)
+		s.logger.Debug("authorize POST: parameters rejected", "error_type", authLogErrorType(err), "client_id", authLogIdentifier(clientID))
 		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
 		return
 	}
 	client, err := s.resolveOAuthClient(ctx, clientID)
 	if err != nil {
-		s.logger.Debug("authorize POST: client lookup failed", "err", err, "client_id", clientID)
+		s.logger.Debug("authorize POST: client lookup failed", "error_type", authLogErrorType(err), "client_id", authLogIdentifier(clientID))
 		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
 		return
 	}
@@ -476,7 +505,7 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 	codeChallenge := r.FormValue("code_challenge")
 	codeChallengeMethod := r.FormValue("code_challenge_method")
 	if err := s.requirePKCEForPublicClient(ctx, clientID, codeChallenge, codeChallengeMethod); err != nil {
-		s.logger.Debug("authorize POST: PKCE missing for public client", "err", err, "client_id", clientID)
+		s.logger.Debug("authorize POST: PKCE missing for public client", "error_type", authLogErrorType(err), "client_id", authLogIdentifier(clientID))
 		http.Error(w, `{"error":"invalid_request"}`, http.StatusBadRequest)
 		return
 	}
@@ -710,7 +739,7 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 				return approvalErr
 			})
 			if err != nil {
-				s.logger.Error("client approval lookup failed", "err", err, "learner", selected.LearnerID, "client", clientID)
+				s.logger.Error("client approval lookup failed", "error_type", authLogErrorType(err), "learner", authLogIdentifier(selected.LearnerID), "client", authLogIdentifier(clientID))
 				renderAuthPage(w, data, "Internal error. Please try again.", "login")
 				return
 			}
@@ -723,7 +752,7 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 			if err := s.store.WithTenantTx(ctx, tenantScope, func(txCtx context.Context, scoped storeport.Store) error {
 				return scoped.ApproveClientForScope(txCtx, selected.LearnerID, clientID, redirectURI, scope)
 			}); err != nil {
-				s.logger.Warn("persist client approval failed", "err", err, "learner", selected.LearnerID, "client", clientID)
+				s.logger.Warn("persist client approval failed", "error_type", authLogErrorType(err), "learner", authLogIdentifier(selected.LearnerID), "client", authLogIdentifier(clientID))
 			}
 		}
 		selectedPrincipal = models.Principal{
@@ -770,7 +799,7 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 	// RFC 9207 mix-up mitigation: clients (e.g. Mistral) may require iss in the callback.
 	qv.Set("iss", s.baseURL)
 	u.RawQuery = qv.Encode()
-	s.logger.Info("authorize POST redirect", "state_len", len(state), "redirect_host", u.Host)
+	s.logger.Info("authorize POST redirect", "state_len", len(state), "redirect_host", authLogIdentifier(u.Host))
 	setAuthorizeCSRFCookie(w, "", -1)
 	http.Redirect(w, r, u.String(), http.StatusFound)
 }
@@ -846,7 +875,7 @@ func (s *OAuthServer) handleClientCredentialsGrant(w http.ResponseWriter, r *htt
 		Secret:   clientSecret,
 	})
 	if err != nil {
-		s.logger.Debug("client credentials authentication failed", "client_id", clientID)
+		s.logger.Debug("client credentials authentication failed", "client_id", authLogIdentifier(clientID))
 		writeTokenError(w, "invalid_client", http.StatusUnauthorized)
 		return
 	}
@@ -878,7 +907,7 @@ func (s *OAuthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *htt
 	resource := r.FormValue("resource")
 	clientID, clientSecret := extractClientCredentials(r)
 
-	s.logger.Debug("token exchange attempt", "code_len", len(code), "verifier_len", len(codeVerifier), "client_id", clientID)
+	s.logger.Debug("token exchange attempt", "code_len", len(code), "verifier_len", len(codeVerifier), "client_id", authLogIdentifier(clientID))
 
 	// Note: code_verifier is *conditionally* required (issue #114). PKCE is
 	// only enforced when the auth code was minted with a non-empty challenge,
@@ -893,7 +922,7 @@ func (s *OAuthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *htt
 
 	client, err := s.resolveOAuthClient(ctx, clientID)
 	if err != nil {
-		s.logger.Debug("token exchange: unknown client", "client_id", clientID)
+		s.logger.Debug("token exchange: unknown client", "client_id", authLogIdentifier(clientID))
 		writeTokenError(w, "invalid_client", http.StatusUnauthorized)
 		return
 	}
@@ -905,7 +934,7 @@ func (s *OAuthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *htt
 		if ctx.Err() != nil {
 			return
 		}
-		s.logger.Debug("token exchange: client auth failed", "client_id", clientID)
+		s.logger.Debug("token exchange: client auth failed", "client_id", authLogIdentifier(clientID))
 		writeTokenError(w, "invalid_client", http.StatusUnauthorized)
 		return
 	}
@@ -917,7 +946,7 @@ func (s *OAuthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *htt
 		return
 	}
 	if resource != MCPResource(s.baseURL) || authCode.Resource == "" || resource != authCode.Resource {
-		s.logger.Debug("token exchange: resource mismatch", "client_id", clientID)
+		s.logger.Debug("token exchange: resource mismatch", "client_id", authLogIdentifier(clientID))
 		writeTokenError(w, "invalid_grant", http.StatusBadRequest)
 		return
 	}
@@ -925,7 +954,7 @@ func (s *OAuthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *htt
 	// request, the token request must carry the identical value. Empty binding
 	// denotes a pre-upgrade code and is accepted once for compatibility.
 	if authCode.RedirectURI != "" && redirectURI != authCode.RedirectURI {
-		s.logger.Debug("token exchange: redirect_uri mismatch", "client_id", clientID)
+		s.logger.Debug("token exchange: redirect_uri mismatch", "client_id", authLogIdentifier(clientID))
 		writeTokenError(w, "invalid_grant", http.StatusBadRequest)
 		return
 	}
@@ -941,14 +970,14 @@ func (s *OAuthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *htt
 	// verifier (defense-in-depth; the /authorize gate already prevents this).
 	if authCode.CodeChallenge == "" {
 		if client.ClientSecretHash == "" {
-			s.logger.Warn("token exchange: empty PKCE challenge for public client — refusing", "client_id", clientID)
+			s.logger.Warn("token exchange: empty PKCE challenge for public client — refusing", "client_id", authLogIdentifier(clientID))
 			writeTokenError(w, "invalid_grant", http.StatusBadRequest)
 			return
 		}
 		if codeVerifier != "" {
 			// RFC 9700 §2.1.1 downgrade guard: a verifier cannot appear at
 			// the token endpoint unless its challenge was bound to the code.
-			s.logger.Debug("token exchange: unexpected code_verifier without challenge", "client_id", clientID)
+			s.logger.Debug("token exchange: unexpected code_verifier without challenge", "client_id", authLogIdentifier(clientID))
 			writeTokenError(w, "invalid_grant", http.StatusBadRequest)
 			return
 		}
@@ -962,7 +991,7 @@ func (s *OAuthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *htt
 			method = "S256"
 		}
 		if method != "S256" {
-			s.logger.Warn("token exchange: unsupported stored PKCE method", "client_id", clientID, "method", method)
+			s.logger.Warn("token exchange: unsupported stored PKCE method", "client_id", authLogIdentifier(clientID), "method", sanitizeAuthLogField(method))
 			writeTokenError(w, "invalid_grant", http.StatusBadRequest)
 			return
 		}
@@ -1094,12 +1123,12 @@ func (s *OAuthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Req
 			return
 		}
 		if errors.Is(err, storeport.ErrRefreshTokenReuse) {
-			s.logger.Warn("refresh token reuse detected; family revoked", "client_id", clientID)
+			s.logger.Warn("refresh token reuse detected; family revoked", "client_id", authLogIdentifier(clientID))
 			writeTokenError(w, "invalid_grant", http.StatusBadRequest)
 			return
 		}
 		if errors.Is(err, storeport.ErrInvalidRefreshToken) {
-			s.logger.Warn("refresh token rejected (expired, mismatched, or already rotated)", "client_id", clientID)
+			s.logger.Warn("refresh token rejected (expired, mismatched, or already rotated)", "client_id", authLogIdentifier(clientID))
 			writeTokenError(w, "invalid_grant", http.StatusBadRequest)
 			return
 		}
@@ -1307,7 +1336,7 @@ func (s *OAuthServer) HandleRegister(w http.ResponseWriter, r *http.Request) {
 		applicationType = value
 	}
 
-	s.logger.Info("dynamic client registration request", "auth_method", authMethod, "metadata_key_count", len(req))
+	s.logger.Info("dynamic client registration request", "auth_method", sanitizeAuthLogField(authMethod), "metadata_key_count", len(req))
 
 	var uris []string
 	if raw, ok := req["redirect_uris"]; ok {

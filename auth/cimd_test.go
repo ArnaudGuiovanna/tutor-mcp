@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -354,10 +355,96 @@ func TestCIMDClientIDAndOutboundIPGuards(t *testing.T) {
 		"https://127.0.0.1/metadata.json",
 		"https://10.0.0.1/metadata.json",
 		"https://192.0.2.1/metadata.json",
+		"https://[64:ff9b::c000:201]/metadata.json",
+		"https://[64:ff9b:1::1]/metadata.json",
+		"https://[2001::1]/metadata.json",
+		"https://[2002:c000:201::1]/metadata.json",
 	} {
 		if _, err := parseCIMDClientID(clientID); err == nil {
 			t.Errorf("unsafe client_id accepted: %s", clientID)
 		}
+	}
+}
+
+func TestCIMDTransportRejectsUnsafeDNSWithoutDialing(t *testing.T) {
+	tests := []struct {
+		name string
+		ips  []net.IPAddr
+	}{
+		{name: "private", ips: []net.IPAddr{{IP: net.ParseIP("10.0.0.8")}}},
+		{name: "loopback", ips: []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}},
+		{name: "link local", ips: []net.IPAddr{{IP: net.ParseIP("169.254.169.254")}}},
+		{name: "carrier grade NAT", ips: []net.IPAddr{{IP: net.ParseIP("100.64.0.1")}}},
+		{name: "NAT64", ips: []net.IPAddr{{IP: net.ParseIP("64:ff9b::a00:1")}}},
+		{name: "Teredo", ips: []net.IPAddr{{IP: net.ParseIP("2001::ffff")}}},
+		{name: "IPv6 documentation", ips: []net.IPAddr{{IP: net.ParseIP("2001:db8::1")}}},
+		{name: "6to4", ips: []net.IPAddr{{IP: net.ParseIP("2002:0a00:0001::")}}},
+		{name: "mixed public and private", ips: []net.IPAddr{
+			{IP: net.ParseIP("8.8.8.8")},
+			{IP: net.ParseIP("10.0.0.8")},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var lookups atomic.Int32
+			var dials atomic.Int32
+			client := newCIMDHTTPClientWithNetwork(
+				func(_ context.Context, host string) ([]net.IPAddr, error) {
+					lookups.Add(1)
+					if host != "client.example" {
+						t.Fatalf("resolved host = %q", host)
+					}
+					return tt.ips, nil
+				},
+				func(context.Context, string, string) (net.Conn, error) {
+					dials.Add(1)
+					return nil, errors.New("unexpected dial")
+				},
+			)
+			req, err := http.NewRequest(http.MethodGet, "https://client.example/oauth/metadata.json", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.Do(req); err == nil || !strings.Contains(err.Error(), "non-public") {
+				t.Fatalf("request error = %v, want non-public rejection", err)
+			}
+			if lookups.Load() != 1 || dials.Load() != 0 {
+				t.Fatalf("network calls: lookups=%d dials=%d, want 1/0", lookups.Load(), dials.Load())
+			}
+		})
+	}
+}
+
+func TestCIMDTransportDialsOnlyPinnedPublicAddress(t *testing.T) {
+	var dialNetwork string
+	var dialAddress string
+	var dials atomic.Int32
+	client := newCIMDHTTPClientWithNetwork(
+		func(_ context.Context, host string) ([]net.IPAddr, error) {
+			if host != "client.example" {
+				t.Fatalf("resolved host = %q", host)
+			}
+			return []net.IPAddr{
+				{IP: net.ParseIP("8.8.8.8")},
+				{IP: net.ParseIP("1.1.1.1")},
+			}, nil
+		},
+		func(_ context.Context, network, address string) (net.Conn, error) {
+			dials.Add(1)
+			dialNetwork = network
+			dialAddress = address
+			return nil, errors.New("test dial stopped")
+		},
+	)
+	req, err := http.NewRequest(http.MethodGet, "https://client.example/oauth/metadata.json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Do(req); err == nil || !strings.Contains(err.Error(), "test dial stopped") {
+		t.Fatalf("request error = %v, want injected dial error", err)
+	}
+	if dials.Load() != 1 || dialNetwork != "tcp" || dialAddress != "8.8.8.8:443" {
+		t.Fatalf("dial calls=%d network=%q address=%q, want one tcp dial to pinned first IP", dials.Load(), dialNetwork, dialAddress)
 	}
 }
 

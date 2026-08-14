@@ -60,6 +60,13 @@ var cimdCacheUseSequence atomic.Uint64
 
 func newCIMDHTTPClient() *http.Client {
 	dialer := &net.Dialer{Timeout: 3 * time.Second, KeepAlive: 30 * time.Second}
+	return newCIMDHTTPClientWithNetwork(net.DefaultResolver.LookupIPAddr, dialer.DialContext)
+}
+
+type cimdLookupIPAddrFunc func(context.Context, string) ([]net.IPAddr, error)
+type cimdDialContextFunc func(context.Context, string, string) (net.Conn, error)
+
+func newCIMDHTTPClientWithNetwork(lookupIPAddr cimdLookupIPAddrFunc, dialContext cimdDialContextFunc) *http.Client {
 	transport := &http.Transport{
 		Proxy:                 nil,
 		ForceAttemptHTTP2:     true,
@@ -73,7 +80,7 @@ func newCIMDHTTPClient() *http.Client {
 			if err != nil {
 				return nil, fmt.Errorf("CIMD dial address: %w", err)
 			}
-			ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+			ips, err := lookupIPAddr(ctx, host)
 			if err != nil {
 				return nil, fmt.Errorf("CIMD resolve host: %w", err)
 			}
@@ -85,7 +92,10 @@ func newCIMDHTTPClient() *http.Client {
 			if len(ips) == 0 {
 				return nil, fmt.Errorf("CIMD host has no addresses")
 			}
-			return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
+			// Connect to the already-vetted address rather than resolving the
+			// hostname a second time. This closes DNS rebinding between validation
+			// and connection while TLS still authenticates the original hostname.
+			return dialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
 		},
 	}
 	return &http.Client{
@@ -115,7 +125,9 @@ var cimdDeniedCIDRs = func() []*net.IPNet {
 	blocks := []string{
 		"0.0.0.0/8", "100.64.0.0/10", "192.0.0.0/24", "192.0.2.0/24",
 		"198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "240.0.0.0/4",
-		"2001:db8::/32", "2001:10::/28",
+		"64:ff9b::/96", "64:ff9b:1::/48", // NAT64 translation prefixes.
+		"2001::/32", "2001:10::/28", "2001:db8::/32", // Teredo, ORCHID, and documentation.
+		"2002::/16", // 6to4 embeds an attacker-selected IPv4 destination.
 	}
 	var networks []*net.IPNet
 	for _, block := range blocks {
