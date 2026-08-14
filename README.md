@@ -4,9 +4,9 @@
 
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
-  <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-1.25+-00ADD8.svg?logo=go&logoColor=white" alt="Go 1.25+" /></a>
+  <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-1.25.13+-00ADD8.svg?logo=go&logoColor=white" alt="Go 1.25.13+" /></a>
   <a href="https://modelcontextprotocol.io/"><img src="https://img.shields.io/badge/MCP-server-7c3aed.svg" alt="MCP server" /></a>
-  <a href="https://github.com/ArnaudGuiovanna/tutor-mcp/releases"><img src="https://img.shields.io/badge/release-v0.4.1-orange.svg" alt="Release v0.4.1" /></a>
+  <a href="https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/v0.5.0"><img src="https://img.shields.io/badge/release-v0.5.0-orange.svg" alt="Release v0.5.0" /></a>
   <a href="https://github.com/ArnaudGuiovanna/tutor-mcp/issues"><img src="https://img.shields.io/badge/status-alpha-yellow.svg" alt="Status: alpha" /></a>
 </p>
 
@@ -16,7 +16,7 @@
 
 Tell the LLM what you want to learn — *Spanish for travel*, *Go for backend*, *medieval history* — and the runtime orchestrates the journey: what to study next, when to review, when you've mastered a concept, when you need a nudge. The next conversation starts from what the learner has mastered, forgotten, misunderstood, felt, and explicitly committed to do next.
 
-**Status — alpha v0.4.1.** Two profiles are supported: local SQLite with one
+**Status — alpha v0.5.0.** Two profiles are supported: local SQLite with one
 process, and horizontal multi-tenant SaaS on PostgreSQL with separate
 API/worker/migrator roles, forced RLS, durable outbox/jobs, encrypted shared
 narrative memory, quotas, audit and recovery runbooks. The regulation pipeline
