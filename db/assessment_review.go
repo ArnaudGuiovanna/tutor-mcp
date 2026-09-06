@@ -5,9 +5,11 @@ package db
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 
 	"tutor-mcp/assessment"
@@ -15,15 +17,16 @@ import (
 	storeport "tutor-mcp/store"
 )
 
-// The same predicate governs listing, detail and score preview. In particular,
-// failures are not excluded and authorization runs before pagination. Cohort
+// Shared access predicate, also used for the actor's historical opinion.
+// Listing, material and scoring add the eligibility predicate below. Cohort
 // access follows the attempt's enrollment, not the domain's current enrollment.
 const assessmentReviewFrom = ` FROM assessment_attempts a
  JOIN learners l ON l.id = a.learner_id AND l.tenant_id = a.tenant_id
  LEFT JOIN enrollments e ON e.id = a.enrollment_id AND e.tenant_id = a.tenant_id
    AND e.learner_id = a.learner_id
- WHERE a.tenant_id = ? AND l.user_id <> ?
-   AND a.decision_id IS NOT NULL AND a.curriculum_invalidated_version = 0
+ WHERE a.tenant_id = ? AND l.user_id <> ?`
+
+const assessmentReviewEligible = ` AND a.decision_id IS NOT NULL AND a.curriculum_invalidated_version = 0
    AND a.trusted_evaluation = 0 AND a.submitted_at IS NOT NULL
    AND (a.status = 'submitted' OR (a.status = 'evaluated' AND a.evaluation_method = 'host_llm'))`
 
@@ -69,6 +72,9 @@ func (s *Store) ListAssessmentReviewCandidates(ctx context.Context, actor models
 			from += ` AND e.cohort_id = ?`
 			args = append(args, cohortID)
 		}
+		from += assessmentReviewEligible + ` AND NOT EXISTS (SELECT 1 FROM assessment_reviews r
+ WHERE r.tenant_id = a.tenant_id AND r.attempt_id = a.id AND r.reviewer_user_id = ?)`
+		args = append(args, actor.UserID)
 		rows, err := txs.query(txCtx, `SELECT a.id, a.activity_type, a.curriculum_version, a.submitted_at`+
 			from+` AND a.id > ? ORDER BY a.id LIMIT ?`, append(args, after, limit+1)...)
 		if err != nil {
@@ -114,7 +120,7 @@ func (s *Store) GetAssessmentReviewMaterial(ctx context.Context, actor models.Pr
  a.decision_id, a.activity_id, a.activity_version, a.observable, a.curriculum_concept_json,
  a.outcome_ids_json, COALESCE(a.task_text, ''), a.task_content_hash,
  COALESCE(a.response_text, ''), COALESCE(a.response_content_hash, ''), a.rubric_json, a.passing_score, a.created_at`+
-			from+` AND a.id = ?`, append(args, attemptID)...).Scan(
+			from+assessmentReviewEligible+` AND a.id = ?`, append(args, attemptID)...).Scan(
 			&material.AttemptID, &material.ActivityType, &material.CurriculumVersion, &material.SubmittedAt,
 			&material.DecisionID, &material.ActivityID, &material.ActivityVersion, &material.Observable, &competencyJSON,
 			&outcomesJSON, &material.TaskText, &material.TaskContentHash, &material.ResponseText,
@@ -136,6 +142,16 @@ func (s *Store) GetAssessmentReviewMaterial(ctx context.Context, actor models.Pr
 			material.OutcomeIDs = []string{}
 		}
 		material.TextAvailable = strings.TrimSpace(material.TaskText) != "" && strings.TrimSpace(material.ResponseText) != ""
+		// Hash the actual frozen projection, not caller-supplied content hashes.
+		// Normalize instants across SQLite/PostgreSQL before serializing. The hash
+		// field is empty in this versioned preimage, so it is not self-referential.
+		material.PreparedAt = material.PreparedAt.UTC()
+		material.SubmittedAt = material.SubmittedAt.UTC()
+		encoded, err := json.Marshal(material)
+		if err != nil {
+			return storeport.ErrAssessmentReviewMaterialUnavailable
+		}
+		material.MaterialHash = reviewDigest(append([]byte("assessment-review-material-v1\n"), encoded...))
 		return nil
 	})
 	if err != nil {
@@ -143,3 +159,5 @@ func (s *Store) GetAssessmentReviewMaterial(ctx context.Context, actor models.Pr
 	}
 	return &material, nil
 }
+
+func reviewDigest(raw []byte) string { return fmt.Sprintf("%x", sha256.Sum256(raw)) }

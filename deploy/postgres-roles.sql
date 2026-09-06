@@ -34,7 +34,7 @@ GRANT SELECT ON tenants, plans, schema_migrations TO tutor_worker;
 GRANT SELECT ON
     learners, availability, domains, concept_states, interactions,
     affect_states, calibration_records, transfer_records, assessment_attempts,
-    pedagogical_decisions,
+    pedagogical_decisions, assessment_reviews,
     narrative_objects, audit_events, retention_legal_holds,
     tenant_integrations, tenant_integration_secret_versions,
     tenant_entitlements, entitlement_reservations, usage_events,
@@ -53,10 +53,11 @@ GRANT SELECT, UPDATE ON tenant_dsar_requests, tenant_dsar_phases TO tutor_worker
 -- Resume pre-upgrade erasure requests by appending newly introduced checkpoints.
 GRANT INSERT ON tenant_dsar_phases TO tutor_worker;
 GRANT UPDATE ON learners TO tutor_worker;
+GRANT UPDATE (rubric_score_json) ON assessment_reviews TO tutor_worker;
 GRANT DELETE ON
     webhook_delivery_transitions, webhook_push_log, webhook_message_queue,
     narrative_mutations, narrative_objects, pedagogical_snapshots,
-    transfer_records, interactions, assessment_attempts, pedagogical_decisions, affect_states,
+    transfer_records, interactions, assessment_reviews, assessment_attempts, pedagogical_decisions, affect_states,
     implementation_intentions, learning_sessions, concept_states,
     scheduled_alerts, availability
 TO tutor_worker;

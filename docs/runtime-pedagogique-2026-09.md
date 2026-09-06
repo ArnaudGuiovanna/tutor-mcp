@@ -38,7 +38,7 @@ qualité de la tâche ni la fidélité de sa présentation à l'apprenant.
 | Une définition de compétence modifiée conservant des estimations et preuves périmées | Réconciliation atomique, remise à l'état initial des estimations concernées, invalidation des observations et tentatives antérieures ; historique conservé. |
 | Prérequis impossibles à réparer explicitement | Opération `repair_prerequisites` par IDs stables, listes de remplacement explicites, validation du graphe complet. |
 | Notation liée passant par un normaliseur permissif ; résultat non recalculé au stockage | Contrat partagé entre MCP et stockage, rejet des JSON ambigus et agrégats contradictoires, calcul déterministe sans epsilon fixe. |
-| Aucune consultation séparée pour examiner une réponse sans la note du tuteur | File de revue administrative tenant/cohorte, projection des seules entrées figées et prévisualisation stricte sans enregistrement ni attribution de confiance. |
+| Aucune consultation séparée pour examiner une réponse sans la note du tuteur | File de revue administrative tenant/cohorte, projection des entrées figées, prévisualisation et journal d'avis authentifiés ; aucune attribution automatique de confiance. |
 
 ## BKT : observation et opportunité d'apprentissage
 
@@ -233,14 +233,21 @@ La [consultation administrative de revue](assessment-review.md) utilise désorma
 ce contrat pour prévisualiser des scores sur les entrées figées, sans exposer la
 notation du tuteur. La file inclut ses réussites et ses échecs ; les droits sont
 vérifiés par organisation/cohorte et les réponses de l'acteur lui-même sont exclues.
-Ce canal ne persiste aucun avis, ne certifie aucune identité de réviseur et ne
-fournit **pas encore** de mécanisme d'adjudication ou d'évaluation fiable. Le canal
+Ce canal persiste désormais un premier avis par compte/tentative, lié par empreinte
+aux artefacts lus, avec idempotence et audit atomique. Les justifications suivent
+la rétention et le DSAR de l'apprenant évalué. Il authentifie un compte, **pas**
+une exécution humaine ni la correction de l'avis, et ne fournit **pas encore**
+de mécanisme d'adjudication ou d'évaluation fiable. Le canal
 public reste `host_llm` non fiable ; il ne peut pas se promouvoir en revue humaine
 ou externe en ajoutant un champ au score. Une observation textuelle non vide ne
 prouve pas davantage sa fidélité à la réponse de l'apprenant.
 
 ## Données et migrations
 
+- Journal d'avis : SQLite `0066_assessment_reviews`, PostgreSQL
+  `postgres_0057_assessment_reviews`. RLS tenant et immutabilité hors purge du
+  texte ; aucun replay d'apprentissage. Les droits worker doivent être actualisés
+  avec `deploy/postgres-roles.sql` après migration.
 - Migrations additives : SQLite `0064_pedagogical_contracts`, PostgreSQL
   `postgres_0055_pedagogical_contracts`. Aucune ancienne migration réécrite,
   aucune migration appliquée à une base applicative par ce chantier.
@@ -310,8 +317,8 @@ Ce lot ne rend pas le système « optimal » ni validé expérimentalement.
 
 1. **Évaluation fiable opérationnelle.** Le canal public reste `host_llm`, non
    fiable pour une revendication de démonstration. Le contrat commun de notation
-   est implémenté ; il faut encore une vraie frontière de
-   revue indépendante, avec identité, audit et adjudication. Une seconde requête
+   et le journal authentifié/audité sont implémentés ; il faut encore une vraie
+   frontière de certification indépendante et une adjudication. Une seconde requête
    au même modèle n'est pas automatiquement une évaluation indépendante. En
    contexte à enjeux élevés, la règle de revue humaine reste inchangée.
 2. **Qualité et historique du curriculum.** La réconciliation prospective et la

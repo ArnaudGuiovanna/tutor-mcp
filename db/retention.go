@@ -89,6 +89,7 @@ type RetentionReport struct {
 	WebhookPushLinksDetached     RetentionMetric `json:"webhook_push_links_detached"`
 	AssessmentTaskPlaintext      RetentionMetric `json:"assessment_task_plaintext"`
 	AssessmentResponsePlaintext  RetentionMetric `json:"assessment_response_plaintext"`
+	AssessmentReviewPlaintext    RetentionMetric `json:"assessment_review_plaintext"`
 	AssessmentPlaintextBlocked   int64           `json:"assessment_plaintext_blocked"`
 	AssessmentAbandonedAttempts  RetentionMetric `json:"assessment_abandoned_attempts"`
 	IdempotencyResponsePlaintext RetentionMetric `json:"idempotency_response_plaintext"`
@@ -205,6 +206,19 @@ func (s *Store) runDataRetention(ctx context.Context, policy RetentionPolicy, no
 
 	if policy.AssessmentPlaintextDays > 0 {
 		cutoff := retentionCutoff(now, policy.AssessmentPlaintextDays)
+		reviewEligible := `created_at < ? AND rubric_score_json IS NOT NULL`
+		var reviewErr error
+		report.AssessmentReviewPlaintext.Eligible, report.AssessmentReviewPlaintext.Held, reviewErr = s.retentionCountsByHold(ctx, "assessment_reviews", reviewEligible, cutoff)
+		if reviewErr != nil {
+			return fmt.Errorf("count assessment review plaintext: %w", reviewErr)
+		}
+		if apply {
+			report.AssessmentReviewPlaintext.Applied, reviewErr = s.retentionExec(ctx,
+				`UPDATE assessment_reviews SET rubric_score_json = NULL WHERE `+reviewEligible+` AND `+retentionHoldClause("assessment_reviews", false), cutoff)
+			if reviewErr != nil {
+				return fmt.Errorf("redact assessment review plaintext: %w", reviewErr)
+			}
+		}
 		terminal := `status IN ('evaluated', 'cancelled')
 			AND COALESCE(evaluated_at, cancelled_at, created_at) < ?`
 		taskEligible := terminal + ` AND task_text IS NOT NULL AND task_text <> '' AND task_content_hash <> ''`
@@ -405,6 +419,7 @@ func RetentionReportTotals(report *RetentionReport) (eligible, applied, held int
 		report.WebhookPushLinksDetached,
 		report.AssessmentTaskPlaintext,
 		report.AssessmentResponsePlaintext,
+		report.AssessmentReviewPlaintext,
 		report.AssessmentAbandonedAttempts,
 		report.IdempotencyResponsePlaintext,
 		report.PedagogicalSnapshots,

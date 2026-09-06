@@ -430,7 +430,7 @@ func main() {
 		baseURL, initialOAuthScope, store, adminapi.New(store, logger).Handler(),
 	)
 	mux.Handle("/admin/catalog/", adminHandler)
-	// Raw response review is a separate, read-only administrative capability;
+	// Raw response review and opinion recording are separate administrative capabilities;
 	// the MCP handler never receives a trusted evaluation mutation port.
 	reviewHandler := auth.RateLimitMiddleware(mcpIPLimiter,
 		auth.BearerMiddlewareWithPrincipalValidator(baseURL, initialOAuthScope, store,

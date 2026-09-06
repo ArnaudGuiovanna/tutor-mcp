@@ -390,7 +390,7 @@ func (s *Store) CompleteTenantDSARExport(ctx context.Context, scope models.Tenan
 			return err
 		}
 		counts := make(map[string]int64)
-		for _, table := range []string{"interactions", "concept_states", "narrative_objects", "pedagogical_decisions", "audit_events"} {
+		for _, table := range []string{"interactions", "concept_states", "narrative_objects", "pedagogical_decisions", "assessment_reviews", "audit_events"} {
 			var count int64
 			predicate := "learner_id = ?"
 			args := []any{learnerID}
@@ -450,7 +450,7 @@ func (s *Store) ResumeTenantDSAR(ctx context.Context, actor models.Principal, re
 var dsarErasurePhases = []string{
 	"webhook_delivery_transitions", "webhook_push_log", "webhook_message_queue",
 	"narrative_mutations", "narrative_objects", "pedagogical_snapshots",
-	"transfer_records", "interactions", "assessment_attempts", "pedagogical_decisions", "affect_states",
+	"transfer_records", "interactions", "assessment_reviews", "assessment_attempts", "pedagogical_decisions", "affect_states",
 	"implementation_intentions", "learning_sessions", "concept_states",
 	"scheduled_alerts", "availability", "scrub_learner",
 }
@@ -460,6 +460,7 @@ var dsarLearnerTables = map[string]string{
 	"webhook_message_queue": "learner_id", "narrative_mutations": "learner_id",
 	"narrative_objects": "learner_id", "pedagogical_snapshots": "learner_id",
 	"transfer_records": "learner_id", "interactions": "learner_id",
+	"assessment_reviews":  "learner_id",
 	"assessment_attempts": "learner_id", "pedagogical_decisions": "learner_id", "affect_states": "learner_id",
 	"implementation_intentions": "learner_id", "learning_sessions": "learner_id",
 	"concept_states": "learner_id", "scheduled_alerts": "learner_id",
@@ -494,17 +495,19 @@ func (s *Store) ProcessTenantDSARErasureBatch(ctx context.Context, scope models.
 		if requestStatus != "pending" && requestStatus != "processing" {
 			return fmt.Errorf("process tenant DSAR erasure: request is not runnable")
 		}
-		// Requests created before the decision journal existed must also erase
-		// its rows. Append a checkpoint without rewriting existing positions;
+		// Requests created before the journals existed must also erase their
+		// rows. Append checkpoints without rewriting existing positions;
 		// execution follows the current dependency order, not insertion order.
-		if _, err := txs.exec(txCtx, `INSERT INTO tenant_dsar_phases
+		for _, phase := range []string{"pedagogical_decisions", "assessment_reviews"} {
+			if _, err := txs.exec(txCtx, `INSERT INTO tenant_dsar_phases
 			(tenant_id, request_id, position, phase, status, affected_rows, updated_at)
-			SELECT ?, ?, COALESCE(MAX(position), -1) + 1, 'pedagogical_decisions', 'pending', 0, ?
+			SELECT ?, ?, COALESCE(MAX(position), -1) + 1, ?, 'pending', 0, ?
 			FROM tenant_dsar_phases WHERE tenant_id = ? AND request_id = ?
 			HAVING NOT EXISTS (SELECT 1 FROM tenant_dsar_phases
-			 WHERE tenant_id = ? AND request_id = ? AND phase = 'pedagogical_decisions')`,
-			scope.TenantID, requestID, now, scope.TenantID, requestID, scope.TenantID, requestID); err != nil {
-			return err
+			 WHERE tenant_id = ? AND request_id = ? AND phase = ?)`,
+				scope.TenantID, requestID, phase, now, scope.TenantID, requestID, scope.TenantID, requestID, phase); err != nil {
+				return err
+			}
 		}
 		var holds int
 		if err := txs.queryRow(txCtx, `SELECT COUNT(*) FROM retention_legal_holds

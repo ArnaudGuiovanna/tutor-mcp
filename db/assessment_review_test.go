@@ -189,12 +189,23 @@ func TestAssessmentReviewCurrentMembershipAndCohortAuthorization(t *testing.T) {
 	if _, err := s.GetAssessmentReviewMaterial(ctx, combined, "a-other"); err != nil {
 		t.Fatalf("combined roles lost admin permission: %v", err)
 	}
+	trainer = reviewWriter(trainer)
+	trainerReview := recordReviewForTest(t, s, trainer, "z-assigned", "trainer-opinion")
+	if _, _, err := s.RecordAssessmentReview(ctx, trainer, "a-other", "other-opinion", trainerReview.MaterialHash, completeBoundScore); !errors.Is(err, storeport.ErrNotFound) {
+		t.Fatalf("trainer reviewed another cohort: %v", err)
+	}
 	if _, err := s.exec(ctx, `DELETE FROM cohort_trainers WHERE tenant_id = ? AND cohort_id = ? AND membership_id = ?`,
 		owner.TenantID, cohortID, trainer.MembershipID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.GetAssessmentReviewMaterial(ctx, trainer, "z-assigned"); !errors.Is(err, storeport.ErrNotFound) {
 		t.Fatalf("revoked assignment still grants access: %v", err)
+	}
+	if _, err := s.GetOwnAssessmentReview(ctx, trainer, "z-assigned"); !errors.Is(err, storeport.ErrNotFound) {
+		t.Fatalf("revoked assignment can read review: %v", err)
+	}
+	if _, _, err := s.RecordAssessmentReview(ctx, trainer, "z-assigned", "trainer-opinion", trainerReview.MaterialHash, completeBoundScore); !errors.Is(err, storeport.ErrNotFound) {
+		t.Fatalf("revoked assignment can retry: %v", err)
 	}
 	for _, role := range []string{models.RoleLearner, models.RoleAuditor, models.RoleBillingAdmin} {
 		actor := reviewRoleForTest(t, s, "role-"+role, role)
@@ -249,6 +260,13 @@ func TestAssessmentReviewRejectsForeignTenantAndInvalidPages(t *testing.T) {
 	}
 	if _, err := s.GetAssessmentReviewMaterial(ctx, foreign, "local"); !errors.Is(err, storeport.ErrNotFound) {
 		t.Fatalf("foreign tenant read response: %v", err)
+	}
+	foreign = reviewWriter(foreign)
+	if _, _, err := s.RecordAssessmentReview(ctx, foreign, "local", "foreign-opinion", strings.Repeat("0", 64), completeBoundScore); !errors.Is(err, storeport.ErrNotFound) {
+		t.Fatalf("foreign tenant wrote review: %v", err)
+	}
+	if _, err := s.GetOwnAssessmentReview(ctx, foreign, "local"); !errors.Is(err, storeport.ErrNotFound) {
+		t.Fatalf("foreign tenant read review: %v", err)
 	}
 	for _, limit := range []int{0, -1, 101} {
 		if _, err := s.ListAssessmentReviewCandidates(ctx, owner, "", "", limit); !errors.Is(err, storeport.ErrInvalidAssessmentReviewRequest) {

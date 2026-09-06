@@ -82,6 +82,11 @@ func testPedagogicalDecisionDSAR(t *testing.T, legacy bool) {
 	template := pedagogicalLifecycleFixture(t, s, owner, now)
 	decision := createLifecycleDecision(t, s, owner, template, "decision-dsar", now)
 	createLifecycleAssessment(t, s, decision)
+	if err := s.SubmitAssessmentAttempt(ctx, owner.LearnerID, "attempt-"+decision.ID, "Committed learner answer", "answer-hash", now); err != nil {
+		t.Fatal(err)
+	}
+	reviewer := reviewWriter(reviewRoleForTest(t, s, "lifecycle-reviewer", models.RolePedagogyManager))
+	recordReviewForTest(t, s, reviewer, "attempt-"+decision.ID, "lifecycle-opinion")
 	curriculum, err := s.GetCurriculumSnapshot(ctx, owner.LearnerID, decision.DomainID, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -112,13 +117,16 @@ func testPedagogicalDecisionDSAR(t *testing.T, legacy bool) {
 	if manifest.Counts["pedagogical_decisions"] != 1 {
 		t.Fatalf("decision missing from export manifest: %s", raw)
 	}
+	if manifest.Counts["assessment_reviews"] != 1 {
+		t.Fatalf("review missing from export manifest: %s", raw)
+	}
 	erasure, err := s.RequestTenantDSAR(ctx, owner, owner.LearnerID, "erase", "verified erasure request")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if legacy {
 		// Simulate a durable pre-upgrade request without the new checkpoint.
-		if _, err := s.exec(ctx, `DELETE FROM tenant_dsar_phases WHERE tenant_id = ? AND request_id = ? AND phase = 'pedagogical_decisions'`, owner.TenantID, erasure.ID); err != nil {
+		if _, err := s.exec(ctx, `DELETE FROM tenant_dsar_phases WHERE tenant_id = ? AND request_id = ? AND phase IN ('pedagogical_decisions', 'assessment_reviews')`, owner.TenantID, erasure.ID); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -132,7 +140,7 @@ func testPedagogicalDecisionDSAR(t *testing.T, legacy bool) {
 	if !complete {
 		t.Fatal("DSAR erasure did not finish")
 	}
-	for _, table := range []string{"assessment_attempts", "pedagogical_decisions", "learning_sessions"} {
+	for _, table := range []string{"assessment_reviews", "assessment_attempts", "pedagogical_decisions", "learning_sessions"} {
 		if got := retentionCountTable(t, s, table); got != 0 {
 			t.Fatalf("%s: %d learner rows remain after erasure", table, got)
 		}

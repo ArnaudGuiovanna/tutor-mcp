@@ -1665,6 +1665,10 @@ END $$;`,
 		Version: "postgres_0056_curriculum_reconciliation",
 		Body:    postgresCurriculumReconciliationMigration,
 	},
+	{
+		Version: "postgres_0057_assessment_reviews",
+		Body:    postgresAssessmentReviewMigration,
+	},
 }
 
 // OpenPostgres opens a PostgreSQL-backed *sql.DB via the pgx database/sql

@@ -28,6 +28,22 @@ type assessmentReviewStoreStub struct {
 	lastCohort  string
 	lastAfter   string
 	lastLimit   int
+	replayed    bool
+	lastKey     string
+	lastHash    string
+	lastScore   string
+}
+
+func (s *assessmentReviewStoreStub) RecordAssessmentReview(_ context.Context, actor models.Principal, attempt, key, hash, score string) (*models.AssessmentReview, bool, error) {
+	s.calls++
+	s.lastActor, s.lastAttempt, s.lastKey, s.lastHash, s.lastScore = actor, attempt, key, hash, score
+	return &models.AssessmentReview{ID: "review-1", AttemptID: attempt}, s.replayed, s.err
+}
+
+func (s *assessmentReviewStoreStub) GetOwnAssessmentReview(_ context.Context, actor models.Principal, attempt string) (*models.AssessmentReview, error) {
+	s.calls++
+	s.lastActor, s.lastAttempt = actor, attempt
+	return &models.AssessmentReview{ID: "review-1", AttemptID: attempt}, s.err
 }
 
 func (s *assessmentReviewStoreStub) ListAssessmentReviewCandidates(_ context.Context, actor models.Principal, cohort, after string, limit int) (models.AssessmentReviewPage, error) {
@@ -55,7 +71,68 @@ func newAssessmentReviewStub(t *testing.T) *assessmentReviewStoreStub {
 	return &assessmentReviewStoreStub{material: models.AssessmentReviewMaterial{
 		AssessmentReviewItem: models.AssessmentReviewItem{AttemptID: "attempt-1", ActivityType: "PRACTICE", CurriculumVersion: 1},
 		TaskText:             "Generated task.", ResponseText: "Learner response.", Rubric: rubric, TextAvailable: true,
+		MaterialHash: strings.Repeat("a", 64),
 	}}
+}
+
+func TestAssessmentReviewHTTPRecordPreconditionsAndOwnOpinion(t *testing.T) {
+	store := newAssessmentReviewStub(t)
+	handler := NewAssessmentReview(store, nil).Handler()
+	path := reviewAPIPath + "/attempt-1/reviews"
+	headers := map[string]string{"Idempotency-Key": "opinion-1", "If-Match": `"` + store.material.MaterialHash + `"`}
+	for _, scope := range []string{models.OAuthScopeLearnerRead, models.OAuthScopeLearnerWrite} {
+		rec := adminRequest(t, handler, http.MethodPost, path, reviewScoreJSON, scope, headers)
+		if rec.Code != http.StatusForbidden || store.calls != 0 {
+			t.Fatalf("single scope permitted: %d", rec.Code)
+		}
+	}
+	for _, tc := range []struct {
+		key, match string
+		status     int
+	}{
+		{"", headers["If-Match"], 400}, {"k", "", 428}, {"k", "*", 400}, {"k", `W/` + headers["If-Match"], 400},
+	} {
+		rec := adminRequest(t, handler, http.MethodPost, path, reviewScoreJSON, models.OAuthScopeLearner, map[string]string{"Idempotency-Key": tc.key, "If-Match": tc.match})
+		if rec.Code != tc.status || store.calls != 0 {
+			t.Fatalf("precondition %+v: %d", tc, rec.Code)
+		}
+	}
+	rec := adminRequest(t, handler, http.MethodPost, path, strings.Repeat(" ", assessment.MaxJSONBytes+1), models.OAuthScopeLearner, headers)
+	if rec.Code != 413 || store.calls != 0 {
+		t.Fatal("oversized score reached store")
+	}
+	rec = adminRequest(t, handler, http.MethodGet, reviewAPIPath+"/attempt-1", "", models.OAuthScopeLearnerRead, nil)
+	if rec.Header().Get("ETag") != headers["If-Match"] {
+		t.Fatal("missing material ETag")
+	}
+	for _, replay := range []bool{false, true} {
+		store.replayed = replay
+		rec = adminRequest(t, handler, http.MethodPost, path, reviewScoreJSON, models.OAuthScopeLearner, headers)
+		want := 201
+		if replay {
+			want = 200
+		}
+		if rec.Code != want || store.lastKey != "opinion-1" || store.lastHash != store.material.MaterialHash || store.lastScore != reviewScoreJSON || !strings.Contains(rec.Body.String(), `"trusted_evaluation":false`) {
+			t.Fatalf("record status=%d body=%s", rec.Code, rec.Body.String())
+		}
+	}
+	for _, tc := range []struct {
+		err  error
+		code int
+	}{
+		{storeport.ErrAssessmentReviewConflict, 409}, {storeport.ErrAssessmentReviewMaterialChanged, 412}, {storeport.ErrInvalidAssessmentReviewScore, 400},
+	} {
+		store.err = tc.err
+		rec = adminRequest(t, handler, http.MethodPost, path, reviewScoreJSON, models.OAuthScopeLearner, headers)
+		if rec.Code != tc.code {
+			t.Fatalf("error status=%d want=%d", rec.Code, tc.code)
+		}
+	}
+	store.err = nil
+	rec = adminRequest(t, handler, http.MethodGet, path+"/mine", "", models.OAuthScopeLearnerRead, nil)
+	if rec.Code != 200 || rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("own review: %d", rec.Code)
+	}
 }
 
 func TestAssessmentReviewHTTPScopesRoutingAndPagination(t *testing.T) {

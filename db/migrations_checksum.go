@@ -1889,6 +1889,10 @@ END;`,
 		Version: "0065_curriculum_reconciliation",
 		Body:    sqliteCurriculumReconciliationMigration,
 	})
+	out = append(out, migration{
+		Version: "0066_assessment_reviews",
+		Body:    sqliteAssessmentReviewMigration,
+	})
 	return out
 }
 
