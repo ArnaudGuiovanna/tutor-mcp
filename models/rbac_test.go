@@ -64,3 +64,40 @@ func TestTrainerProgressRequiresAssignedCohort(t *testing.T) {
 		t.Fatal("trainer denied inside assigned cohort")
 	}
 }
+
+func TestAssessmentReviewPermissionIsSeparateAndCohortBound(t *testing.T) {
+	resource := AuthorizationResource{TenantID: LegacyTenantID}
+	for _, role := range []string{RoleOwner, RoleAdmin, RolePedagogyManager} {
+		if !principalWithRole(role).Authorize(PermissionAssessmentReview, resource) {
+			t.Errorf("%s cannot review", role)
+		}
+	}
+	for _, role := range []string{RoleLearner, RoleTrainer, RoleAuditor, RoleBillingAdmin, RoleServiceAccount, RoleSupport} {
+		if principalWithRole(role).Authorize(PermissionAssessmentReview, resource) {
+			t.Errorf("%s can read unscoped raw assessment material", role)
+		}
+	}
+	trainer := principalWithRole(RoleTrainer)
+	resource.CohortID = "assigned"
+	resource.AssignedCohortIDs = []string{"different"}
+	if trainer.Authorize(PermissionAssessmentReview, resource) {
+		t.Fatal("trainer can review a different cohort")
+	}
+	resource.AssignedCohortIDs = []string{"assigned"}
+	if !trainer.Authorize(PermissionAssessmentReview, resource) {
+		t.Fatal("assigned trainer cannot review")
+	}
+	resource.TenantID = "foreign"
+	if trainer.Authorize(PermissionAssessmentReview, resource) {
+		t.Fatal("trainer can review another tenant")
+	}
+	for _, roles := range [][]string{{RoleTrainer, RoleAdmin}, {RoleAdmin, RoleTrainer}} {
+		combined := principalWithRole(RoleAdmin)
+		combined.Roles = roles
+		for _, permission := range []Permission{PermissionAssessmentReview, PermissionProgressRead} {
+			if !combined.Authorize(permission, AuthorizationResource{TenantID: LegacyTenantID}) {
+				t.Errorf("role ordering %v hid %s grant", roles, permission)
+			}
+		}
+	}
+}

@@ -74,6 +74,27 @@ func TestGetPendingAlertsThenNextActivityP95Budget(t *testing.T) {
 	}
 }
 
+// Keep the performance harness's identity contract covered even when the
+// environment-dependent latency gate is disabled during ordinary unit tests.
+func TestAlertActivityPairCarriesPedagogicalPrincipal(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	fixture := seedAlertActivityPairFixture(t, store, 2)
+	callPair := newAlertActivityPairCaller(t, deps)
+	for _, learnerID := range fixture.learners {
+		var scopedStates int
+		if err := store.RawDB().QueryRow(`SELECT COUNT(*) FROM concept_states
+ WHERE learner_id = ? AND domain_id <> ''`, learnerID).Scan(&scopedStates); err != nil || scopedStates != pairPerfDefaultConcepts {
+			t.Fatalf("performance fixture states are not domain-scoped: count=%d err=%v", scopedStates, err)
+		}
+		callPair(learnerID)
+		var count int
+		if err := store.RawDB().QueryRow(`SELECT COUNT(*) FROM pedagogical_decisions
+ WHERE tenant_id = ? AND learner_id = ?`, models.LegacyTenantID, learnerID).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("paired call did not freeze learner's decision: learner=%s count=%d err=%v", learnerID, count, err)
+		}
+	}
+}
+
 func BenchmarkGetPendingAlertsThenNextActivityPair(b *testing.B) {
 	activeLearners := pairPerfEnvInt(b, "MCP_PERF_ACTIVE_LEARNERS", pairPerfDefaultActiveLearners)
 	store, deps := setupBenchTools(b)
@@ -138,7 +159,7 @@ func seedAlertActivityPairFixture(tb testing.TB, store *db.Store, activeLearners
 
 		for conceptIdx, concept := range concepts {
 			lastReview := base.Add(-time.Duration(conceptIdx+1) * 24 * time.Hour)
-			cs := models.NewConceptState(learnerID, concept)
+			cs := models.NewConceptStateInDomain(learnerID, domain.ID, concept)
 			cs.CardState = "review"
 			cs.PMastery = 0.42 + float64((learnerIdx+conceptIdx)%7)*0.06
 			if conceptIdx%5 == 0 {
@@ -260,7 +281,11 @@ func newAlertActivityPairCaller(tb testing.TB, deps *Deps) func(string) time.Dur
 	server.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			if learnerID, _ := currentLearner.Load().(string); learnerID != "" {
-				ctx = context.WithValue(ctx, auth.LearnerIDKey, learnerID)
+				var err error
+				ctx, err = auth.WithPrincipal(ctx, models.LegacyPrincipal(learnerID))
+				if err != nil {
+					return nil, err
+				}
 				ctx = auth.WithOAuthScope(ctx, models.OAuthScopeLearner)
 			}
 			return next(ctx, method, req)

@@ -430,6 +430,13 @@ func main() {
 		baseURL, initialOAuthScope, store, adminapi.New(store, logger).Handler(),
 	)
 	mux.Handle("/admin/catalog/", adminHandler)
+	// Raw response review is a separate, read-only administrative capability;
+	// the MCP handler never receives a trusted evaluation mutation port.
+	reviewHandler := auth.RateLimitMiddleware(mcpIPLimiter,
+		auth.BearerMiddlewareWithPrincipalValidator(baseURL, initialOAuthScope, store,
+			auth.LearnerRateLimitMiddleware(mcpLearnerLimiter,
+				adminapi.NewAssessmentReview(store, logger).Handler())))
+	mux.Handle("/admin/assessment-reviews/", reviewHandler)
 
 	if runsWorker {
 		// Development PROCESS_ROLE=all preserves the one-process experience.

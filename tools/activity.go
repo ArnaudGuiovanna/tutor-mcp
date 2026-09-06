@@ -573,42 +573,6 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 	})
 }
 
-// applyFadeToMotivation modulates a MotivationBrief based on the fade
-// HintLevel. The contract:
-//
-//   - HintLevelFull    : brief returned unchanged (legacy behaviour).
-//   - HintLevelPartial : Instruction is collapsed to a one-line
-//     concise form; structured fields (ValueFraming, ProgressDelta,
-//     etc.) are preserved so the LLM still has the context to weave
-//     in if it chooses, but the explicit phrasing guidance is shorter.
-//   - HintLevelNone    : Kind is cleared and Instruction is emptied.
-//     Per the system prompt, kind == "" means "no motivational
-//     preamble". Structured fields are also cleared to make the
-//     suppression unambiguous on the wire.
-//
-// Returns brief unchanged if it's nil or already silent (kind == "").
-func applyFadeToMotivation(brief *models.MotivationBrief, level engine.HintLevel) *models.MotivationBrief {
-	if brief == nil {
-		return brief
-	}
-	switch level {
-	case engine.HintLevelNone:
-		return &models.MotivationBrief{Kind: "", Instruction: ""}
-	case engine.HintLevelPartial:
-		if brief.Kind == "" {
-			return brief
-		}
-		// Replace the verbose tutor-direction Instruction with a
-		// terse one-liner. The kind + structured fields stay so
-		// downstream context is preserved.
-		clone := *brief
-		clone.Instruction = "Keep it brief and minimal."
-		return &clone
-	default: // HintLevelFull
-		return brief
-	}
-}
-
 func loadEpisodicContextForActivity(
 	ctx context.Context,
 	deps *Deps,

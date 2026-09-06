@@ -1,7 +1,7 @@
 # Runtime pédagogique : corrections et trajectoire
 
 État des lots de correction, séparation BKT, réconciliation du curriculum et
-validation partagée de la notation,
+validation partagée de la notation et accès administratif à la revue,
 septembre 2026. Ce document distingue les corrections
 implémentées d'une validation pédagogique, qui nécessite encore des données
 d'apprentissage. Il prévaut sur les anciennes descriptions PFA/IRT/fade des
@@ -38,6 +38,7 @@ qualité de la tâche ni la fidélité de sa présentation à l'apprenant.
 | Une définition de compétence modifiée conservant des estimations et preuves périmées | Réconciliation atomique, remise à l'état initial des estimations concernées, invalidation des observations et tentatives antérieures ; historique conservé. |
 | Prérequis impossibles à réparer explicitement | Opération `repair_prerequisites` par IDs stables, listes de remplacement explicites, validation du graphe complet. |
 | Notation liée passant par un normaliseur permissif ; résultat non recalculé au stockage | Contrat partagé entre MCP et stockage, rejet des JSON ambigus et agrégats contradictoires, calcul déterministe sans epsilon fixe. |
+| Aucune consultation séparée pour examiner une réponse sans la note du tuteur | File de revue administrative tenant/cohorte, projection des seules entrées figées et prévisualisation stricte sans enregistrement ni attribution de confiance. |
 
 ## BKT : observation et opportunité d'apprentissage
 
@@ -228,8 +229,12 @@ Une ancienne tentative liée dont la rubrique serait invalide doit être annulé
 si elle est encore ouverte, puis remplacée par une préparation valide ; le
 contrat figé n'est pas réparé après la réponse.
 
-Ce sous-lot ne fournit **pas encore** de canal de revue indépendante. Il ne choisit
-ni fournisseur, ni identité de réviseur, ni mécanisme d'adjudication. Le canal
+La [consultation administrative de revue](assessment-review.md) utilise désormais
+ce contrat pour prévisualiser des scores sur les entrées figées, sans exposer la
+notation du tuteur. La file inclut ses réussites et ses échecs ; les droits sont
+vérifiés par organisation/cohorte et les réponses de l'acteur lui-même sont exclues.
+Ce canal ne persiste aucun avis, ne certifie aucune identité de réviseur et ne
+fournit **pas encore** de mécanisme d'adjudication ou d'évaluation fiable. Le canal
 public reste `host_llm` non fiable ; il ne peut pas se promouvoir en revue humaine
 ou externe en ajoutant un champ au score. Une observation textuelle non vide ne
 prouve pas davantage sa fidélité à la réponse de l'apprenant.

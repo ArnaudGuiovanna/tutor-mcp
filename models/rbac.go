@@ -8,11 +8,14 @@ import "slices"
 type Permission string
 
 const (
-	PermissionTenantManage      Permission = "tenant:manage"
-	PermissionMembershipManage  Permission = "membership:manage"
-	PermissionFormationWrite    Permission = "formation:write"
-	PermissionCohortManage      Permission = "cohort:manage"
-	PermissionProgressRead      Permission = "progress:read"
+	PermissionTenantManage     Permission = "tenant:manage"
+	PermissionMembershipManage Permission = "membership:manage"
+	PermissionFormationWrite   Permission = "formation:write"
+	PermissionCohortManage     Permission = "cohort:manage"
+	PermissionProgressRead     Permission = "progress:read"
+	// Reading raw assessment material is distinct from aggregate progression.
+	// This permission never grants the right to certify an evaluation.
+	PermissionAssessmentReview  Permission = "assessment:review"
 	PermissionLearningSelf      Permission = "learning:self"
 	PermissionBillingManage     Permission = "billing:manage"
 	PermissionAuditRead         Permission = "audit:read"
@@ -36,20 +39,23 @@ var rolePermissions = map[string]map[Permission]bool{
 		PermissionFormationWrite: true, PermissionCohortManage: true,
 		PermissionProgressRead: true, PermissionBillingManage: true,
 		PermissionAuditRead: true, PermissionIntegrationManage: true,
-		PermissionUsageRead: true,
+		PermissionUsageRead:        true,
+		PermissionAssessmentReview: true,
 	},
 	RoleAdmin: {
 		PermissionTenantManage: true, PermissionMembershipManage: true,
 		PermissionFormationWrite: true, PermissionCohortManage: true,
 		PermissionProgressRead: true, PermissionAuditRead: true,
 		PermissionIntegrationManage: true, PermissionUsageRead: true,
+		PermissionAssessmentReview: true,
 	},
 	RolePedagogyManager: {
 		PermissionFormationWrite: true, PermissionCohortManage: true,
 		PermissionProgressRead: true, PermissionUsageRead: true,
+		PermissionAssessmentReview: true,
 	},
 	RoleTrainer: {
-		PermissionProgressRead: true,
+		PermissionProgressRead: true, PermissionAssessmentReview: true,
 	},
 	RoleAuditor: {
 		PermissionProgressRead: true, PermissionAuditRead: true,
@@ -81,8 +87,12 @@ func (p Principal) Authorize(permission Permission, resource AuthorizationResour
 		switch {
 		case permission == PermissionLearningSelf:
 			return resource.OwnerUserID != "" && resource.OwnerUserID == p.UserID
-		case role == RoleTrainer && permission == PermissionProgressRead:
-			return resource.CohortID != "" && slices.Contains(resource.AssignedCohortIDs, resource.CohortID)
+		case role == RoleTrainer && (permission == PermissionProgressRead || permission == PermissionAssessmentReview):
+			if resource.CohortID != "" && slices.Contains(resource.AssignedCohortIDs, resource.CohortID) {
+				return true
+			}
+			// An inapplicable cohort grant must not mask another role's grant.
+			continue
 		default:
 			return true
 		}
@@ -96,5 +106,6 @@ func KnownPermissions() []Permission {
 		PermissionCohortManage, PermissionProgressRead, PermissionLearningSelf,
 		PermissionBillingManage, PermissionAuditRead, PermissionIntegrationManage,
 		PermissionUsageRead,
+		PermissionAssessmentReview,
 	}
 }
