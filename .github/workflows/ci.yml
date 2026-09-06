@@ -52,6 +52,9 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Test task publication hooks (offline)
+        run: python3 -B -m unittest discover -s scripts -p test_finish_task.py
+
       - name: Staticcheck
         run: |
           go install honnef.co/go/tools/cmd/staticcheck@2026.1

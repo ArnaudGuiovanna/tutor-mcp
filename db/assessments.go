@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"time"
 
+	"tutor-mcp/assessment"
 	"tutor-mcp/models"
 )
 
@@ -76,6 +77,13 @@ func (s *Store) createAssessmentAttempt(ctx context.Context, a *models.Assessmen
 		return err
 	}
 	if a.DecisionID != "" {
+		rubric, err := assessment.ParseRubric(a.RubricJSON)
+		if err != nil {
+			return fmt.Errorf("create assessment attempt: %w", err)
+		}
+		if a.PassingScore != rubric.PassingScore {
+			return fmt.Errorf("create assessment attempt: passing score contradicts frozen rubric")
+		}
 		if s.dialect == DialectPostgres {
 			var version int
 			if err := s.queryRow(ctx, `SELECT graph_version FROM domains WHERE id = ? AND learner_id = ? AND tenant_id = ? FOR SHARE`,
@@ -221,7 +229,39 @@ func (s *Store) CompleteAssessmentEvaluation(ctx context.Context, learnerID, att
 	if method != models.EvaluationMethodHostLLM {
 		return fmt.Errorf("complete assessment evaluation: public evaluator must be host_llm")
 	}
-	return s.completeUntrustedAssessmentEvaluation(ctx, learnerID, attemptID, rubricScoreJSON, evaluatorID, method, provenanceJSON, score, passed, now)
+	return s.inTx(ctx, nil, func(txs *Store) error {
+		// Lock the curriculum before the attempt, matching observation/revision
+		// lock order. Revalidate at the persistence boundary, not only in MCP.
+		attempt, err := txs.GetAssessmentAttemptForUpdate(ctx, learnerID, attemptID)
+		if err != nil {
+			return err
+		}
+		if attempt.Status != models.AssessmentAttemptSubmitted || attempt.CurriculumInvalidatedVersion != 0 {
+			return ErrAssessmentStateConflict
+		}
+		if attempt.DecisionID != "" {
+			rubric, err := assessment.ParseRubric(attempt.RubricJSON)
+			if err != nil {
+				return err
+			}
+			if rubric.PassingScore != attempt.PassingScore {
+				return fmt.Errorf("complete assessment evaluation: inconsistent frozen passing score")
+			}
+			result, err := assessment.EvaluateJSON(rubric, rubricScoreJSON)
+			if err != nil {
+				return err
+			}
+			if score != result.Total || passed != result.Passed {
+				return fmt.Errorf("complete assessment evaluation: outcome contradicts frozen rubric and criterion scores")
+			}
+			canonical, err := json.Marshal(result.Score)
+			if err != nil {
+				return err
+			}
+			rubricScoreJSON, score, passed = string(canonical), result.Total, result.Passed
+		}
+		return txs.completeUntrustedAssessmentEvaluation(ctx, learnerID, attemptID, rubricScoreJSON, evaluatorID, method, provenanceJSON, score, passed, now)
+	})
 }
 
 func (s *Store) completeUntrustedAssessmentEvaluation(ctx context.Context, learnerID, attemptID, rubricScoreJSON, evaluatorID string, method models.EvaluationMethod, provenanceJSON string, score float64, passed bool, now time.Time) error {

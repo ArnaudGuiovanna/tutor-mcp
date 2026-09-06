@@ -197,6 +197,42 @@ func TestBoundAssessmentRubricSurvivesEvaluationAndRequiresEvidence(t *testing.T
 	if err != nil || attempt.Status != models.AssessmentAttemptSubmitted {
 		t.Fatalf("rejected score consumed attempt: attempt=%+v err=%v", attempt, err)
 	}
+	validScores := assessmentEvaluationArgs(domain.ID, session.ID, attemptID, true)["rubric_score_json"].(string)
+	initialState := models.NewConceptStateInDomain("L_owner", domain.ID, "a")
+	initialState.PMastery, initialState.Reps = 0.4, 2
+	if err := store.UpsertConceptState(ctx, initialState); err != nil {
+		t.Fatal(err)
+	}
+	for name, invalid := range map[string]string{
+		"duplicate criterion score": strings.Replace(validScores, `"score":2`, `"score":0,"score":2`, 1),
+		"numeric string":            strings.Replace(validScores, `"score":2`, `"score":"2"`, 1),
+		"score alias":               strings.Replace(validScores, `"criteria_scores"`, `"scores"`, 1),
+		"contradictory total":       strings.Replace(validScores, `"criteria_scores":`, `"total":0,"criteria_scores":`, 1),
+		"claimed trust":             strings.Replace(validScores, `"criteria_scores":`, `"trusted_evaluation":true,"criteria_scores":`, 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if invalid == validScores {
+				t.Fatal("fixture did not create invalid scoring")
+			}
+			args["rubric_score_json"] = invalid
+			rejected := callTool(t, deps, registerRecordInteraction, "L_owner", "record_interaction", args)
+			if !rejected.IsError {
+				t.Fatalf("invalid score accepted: %s", resultText(rejected))
+			}
+			attempt, err := store.GetAssessmentAttempt(ctx, "L_owner", attemptID)
+			if err != nil || attempt.Status != models.AssessmentAttemptSubmitted {
+				t.Fatalf("rejected score consumed attempt: %+v err=%v", attempt, err)
+			}
+			interactions, err := store.GetRecentInteractionsInDomain(ctx, "L_owner", domain.ID, "a", 10)
+			if err != nil || len(interactions) != 0 {
+				t.Fatalf("rejected score created observations: %+v err=%v", interactions, err)
+			}
+			state, err := store.GetConceptStateInDomain(ctx, "L_owner", domain.ID, "a")
+			if err != nil || state.PMastery != initialState.PMastery || state.Reps != initialState.Reps {
+				t.Fatalf("rejected score changed learner model: %+v err=%v", state, err)
+			}
+		})
+	}
 	accepted := callTool(t, deps, registerRecordInteraction, "L_owner", "record_interaction", assessmentEvaluationArgs(domain.ID, session.ID, attemptID, true))
 	if accepted.IsError {
 		t.Fatalf("evaluate bound assessment: %s", resultText(accepted))
@@ -208,5 +244,62 @@ func TestBoundAssessmentRubricSurvivesEvaluationAndRequiresEvidence(t *testing.T
 	rubric, err := normalizeAssessmentRubric(attempt.RubricJSON)
 	if err != nil || rubric.AnswerKey == "" || len(rubric.Criteria[0].Anchors) != 3 {
 		t.Fatalf("evaluation discarded the frozen rubric's semantic content: rubric=%+v err=%v", rubric, err)
+	}
+}
+
+func TestBoundAssessmentDecimalPassingRuleEndToEnd(t *testing.T) {
+	for _, tc := range []struct {
+		name, rubric, scores string
+		total                float64
+		passed               bool
+	}{
+		{"decimal equality", `{"criteria":[{"id":"x","description":"First criterion.","max_score":0.1},{"id":"y","description":"Second criterion.","max_score":0.7}],"passing_score":0.8}`, `{"criteria_scores":[{"id":"x","score":0.1,"evidence":"Observed."},{"id":"y","score":0.7,"evidence":"Observed."}]}`, 0.8, true},
+		{"zero below tiny threshold", `{"criteria":[{"id":"x","description":"Defined criterion.","max_score":1}],"passing_score":1e-12}`, `{"criteria_scores":[{"id":"x","score":0,"evidence":"Criterion not met."}]}`, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, deps := setupToolsTest(t)
+			domain := makeOwnerDomain(t, store, "L_owner", "math")
+			ctx := context.Background()
+			curriculum, err := store.EnsureCurriculumBaseline(ctx, "L_owner", domain.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC()
+			session, err := store.OpenLearningSession(ctx, "L_owner", domain.ID, "", now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			decision := &models.PedagogicalDecision{
+				ID: "decimal-decision", LearnerID: "L_owner", DomainID: domain.ID, SessionID: session.ID,
+				CurriculumVersion: curriculum.Version, PolicyVersion: models.PedagogicalPolicyVersion, CreatedAt: now,
+				Contract: models.PedagogicalContract{DecisionID: "decimal-decision", CurriculumVersion: curriculum.Version, PolicyVersion: models.PedagogicalPolicyVersion, TargetConcept: "a", RecommendedActivityType: models.ActivityPractice, Competency: curriculumCompetency(curriculum, "a")},
+			}
+			if err := store.CreatePedagogicalDecision(ctx, models.LegacyPrincipal("L_owner").TenantScope(), decision); err != nil {
+				t.Fatal(err)
+			}
+			prepared := callTool(t, deps, registerPrepareAssessmentAttempt, "L_owner", "prepare_assessment_attempt", map[string]any{
+				"domain_id": domain.ID, "session_id": session.ID, "decision_id": decision.ID,
+				"concept": "a", "activity_type": "PRACTICE", "observable": "Apply the competency.",
+				"task_text": "Generated task.", "rubric_json": tc.rubric,
+			})
+			if prepared.IsError {
+				t.Fatalf("prepare: %s", resultText(prepared))
+			}
+			attemptID := decodeResult(t, prepared)["attempt_id"].(string)
+			submitted := callTool(t, deps, registerSubmitAssessmentAttempt, "L_owner", "submit_assessment_attempt", map[string]any{"attempt_id": attemptID, "learner_response": "Committed response."})
+			if submitted.IsError {
+				t.Fatalf("submit: %s", resultText(submitted))
+			}
+			args := assessmentEvaluationArgs(domain.ID, session.ID, attemptID, tc.passed)
+			args["rubric_score_json"] = tc.scores
+			accepted := callTool(t, deps, registerRecordInteraction, "L_owner", "record_interaction", args)
+			if accepted.IsError {
+				t.Fatalf("evaluate: %s", resultText(accepted))
+			}
+			attempt, err := store.GetAssessmentAttempt(ctx, "L_owner", attemptID)
+			if err != nil || attempt.Score != tc.total || attempt.Passed != tc.passed || attempt.TrustedEvaluation {
+				t.Fatalf("attempt=%+v err=%v", attempt, err)
+			}
+		})
 	}
 }

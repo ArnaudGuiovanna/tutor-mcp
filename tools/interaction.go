@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	assessmentrules "tutor-mcp/assessment"
 	"tutor-mcp/engine"
 	"tutor-mcp/models"
 
@@ -145,10 +146,14 @@ func registerRecordInteraction(server *mcp.Server, deps *Deps) {
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
 		}
-		rubricScore, rubricScoreWarnings, err := normalizeRubricScoreJSON(params.RubricScoreJSON, rubric)
-		if err != nil {
-			r, _ := errorResult(err.Error())
-			return r, nil, nil
+		var rubricScore map[string]any
+		var rubricScoreWarnings []string
+		if params.AssessmentAttemptID == "" {
+			rubricScore, rubricScoreWarnings, err = normalizeRubricScoreJSON(params.RubricScoreJSON, rubric)
+			if err != nil {
+				r, _ := errorResult(err.Error())
+				return r, nil, nil
+			}
 		}
 		rubricJSON := ""
 		if rubric != nil {
@@ -248,18 +253,19 @@ func registerRecordInteraction(server *mcp.Server, deps *Deps) {
 					return r, nil, nil
 				}
 			}
-			rubricScore, rubricScoreWarnings, err = normalizeRubricScoreJSON(params.RubricScoreJSON, rubric)
-			if err != nil || rubricScore == nil {
-				if err == nil {
+			if boundRubric != nil {
+				var result assessmentrules.Result
+				result, err = assessmentrules.EvaluateJSON(*boundRubric, params.RubricScoreJSON)
+				assessmentScore, assessmentPassed = result.Total, result.Passed
+				rubricScore, rubricScoreWarnings = result.Score, nil
+			} else {
+				rubricScore, rubricScoreWarnings, err = normalizeRubricScoreJSON(params.RubricScoreJSON, rubric)
+				if err == nil && rubricScore == nil {
 					err = fmt.Errorf("rubric_score_json is required with attempt_id")
 				}
-				r, _ := errorResult(err.Error())
-				return r, nil, nil
-			}
-			if boundRubric != nil {
-				assessmentScore, assessmentPassed, err = deriveBoundAssessmentOutcome(*boundRubric, rubricScore)
-			} else {
-				assessmentScore, assessmentPassed, err = deriveAssessmentOutcome(rubric, rubricScore)
+				if err == nil {
+					assessmentScore, assessmentPassed, err = deriveAssessmentOutcome(rubric, rubricScore)
+				}
 			}
 			if err != nil {
 				r, _ := errorResult(err.Error())

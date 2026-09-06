@@ -1,6 +1,7 @@
 # Runtime pédagogique : corrections et trajectoire
 
-État des lots de correction, séparation BKT et réconciliation du curriculum,
+État des lots de correction, séparation BKT, réconciliation du curriculum et
+validation partagée de la notation,
 septembre 2026. Ce document distingue les corrections
 implémentées d'une validation pédagogique, qui nécessite encore des données
 d'apprentissage. Il prévaut sur les anciennes descriptions PFA/IRT/fade des
@@ -36,11 +37,12 @@ qualité de la tâche ni la fidélité de sa présentation à l'apprenant.
 | Une réponse de diagnostic déclenchant une transition d'apprentissage | Inférence bayésienne séparée de la transition ; politique explicite selon le type d'activité ; posterior et contribution de la transition audités. |
 | Une définition de compétence modifiée conservant des estimations et preuves périmées | Réconciliation atomique, remise à l'état initial des estimations concernées, invalidation des observations et tentatives antérieures ; historique conservé. |
 | Prérequis impossibles à réparer explicitement | Opération `repair_prerequisites` par IDs stables, listes de remplacement explicites, validation du graphe complet. |
+| Notation liée passant par un normaliseur permissif ; résultat non recalculé au stockage | Contrat partagé entre MCP et stockage, rejet des JSON ambigus et agrégats contradictoires, calcul déterministe sans epsilon fixe. |
 
 ## BKT : observation et opportunité d'apprentissage
 
 La séparation introduite par `2026-09-observation-v2`, conservée dans la politique
-courante `2026-09-curriculum-v3`, distingue deux opérations :
+courante `2026-09-scoring-v4`, distingue deux opérations :
 
 - `BKTObserve` : calcul de la probabilité de maîtrise conditionnée par la réponse,
   avec les probabilités de slip et guess ; aucun terme d'apprentissage ou d'oubli.
@@ -196,6 +198,42 @@ extensions non implémentées échouent explicitement dans le chemin lié. Le ch
 legacy conserve sa normalisation permissive pour compatibilité ; il n'offre pas
 le contrat strict du chemin lié.
 
+### Notation partagée : préparation de la revue indépendante
+
+Depuis `2026-09-scoring-v4`, le package `assessment` porte le contrat des rubriques
+liées et de leurs scores. Il est utilisé par les outils MCP et par le stockage,
+pas seulement par une instruction donnée au tuteur.
+
+- Les JSON ont une seule valeur, des clés uniques à chaque niveau, des IDs exacts
+  et des nombres JSON finis. Les alias historiques, nombres sous forme de texte
+  et règles inconnues sont refusés, sans correction silencieuse.
+- Chaque critère figé reçoit exactement un score dans ses bornes et une
+  observation `evidence` non vide. Les champs facultatifs `summary`, `confidence`
+  et `error_type` restent descriptifs ; ils ne donnent pas de confiance au réviseur.
+- `total`, `max_total` et le `max_score` de chaque critère, s'ils sont transmis,
+  doivent correspondre aux valeurs dérivées. Aucun agrégat ne remplace la rubrique.
+- Les représentations décimales canoniques des valeurs float64 stockées sont
+  additionnées exactement. Le seuil est comparé sans epsilon fixe : un zéro ne
+  passe plus un seuil positif minuscule, et `0.1 + 0.7` atteint `0.8`.
+  Cela ne promet pas une précision arbitraire des nombres JSON d'entrée.
+- Les documents JSON et leur forme canonique sont limités à 16 384 octets ;
+  la profondeur JSON est bornée. La canonicalisation conserve les textes générés.
+- Le stockage vérifie la rubrique à la préparation puis recalcule le résultat
+  sous les verrous curriculum/tentative. Une contradiction est rejetée et les
+  écritures pédagogiques composées sont annulées avec la transaction.
+
+Les tentatives standalone/legacy gardent leur normalisation de compatibilité.
+Aucune évaluation passée n'est rejouée et aucune migration n'est nécessaire.
+Une ancienne tentative liée dont la rubrique serait invalide doit être annulée
+si elle est encore ouverte, puis remplacée par une préparation valide ; le
+contrat figé n'est pas réparé après la réponse.
+
+Ce sous-lot ne fournit **pas encore** de canal de revue indépendante. Il ne choisit
+ni fournisseur, ni identité de réviseur, ni mécanisme d'adjudication. Le canal
+public reste `host_llm` non fiable ; il ne peut pas se promouvoir en revue humaine
+ou externe en ajoutant un champ au score. Une observation textuelle non vide ne
+prouve pas davantage sa fidélité à la réponse de l'apprenant.
+
 ## Données et migrations
 
 - Migrations additives : SQLite `0064_pedagogical_contracts`, PostgreSQL
@@ -226,7 +264,7 @@ le contrat strict du chemin lié.
 
 ## Vérifications effectuées
 
-- Suite complète après le lot curriculum : `go test -p 1 ./... -count=1` réussie.
+- Suite complète après le sous-lot notation partagée : `go test -p 1 ./... -count=1` réussie.
 - Analyse statique : `go vet ./...` réussie ; `git diff --check` sans erreur.
 - Tests ciblés avec `-race` : FSRS, axes de maîtrise, calibration, contrats de
   décision et rubriques liées réussis dans `algorithms`, `engine`, `db`, `tools`.
@@ -247,6 +285,12 @@ le contrat strict du chemin lié.
 - PostgreSQL (vérifié au premier lot), dans des schémas isolés : migrations et contrats, usage unique
   concurrent, immutabilité, rétention, export/effacement DSAR (dont demandes
   antérieures), et isolation RLS avec un rôle non privilégié réussis.
+- Notation partagée : cas ambigus/contradictoires, seuils décimaux, non-consommation
+  des tentatives rejetées et absence d'actualisation du modèle vérifiés. Tests
+  ciblés `-race` réussis dans `assessment`, `db` et `tools` ; tests PostgreSQL
+  de notation, usage unique concurrent, rollback, curriculum et RLS réussis.
+- Parseur/notation : essai de fuzzing de dix secondes, environ 17 000 exécutions,
+  sans échec détecté. Ce résultat n'est pas une preuve exhaustive de sûreté.
 
 La dernière exécution complète utilise un répertoire temporaire sur disque et
 le binaire Go direct : le `/tmp` en mémoire avait saturé lors de relances
@@ -260,7 +304,8 @@ les attentes fonctionnelles pour les contourner.
 Ce lot ne rend pas le système « optimal » ni validé expérimentalement.
 
 1. **Évaluation fiable opérationnelle.** Le canal public reste `host_llm`, non
-   fiable pour une revendication de démonstration. Il faut une vraie frontière de
+   fiable pour une revendication de démonstration. Le contrat commun de notation
+   est implémenté ; il faut encore une vraie frontière de
    revue indépendante, avec identité, audit et adjudication. Une seconde requête
    au même modèle n'est pas automatiquement une évaluation indépendante. En
    contexte à enjeux élevés, la règle de revue humaine reste inchangée.

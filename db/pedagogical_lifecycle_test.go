@@ -60,7 +60,7 @@ func createLifecycleAssessment(t *testing.T, s *Store, decision *models.Pedagogi
 		ConceptID: decision.Contract.TargetConcept, SessionID: decision.SessionID,
 		ActivityID: "activity-" + decision.ID, ActivityVersion: 1, ActivityType: string(decision.Contract.RecommendedActivityType),
 		Observable: "application", TaskText: "generated task", TaskContentHash: "hash",
-		RubricJSON: `{"criteria":[{"id":"correctness","weight":1,"max_score":1}]}`, PassingScore: .7,
+		RubricJSON: `{"criteria":[{"id":"correctness","description":"Correct application.","max_score":1}],"passing_score":0.7}`, PassingScore: .7,
 		CreatedAt: decision.CreatedAt, DecisionID: decision.ID, CurriculumVersion: decision.CurriculumVersion,
 		CurriculumConceptJSON: string(competency), OutcomeIDsJSON: "[]",
 	}); err != nil {

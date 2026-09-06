@@ -42,6 +42,12 @@ Open an issue using the **Feature request** template. Describe the user-facing p
 
 ## Coding conventions
 
+### Maintainer task publication
+
+The maintainer's local Codex workflow publishes completed implementation tasks
+through `staging` and then fast-forwards `main`. It does not replace the external
+contributor PR workflow above. See [setup, safeguards and recovery](docs/task-publication.md).
+
 ### Formatting
 
 - `gofmt` mandatory.

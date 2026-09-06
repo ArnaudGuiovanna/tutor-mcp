@@ -1,0 +1,17 @@
+{
+  "description": "Publish only an explicitly prepared, verified task through staging then main.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/finish_task.py\" stop-hook",
+            "timeout": 600,
+            "statusMessage": "Publishing the prepared task via staging and main"
+          }
+        ]
+      }
+    ]
+  }
+}

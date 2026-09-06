@@ -7,7 +7,7 @@ import "time"
 
 // PedagogicalPolicyVersion identifies the rules that produced a decision.
 // A decision is an immutable contract; generated tasks reference its ID.
-const PedagogicalPolicyVersion = "2026-09-curriculum-v3"
+const PedagogicalPolicyVersion = "2026-09-scoring-v4"
 
 type PedagogicalDecision struct {
 	ID                string              `json:"id"`

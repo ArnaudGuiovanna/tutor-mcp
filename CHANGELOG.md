@@ -6,8 +6,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Development workflow
+
+- Add an explicitly armed Codex Stop hook and task publisher: verify, commit/push
+  on staging, then fast-forward merge/push on main. Pin the staged tree and
+  session; preserve unrelated notes, reject divergence and resume interrupted
+  pushes without duplicating commits. Add offline integration tests in CI.
+- Document the maintainer's end-of-task publication convention in AGENTS.md.
+  Native Codex hook execution requires the user's initial hook trust review.
+
 ### Pedagogical runtime corrections
 
+- Share decision-bound rubric/scoring validation between MCP and persistence.
+  Reject duplicate JSON keys, coercions, unsupported fields and contradictory
+  aggregates; recompute outcomes under the assessment/curriculum transaction.
+  Sum canonical decimal values without a fixed pass epsilon. Version runtime
+  policy as `2026-09-scoring-v4`; no migration, retrospective regrading or new
+  trusted evaluator channel is introduced by this preparatory sub-lot.
 - Reconcile learner state atomically with curriculum revisions: changed
   definitions and retirement/reactivation reset affected estimates and supersede
   old interactions, assessments and transfer evidence without rewriting outcomes.

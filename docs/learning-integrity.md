@@ -60,6 +60,27 @@ through a server-controlled evaluator boundary. Until such a boundary is
 configured, a deployment can report estimated and retained stages but cannot
 manufacture a demonstrated claim.
 
+Decision-bound attempts use the shared `assessment` package at both MCP and
+storage boundaries. Rubric/scoring JSON must have unique object keys, canonical
+criterion IDs and finite JSON numbers; aliases, numeric strings and unsupported
+fields are rejected. Each criterion is scored exactly once with non-empty
+`evidence`. Optional `total`, `max_total` and per-criterion `max_score` must agree
+with the frozen rubric and scores. Confidence remains descriptive metadata.
+
+Stored float64 values are summed using their canonical decimal representations;
+passing compares that sum to the frozen threshold without a fixed epsilon.
+This avoids order-dependent arithmetic and a zero passing a tiny positive
+threshold, but does not imply arbitrary precision of incoming JSON numbers.
+Each JSON document and its canonical form are limited to 16,384 bytes.
+
+Storage verifies the frozen passing rule on creation and recomputes the bound
+outcome before completing an evaluation, under the curriculum/attempt locks.
+A rejected result leaves the attempt submitted and rolls back any composed
+learning writes. Standalone/legacy normalization remains unchanged. No existing
+evaluation is rewritten and structural validity never grants evaluator trust.
+This shared contract prepares, but does not implement, an independent review
+channel, reviewer identity or disagreement adjudication.
+
 ## Mutation delivery
 
 Every state-changing MCP schema accepts an optional `idempotency_key`, also
