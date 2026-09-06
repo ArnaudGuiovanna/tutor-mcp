@@ -146,7 +146,7 @@ func registerRecordAffect(server *mcp.Server, deps *Deps) {
 			since := time.Now().UTC().Add(-30 * 24 * time.Hour)
 			allInteractions, interactionsErr := deps.Store.GetInteractionsSince(ctx, learnerID, since)
 			allStates, statesErr := deps.Store.GetConceptStatesByLearner(ctx, learnerID)
-			calibBias, calibrationErr := deps.Store.GetCalibrationBias(ctx, learnerID, 20)
+			calibHistory, calibrationErr := deps.Store.GetCalibrationBiasHistory(ctx, learnerID, 20)
 			switch {
 			case interactionsErr != nil:
 				markDegraded("autonomy_score", interactionsErr)
@@ -156,10 +156,10 @@ func registerRecordAffect(server *mcp.Server, deps *Deps) {
 				markDegraded("autonomy_score", calibrationErr)
 			default:
 				autonomy := engine.ComputeAutonomyMetrics(engine.AutonomyInput{
-					Interactions:    allInteractions,
-					ConceptStates:   allStates,
-					CalibrationBias: calibBias,
-					SessionGap:      2 * time.Hour,
+					Interactions:      allInteractions,
+					ConceptStates:     allStates,
+					CalibrationDeltas: calibHistory,
+					SessionGap:        2 * time.Hour,
 				})
 				if err := deps.Store.UpdateAffectAutonomyScore(ctx, learnerID, params.SessionID, autonomy.Score); err != nil {
 					markDegraded("autonomy_score_persistence", err)

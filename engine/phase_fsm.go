@@ -51,8 +51,8 @@ type PhaseObservables struct {
 
 	// GoalRelevantBelowRetention is true when at least one
 	// goal-relevant concept has FSRS retrievability strictly below
-	// cfg.RetentionRecallThreshold. Triggers MAINTENANCE →
-	// INSTRUCTION.
+	// cfg.RetentionRecallThreshold. Retained as an audit signal; forgetting
+	// creates a recall need without changing the acquisition phase.
 	GoalRelevantBelowRetention bool
 }
 
@@ -81,8 +81,8 @@ type PhaseEvaluation struct {
 //     threshold (encoded via EstimatedGoalRelevant == TotalGoalRelevant > 0)
 //
 //   - MAINTENANCE → INSTRUCTION :
-//     at least one goal-relevant concept has retention <
-//     cfg.RetentionRecallThreshold
+//     at least one goal-relevant estimate is below the acquisition routing
+//     threshold. Retention alone is handled by recall selection in either phase.
 //
 // Unknown current phase → no transition, returns the unknown phase
 // echoed back with Transitioned=false. The caller (Orchestrate) is
@@ -145,15 +145,15 @@ func EvaluatePhase(current models.Phase, obs PhaseObservables, cfg PhaseConfig) 
 		}
 
 	case models.PhaseMaintenance:
-		if obs.GoalRelevantBelowRetention {
+		if obs.TotalGoalRelevant > 0 && obs.EstimatedGoalRelevant < obs.TotalGoalRelevant {
 			return PhaseEvaluation{
 				From: current, To: models.PhaseInstruction, Transitioned: true,
-				Rationale: "MAINTENANCE→INSTRUCTION: one goal-relevant concept below the retention threshold",
+				Rationale: "MAINTENANCE→INSTRUCTION: a goal-relevant concept needs acquisition practice",
 			}
 		}
 		return PhaseEvaluation{
 			From: current, To: current, Transitioned: false,
-			Rationale: "MAINTENANCE: retention OK on all goal-relevants — stay",
+			Rationale: "MAINTENANCE: no acquisition gap; any recall needs are selected within this phase",
 		}
 
 	default:

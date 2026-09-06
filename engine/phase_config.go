@@ -33,8 +33,8 @@ type PhaseConfig struct {
 	NDiagnosticMax int
 
 	// RetentionRecallThreshold is the FSRS Retrievability below which
-	// a goal-relevant concept triggers MAINTENANCE → INSTRUCTION
-	// (recall is required again). It follows the recall-routing threshold,
+	// a goal-relevant concept receives recall priority in either learning phase.
+	// It follows the recall-routing threshold,
 	// which is intentionally earlier than user-facing FORGETTING alerts.
 	RetentionRecallThreshold float64
 

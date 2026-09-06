@@ -31,6 +31,9 @@ func TestGetAutonomyMetrics_HappyPath(t *testing.T) {
 	if _, ok := out["trend"]; !ok {
 		t.Fatalf("expected trend in result, got %v", out)
 	}
+	if out["score_status"] != "unavailable" || out["score"] != float64(0) || out["calibration_accuracy"] != float64(0) || out["hint_independence"] != float64(0) {
+		t.Fatalf("empty history must not appear perfectly calibrated or independent: %v", out)
+	}
 }
 
 func TestGetAutonomyMetrics_UnknownDomainIDRejected(t *testing.T) {
@@ -68,7 +71,7 @@ func TestGetAutonomyMetrics_DomainIDFiltersForeignInteractions(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		interaction := &models.Interaction{
 			LearnerID: "L_owner", Concept: "x", DomainID: d2.ID,
-			ActivityType:      "PRACTICE",
+			ActivityType:      "RECALL_EXERCISE",
 			Success:           true,
 			IsProactiveReview: true,
 			SelfInitiated:     true,
@@ -103,5 +106,35 @@ func TestGetAutonomyMetrics_DomainIDFiltersForeignInteractions(t *testing.T) {
 	pr2, _ := out2["proactive_review_rate"].(float64)
 	if pr2 == 0.0 {
 		t.Errorf("with domain_id=D2 (where x lives), proactive_review_rate should be > 0, got %v", pr2)
+	}
+}
+
+func TestGetAutonomyMetrics_OppositeCalibrationErrorsDoNotCancel(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	domain := makeOwnerDomain(t, store, "L_owner", "calibration")
+	for _, prediction := range []struct {
+		id                string
+		predicted, actual float64
+	}{
+		{"overconfident", 1, 0},
+		{"underconfident", 0, 1},
+	} {
+		record := &models.CalibrationRecord{PredictionID: prediction.id, LearnerID: "L_owner", DomainID: domain.ID, ConceptID: "a", Predicted: prediction.predicted}
+		if err := store.CreateCalibrationPrediction(context.Background(), record); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.CompleteCalibrationRecord(context.Background(), prediction.id, "L_owner", prediction.actual, prediction.predicted-prediction.actual); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, params := range []map[string]any{{}, {"domain_id": domain.ID}} {
+		res := callTool(t, deps, registerGetAutonomyMetrics, "L_owner", "get_autonomy_metrics", params)
+		if res.IsError {
+			t.Fatalf("autonomy query failed: %s", resultText(res))
+		}
+		out := decodeResult(t, res)
+		if out["calibration_accuracy"] != float64(0) || out["calibration_samples"] != float64(2) {
+			t.Fatalf("opposite prediction errors were cancelled or evidence lost: %v", out)
+		}
 	}
 }

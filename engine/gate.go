@@ -53,9 +53,9 @@ var ErrInvalidGateResult = errors.New("gate result invariant violation")
 // N = 0 disables the anti-rep filter entirely (documented escape for
 // tests and special modes).
 //
-// At runtime, the effective window is capped at len(input.Concepts) - 1
-// to guarantee anti-rep never excludes more than (domain_size - 1)
-// candidates — preventing NoCandidate on small domains (OQ-3.4 cap).
+// The effective window is capped at len(input.Concepts) - 1. If prerequisite
+// filtering leaves only recent concepts, diversity is relaxed so it cannot
+// prevent an otherwise eligible activity.
 const DefaultAntiRepeatWindow = 3
 
 // GateInput is the read-only context for one ApplyGate call. The
@@ -252,8 +252,8 @@ func ApplyGate(input GateInput) (GateResult, error) {
 
 	// ── Rule 4 — anti-rep with effective_N protection (OQ-3.4) ─────────
 	//
-	// Cap effective N at domain_size - 1 so the filter never excludes
-	// every candidate. N = 0 disables the filter entirely.
+	// Cap the recent window for small domains. The post-filter fallback below
+	// also protects narrower prerequisite pools. N = 0 disables this preference.
 	n := max(0, input.AntiRepeatWindow)
 	maxExclusion := max(0, len(input.Concepts)-1)
 	n = min(n, maxExclusion)
@@ -280,8 +280,12 @@ func ApplyGate(input GateInput) (GateResult, error) {
 		}
 	}
 
+	antiRepeatRelaxed := len(finalCandidates) == 0 && len(afterPrereq) > 0
+	if antiRepeatRelaxed {
+		finalCandidates = afterPrereq
+	}
 	if len(finalCandidates) == 0 {
-		return newNoCandidateResult("tous candidats filtres par prereq/anti-rep"), nil
+		return newNoCandidateResult("no candidate satisfies prerequisites"), nil
 	}
 
 	// ── Rule 5 — FORGETTING-Critical priority filter (issue #16) ───────
@@ -339,6 +343,9 @@ func ApplyGate(input GateInput) (GateResult, error) {
 		len(finalCandidates), n, len(restrictions))
 	if forgettingRestrictionFired {
 		rationale += " ; pool restreint aux concepts FORGETTING-Critical (issue #16)"
+	}
+	if antiRepeatRelaxed {
+		rationale += " ; anti-repetition relaxed: every prerequisite-eligible concept was recent"
 	}
 	return newAllowResult(finalCandidates, restrictions, rationale), nil
 }

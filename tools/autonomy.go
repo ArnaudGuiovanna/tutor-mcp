@@ -20,7 +20,7 @@ type GetAutonomyMetricsParams struct {
 func registerGetAutonomyMetrics(server *mcp.Server, deps *Deps) {
 	addTool(server, &mcp.Tool{
 		Name:        "get_autonomy_metrics",
-		Description: "Current autonomy score with its 4 components and trend. Readable by the learner and the system.",
+		Description: "Descriptive learning rates, prediction accuracy and observation counts. The legacy summary score is not a validated autonomy measure; missing evidence is explicit.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params GetAutonomyMetricsParams) (*mcp.CallToolResult, any, error) {
 		learnerID, err := getLearnerID(ctx)
 		if err != nil {
@@ -40,7 +40,7 @@ func registerGetAutonomyMetrics(server *mcp.Server, deps *Deps) {
 			r, _ := safeErrorResult(deps.Logger, "failed to load concept states", err)
 			return r, nil, nil
 		}
-		calibBias, err := deps.Store.GetCalibrationBias(ctx, learnerID, 20)
+		calibHistory, err := deps.Store.GetCalibrationBiasHistory(ctx, learnerID, 20)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to load calibration", err)
 			return r, nil, nil
@@ -68,7 +68,7 @@ func registerGetAutonomyMetrics(server *mcp.Server, deps *Deps) {
 				r, _ := safeErrorResult(deps.Logger, "failed to load domain states", err)
 				return r, nil, nil
 			}
-			calibBias, err = deps.Store.GetCalibrationBiasInDomain(ctx, learnerID, domain.ID, 20)
+			calibHistory, err = deps.Store.GetCalibrationBiasHistoryInDomain(ctx, learnerID, domain.ID, 20)
 			if err != nil {
 				r, _ := safeErrorResult(deps.Logger, "failed to load domain calibration", err)
 				return r, nil, nil
@@ -76,10 +76,10 @@ func registerGetAutonomyMetrics(server *mcp.Server, deps *Deps) {
 		}
 
 		metrics := engine.ComputeAutonomyMetrics(engine.AutonomyInput{
-			Interactions:    interactions,
-			ConceptStates:   states,
-			CalibrationBias: calibBias,
-			SessionGap:      2 * time.Hour,
+			Interactions:      interactions,
+			ConceptStates:     states,
+			CalibrationDeltas: calibHistory,
+			SessionGap:        2 * time.Hour,
 		})
 
 		affects, err := deps.Store.GetRecentAffectStates(ctx, learnerID, 10)

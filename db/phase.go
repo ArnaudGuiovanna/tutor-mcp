@@ -118,7 +118,7 @@ func (s *Store) getActiveMisconceptionsBatch(ctx context.Context, learnerID, dom
 		 FROM (
 		    SELECT concept, misconception_type,
 		           ROW_NUMBER() OVER (PARTITION BY concept ORDER BY created_at DESC, id DESC) AS rn
-		    FROM interactions
+		    FROM `+currentInteractionsSQL+` AS interactions
 		    WHERE learner_id = ?`+domainClause+` AND concept IN (`+strings.Join(placeholders, ",")+`)
 		 )
 		 WHERE rn <= ? AND misconception_type IS NOT NULL`,
@@ -191,7 +191,7 @@ func (s *Store) GetRecentConceptsByDomain(ctx context.Context, learnerID string,
 		conceptSet[c] = true
 	}
 	rows, err := s.query(ctx,
-		`SELECT concept FROM interactions
+		`SELECT concept FROM `+currentInteractionsSQL+` AS interactions
 		 WHERE learner_id = ?
 		 ORDER BY created_at DESC
 		 LIMIT ?`,
@@ -226,7 +226,7 @@ func (s *Store) GetRecentConceptsInDomain(ctx context.Context, learnerID, domain
 		return nil, nil
 	}
 	rows, err := s.query(ctx,
-		`SELECT concept FROM interactions
+		`SELECT concept FROM `+currentInteractionsSQL+` AS interactions
 		 WHERE learner_id = ? AND domain_id = ?
 		 ORDER BY created_at DESC
 		 LIMIT ?`,
@@ -264,7 +264,7 @@ func (s *Store) CountInteractionsSince(ctx context.Context, learnerID string, si
 	if len(domainConcepts) == 0 {
 		var n int
 		err := s.queryRow(ctx,
-			`SELECT COUNT(*) FROM interactions
+			`SELECT COUNT(*) FROM `+currentInteractionsSQL+` AS interactions
 			 WHERE learner_id = ? AND created_at >= ?`,
 			learnerID, since,
 		).Scan(&n)
@@ -278,7 +278,7 @@ func (s *Store) CountInteractionsSince(ctx context.Context, learnerID string, si
 		conceptSet[c] = true
 	}
 	rows, err := s.query(ctx,
-		`SELECT concept FROM interactions
+		`SELECT concept FROM `+currentInteractionsSQL+` AS interactions
 		 WHERE learner_id = ? AND created_at >= ?`,
 		learnerID, since,
 	)
@@ -308,7 +308,7 @@ func (s *Store) CountInteractionsSince(ctx context.Context, learnerID string, si
 func (s *Store) GetQualifiedDiagnosticConceptsSinceInDomain(ctx context.Context, learnerID, domainID string, since time.Time) ([]string, error) {
 	rows, err := s.query(ctx,
 		`SELECT DISTINCT i.concept
-		 FROM interactions i
+		 FROM `+currentInteractionsSQL+` i
 		 JOIN assessment_attempts a
 		   ON a.id = i.assessment_attempt_id
 		  AND a.learner_id = i.learner_id
@@ -318,7 +318,7 @@ func (s *Store) GetQualifiedDiagnosticConceptsSinceInDomain(ctx context.Context,
 		 WHERE i.learner_id = ? AND i.domain_id = ? AND i.created_at >= ?
 		   AND i.activity_type = 'DIAGNOSTIC_ASSESSMENT'
 		   AND i.hints_requested = 0
-		   AND a.status = 'evaluated'
+		   AND a.status = 'evaluated' AND a.curriculum_invalidated_version = 0
 		   AND a.submitted_at IS NOT NULL
 		   AND a.evaluated_at IS NOT NULL`,
 		learnerID, domainID, since,
@@ -359,7 +359,7 @@ func (s *Store) getActionHistoryForConcept(ctx context.Context, learnerID, domai
 	if recentLimit <= 0 {
 		recentLimit = 50
 	}
-	query := `SELECT activity_type, success FROM interactions
+	query := `SELECT activity_type, success FROM ` + currentInteractionsSQL + ` AS interactions
 		 WHERE learner_id = ? AND concept = ?`
 	args := []any{learnerID, concept}
 	if exactDomain {

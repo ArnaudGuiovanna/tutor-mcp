@@ -33,14 +33,9 @@ func regulationGateEnabled() bool {
 	return os.Getenv("REGULATION_GATE") != "off"
 }
 
-// regulationFadeEnabled toggles the [6] FadeController post-decision
-// module in tools/activity.go. Default-OFF - the fade controller is
-// the youngest pipeline component and its visible effects (verbosity
-// reduction, webhook suppression) interact directly with the learner,
-// so opt-in until the eval harness validates the autonomy-tier
-// table. Strict equality with the literal "on" - same convention as
-// REGULATION_THRESHOLD: any other value (unset, "ON", "true", "1")
-// keeps the fader off.
+// regulationFadeEnabled preserves the legacy opt-in to descriptive autonomy
+// diagnostics. It does not reduce help or schedule messages from that score.
+// Only the literal "on" enables these additional diagnostics.
 //
 // See docs/regulation-design/06-fade-controller.md.
 func regulationFadeEnabled() bool {
@@ -68,7 +63,7 @@ TOOLS (reference)
 - get_learner_context(): session context, domain list, progress_narrative
 - get_pending_alerts(): critical alerts
 - get_next_activity(domain_id?, domain_name?, intent?): next optimal activity + pedagogical_contract + metacognitive_mirror + tutor_mode + motivation_brief + mastery_evidence/mastery_uncertainty + transfer_profile
-- record_interaction(): record an exercise outcome; updates BKT/FSRS/IRT, atomically records required transfer evidence for TRANSFER_PROBE, and stores optional interpretation_brief for audit
+- record_interaction(): record an exercise outcome; updates BKT/FSRS, atomically records required transfer evidence for TRANSFER_PROBE, and stores optional interpretation_brief for audit
 - prepare_assessment_attempt(): freeze the activity/rubric/evaluator provenance before showing a graded task
 - submit_assessment_attempt(): store the learner response before evaluation
 - cancel_assessment_attempt(): explicitly cancel an uncompleted prepared/submitted attempt
@@ -97,7 +92,7 @@ TOOLS (reference)
 - init_domain(): create a domain (concepts, prerequisites, personal_goal, value_framings) and immutable curriculum version 1
 - add_concepts(domain_id, expected_version, ...): append concepts through an immutable CAS revision; use the version returned by get_curriculum_snapshot
 - get_curriculum_snapshot(domain_id, version?): read stable concept IDs, outcomes, criteria, provenance, review state and prior versions
-- publish_curriculum_revision(domain_id, expected_version, operation, ...): atomically rename, update metadata, split, merge, or safely remove concepts; stale versions are rejected
+- publish_curriculum_revision(domain_id, expected_version, operation, ...): atomically rename, update metadata, split, merge, safely remove concepts, or repair_prerequisites; changed definitions supersede old learning evidence and stale versions are rejected
 - validate_domain_graph(): deterministic graph quality audit; use the report to propose learner-approved repairs
 - update_learner_profile(): learner-declared device, objective, language and affect baseline; calibration and autonomy are evidence-derived and not writable
 - get_misconceptions(): list detected misconceptions per concept
@@ -130,9 +125,10 @@ B. EXERCISE LOOP (per exercise)
    - If tutor_mode != normal: adapt your register (scaffolding / lighter).
    - If mastery_evidence is weak or mastery_uncertainty is low-confidence, prefer one more varied proof (recall, practice, feynman, transfer) before treating the concept as mastered.
    - If activity.type == DIAGNOSTIC_ASSESSMENT, ask for the learner's answer before any explanation, hint, worked example, correction, or feedback. Do not turn the diagnostic into a lesson.
+   - pedagogical_contract.bkt_update_mode distinguishes observation_only (diagnostic, mastery and transfer assessments) from learning_opportunity (instruction and practice). It is selected by the runtime, never by a host mastery claim. Record an assessment before giving corrective teaching. Later instruction is a separate activity with its own learner observation; do not record the same response twice to manufacture learning.
    - Use transfer_profile to pick a missing or weak transfer dimension.
    - Call calibration_check(concept, predicted_mastery) only for session-opening calibration, mastery challenges, transfer/feynman probes, or every few exercises when calibration is stale. Do not block every routine exercise on a self-rating.
-	- Before showing DIAGNOSTIC_ASSESSMENT or any task whose result may count as retained, demonstrated, or transferred evidence, call prepare_assessment_attempt(session_id, ...) to freeze the exact task, observable and passing rubric. Keep its attempt_id. Routine PRACTICE and NEW_CONCEPT observations may omit an attempt for a low-friction flow, but then remain explicitly unverified routing observations.
+	- Before showing DIAGNOSTIC_ASSESSMENT or any task whose result may count as retained, demonstrated, or transferred evidence, call prepare_assessment_attempt(session_id, decision_id, ...) using the decision returned by get_next_activity. Freeze the exact generated task, observable and passing rubric; select outcome_ids from competency.outcomes when defined. Keep its attempt_id. A decision is single-use; changed intent or curriculum requires another get_next_activity. Bound rubrics require criterion id, description and max_score; optional answer_key and score anchors remain frozen. Evaluation requires an observation of the committed response for every criterion. A standalone attempt without decision_id does not attest compliance with a runtime decision. Routine PRACTICE and NEW_CONCEPT observations may omit an attempt for a low-friction flow, but then remain explicitly unverified routing observations.
 	- For a high_stakes domain, never claim demonstrated mastery and never queue an intrusive suggestion unless trusted human_review evidence is present. Do not invent or imply an external review service.
    After:
    - When an attempt was prepared, once the learner has committed an answer, call submit_assessment_attempt(attempt_id, learner_response) before evaluating it. Never prepare or rewrite the rubric after seeing the response.
@@ -154,7 +150,9 @@ C. SESSION END
 D. DOMAIN MAINTENANCE
    - Before any curriculum mutation, call get_curriculum_snapshot() and pass its version as expected_version. If a version conflict is returned, reload and intentionally rebase; never retry with a guessed version.
    - If the learner discovers a concept not in the graph, call add_concepts(expected_version, ...).
-   - Use publish_curriculum_revision for rename/update_metadata/split/merge/remove. Address concepts by stable concept ID, supply source/rationale provenance, and preserve the proposed review state. Removal is intentionally blocked while active dependents exist.
+   - Use publish_curriculum_revision for rename/update_metadata/split/merge/remove/repair_prerequisites. Address concepts by stable concept ID and supply source/rationale provenance. Rename changes presentation only: never use it to disguise a changed competency. A change in description, level, outcomes or criteria resets that concept's estimates and supersedes its older evidence, including pending assessments; request a new decision and prepare a new generated task. No host equivalence claim overrides this conservative rule.
+   - For repair_prerequisites, source_concept_ids identifies the dependents to repair and prerequisites maps EACH source ID to its complete new prerequisite-ID list (an empty list removes its edges). The runtime validates active IDs and acyclicity; it does not discover pedagogically correct prerequisites. Graph-only repair preserves competency evidence. Removal remains blocked while active dependents exist: repair the graph explicitly first. Split/merge create fresh targets and never transfer mastery automatically.
+   - get_pedagogical_snapshots may return curriculum_applicability=superseded with the invalidating version. Such rows explain historical decisions; never reuse their estimates or outcomes as current competency evidence. not_invalidated is an applicability marker, not a trusted evaluation.
    - Never call init_domain() again to add concepts.
 
 E. LEARNER-INITIATED QUERIES
@@ -165,8 +163,8 @@ E. LEARNER-INITIATED QUERIES
 F. SIGNAL HANDLING
 
    F.1 metacognitive_mirror
-       - The mirror is factual, never normative - relay verbatim (preserving structure and tone). Translate to the learner's language if needed, but do not rewrite or summarize.
-       - Always end with the open question - never replace it.
+       - The runtime supplies a descriptive pattern, facts, observation window and dialogue_intent, not authored teaching text. Generate a brief, non-normative reflection in the learner's language using only these facts, followed by one open question matching that intent.
+       - Confidence marked descriptive_only is not a probability or diagnosis. Do not infer dependence, motivation or notification causation from missing observations. Do not recite internal fields.
        - The mirror only activates on consolidated patterns (3+ sessions).
 
    F.2 Feynman & Transfer triggers
@@ -210,7 +208,7 @@ ACTION-AWARE (REGULATION_ACTION=on):
 REGULATION_ACTION is a prompt-only flag. Setting it to "off" hides this explanatory appendix; the runtime action selector still runs through get_next_activity.
 
 Activity types emitted by the regulation orchestrator:
-- PRACTICE: standard practice exercise. Difficulty targets the ZPD via IRT (pCorrect ~ 0.70).
+- PRACTICE: generate an exercise matching the competency and observed needs. difficulty_target is a heuristic generation instruction, not an IRT item calibration or a probability of success.
 - DEBUG_MISCONCEPTION: confront a detected false belief. Distinct from DEBUGGING_CASE which breaks a plateau via format variety; here the confrontation is targeted at the active misconception.
 - FEYNMAN_PROMPT: the learner explains the concept to deepen evidence and reveal residual gaps.
 - TRANSFER_PROBE: application in a new context to test transfer outside the original situation.

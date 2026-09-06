@@ -215,6 +215,10 @@ func registerRecordInteraction(server *mcp.Server, deps *Deps) {
 				r, _ := errorResult("assessment attempt not found")
 				return r, nil, nil
 			}
+			if assessment.CurriculumInvalidatedVersion != 0 {
+				r, _ := errorResult("assessment curriculum definition changed: prepare a new task against the current curriculum")
+				return r, nil, nil
+			}
 			if assessment.Status != models.AssessmentAttemptSubmitted {
 				r, _ := errorResult("assessment attempt must be submitted before evaluation")
 				return r, nil, nil
@@ -227,10 +231,22 @@ func registerRecordInteraction(server *mcp.Server, deps *Deps) {
 				r, _ := errorResult("assessment attempt belongs to another learning session")
 				return r, nil, nil
 			}
-			rubric, rubricWarnings, err = normalizeRubricJSON(assessment.RubricJSON)
-			if err != nil || rubric == nil {
-				r, _ := errorResult("stored assessment rubric is invalid")
-				return r, nil, nil
+			var boundRubric *models.AssessmentRubric
+			if assessment.DecisionID != "" {
+				parsed, parseErr := normalizeAssessmentRubric(assessment.RubricJSON)
+				if parseErr != nil {
+					r, _ := errorResult("stored bound assessment rubric is invalid")
+					return r, nil, nil
+				}
+				boundRubric = &parsed
+				rubric = assessmentRubricMap(parsed)
+				rubricWarnings = nil
+			} else {
+				rubric, rubricWarnings, err = normalizeRubricJSON(assessment.RubricJSON)
+				if err != nil || rubric == nil {
+					r, _ := errorResult("stored assessment rubric is invalid")
+					return r, nil, nil
+				}
 			}
 			rubricScore, rubricScoreWarnings, err = normalizeRubricScoreJSON(params.RubricScoreJSON, rubric)
 			if err != nil || rubricScore == nil {
@@ -240,7 +256,11 @@ func registerRecordInteraction(server *mcp.Server, deps *Deps) {
 				r, _ := errorResult(err.Error())
 				return r, nil, nil
 			}
-			assessmentScore, assessmentPassed, err = deriveAssessmentOutcome(rubric, rubricScore)
+			if boundRubric != nil {
+				assessmentScore, assessmentPassed, err = deriveBoundAssessmentOutcome(*boundRubric, rubricScore)
+			} else {
+				assessmentScore, assessmentPassed, err = deriveAssessmentOutcome(rubric, rubricScore)
+			}
 			if err != nil {
 				r, _ := errorResult(err.Error())
 				return r, nil, nil

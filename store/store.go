@@ -312,6 +312,8 @@ type InteractionStore interface {
 // response/evaluation as an explicit state machine. TrustedEvaluation is
 // assigned by a server-side evaluator boundary, not by MCP callers.
 type AssessmentStore interface {
+	CreatePedagogicalDecision(ctx context.Context, scope models.TenantScope, decision *models.PedagogicalDecision) error
+	GetPedagogicalDecision(ctx context.Context, scope models.TenantScope, decisionID string) (*models.PedagogicalDecision, error)
 	CreateAssessmentAttempt(ctx context.Context, attempt *models.AssessmentAttempt) error
 	GetAssessmentAttempt(ctx context.Context, learnerID, attemptID string) (*models.AssessmentAttempt, error)
 	GetAssessmentAttemptForUpdate(ctx context.Context, learnerID, attemptID string) (*models.AssessmentAttempt, error)

@@ -31,18 +31,37 @@ type CalibrationRecord struct {
 }
 
 type MirrorMessage struct {
-	Pattern      string `json:"pattern"`
-	Message      string `json:"message"`
-	OpenQuestion string `json:"open_question"`
+	Pattern        string         `json:"pattern"`
+	Facts          map[string]any `json:"facts,omitempty"`
+	Window         *MirrorWindow  `json:"window,omitempty"`
+	Confidence     string         `json:"confidence,omitempty"`
+	DialogueIntent string         `json:"dialogue_intent,omitempty"`
+	// Historical authored messages remain decodable. Runtime detection emits
+	// observations and a dialogue intent; the generative tutor writes the text.
+	Message      string `json:"message,omitempty"`
+	OpenQuestion string `json:"open_question,omitempty"`
+}
+
+type MirrorWindow struct {
+	SessionCount     int `json:"session_count"`
+	InteractionCount int `json:"interaction_count"`
 }
 
 type AutonomyMetrics struct {
+	// Score is a legacy descriptive mean of observed rates. It is not a
+	// validated measure of autonomy and must not drive support or fading.
 	Score               float64   `json:"score"`
+	ScoreStatus         string    `json:"score_status"`
+	ObservedComponents  int       `json:"observed_components"`
 	Trend               string    `json:"trend"`
 	InitiativeRate      float64   `json:"initiative_rate"`
+	SessionCount        int       `json:"session_count"`
 	CalibrationAccuracy float64   `json:"calibration_accuracy"`
+	CalibrationSamples  int       `json:"calibration_samples"`
 	HintIndependence    float64   `json:"hint_independence"`
+	HintObservations    int       `json:"hint_observations"`
 	ProactiveReviewRate float64   `json:"proactive_review_rate"`
+	ReviewObservations  int       `json:"review_observations"`
 	ComputedAt          time.Time `json:"computed_at"`
 }
 

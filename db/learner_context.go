@@ -273,7 +273,7 @@ func (s *Store) learnerContextNarrativeQuery(learnerID, domainID string, concept
 		       SUM(CASE WHEN i.created_at < ? THEN 1 ELSE 0 END) AS total_before,
 		       SUM(CASE WHEN i.created_at < ? AND i.success = 1 THEN 1 ELSE 0 END) AS successful_before,
 		       MAX(CASE WHEN i.success = 1 AND i.created_at >= ? THEN 1 ELSE 0 END) AS recent_success
-		FROM interactions i
+		FROM ` + currentInteractionsSQL + ` i
 		WHERE i.learner_id = ? AND i.domain_id = ?
 		  AND i.concept IN (` + strings.Join(placeholders, ",") + `)
 		  AND (i.created_at < ? OR (i.success = 1 AND i.created_at >= ?))

@@ -6,6 +6,7 @@ package engine
 
 import (
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -187,7 +188,7 @@ func TestSelectAction_Mastery30To70_PracticeStandard(t *testing.T) {
 
 func TestSelectAction_Mastery70To85_PracticeZPD(t *testing.T) {
 	cs := reviewedConceptState("Maps", 0.78)
-	cs.Theta = 0.847 // → b=0 → sigmoid=0.5
+	cs.Theta = 0.847 // legacy estimate must not determine task difficulty
 	a := SelectAction("Maps", cs, nil, ActionHistory{})
 	if a.Type != models.ActivityPractice {
 		t.Fatalf("expected PRACTICE, got %s", a.Type)
@@ -195,8 +196,8 @@ func TestSelectAction_Mastery70To85_PracticeZPD(t *testing.T) {
 	if a.Format != "practice_zpd" {
 		t.Errorf("expected practice_zpd format, got %s", a.Format)
 	}
-	if math.Abs(a.DifficultyTarget-0.50) > 0.01 {
-		t.Errorf("expected DifficultyTarget≈0.50 at theta=0.847, got %f", a.DifficultyTarget)
+	if a.DifficultyTarget != PracticeDifficultyTarget {
+		t.Errorf("expected heuristic DifficultyTarget=%f, got %f", PracticeDifficultyTarget, a.DifficultyTarget)
 	}
 }
 
@@ -347,16 +348,16 @@ func TestSelectAction_NaN_PMastery_FallsBackToRest(t *testing.T) {
 	}
 }
 
-func TestSelectAction_NaN_Theta_FallsBackToRest(t *testing.T) {
+func TestSelectAction_NaN_LegacyThetaDoesNotBlockPractice(t *testing.T) {
 	before := NaNFallbackCount()
 	cs := reviewedConceptState("Concept", 0.5)
 	cs.Theta = math.NaN()
 	a := SelectAction("Concept", cs, nil, ActionHistory{})
-	if a.Type != models.ActivityRest {
-		t.Fatalf("expected REST on NaN Theta, got %s", a.Type)
+	if a.Type != models.ActivityPractice {
+		t.Fatalf("unused legacy theta must not block PRACTICE, got %s", a.Type)
 	}
-	if NaNFallbackCount() != before+1 {
-		t.Errorf("expected nanFallbackCount to increment by 1, got delta %d", NaNFallbackCount()-before)
+	if NaNFallbackCount() != before {
+		t.Errorf("unused legacy theta triggered a fallback")
 	}
 }
 
@@ -386,60 +387,29 @@ func TestSelectAction_RespectsMasteryBKTAccessor(t *testing.T) {
 	}
 }
 
-// ─── ZPD formula (OQ-5.3) ──────────────────────────────────────────────────
-
-func TestZPDDifficulty_TargetsPCorrect70_AtTheta0847(t *testing.T) {
-	d := zpdDifficultyFromTheta(ZPDOffset)
-	if math.Abs(d-0.50) > 0.005 {
-		t.Errorf("at θ=ZPDOffset (%.3f), expected DifficultyTarget=0.50 (b=0, sigmoid(0)=0.5), got %f",
-			ZPDOffset, d)
-	}
-}
-
-func TestZPDDifficulty_ClampsLow(t *testing.T) {
-	// θ=-4 → b=-4.847 → sigmoid≈0.0078 → clamp to 0.30
-	d := zpdDifficultyFromTheta(-4)
-	if d != 0.30 {
-		t.Errorf("expected 0.30 (low clamp) at θ=-4, got %f", d)
-	}
-}
-
-func TestZPDDifficulty_ClampsHigh(t *testing.T) {
-	// θ=4 → b=3.153 → sigmoid≈0.959 → clamp to 0.85
-	d := zpdDifficultyFromTheta(4)
-	if d != 0.85 {
-		t.Errorf("expected 0.85 (high clamp) at θ=4, got %f", d)
-	}
-}
-
-func TestZPDDifficulty_BoundaryAtZeroTheta(t *testing.T) {
-	// θ=0 → b=-0.847 → sigmoid(-0.847)≈0.300 (right at low clamp boundary)
-	d := zpdDifficultyFromTheta(0)
-	if math.Abs(d-0.30) > 0.005 {
-		t.Errorf("at θ=0 expected ~0.30, got %f", d)
-	}
-}
-
-func TestZPDDifficulty_NaNHandlingDoesNotPropagate(t *testing.T) {
-	d := zpdDifficultyFromTheta(math.NaN())
-	if math.IsNaN(d) {
-		t.Errorf("NaN theta produced NaN difficulty (must be benign middle), got NaN")
-	}
-	if d < 0.30 || d > 0.85 {
-		t.Errorf("NaN fallback difficulty out of envelope: %f", d)
-	}
-}
-
-func TestZPDDifficulty_MonotonicInTheta(t *testing.T) {
-	// Sanity: difficulty must be non-decreasing in theta within the
-	// unclamped range, since sigmoid is monotone.
-	thetas := []float64{-1, -0.5, 0, 0.5, 1, 1.5, 2}
-	prev := zpdDifficultyFromTheta(thetas[0])
-	for _, th := range thetas[1:] {
-		d := zpdDifficultyFromTheta(th)
-		if d < prev {
-			t.Errorf("non-monotone: θ=%.2f → %f < previous %f", th, d, prev)
+func TestPracticeDecisionIndependentOfLegacyThetaAndFSRSDifficulty(t *testing.T) {
+	for _, mastery := range []float64{0.5, 0.75, 0.90} {
+		cs := reviewedConceptState("Concept", mastery)
+		want := SelectAction("Concept", cs, nil, ActionHistory{})
+		for _, theta := range []float64{-4, 0, 4, math.NaN(), math.Inf(1)} {
+			for _, difficulty := range []float64{1, 5, 10} {
+				cs.Theta, cs.Difficulty = theta, difficulty
+				got := SelectAction("Concept", cs, nil, ActionHistory{})
+				if got != want {
+					t.Errorf("unvalidated estimates changed practice: mastery=%f theta=%f memoryDifficulty=%f got=%+v want=%+v", mastery, theta, difficulty, got, want)
+				}
+			}
 		}
-		prev = d
+	}
+}
+
+func TestPracticeTargetIsExplicitlyHeuristic(t *testing.T) {
+	cs := reviewedConceptState("Concept", 0.75)
+	got := SelectAction("Concept", cs, nil, ActionHistory{})
+	if got.DifficultyTarget != PracticeDifficultyTarget || !strings.Contains(got.Rationale, "heuristic") {
+		t.Errorf("practice must expose a heuristic generation target, got %+v", got)
+	}
+	if strings.Contains(got.Rationale, "IRT") || strings.Contains(got.Rationale, "70%") {
+		t.Errorf("practice must not claim calibrated IRT success probability, got %+v", got)
 	}
 }

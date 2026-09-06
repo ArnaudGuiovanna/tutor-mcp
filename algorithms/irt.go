@@ -14,7 +14,9 @@ const (
 
 	// A dichotomous 2PL item with discrimination 1 contributes at most 0.25
 	// Fisher information. ConceptState does not persist posterior variance, so
-	// prior response count is used as a conservative cumulative precision proxy.
+	// prior response count is used as a regularization heuristic, not a
+	// calibrated posterior precision. Runtime-generated tasks no longer use
+	// this update because their item parameters have not been calibrated.
 	irtInformationPerObservation = 0.25
 	irtMaxNewtonStep             = 1.0
 )
@@ -87,11 +89,16 @@ func isFiniteIRTItem(item IRTItem) bool {
 		!math.IsNaN(item.Discrimination) && !math.IsInf(item.Discrimination, 0)
 }
 
+// IRTIsInZPD retains a legacy project-specific band for compatibility.
+// This interval is not an empirically established zone of proximal development.
 func IRTIsInZPD(pCorrect float64) bool {
 	return pCorrect >= 0.55 && pCorrect <= 0.80
 }
 
 // FSRSDifficultyToIRT maps FSRS difficulty [1, 10] to IRT scale [-3, 3].
+// Deprecated: FSRS difficulty describes a learner's memory of a concept, not
+// item difficulty. This numerical mapping must not feed a live learner model
+// or pedagogical decision. It remains only for compatibility with old replays.
 func FSRSDifficultyToIRT(fsrsDifficulty float64) float64 {
 	// FSRS difficulty is defined on [1,10]. Bootstrap/imported rows may be
 	// outside that range; normalize them before mapping so one malformed card

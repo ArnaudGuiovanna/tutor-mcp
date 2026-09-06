@@ -7,6 +7,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"tutor-mcp/models"
 )
 
 func TestCanonicalContentHashRejectsMismatch(t *testing.T) {
@@ -152,6 +154,10 @@ func TestAssessmentAttemptEvaluationIsAtomicLinkedAndSingleUse(t *testing.T) {
 	}
 	if out["evidence_verification"] != "assessment_linked_untrusted_evaluation" {
 		t.Fatalf("assessment evidence marker=%v", out["evidence_verification"])
+	}
+	obs := out["observation"].(map[string]any)
+	if obs["bkt_update_mode"] != string(models.BKTLearningOpportunity) || obs["bkt_transition_applied"] != true {
+		t.Fatalf("rubric-linked practice must retain its learning opportunity: %v", obs)
 	}
 
 	attempt, err := store.GetAssessmentAttempt(context.Background(), "L_owner", attemptID)

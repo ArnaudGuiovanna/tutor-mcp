@@ -116,11 +116,12 @@ type ReviseCurriculumParams struct {
 	IdempotentMutationParams
 	DomainID         string                        `json:"domain_id" jsonschema:"target domain ID"`
 	ExpectedVersion  int                           `json:"expected_version" jsonschema:"current graph_version; stale revisions are rejected"`
-	Operation        string                        `json:"operation" jsonschema:"rename | update_metadata | split | merge | remove"`
+	Operation        string                        `json:"operation" jsonschema:"rename (presentation only) | update_metadata (changed definition invalidates prior learning evidence) | split | merge | remove | repair_prerequisites"`
 	SourceConceptIDs []string                      `json:"source_concept_ids" jsonschema:"stable concept IDs affected by the operation"`
 	NewLabel         string                        `json:"new_label,omitempty" jsonschema:"new display label for rename"`
 	Metadata         *CurriculumConceptDefinition  `json:"metadata,omitempty" jsonschema:"replacement metadata for update_metadata"`
 	NewConcepts      []CurriculumConceptDefinition `json:"new_concepts,omitempty" jsonschema:"new competencies created by split or merge"`
+	Prerequisites    map[string][]string           `json:"prerequisites,omitempty" jsonschema:"for repair_prerequisites: complete replacement prerequisite IDs for each source concept ID; an empty list removes its prerequisites"`
 	Provenance       CurriculumProvenanceInput     `json:"provenance" jsonschema:"source and rationale for this revision"`
 	Review           *CurriculumReviewInput        `json:"review,omitempty" jsonschema:"optional unreviewed/in-review annotation"`
 }
@@ -128,7 +129,7 @@ type ReviseCurriculumParams struct {
 func registerReviseCurriculum(server *mcp.Server, deps *Deps) {
 	addTool(server, &mcp.Tool{
 		Name:        "publish_curriculum_revision",
-		Description: "Publish one immutable curriculum revision using optimistic concurrency. Supports rename, metadata update, split, merge, and safe leaf removal; stable IDs and all prior versions are preserved.",
+		Description: "Publish an immutable curriculum revision using optimistic concurrency. Supports presentation-only rename, definition update, split, merge, safe leaf removal and explicit prerequisite repair. Changed definitions reset estimates and invalidate old evidence for routing; history and stable IDs are preserved.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params ReviseCurriculumParams) (*mcp.CallToolResult, any, error) {
 		learnerID, err := getLearnerID(ctx)
 		if err != nil {
@@ -262,7 +263,42 @@ func buildCurriculumRevision(current *models.CurriculumSnapshot, params ReviseCu
 		return nil, nil, err
 	}
 	var newKeys []string
+	if params.Prerequisites != nil && params.Operation != string(models.CurriculumOperationRepairPrerequisites) {
+		return nil, nil, fmt.Errorf("prerequisites is only valid for repair_prerequisites")
+	}
 	switch models.CurriculumOperationType(params.Operation) {
+	case models.CurriculumOperationRepairPrerequisites:
+		if len(sources) == 0 || params.Prerequisites == nil || len(params.Prerequisites) != len(sources) {
+			return nil, nil, fmt.Errorf("repair_prerequisites requires an exact prerequisite map for source_concept_ids")
+		}
+		active := make(map[string]string)
+		for _, concept := range next.Concepts {
+			if concept.Status == models.CurriculumConceptActive {
+				active[concept.ID] = concept.Key
+			}
+		}
+		for _, source := range sources {
+			ids, ok := params.Prerequisites[source.ID]
+			if !ok || len(ids) > maxConceptsPerCall {
+				return nil, nil, fmt.Errorf("missing or oversized prerequisites for %q", source.ID)
+			}
+			keys := make([]string, 0, len(ids))
+			seen := map[string]bool{}
+			for _, id := range ids {
+				key, exists := active[id]
+				if !exists || id == source.ID || seen[id] {
+					return nil, nil, fmt.Errorf("prerequisite IDs must be active, unique and different from their dependent")
+				}
+				seen[id] = true
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			if len(keys) == 0 {
+				delete(next.Graph.Prerequisites, source.Key)
+			} else {
+				next.Graph.Prerequisites[source.Key] = keys
+			}
+		}
 	case models.CurriculumOperationRename:
 		if len(sources) != 1 || strings.TrimSpace(params.NewLabel) == "" {
 			return nil, nil, fmt.Errorf("rename requires exactly one source_concept_id and new_label")
@@ -331,7 +367,7 @@ func buildCurriculumRevision(current *models.CurriculumSnapshot, params ReviseCu
 		retireCurriculumConcepts(next, sources, nil)
 		next.Graph = removeCurriculumGraphKeys(next.Graph, keys)
 	default:
-		return nil, nil, fmt.Errorf("operation must be rename, update_metadata, split, merge, or remove")
+		return nil, nil, fmt.Errorf("operation must be rename, update_metadata, split, merge, remove, or repair_prerequisites")
 	}
 
 	targetIDs := make([]string, 0)

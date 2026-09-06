@@ -88,19 +88,28 @@ func normalizePedagogicalSnapshots(snapshots []*models.PedagogicalSnapshot) any 
 		if s == nil {
 			continue
 		}
+		applicability := "not_invalidated"
+		if s.CurriculumInvalidatedVersion > 0 {
+			applicability = "superseded"
+		}
+		if s.CurriculumInvalidatedVersion < 0 {
+			applicability = "unknown"
+		}
 		out = append(out, map[string]any{
-			"id":                   s.ID,
-			"interaction_id":       s.InteractionID,
-			"learner_id":           s.LearnerID,
-			"domain_id":            s.DomainID,
-			"concept":              s.Concept,
-			"activity_type":        s.ActivityType,
-			"before":               parseSnapshotJSON(s.BeforeJSON),
-			"observation":          parseSnapshotJSON(s.ObservationJSON),
-			"after":                parseSnapshotJSON(s.AfterJSON),
-			"decision":             parseSnapshotJSON(s.DecisionJSON),
-			"interpretation_brief": s.InterpretationBrief,
-			"created_at":           s.CreatedAt,
+			"curriculum_applicability":       applicability,
+			"curriculum_invalidated_version": s.CurriculumInvalidatedVersion,
+			"id":                             s.ID,
+			"interaction_id":                 s.InteractionID,
+			"learner_id":                     s.LearnerID,
+			"domain_id":                      s.DomainID,
+			"concept":                        s.Concept,
+			"activity_type":                  s.ActivityType,
+			"before":                         parseSnapshotJSON(s.BeforeJSON),
+			"observation":                    parseSnapshotJSON(s.ObservationJSON),
+			"after":                          parseSnapshotJSON(s.AfterJSON),
+			"decision":                       parseSnapshotJSON(s.DecisionJSON),
+			"interpretation_brief":           s.InterpretationBrief,
+			"created_at":                     s.CreatedAt,
 		})
 	}
 	return out

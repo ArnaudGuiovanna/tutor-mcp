@@ -21,7 +21,7 @@ process, and horizontal multi-tenant SaaS on PostgreSQL with separate
 API/worker/migrator roles, forced RLS, durable outbox/jobs, encrypted shared
 narrative memory, quotas, audit and recovery runbooks. The regulation pipeline
 (phase FSM + concept/action selectors + gate + threshold resolver) ships
-default-on; the fade controller is opt-in. Direct Discord remains at-least-once
+default-on; automatic help withdrawal from the descriptive autonomy score is disabled. Direct Discord remains at-least-once
 with quarantine of ambiguous outcomes; signed SaaS webhooks expose a stable
 deduplication contract.
 
@@ -67,9 +67,9 @@ The server sits between a learner and an LLM. It splits the job cleanly:
 
 Four loops run from the first session:
 
-- **Learning loop** — Before and after every exchange, the LLM calls `get_next_activity` and `record_interaction`. The runtime updates BKT mastery, FSRS recall, regularized cumulative IRT ability, transfer evidence and misconception status — in real time, on every interaction. The LLM never picks scheduling itself.
+- **Learning loop** — The LLM calls `get_next_activity` and `record_interaction`. The runtime updates BKT estimates, FSRS recall, transfer evidence and misconception status. Evidence-bearing generated tasks can bind to a single-use, curriculum-versioned `decision_id`; the runtime checks their target and activity type, not the semantic truth of host-generated content.
 - **Narrative memory loop** — `record_session_close` asks the LLM for a factual session trace; `update_learner_memory` stores stable memory, pending observations, concept notes, sessions and archives. The next `get_next_activity` call can use those traces to avoid a generic exercise.
-- **Metacognitive loop** — Affect check-ins (`record_affect`), calibration tracking (`calibration_check` / `record_calibration_result`) and an autonomy score observe the learner's relationship to the system. A factual mirror surfaces consolidated dependency patterns — the system aims to make itself progressively unnecessary.
+- **Metacognitive loop** — Affect check-ins and calibration tracking expose descriptive observations with sample coverage. Mirrors return facts, an observation window and a dialogue intent; the LLM generates the reflection. Missing observations are not evidence of dependency or perfect calibration.
 - **Motivation loop** — A brief engine selects one motivational angle per exercise (milestone, competence value, growth mindset, affect reframe, plateau recontext, utility value) and emits *signals + instruction* — never canned text. The LLM phrases it.
 
 The pillars of an Intelligent Tutoring System map cleanly:
@@ -77,7 +77,7 @@ The pillars of an Intelligent Tutoring System map cleanly:
 | ITS pillar | Owner |
 |---|---|
 | **Domain model** (concept graph, prerequisites) | Tutor MCP runtime — KST-validated |
-| **Learner model** (mastery, ability, recall, transfer) | Tutor MCP runtime — BKT, regularized online IRT, PFA |
+| **Learner model** (mastery estimates, recall, transfer) | Tutor MCP runtime — BKT, FSRS-5, assessment/transfer evidence |
 | **Pedagogical model** (scheduling, regulation, alerts) | Tutor MCP runtime — FSRS, evidence gates, orchestrator |
 | **Interface + content** | The LLM — Claude / ChatGPT / Le Chat / Gemini |
 
@@ -154,7 +154,7 @@ handler is never executed again for that key.
 | `get_pending_alerts` | Learning + metacognitive alerts requiring action |
 | `get_next_activity` | Next optimal activity + episodic context + reasoning request + tutor mode + motivation brief + mastery uncertainty + transfer profile |
 | `prepare_assessment_attempt` / `submit_assessment_attempt` / `cancel_assessment_attempt` | Freeze task/rubric before the response, commit the response before evaluation, or explicitly cancel the attempt |
-| `record_interaction` | Persist an observation and update BKT/FSRS/IRT; unlinked practice stays explicitly unverified, while retention/demonstration/transfer evidence references a submitted/evaluated attempt |
+| `record_interaction` | Persist an observation and update BKT/FSRS; unlinked practice stays explicitly unverified, while retention/demonstration/transfer evidence references a submitted/evaluated attempt |
 | `check_mastery` | Mastery-challenge readiness: BKT + evidence diversity + uncertainty + transfer status |
 | `get_olm_snapshot` | Open Learner Model: evidence-backed stages per concept — estimated, retained, demonstrated and transferred |
 | `get_dashboard_state` | Evidence-backed progress (estimated/retained/demonstrated/transferred), routing state, retention, autonomy, calibration bias and affect history |
@@ -166,7 +166,7 @@ handler is never executed again for that key.
 | `init_domain` | Create domain with concept graph, prerequisites, personal goal, and immutable curriculum version 1 |
 | `add_concepts` | Append concepts with `expected_version` CAS; optional outcomes/level/criteria metadata; progress is not reset |
 | `get_curriculum_snapshot` | Read latest/historical immutable versions, stable concept IDs, outcomes, criteria, provenance and review state |
-| `publish_curriculum_revision` | CAS-protected rename, metadata update, split, merge, or safe removal with a complete audit envelope |
+| `publish_curriculum_revision` | CAS-protected rename, definition update, split, merge, safe removal or explicit prerequisite repair. Changed definitions reset estimates and supersede old evidence for routing; historical records remain auditable. |
 | `validate_domain_graph` | Audit graph: cycles, orphans, depth, disconnections |
 | `archive_domain` / `unarchive_domain` / `delete_domain` | Lifecycle; deletion is a runtime-hidden tombstone that preserves curriculum and learning evidence |
 | `set_domain_priority` | Re-rank domains for scheduling weight |
@@ -217,7 +217,7 @@ handler is never executed again for that key.
 
 ### Alert engine
 
-The scheduler detects nine alert types — learning (`FORGETTING`, `PLATEAU`, `ZPD_DRIFT`, `OVERLOAD`, `MASTERY_READY`) and metacognitive (`DEPENDENCY_INCREASING`, `CALIBRATION_DIVERGING`, `AFFECT_NEGATIVE`, `TRANSFER_BLOCKED`). `MASTERY_READY` means that attempt-linked retained, varied evidence is sufficient to *attempt* a challenge; it is not a demonstrated-mastery claim, and the same recent trusted transfer failure that blocks `check_mastery` suppresses the alert. Every delivery rechecks explicit consent, DND, the learner's DST-aware local window, frequency and local-day cap through an atomic reservation. Archived/deleted domains are filtered out. Unreviewed high-stakes domains cannot produce demonstrated claims or intrusive suggestions; only trusted `human_review` assessment evidence opens that gate, and the runtime does not invent an external reviewer.
+The scheduler uses learning and metacognitive alerts. PFA-based `PLATEAU` and composite-score `DEPENDENCY_INCREASING` producers have been removed; legacy records remain readable. `MASTERY_READY` means that attempt-linked retained, varied evidence is sufficient to *attempt* a challenge; it is not a demonstrated-mastery claim, and recent trusted transfer failure suppresses the alert. Every delivery rechecks consent, DND, local time windows and frequency caps. Unreviewed high-stakes domains cannot produce demonstrated claims or intrusive suggestions; only trusted `human_review` evidence opens that gate, and the runtime does not invent an external reviewer.
 
 ## Cognitive science engine
 
@@ -225,14 +225,13 @@ Pure-function algorithms running on every interaction, composed by the regulatio
 
 | Algorithm | Role |
 |---|---|
-| **BKT** + individualized BKT | Estimates mastery confidence per concept, not just whether the learner answered right today; recent-history profile individualizes `P(Learn)`, `P(Slip)`, `P(Guess)` — never tuned by the LLM |
-| **FSRS** | Decides when to bring a concept back, using stability and difficulty curves |
-| **IRT** | Tracks learner ability θ with a regularized cumulative online update so one binary response cannot saturate the estimate |
-| **PFA** | Weighs wins and losses on each concept to predict how the next attempt is likely to go |
+| **BKT** + individualized BKT | Bayesian observation is separate from learning transition: diagnostic/mastery/transfer probes update the posterior only; instruction/practice retain a modeled learning opportunity. Runtime-selected mode and effective parameters are audited; recent-history adjustments remain uncalibrated heuristics, not LLM-tuned coefficients. |
+| **FSRS-5** | Reference memory equations with a whole-day scheduling adapter; existing card history is preserved |
+| **Task difficulty** | Transparent generation heuristic; not a probability of success. FSRS difficulty is no longer treated as an IRT item parameter; legacy θ is preserved but not updated or used to set difficulty |
 | **KST** | Validates prerequisite graph; gates new concepts on mastery of ancestors |
 | **Structured transfer** | Checks whether knowledge moves beyond the training pattern across `near`/`far`/`debugging`/`teaching`/`creative` probes |
 
-The **regulation pipeline** runs as a 7-stage chain inside `get_next_activity`: threshold resolver → goal decomposer → phase FSM (`DIAGNOSTIC ↔ INSTRUCTION ↔ MAINTENANCE`) → concept selector → gate (anti-repeat / session-budget / no-fringe escape) → action selector → fade controller. Pure functions are unit-tested (~90 tests); the orchestrator integration is covered by SQLite in-memory + migration tests. Full design rationale in [`docs/regulation-design/`](./docs/regulation-design/).
+The **regulation pipeline** runs inside `get_next_activity`: threshold resolver → goal decomposer → phase FSM (`DIAGNOSTIC ↔ INSTRUCTION ↔ MAINTENANCE`) → concept selector → gate → action selector → frozen decision contract. Historical design notes are in [`docs/regulation-design/`](./docs/regulation-design/); [current corrections and limitations](docs/runtime-pedagogique-2026-09.md) supersede their former PFA/IRT/fade assumptions.
 
 ## Configuration
 
@@ -280,7 +279,7 @@ Environment variables read at boot:
 | `REGULATION_THRESHOLD` | `on` | `off` reverts to legacy split thresholds (BKT 0.85 / KST 0.70 / Mid 0.80) |
 | `REGULATION_GOAL` | `on` | `off` hides `set_goal_relevance` / `get_goal_relevance` and drops the goal-aware prompt section |
 | `REGULATION_ACTION` / `_CONCEPT` / `_GATE` | `on` | `off` drops the system-prompt appendix only — the selector / gate logic always runs |
-| `REGULATION_FADE` | **`off`** *(opt-in)* | Strict literal `on` reduces motivational/hint verbosity and exposes advisory fade parameters. Scheduler frequency, ZPD target and proactive-review cadence are not yet wired to those advisory fields. |
+| `REGULATION_FADE` | **`off`** *(compatibility flag)* | Strict literal `on` exposes descriptive autonomy metrics and `fade_status`; it does not withdraw help or change scheduling from an unvalidated composite score. |
 
 Credential checks, registration, verification and recovery have distinct
 rate-limit buckets. The MCP endpoint applies both per-IP/per-learner rates and
@@ -307,7 +306,7 @@ are specified in the [learning integrity contract](./docs/learning-integrity.md)
 ```
 main.go              HTTP + MCP handler + OAuth + scheduler
 auth/                OAuth 2.1 + JWT + PKCE + rate limiter
-algorithms/          BKT / FSRS / regularized IRT / PFA / KST + thresholds
+algorithms/          BKT / FSRS-5 / KST + thresholds; standalone IRT math
 engine/              Orchestrator + phase FSM + selectors + gate + fade
                      + alert / motivation / mirror / replay / OLM
 models/              Typed structs (learner, domain, interactions, regulation, …)
@@ -349,7 +348,7 @@ The runtime deliberately separates deterministic decisions from LLM coaching fre
 
 ## Acknowledgments
 
-Stands on the shoulders of: Corbett & Anderson (BKT, 1995), Open-Spaced-Repetition (FSRS), Lord & Novick (IRT, 1968), Pavlik et al. (PFA, 2009), Falmagne & Doignon (KST, 2011), Hidi & Renninger (interest phases, 2006), McClelland / McNaughton / O'Reilly (CLS-inspired memory layering, 1995).
+Stands on the shoulders of: Corbett & Anderson (BKT, 1995), Open-Spaced-Repetition (FSRS), Falmagne & Doignon (KST, 2011), Hidi & Renninger (interest phases, 2006), McClelland / McNaughton / O'Reilly (CLS-inspired memory layering, 1995).
 
 ## Operations · Security · Contributing · Roadmap
 
@@ -359,7 +358,7 @@ Stands on the shoulders of: Corbett & Anderson (BKT, 1995), Open-Spaced-Repetiti
   [PITR and tenant restore](./docs/tenant-restore-runbook.md).
 - **Security** — private disclosure channels and operator hardening checklist: [SECURITY.md](./SECURITY.md). Do not open public issues for vulnerabilities.
 - **Contributing** — fork, branch from `staging`, conventional commits, test plan in the PR: [CONTRIBUTING.md](./CONTRIBUTING.md). Single-author maintained; small focused changes land fastest.
-- **Roadmap** — tracked on the [issue tracker](https://github.com/ArnaudGuiovanna/tutor-mcp/issues) (`p0` urgent, `p1` sprint, `p2` when convenient). Deferred statistical refinements: [#48](https://github.com/ArnaudGuiovanna/tutor-mcp/issues/48) PFA fidelity and [#52](https://github.com/ArnaudGuiovanna/tutor-mcp/issues/52) FSRS sub-day intervals. Shipped log in [CHANGELOG.md](./CHANGELOG.md).
+- **Roadmap** — see the [runtime corrections and remaining work](docs/runtime-pedagogique-2026-09.md) and [issue tracker](https://github.com/ArnaudGuiovanna/tutor-mcp/issues). PFA has been removed; FSRS sub-day scheduling remains deferred. Shipped log in [CHANGELOG.md](./CHANGELOG.md).
 
 ## License
 

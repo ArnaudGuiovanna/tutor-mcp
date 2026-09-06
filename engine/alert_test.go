@@ -80,7 +80,9 @@ func masteryReadyEvidence(now time.Time, learnerID, concept string) []*models.In
 			Concept:      concept,
 			ActivityType: string(models.ActivityFeynmanPrompt),
 			Success:      true,
-			CreatedAt:    now.Add(-2 * time.Hour),
+			// The subsequent recall must be cold for at least 24 hours
+			// after this explanation, not merely after the first practice.
+			CreatedAt: now.Add(-30 * time.Hour),
 		},
 		{
 			LearnerID:    learnerID,
@@ -419,9 +421,9 @@ func TestComputeAlertsForgettingCriticalSuppressesFailureZPDDrift(t *testing.T) 
 	}
 }
 
-func TestComputeAlertsIRTPredictiveZPDDrift(t *testing.T) {
-	// Concept with low theta and high difficulty → IRT pCorrect < 0.55
-	// Theta = -1.0, FSRS difficulty = 8.0 → IRT difficulty ≈ 1.67
+func TestComputeAlertsLegacyThetaCannotPredictGeneratedItemDifficulty(t *testing.T) {
+	// Neither a legacy theta nor a concept's FSRS difficulty calibrates an
+	// unseen generated item. Those values alone must not produce a ZPD alert.
 	// pCorrect = 1/(1+exp(-1*(-1.0-1.67))) ≈ 0.065 — well below 0.55
 	states := []*models.ConceptState{
 		alertNonForgettingState("channels", 0.3),
@@ -437,8 +439,8 @@ func TestComputeAlertsIRTPredictiveZPDDrift(t *testing.T) {
 			found = true
 		}
 	}
-	if !found {
-		t.Error("expected IRT-predictive ZPD_DRIFT (info) for channels")
+	if found {
+		t.Error("uncalibrated legacy theta must not create a predictive ZPD alert")
 	}
 }
 
@@ -457,9 +459,9 @@ func TestComputeAlertsForgettingCriticalSuppressesPredictiveZPDDrift(t *testing.
 	}
 }
 
-func TestComputeAlertsIRTPredictiveSkipsWhenFailureBased(t *testing.T) {
-	// Concept already has 3 failures → failure-based ZPD_DRIFT (warning) exists.
-	// IRT-predictive should NOT add a duplicate.
+func TestComputeAlertsConsecutiveFailuresRemainActionableWithLegacyTheta(t *testing.T) {
+	// Three observed failures still produce one warning regardless of legacy
+	// theta; removing unsupported prediction must preserve this observation.
 	states := []*models.ConceptState{
 		alertNonForgettingState("pointers", 0.3),
 	}
@@ -484,7 +486,7 @@ func TestComputeAlertsIRTPredictiveSkipsWhenFailureBased(t *testing.T) {
 	}
 }
 
-func TestComputeAlertsDependencyIncreasing(t *testing.T) {
+func TestComputeAlertsCompositeDeclineDoesNotDiagnoseDependency(t *testing.T) {
 	autonomyScores := []float64{0.4, 0.5, 0.6} // declining (newest first)
 	alerts := ComputeMetacognitiveAlerts(autonomyScores, 0.3, nil, nil)
 
@@ -494,8 +496,8 @@ func TestComputeAlertsDependencyIncreasing(t *testing.T) {
 			found = true
 		}
 	}
-	if !found {
-		t.Error("expected DEPENDENCY_INCREASING alert")
+	if found {
+		t.Error("declining composite score must not establish increasing dependency")
 	}
 }
 

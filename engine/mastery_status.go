@@ -13,8 +13,8 @@ import (
 
 const minimumDelayedRecallGap = 24 * time.Hour
 
-// MasteryStage is a learner-facing evidence ladder. Each stage implies the
-// previous one; a probability estimate alone is never labelled demonstrated.
+// MasteryStage is a compact learner-facing summary of the strongest supported
+// evidence axis. It does not imply that the other axes have been observed.
 type MasteryStage string
 
 // RetentionEvidenceTrust makes the distinction between routing observations
@@ -39,7 +39,9 @@ const (
 )
 
 // MasteryStatus unifies the semantics consumed by check_mastery and the OLM.
-// The boolean fields are cumulative, making the hierarchy explicit to clients.
+// Estimated, Retained and Demonstrated are independent: for example, an expert
+// can demonstrate a capability before a delayed recall or a high model estimate
+// exists. Transferred additionally requires demonstrated assessment evidence.
 type MasteryStatus struct {
 	Stage             MasteryStage           `json:"stage"`
 	Estimated         bool                   `json:"estimated"`
@@ -76,64 +78,113 @@ func AssessMasteryStatus(
 		TransferReadiness: TransferReadinessUnobserved,
 		RetentionEvidence: RetentionEvidenceNone,
 	}
-	if cs == nil {
-		return status
-	}
-	status.MasteryEstimate = cs.PMastery
-	if cs.CardState != "new" {
-		status.Stage = MasteryStageDeveloping
-		status.RetentionEstimate = algorithms.CurrentRetrievability(now, cs.LastReview, cs.Stability)
+	if cs != nil {
+		status.MasteryEstimate = cs.PMastery
+		status.Estimated = cs.PMastery >= algorithms.MasteryBKT()
+		if cs.CardState != "new" {
+			status.Stage = MasteryStageDeveloping
+			status.RetentionEstimate = algorithms.CurrentRetrievability(now, cs.LastReview, cs.Stability)
+		}
+		uncertainty := ComputeMasteryUncertainty(cs, interactions, MasteryEvidenceProfile{Now: now})
+		status.Confidence = uncertainty.ConfidenceLabel
 	}
 
+	assessments = assessmentEvidenceAt(learnerID, concept, assessments, now)
 	evidence := MasteryEvidenceQuality(BuildEvidenceProfile(learnerID, concept, interactions, now))
-	uncertainty := ComputeMasteryUncertainty(cs, interactions, MasteryEvidenceProfile{Now: now})
 	verifiedTransfers := trustedTransferRecords(concept, transfers, assessments)
 	transfer := BuildTrustedTransferProfileAt(concept, verifiedTransfers, now)
 	status.EvidenceQuality = evidence.Quality
-	status.Confidence = uncertainty.ConfidenceLabel
 	status.TransferReadiness = transfer.ReadinessLabel
+	retentionTimeline := assessmentResponseTimeline(learnerID, concept, interactions, assessments, now)
 	linkedRecall := hasAssessmentLinkedDelayedSuccessfulRecall(
-		learnerID, concept, interactions, assessments, minimumDelayedRecallGap,
+		learnerID, concept, retentionTimeline, assessments, minimumDelayedRecallGap, now,
 	)
 	if linkedRecall {
 		status.RetentionEvidence = RetentionEvidenceAssessmentLinked
-	} else if hasDelayedRetrievalObservation(learnerID, concept, interactions, minimumDelayedRecallGap) {
+	} else if hasDelayedRetrievalObservation(learnerID, concept, retentionTimeline, minimumDelayedRecallGap, now) {
 		status.RetentionEvidence = RetentionEvidenceUnverifiedOnly
 	}
 
-	status.Estimated = cs.PMastery >= algorithms.MasteryBKT()
-	if !status.Estimated {
-		return status
-	}
-	status.Stage = MasteryStageEstimated
-
-	status.Retained = cs.CardState != "new" &&
+	status.Retained = cs != nil && cs.CardState != "new" &&
 		status.RetentionEstimate >= algorithms.RetentionRecallRoutingThreshold && linkedRecall
-	if !status.Retained {
-		return status
-	}
-	status.Stage = MasteryStageRetained
-
 	status.Demonstrated = hasTrustedPassedDemonstration(concept, assessments)
-	if !status.Demonstrated {
-		return status
-	}
-	status.Stage = MasteryStageDemonstrated
+	status.Transferred = status.Demonstrated &&
+		(transfer.ReadinessLabel == TransferReadinessReady || transfer.ReadinessLabel == TransferReadinessRobust)
 
-	status.Transferred = transfer.ReadinessLabel == TransferReadinessReady || transfer.ReadinessLabel == TransferReadinessRobust
-	if status.Transferred {
+	switch {
+	case status.Transferred:
 		status.Stage = MasteryStageTransferred
+	case status.Demonstrated:
+		status.Stage = MasteryStageDemonstrated
+	case status.Retained:
+		status.Stage = MasteryStageRetained
+	case status.Estimated:
+		status.Stage = MasteryStageEstimated
 	}
 	return status
 }
 
-func delayedRetrievalCandidates(learnerID, concept string, interactions []*models.Interaction, minimumGap time.Duration) []*models.Interaction {
+// assessmentEvidenceAt excludes other learners and evidence that has not yet
+// completed at the decision clock. Trust remains assigned by the persistence
+// boundary, including its human-review-only policy for high-stakes domains.
+func assessmentEvidenceAt(learnerID, concept string, assessments []*models.AssessmentAttempt, now time.Time) []*models.AssessmentAttempt {
+	var relevant []*models.AssessmentAttempt
+	for _, attempt := range assessments {
+		if attempt == nil || attempt.LearnerID != learnerID || attempt.ConceptID != concept ||
+			attempt.Status != models.AssessmentAttemptEvaluated || attempt.CurriculumInvalidatedVersion != 0 ||
+			attempt.SubmittedAt == nil || attempt.EvaluatedAt == nil ||
+			attempt.SubmittedAt.IsZero() || attempt.EvaluatedAt.IsZero() ||
+			attempt.SubmittedAt.After(*attempt.EvaluatedAt) ||
+			(!now.IsZero() && attempt.EvaluatedAt.After(now)) {
+			continue
+		}
+		relevant = append(relevant, attempt)
+	}
+	return relevant
+}
+
+// assessmentResponseTimeline dates a linked retrieval to the committed learner
+// response, not to grading. Otherwise grading an immediate response a day later
+// could manufacture a delayed recall. Copies preserve callers' audit records;
+// duplicates of one attempt share its response time and cannot imply a delay.
+func assessmentResponseTimeline(learnerID, concept string, interactions []*models.Interaction, assessments []*models.AssessmentAttempt, now time.Time) []*models.Interaction {
+	attempts := make(map[string]*models.AssessmentAttempt, len(assessments))
+	for _, attempt := range assessments {
+		attempts[attempt.ID] = attempt
+	}
+	timeline := make([]*models.Interaction, 0, len(interactions))
+	for _, interaction := range interactions {
+		if interaction == nil || (!now.IsZero() && interaction.CreatedAt.After(now)) {
+			continue
+		}
+		if attempt := attempts[interaction.AssessmentAttemptID]; assessmentMatchesEvaluatedInteraction(attempt, interaction, learnerID, concept) {
+			observation := *interaction
+			observation.CreatedAt = *attempt.SubmittedAt
+			timeline = append(timeline, &observation)
+			if interaction.CreatedAt.After(observation.CreatedAt) {
+				// Keep the later grading/feedback event as an exposure for
+				// subsequent tasks, but never as another successful retrieval.
+				feedback := *interaction
+				feedback.Success = false
+				feedback.AssessmentAttemptID = ""
+				timeline = append(timeline, &feedback)
+			}
+		} else {
+			timeline = append(timeline, interaction)
+		}
+	}
+	return timeline
+}
+
+func delayedRetrievalCandidates(learnerID, concept string, interactions []*models.Interaction, minimumGap time.Duration, now time.Time) []*models.Interaction {
 	if minimumGap <= 0 {
 		minimumGap = minimumDelayedRecallGap
 	}
 	var relevant []*models.Interaction
 	for _, interaction := range interactions {
-		if interaction == nil || interaction.LearnerID != learnerID || interaction.Concept != concept || interaction.CreatedAt.IsZero() {
+		if interaction == nil || interaction.LearnerID != learnerID || interaction.Concept != concept ||
+			interaction.CreatedAt.IsZero() || (!now.IsZero() && interaction.CreatedAt.After(now)) ||
+			!isCognitiveExposureActivity(interaction.ActivityType) {
 			continue
 		}
 		relevant = append(relevant, interaction)
@@ -142,37 +193,59 @@ func delayedRetrievalCandidates(learnerID, concept string, interactions []*model
 		return nil
 	}
 	sort.Slice(relevant, func(i, j int) bool { return relevant[i].CreatedAt.Before(relevant[j].CreatedAt) })
-	oldestEvidence := relevant[0].CreatedAt
+	var previousExposure time.Time
 	var candidates []*models.Interaction
-	for _, interaction := range relevant[1:] {
-		if interaction.CreatedAt.Sub(oldestEvidence) < minimumGap {
-			continue
+	for i := 0; i < len(relevant); {
+		interaction := relevant[i]
+		j := i + 1
+		for j < len(relevant) && relevant[j].CreatedAt.Equal(interaction.CreatedAt) {
+			j++
 		}
-		if interaction.Success && isRetrievalActivity(interaction.ActivityType) {
+		// A same-time exposure has no provable order relative to the response.
+		// Reject that group conservatively instead of depending on input order.
+		if j == i+1 && !previousExposure.IsZero() &&
+			interaction.CreatedAt.Sub(previousExposure) >= minimumGap &&
+			interaction.Success && interaction.HintsRequested == 0 && isRetrievalActivity(interaction.ActivityType) {
 			candidates = append(candidates, interaction)
 		}
+		// Every cognitive exposure resets the interval, including failed or
+		// assisted work and instruction; only a cold retrieval can pass it.
+		previousExposure = interaction.CreatedAt
+		i = j
 	}
 	return candidates
 }
 
-func hasDelayedRetrievalObservation(learnerID, concept string, interactions []*models.Interaction, minimumGap time.Duration) bool {
-	return len(delayedRetrievalCandidates(learnerID, concept, interactions, minimumGap)) > 0
+func hasDelayedRetrievalObservation(learnerID, concept string, interactions []*models.Interaction, minimumGap time.Duration, now time.Time) bool {
+	return len(delayedRetrievalCandidates(learnerID, concept, interactions, minimumGap, now)) > 0
 }
 
-func hasAssessmentLinkedDelayedSuccessfulRecall(learnerID, concept string, interactions []*models.Interaction, assessments []*models.AssessmentAttempt, minimumGap time.Duration) bool {
+func hasAssessmentLinkedDelayedSuccessfulRecall(learnerID, concept string, interactions []*models.Interaction, assessments []*models.AssessmentAttempt, minimumGap time.Duration, now time.Time) bool {
 	attempts := make(map[string]*models.AssessmentAttempt, len(assessments))
 	for _, attempt := range assessments {
 		if attempt != nil && attempt.ID != "" {
 			attempts[attempt.ID] = attempt
 		}
 	}
-	for _, interaction := range delayedRetrievalCandidates(learnerID, concept, interactions, minimumGap) {
+	for _, interaction := range delayedRetrievalCandidates(learnerID, concept, interactions, minimumGap, now) {
 		attempt := attempts[interaction.AssessmentAttemptID]
 		if assessmentMatchesEvaluatedInteraction(attempt, interaction, learnerID, concept) && attempt.Passed {
 			return true
 		}
 	}
 	return false
+}
+
+func isCognitiveExposureActivity(activityType string) bool {
+	if isRetrievalActivity(activityType) {
+		return true
+	}
+	switch models.ActivityType(activityType) {
+	case models.ActivityNewConcept, models.ActivityPractice, models.ActivityDebugMisconception:
+		return true
+	default:
+		return false
+	}
 }
 
 func isRetrievalActivity(activityType string) bool {
@@ -239,7 +312,7 @@ func isTrustedPassedAssessment(attempt *models.AssessmentAttempt, concept string
 
 func isTrustedEvaluatedAssessment(attempt *models.AssessmentAttempt, concept string) bool {
 	if attempt == nil || attempt.ConceptID != concept || attempt.ID == "" ||
-		attempt.Status != models.AssessmentAttemptEvaluated || !attempt.TrustedEvaluation ||
+		attempt.Status != models.AssessmentAttemptEvaluated || attempt.CurriculumInvalidatedVersion != 0 || !attempt.TrustedEvaluation ||
 		attempt.SubmittedAt == nil || attempt.EvaluatedAt == nil {
 		return false
 	}
@@ -256,7 +329,7 @@ func assessmentMatchesEvaluatedInteraction(attempt *models.AssessmentAttempt, in
 		attempt.ID == interaction.AssessmentAttemptID &&
 		attempt.LearnerID == learnerID && attempt.ConceptID == concept &&
 		attempt.ActivityType == interaction.ActivityType &&
-		attempt.Status == models.AssessmentAttemptEvaluated &&
+		attempt.Status == models.AssessmentAttemptEvaluated && attempt.CurriculumInvalidatedVersion == 0 &&
 		attempt.SubmittedAt != nil && attempt.EvaluatedAt != nil
 }
 

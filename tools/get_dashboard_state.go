@@ -300,22 +300,31 @@ func registerGetDashboardState(server *mcp.Server, deps *Deps) {
 			}
 			allInteractions = append(allInteractions, domainInteractions...)
 		}
-		var calibBias float64
+		var calibHistory []float64
 		if len(domains) == 1 {
-			calibBias, err = deps.Store.GetCalibrationBiasInDomain(ctx, learnerID, domains[0].ID, 20)
+			calibHistory, err = deps.Store.GetCalibrationBiasHistoryInDomain(ctx, learnerID, domains[0].ID, 20)
 		} else {
-			calibBias, err = deps.Store.GetCalibrationBias(ctx, learnerID, 20)
+			calibHistory, err = deps.Store.GetCalibrationBiasHistory(ctx, learnerID, 20)
 		}
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to load dashboard calibration", err)
 			return r, nil, nil
 		}
+		// Keep signed bias as its own descriptive output. Prediction accuracy
+		// below is computed from individual errors, not the absolute mean.
+		calibBias := 0.0
+		for _, delta := range calibHistory {
+			calibBias += delta
+		}
+		if len(calibHistory) > 0 {
+			calibBias /= float64(len(calibHistory))
+		}
 
 		autonomy := engine.ComputeAutonomyMetrics(engine.AutonomyInput{
-			Interactions:    allInteractions,
-			ConceptStates:   states,
-			CalibrationBias: calibBias,
-			SessionGap:      2 * time.Hour,
+			Interactions:      allInteractions,
+			ConceptStates:     states,
+			CalibrationDeltas: calibHistory,
+			SessionGap:        2 * time.Hour,
 		})
 
 		affects, err := deps.Store.GetRecentAffectStates(ctx, learnerID, 10)
@@ -348,6 +357,8 @@ func registerGetDashboardState(server *mcp.Server, deps *Deps) {
 			"alerts":                            alerts,
 			"signal":                            signal,
 			"autonomy_score":                    autonomy.Score,
+			"autonomy_score_status":             autonomy.ScoreStatus,
+			"autonomy_components":               autonomy,
 			"calibration_bias":                  calibBias,
 			"affect_last_n":                     affectLastN,
 			"dependency_trend":                  dependencyTrend,

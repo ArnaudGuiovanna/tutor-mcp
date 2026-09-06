@@ -13,7 +13,7 @@ type BKTState struct {
 }
 
 // bktEpsilon is the minimum allowed marginal probability used to clamp the
-// Bayesian denominator in BKTUpdate. With degenerate inputs (e.g.
+// Bayesian denominator in BKTObserve. With degenerate inputs (e.g.
 // PMastery=0 and PGuess=0 on a "correct" observation), pCorrect collapses to
 // zero and the 0/0 division yields NaN, poisoning every downstream consumer.
 // Clamping to a small positive number preserves the standard update path for
@@ -24,16 +24,26 @@ const bktEpsilon = 1e-9
 // MasteryKST, MasteryMid). The bascule REGULATION_THRESHOLD=on collapses
 // them to a single 0.85 — see docs/regulation-design/07-threshold-resolver.md.
 
+// BKTUpdate preserves the traditional observation-plus-transition update for
+// an opportunity to learn. Measurement-only callers must use BKTObserve.
 func BKTUpdate(state BKTState, correct bool) BKTState {
+	return BKTTransition(BKTObserve(state, correct))
+}
+
+// BKTObserve updates the posterior from the response alone. PLearn and PForget
+// are preserved as parameters but do not affect this measurement. Separating
+// observation and state transition follows the KT inference model; omitting a
+// transition for assessment is the runtime's explicit measurement policy.
+// Reference: https://www.cs.cmu.edu/~listen/BNT-SM/kt.html
+func BKTObserve(state BKTState, correct bool) BKTState {
 	var pMasteryGivenObs float64
 	if correct {
 		pCorrectMastery := 1.0 - state.PSlip
 		pCorrectNotMastery := state.PGuess
 		pCorrect := pCorrectMastery*state.PMastery + pCorrectNotMastery*(1-state.PMastery)
 		// Guard against pCorrect==0 (e.g. PMastery=0 ∧ PGuess=0) which would
-		// produce a NaN. Clamping to bktEpsilon makes the posterior fall back
-		// to ~0, which is the correct limit when the observation has zero
-		// modelled probability under either hypothesis.
+		// produce a NaN. This numerical fallback is not a uniquely defined
+		// Bayesian posterior for an impossible observation.
 		if pCorrect < bktEpsilon {
 			pCorrect = bktEpsilon
 		}
@@ -49,9 +59,17 @@ func BKTUpdate(state BKTState, correct bool) BKTState {
 		}
 		pMasteryGivenObs = pIncorrectMastery * state.PMastery / pIncorrect
 	}
-	newPMastery := pMasteryGivenObs*(1-state.PForget) + (1-pMasteryGivenObs)*state.PLearn
 	result := state
-	result.PMastery = clamp(newPMastery, 0, 1)
+	result.PMastery = clamp(pMasteryGivenObs, 0, 1)
+	return result
+}
+
+// BKTTransition applies one modeled learning opportunity to an already updated
+// posterior. PForget is a per-transition probability here, not elapsed-time
+// forgetting. A response-only observation must apply neither transition term.
+func BKTTransition(state BKTState) BKTState {
+	result := state
+	result.PMastery = clamp(state.PMastery*(1-state.PForget)+(1-state.PMastery)*state.PLearn, 0, 1)
 	return result
 }
 

@@ -33,7 +33,7 @@ func (s *Store) GetTransferScoresBatchInDomain(ctx context.Context, learnerID, d
 
 	rows, err := s.query(ctx, `SELECT id, learner_id, domain_id, assessment_attempt_id,
        concept_id, context_type, score, session_id, created_at
-       FROM transfer_records
+       FROM `+currentTransfersSQL+` AS transfer_records
        WHERE learner_id = ? AND domain_id = ?
          AND concept_id IN (`+strings.Join(placeholders, ",")+`)
        ORDER BY concept_id, created_at DESC`, args...)
@@ -92,7 +92,7 @@ func (s *Store) GetEvaluatedAssessmentAttemptsBatchInDomain(ctx context.Context,
        JOIN domains d ON d.id = a.domain_id AND d.learner_id = a.learner_id
        WHERE a.learner_id = ? AND a.domain_id = ?
          AND a.concept_id IN (`+strings.Join(placeholders, ",")+`)
-         AND a.status = 'evaluated'
+         AND a.status = 'evaluated' AND a.curriculum_invalidated_version = 0
          AND a.submitted_at IS NOT NULL AND a.evaluated_at IS NOT NULL
        )
        SELECT `+assessmentColumns+`

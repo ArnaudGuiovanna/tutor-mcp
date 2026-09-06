@@ -200,18 +200,14 @@ func TestNextIntervalFloorAtOne(t *testing.T) {
 }
 
 func TestNextRecallStabilityRatings(t *testing.T) {
-	// Hard, Good, Easy each apply a different modifier (w[15], 1.0, w[17]).
-	// With default weights, Hard's modifier is the smallest, so Hard <= Easy <= Good.
-	// (The default w[17] is < 1.0, which makes Easy < Good in this configuration.)
+	// FSRS-5 uses w[15] < 1 for Hard and w[16] > 1 for Easy. A better
+	// recall rating must yield greater stability for the same prior state.
 	d, s, r := 5.0, 2.0, 0.9
 	hard := nextRecallStability(d, s, r, Hard)
 	good := nextRecallStability(d, s, r, Good)
 	easy := nextRecallStability(d, s, r, Easy)
-	if hard > easy {
-		t.Errorf("Hard stability %f should be <= Easy %f", hard, easy)
-	}
-	if hard > good {
-		t.Errorf("Hard stability %f should be <= Good %f", hard, good)
+	if !(hard < good && good < easy) {
+		t.Errorf("expected Hard < Good < Easy, got %f, %f, %f", hard, good, easy)
 	}
 	// All should be positive and finite.
 	for name, v := range map[string]float64{"hard": hard, "good": good, "easy": easy} {

@@ -418,7 +418,7 @@ func TestOrchestrate_UsesInjectedLoggerLevelForFSM(t *testing.T) {
 
 // ─── MAINTENANCE → INSTRUCTION ─────────────────────────────────────────────
 
-func TestOrchestrate_Maintenance_RetentionLow_TransitionsToInstruction(t *testing.T) {
+func TestOrchestrate_Maintenance_RetentionLowRecallsWithoutPhaseChange(t *testing.T) {
 	store := setupOrchStore(t)
 	domainID := seedOrchDomain(t, store, []string{"A"}, nil, models.PhaseMaintenance)
 	setGoalRelevance(t, store, domainID, map[string]float64{"A": 1.0})
@@ -434,12 +434,94 @@ func TestOrchestrate_Maintenance_RetentionLow_TransitionsToInstruction(t *testin
 		t.Fatal(err)
 	}
 
-	if _, err := Orchestrate(context.Background(), store, defaultInput(domainID)); err != nil {
+	activity, err := Orchestrate(context.Background(), store, defaultInput(domainID))
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if activity.Type != models.ActivityRecall || activity.Concept != "A" {
+		t.Fatalf("forgotten concept needs recall, got %+v", activity)
+	}
 	d, _ := store.GetDomainByID(context.Background(), domainID)
-	if d.Phase != models.PhaseInstruction {
-		t.Errorf("expected transition to INSTRUCTION on retention drop, got phase=%q", d.Phase)
+	if d.Phase != models.PhaseMaintenance {
+		t.Errorf("recall need should stay in MAINTENANCE, got phase=%q", d.Phase)
+	}
+}
+
+func TestOrchestrate_AntiRepeatNeverStarvesAcquisition(t *testing.T) {
+	for _, chain := range []bool{true, false} {
+		t.Run(fmt.Sprintf("prerequisite_chain=%t", chain), func(t *testing.T) {
+			store := setupOrchStore(t)
+			var prereqs map[string][]string
+			if chain {
+				prereqs = map[string][]string{"B": {"A"}, "C": {"B"}}
+			}
+			domainID := seedOrchDomain(t, store, []string{"A", "B", "C"}, prereqs, models.PhaseInstruction)
+			if !chain {
+				// The gate has other candidates, but they no longer belong to
+				// the acquisition fringe. Diversity must relax after selection.
+				setMastery(t, store, "B", 0.95)
+				setMastery(t, store, "C", 0.95)
+			}
+			input := defaultInput(domainID)
+			if _, err := recordSyntheticInteraction(t, store, domainID, "A", "PRACTICE", false, input.Now.Add(-time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+			for call := 0; call < 3; call++ {
+				activity, phase, err := OrchestrateWithPhase(context.Background(), store, input)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if activity.Concept != "A" || activity.Type == models.ActivityRest || phase != models.PhaseInstruction {
+					t.Fatalf("call %d: accessible acquisition must remain available, phase=%s activity=%+v", call, phase, activity)
+				}
+			}
+		})
+	}
+}
+
+func TestOrchestrate_AntiRepeatZeroRemainsDisabled(t *testing.T) {
+	store := setupOrchStore(t)
+	domainID := seedOrchDomain(t, store, []string{"A", "B"}, nil, models.PhaseInstruction)
+	setGoalRelevance(t, store, domainID, map[string]float64{"A": 1, "B": 0.1})
+	input := defaultInput(domainID)
+	if _, err := recordSyntheticInteraction(t, store, domainID, "A", "PRACTICE", false, input.Now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	input.Config.AntiRepeatWindow = 0
+	activity, err := Orchestrate(context.Background(), store, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if activity.Concept != "A" {
+		t.Fatalf("zero window should allow most relevant recent concept A, got %+v", activity)
+	}
+}
+
+func TestOrchestrate_RecallNeedIndependentOfAcquisitionPhase(t *testing.T) {
+	for _, withAcquisitionGap := range []bool{false, true} {
+		t.Run(fmt.Sprintf("acquisition_gap=%t", withAcquisitionGap), func(t *testing.T) {
+			store := setupOrchStore(t)
+			concepts := []string{"A"}
+			wantPhase := models.PhaseMaintenance
+			if withAcquisitionGap {
+				concepts = append(concepts, "B")
+				wantPhase = models.PhaseInstruction
+			}
+			domainID := seedOrchDomain(t, store, concepts, nil, models.PhaseMaintenance)
+			// R ~= .388: recall is due, but the critical-forgetting bypass
+			// does not apply. High acquisition mastery must not hide this need.
+			setReviewState(t, store, "A", 0.95, 1, 24)
+			input := defaultInput(domainID)
+			for call := 0; call < 3; call++ {
+				activity, phase, err := OrchestrateWithPhase(context.Background(), store, input)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if activity.Type != models.ActivityRecall || activity.Concept != "A" || phase != wantPhase {
+					t.Fatalf("call %d: recall must remain available without phase oscillation, phase=%s activity=%+v", call, phase, activity)
+				}
+			}
+		})
 	}
 }
 
@@ -621,62 +703,31 @@ func TestOrchestrateWithPhase_NoTransition_ReturnsCurrentPhase(t *testing.T) {
 	}
 }
 
-// TestOrchestrateWithPhase_NoFringeFallback_ReturnedPhaseMatchesPersisted
-// closes the gap left by the two FSM-path regressions above: the
-// post-orchestrate phase must also match the persisted DB phase when
-// the resolution comes from the *NoFringe fallback* branch (the retry
-// loop in Orchestrate, not the FSM EvaluatePhase decision).
-//
-// Scenario forces the fallback branch:
-//
-//   - Phase = MAINTENANCE in DB.
-//   - Goal_relevance covers A only ; A is unmastered (default mastery
-//     0.1 from seedOrchDomain). FSM stays in MAINTENANCE because no
-//     goal-relevant concept is "below retention" (the default state
-//     CardState=="new" short-circuits the retention check in
-//     buildObservables).
-//   - In MAINTENANCE, selectMaintenance returns NoFringe (no concept
-//     mastered → mastered pool empty). fsmTransitioned=false, so the
-//     orchestrator enters the noFringeFallbackPhase retry, switches
-//     currentPhase to INSTRUCTION, and persists via the phase CAS.
-//   - In INSTRUCTION, A is in the external fringe (mastery 0.1 < BKT,
-//     no prereqs) and eligible (rel=1.0) → activity produced.
-//
-// Both assertions then fire on the *fallback* exit path:
-//  1. gotPhase == PhaseInstruction (the fallback target — vice-versa of
-//     the docstring's INSTRUCTION→MAINTENANCE example, but exercises the
-//     same noFringeFallbackPhase code path).
-//  2. store.GetDomainByID(context.Background(), domainID).Phase == gotPhase (DB consistency
-//     after the fallback's CAS write).
-func TestOrchestrateWithPhase_NoFringeFallback_ReturnedPhaseMatchesPersisted(t *testing.T) {
+// A previously maintained domain can acquire a new gap. The FSM returns to
+// instruction and the phase reported with the activity matches its CAS write.
+func TestOrchestrateWithPhase_AcquisitionGap_ReturnedPhaseMatchesPersisted(t *testing.T) {
 	store := setupOrchStore(t)
 	domainID := seedOrchDomain(t, store, []string{"A"}, nil, models.PhaseMaintenance)
 	setGoalRelevance(t, store, domainID, map[string]float64{"A": 1.0})
-	// A stays at default mastery (0.1, CardState="new") — not mastered.
-	// MAINTENANCE pipeline: no mastered concept → NoFringe.
-	// FSM stays in MAINTENANCE (GoalRelevantBelowRetention=false because
-	// the default state is "new", the retention check is skipped).
-	// Fallback path → INSTRUCTION → A in fringe → activity produced.
+	// A's initial estimate represents an acquisition gap, without any recall
+	// history. That is sufficient to return the domain to instruction.
 
 	activity, gotPhase, err := OrchestrateWithPhase(context.Background(), store, defaultInput(domainID))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Sanity: the fallback branch produced a real activity, not the
-	// pipeline_exhausted REST escape — that would mean both phases
-	// returned NoFringe and we'd be exercising the wrong path.
 	if activity.Type == models.ActivityRest {
-		t.Fatalf("expected fallback to produce a real activity, got REST escape (rationale=%q)", activity.Rationale)
+		t.Fatalf("expected acquisition activity, got REST escape (rationale=%q)", activity.Rationale)
 	}
 	if gotPhase != models.PhaseInstruction {
-		t.Errorf("returned phase = %q, want INSTRUCTION (NoFringe fallback target)", gotPhase)
+		t.Errorf("returned phase = %q, want INSTRUCTION for acquisition gap", gotPhase)
 	}
 	d, err := store.GetDomainByID(context.Background(), domainID)
 	if err != nil {
 		t.Fatalf("get domain: %v", err)
 	}
 	if d.Phase != gotPhase {
-		t.Errorf("returned phase %q does not match persisted phase %q (NoFringe fallback DB write missed)", gotPhase, d.Phase)
+		t.Errorf("returned phase %q does not match persisted phase %q", gotPhase, d.Phase)
 	}
 }
 

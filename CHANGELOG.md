@@ -6,6 +6,38 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Pedagogical runtime corrections
+
+- Reconcile learner state atomically with curriculum revisions: changed
+  definitions and retirement/reactivation reset affected estimates and supersede
+  old interactions, assessments and transfer evidence without rewriting outcomes.
+  Block stale preparation/submission/evaluation, annotate historical snapshots,
+  and exclude superseded evidence before routing-query limits and aggregates.
+- Add explicit, stable-ID-based `repair_prerequisites` with exact edge lists and
+  graph validation; presentation-only rename and graph-only repair preserve
+  existing competency evidence. Version runtime policy as `2026-09-curriculum-v3`.
+- Add SQLite `0065_curriculum_reconciliation` / PostgreSQL `0056` migrations.
+  The SQLite CHECK extension rebuilds curriculum history with preserved data,
+  references and immutability guards; upgrades check and restore foreign keys.
+- Separate BKT observation inference from learning/forgetting transitions.
+  Diagnostic, mastery and transfer assessments are observation-only;
+  instruction/practice retain an explicit modeled learning opportunity.
+  Version the policy as `2026-09-observation-v2` and expose the mode in
+  pedagogical contracts, with posterior and transition delta in audit snapshots.
+  Historical estimates and FSRS exposure behavior remain unchanged.
+- Correct FSRS to coherent FSRS-5 equations and reference parameters; retain
+  legacy card history and whole-day scheduling.
+- Require delayed recall after the latest recorded exposure, without hints,
+  dated at response submission. Separate mastery evidence axes.
+- Relax anti-repeat dead ends and stop forgetting-driven phase oscillation.
+- Remove PFA plateau and FSRS-to-IRT routing; make autonomy descriptive with
+  absolute calibration error, observed sample coverage and no automatic fade.
+- Generate metacognitive dialogue from structured observations, not fixed prose.
+- Add single-use curriculum-bound pedagogical decisions, strict bound rubrics,
+  scope/immutability checks, DSAR support and unreferenced-decision retention.
+  Standalone attempts remain explicitly unbound; host grading remains untrusted.
+- See [implementation scope and remaining work](docs/runtime-pedagogique-2026-09.md).
+
 ### Security
 
 - Bind OAuth authorization codes to their redirect URI and PKCE challenge,

@@ -159,7 +159,9 @@ func TestMasteryReadyAlertAndCheckMasteryShareTrustedTransferFailure(t *testing.
 	retentionAttempt := seedEvaluatedAssessmentFixture(t, store, "L_owner", domain.ID, "calc", models.ActivityRecall, true, now.Add(-time.Hour), "")
 	for _, interaction := range []*models.Interaction{
 		{LearnerID: "L_owner", DomainID: domain.ID, Concept: "calc", ActivityType: string(models.ActivityPractice), Success: true, CreatedAt: now.Add(-72 * time.Hour)},
-		{LearnerID: "L_owner", DomainID: domain.ID, Concept: "calc", ActivityType: string(models.ActivityFeynmanPrompt), Success: true, CreatedAt: now.Add(-2 * time.Hour)},
+		// Keep more than 24 hours between the last exposure and the
+		// committed recall, so the baseline contains genuine delayed evidence.
+		{LearnerID: "L_owner", DomainID: domain.ID, Concept: "calc", ActivityType: string(models.ActivityFeynmanPrompt), Success: true, CreatedAt: now.Add(-30 * time.Hour)},
 		{LearnerID: "L_owner", DomainID: domain.ID, AssessmentAttemptID: retentionAttempt, Concept: "calc", ActivityType: string(models.ActivityRecall), Success: true, CreatedAt: now.Add(-time.Hour)},
 	} {
 		if err := store.CreateInteraction(context.Background(), interaction); err != nil {
@@ -168,7 +170,7 @@ func TestMasteryReadyAlertAndCheckMasteryShareTrustedTransferFailure(t *testing.
 	}
 
 	for index, dimension := range []string{"near", "far", "debugging"} {
-		at := now.Add(-time.Duration(4-index) * time.Hour)
+		at := now.Add(-time.Duration(50-5*index) * time.Minute)
 		attemptID := seedEvaluatedAssessmentFixture(t, store, "L_owner", domain.ID, "calc", models.ActivityTransferProbe, true, at, models.EvaluationMethodExternal)
 		if err := store.CreateTransferRecord(context.Background(), &models.TransferRecord{
 			LearnerID: "L_owner", DomainID: domain.ID, ConceptID: "calc",

@@ -99,15 +99,16 @@ type CurriculumReview struct {
 type CurriculumOperationType string
 
 const (
-	CurriculumOperationCreate         CurriculumOperationType = "create"
-	CurriculumOperationBaselineImport CurriculumOperationType = "baseline_import"
-	CurriculumOperationAdd            CurriculumOperationType = "add"
-	CurriculumOperationRename         CurriculumOperationType = "rename"
-	CurriculumOperationUpdateMetadata CurriculumOperationType = "update_metadata"
-	CurriculumOperationSplit          CurriculumOperationType = "split"
-	CurriculumOperationMerge          CurriculumOperationType = "merge"
-	CurriculumOperationRemove         CurriculumOperationType = "remove"
-	CurriculumOperationLegacyUpdate   CurriculumOperationType = "legacy_graph_update"
+	CurriculumOperationCreate              CurriculumOperationType = "create"
+	CurriculumOperationBaselineImport      CurriculumOperationType = "baseline_import"
+	CurriculumOperationAdd                 CurriculumOperationType = "add"
+	CurriculumOperationRename              CurriculumOperationType = "rename"
+	CurriculumOperationUpdateMetadata      CurriculumOperationType = "update_metadata"
+	CurriculumOperationRepairPrerequisites CurriculumOperationType = "repair_prerequisites"
+	CurriculumOperationSplit               CurriculumOperationType = "split"
+	CurriculumOperationMerge               CurriculumOperationType = "merge"
+	CurriculumOperationRemove              CurriculumOperationType = "remove"
+	CurriculumOperationLegacyUpdate        CurriculumOperationType = "legacy_graph_update"
 )
 
 // CurriculumOperation is stored with every immutable snapshot. Source and
@@ -124,16 +125,25 @@ type CurriculumOperation struct {
 // Graph contains active immutable Keys; Concepts contains both active and
 // retired concepts so older learner evidence remains interpretable.
 type CurriculumSnapshot struct {
-	DomainID      string               `json:"domain_id"`
-	Version       int                  `json:"version"`
-	ParentVersion int                  `json:"parent_version,omitempty"`
-	Graph         KnowledgeSpace       `json:"graph"`
-	Concepts      []CurriculumConcept  `json:"concepts"`
-	Operation     CurriculumOperation  `json:"operation"`
-	Provenance    CurriculumProvenance `json:"provenance"`
-	Review        CurriculumReview     `json:"review"`
-	CreatedBy     string               `json:"created_by"`
-	CreatedAt     time.Time            `json:"created_at"`
+	DomainID       string                    `json:"domain_id"`
+	Version        int                       `json:"version"`
+	ParentVersion  int                       `json:"parent_version,omitempty"`
+	Graph          KnowledgeSpace            `json:"graph"`
+	Concepts       []CurriculumConcept       `json:"concepts"`
+	Operation      CurriculumOperation       `json:"operation"`
+	Provenance     CurriculumProvenance      `json:"provenance"`
+	Review         CurriculumReview          `json:"review"`
+	CreatedBy      string                    `json:"created_by"`
+	CreatedAt      time.Time                 `json:"created_at"`
+	Reconciliation *CurriculumReconciliation `json:"reconciliation,omitempty"`
+}
+
+// CurriculumReconciliation is computed by persistence, never accepted as an
+// author's assertion of equivalence. Learner values stay in pedagogical
+// snapshots, under their own retention/erasure policy, not in curriculum history.
+type CurriculumReconciliation struct {
+	PolicyVersion         string   `json:"policy_version"`
+	InvalidatedConceptIDs []string `json:"invalidated_concept_ids"`
 }
 
 // NewCurriculumStableID returns an opaque, URL-safe stable identifier. The
@@ -172,6 +182,11 @@ func CloneCurriculumSnapshot(in *CurriculumSnapshot) *CurriculumSnapshot {
 		return nil
 	}
 	out := *in
+	if in.Reconciliation != nil {
+		r := *in.Reconciliation
+		r.InvalidatedConceptIDs = append([]string(nil), r.InvalidatedConceptIDs...)
+		out.Reconciliation = &r
+	}
 	out.Graph.Concepts = append([]string(nil), in.Graph.Concepts...)
 	out.Graph.Prerequisites = make(map[string][]string, len(in.Graph.Prerequisites))
 	for concept, prerequisites := range in.Graph.Prerequisites {

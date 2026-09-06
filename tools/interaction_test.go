@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1146,26 +1145,15 @@ func TestComputeCognitiveSignals(t *testing.T) {
 	}
 }
 
-// Issue #53: applyInteraction's BKT → FSRS → IRT chain must be commutative
-// in the sense that the IRT step reads the *prior* (pre-FSRS) Difficulty,
-// not the value FSRS just overwrote. The non-commutative read is on
-// cs.Difficulty: FSRS rewrites it, then IRT consumes it via
-// FSRSDifficultyToIRT to compute the θ update. Reading post-FSRS difficulty
-// silently shifts θ along the difficulty curve, biasing the learner's IRT
-// estimate by the size of the difficulty step. Snapshot the read-only
-// inputs at the top, run the three updates against the snapshot, write
-// once at the end.
-func TestApplyInteraction_IRTReadsPreFSRSDifficulty(t *testing.T) {
+// FSRS difficulty is a memory parameter, not the difficulty of a generated
+// assessment item. New observations must preserve the legacy theta estimate
+// until an independently calibrated item model exists.
+func TestApplyInteraction_DoesNotUpdateLegacyThetaFromFSRSDifficulty(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	domain := makeOwnerDomain(t, store, "L_owner", "math")
 
-	// Seed a concept state in the Review FSRS state with a non-default
-	// Difficulty and Reps. Difficulty=9.0 sits at the high end of the
-	// FSRS [1,10] range; on an Again rating FSRS's nextDifficulty pulls
-	// it sharply down (toward ~6.9), so post-FSRS difficulty differs
-	// from pre-FSRS by ~2 difficulty points. With a failure response
-	// IRT pushes θ negative, and the two starting difficulties produce
-	// distinguishable θ values inside the [-4, 4] clamp window.
+	// A non-default prior proves that retirement preserves historical theta
+	// instead of resetting it when the FSRS memory parameters change.
 	now := time.Now().UTC()
 	last := now.Add(-48 * time.Hour)
 	seed := &models.ConceptState{
@@ -1185,45 +1173,10 @@ func TestApplyInteraction_IRTReadsPreFSRSDifficulty(t *testing.T) {
 		PForget:       0.05,
 		PSlip:         0.1,
 		PGuess:        0.2,
-		// θ seed is non-zero and close to the pre-FSRS IRT difficulty so
-		// the Newton iterations in IRTUpdateTheta land *inside* the
-		// [-4, 4] clamp window, leaving room to distinguish the pre-FSRS
-		// vs post-FSRS difficulty cases.
-		Theta: 2.0,
+		Theta:         2.0,
 	}
 	if err := store.UpsertConceptState(context.Background(), seed); err != nil {
 		t.Fatalf("seed concept state: %v", err)
-	}
-
-	// Compute the expected θ update by running IRT against the *pre-FSRS*
-	// difficulty (9.0). success=false maps to FSRS rating Again.
-	expectedItem := algorithms.IRTItem{
-		Difficulty:     algorithms.FSRSDifficultyToIRT(9.0),
-		Discrimination: 1.0,
-	}
-	expectedTheta := algorithms.IRTUpdateThetaCumulative(seed.Theta, seed.Reps, []algorithms.IRTItem{expectedItem}, []bool{false})
-
-	// And the *post-FSRS* difficulty θ — what today's buggy code computes.
-	// We capture this so the assertion can also confirm the two values are
-	// in fact distinguishable on this scenario (otherwise the test is
-	// vacuous).
-	postFSRSDiff := algorithms.ReviewCard(algorithms.FSRSCard{
-		Stability:     5.0,
-		Difficulty:    9.0,
-		ElapsedDays:   2,
-		ScheduledDays: 5,
-		Reps:          5,
-		Lapses:        0,
-		State:         algorithms.Review,
-		LastReview:    last,
-	}, algorithms.Again, now).Difficulty
-	buggyItem := algorithms.IRTItem{
-		Difficulty:     algorithms.FSRSDifficultyToIRT(postFSRSDiff),
-		Discrimination: 1.0,
-	}
-	buggyTheta := algorithms.IRTUpdateThetaCumulative(seed.Theta, seed.Reps, []algorithms.IRTItem{buggyItem}, []bool{false})
-	if math.Abs(expectedTheta-buggyTheta) < 1e-6 {
-		t.Fatalf("test setup is vacuous: pre/post FSRS thetas are identical (%v)", expectedTheta)
 	}
 
 	cs, _, err := applyInteraction(context.Background(), deps, "L_owner", interactionInput{
@@ -1238,17 +1191,25 @@ func TestApplyInteraction_IRTReadsPreFSRSDifficulty(t *testing.T) {
 		t.Fatalf("applyInteraction: %v", err)
 	}
 
-	if math.Abs(cs.Theta-expectedTheta) > 1e-9 {
-		t.Fatalf("IRT consumed post-FSRS difficulty: got θ=%v, want θ=%v (post-FSRS-buggy θ=%v)",
-			cs.Theta, expectedTheta, buggyTheta)
+	if cs.Theta != seed.Theta {
+		t.Fatalf("unvalidated item changed theta: got %v, want preserved %v", cs.Theta, seed.Theta)
 	}
 
-	// Sanity: FSRS *did* rewrite Difficulty and Reps, so the read-then-
-	// update concern is real on this path.
+	// FSRS still updates normally, independently of retired theta.
 	if cs.Difficulty == 9.0 {
 		t.Fatalf("FSRS did not rewrite Difficulty as expected (still 9.0)")
 	}
 	if cs.Reps != 6 {
 		t.Fatalf("FSRS did not increment Reps as expected: got %d, want 6", cs.Reps)
+	}
+	cs, _, err = applyInteraction(context.Background(), deps, "L_owner", interactionInput{
+		Concept: "a", ActivityType: "RECALL_EXERCISE", Success: true,
+		ResponseTimeSeconds: 10, Confidence: 0.8, DomainID: domain.ID,
+	}, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("apply successful interaction: %v", err)
+	}
+	if cs.Theta != seed.Theta || cs.Reps != 7 {
+		t.Fatalf("success must preserve theta while updating memory: %+v", cs)
 	}
 }

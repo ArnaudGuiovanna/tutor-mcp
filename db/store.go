@@ -399,6 +399,9 @@ func (s *Store) GetOrCreateConceptStateForUpdate(ctx context.Context, learnerID,
 // The materialize-then-lock sequence serializes concurrent updates on the
 // composite (learner, domain, concept) identity under PostgreSQL.
 func (s *Store) GetOrCreateConceptStateForUpdateInDomain(ctx context.Context, learnerID, domainID, concept string) (*models.ConceptState, error) {
+	if _, err := s.lockCurriculumForEvidence(ctx, learnerID, domainID, concept); err != nil {
+		return nil, err
+	}
 	cs, err := s.getConceptState(ctx, learnerID, domainID, concept, true, true)
 	if err == nil {
 		return cs, nil
@@ -1695,7 +1698,7 @@ func (s *Store) GetRecentInteractionsInDomain(ctx context.Context, learnerID, do
 }
 
 func (s *Store) getRecentInteractions(ctx context.Context, learnerID, domainID, concept string, limit int, exactDomain bool) ([]*models.Interaction, error) {
-	query := `SELECT ` + interactionCols + ` FROM interactions WHERE learner_id = ? AND concept = ?`
+	query := `SELECT ` + interactionCols + ` FROM ` + currentInteractionsSQL + ` AS interactions WHERE learner_id = ? AND concept = ?`
 	args := []any{learnerID, concept}
 	if exactDomain {
 		query += ` AND domain_id = ?`
@@ -1716,7 +1719,7 @@ func (s *Store) getRecentInteractions(ctx context.Context, learnerID, domainID, 
 
 func (s *Store) GetRecentInteractionsByLearner(ctx context.Context, learnerID string, limit int) ([]*models.Interaction, error) {
 	rows, err := s.query(ctx,
-		`SELECT `+interactionCols+` FROM interactions WHERE learner_id = ?
+		`SELECT `+interactionCols+` FROM `+currentInteractionsSQL+` AS interactions WHERE learner_id = ?
 		 ORDER BY created_at DESC LIMIT ?`,
 		learnerID, limit,
 	)
@@ -1729,7 +1732,7 @@ func (s *Store) GetRecentInteractionsByLearner(ctx context.Context, learnerID st
 
 func (s *Store) GetRecentInteractionsByDomain(ctx context.Context, learnerID, domainID string, limit int) ([]*models.Interaction, error) {
 	rows, err := s.query(ctx,
-		`SELECT `+interactionCols+` FROM interactions
+		`SELECT `+interactionCols+` FROM `+currentInteractionsSQL+` AS interactions
 		 WHERE learner_id = ? AND domain_id = ?
 		 ORDER BY created_at DESC LIMIT ?`,
 		learnerID, domainID, limit,
@@ -1757,7 +1760,7 @@ func (s *Store) GetSessionInteractions(ctx context.Context, learnerID string) ([
 	// two-hour window. Explicitly closed sessions never leak into a new one.
 	cutoff := time.Now().UTC().Add(-2 * time.Hour)
 	rows, err := s.query(ctx,
-		`SELECT `+interactionCols+` FROM interactions WHERE learner_id = ? AND session_id IS NULL AND created_at > ?
+		`SELECT `+interactionCols+` FROM `+currentInteractionsSQL+` AS interactions WHERE learner_id = ? AND session_id IS NULL AND created_at > ?
 		 ORDER BY created_at DESC`,
 		learnerID, cutoff,
 	)
@@ -1782,7 +1785,7 @@ func (s *Store) GetSessionInteractionsInDomain(ctx context.Context, learnerID, d
 	}
 	cutoff := time.Now().UTC().Add(-2 * time.Hour)
 	rows, err := s.query(ctx,
-		`SELECT `+interactionCols+` FROM interactions
+		`SELECT `+interactionCols+` FROM `+currentInteractionsSQL+` AS interactions
 		 WHERE learner_id = ? AND domain_id = ? AND session_id IS NULL AND created_at > ?
 		 ORDER BY created_at DESC`,
 		learnerID, domainID, cutoff,
@@ -1796,7 +1799,7 @@ func (s *Store) GetSessionInteractionsInDomain(ctx context.Context, learnerID, d
 
 func (s *Store) GetInteractionsBySession(ctx context.Context, learnerID, sessionID string) ([]*models.Interaction, error) {
 	rows, err := s.query(ctx,
-		`SELECT `+interactionCols+` FROM interactions
+		`SELECT `+interactionCols+` FROM `+currentInteractionsSQL+` AS interactions
 		 WHERE learner_id = ? AND session_id = ? ORDER BY created_at DESC`,
 		learnerID, sessionID,
 	)
@@ -1809,7 +1812,7 @@ func (s *Store) GetInteractionsBySession(ctx context.Context, learnerID, session
 
 func (s *Store) GetInteractionsBySessionInDomain(ctx context.Context, learnerID, sessionID, domainID string) ([]*models.Interaction, error) {
 	rows, err := s.query(ctx,
-		`SELECT `+interactionCols+` FROM interactions
+		`SELECT `+interactionCols+` FROM `+currentInteractionsSQL+` AS interactions
 		 WHERE learner_id = ? AND session_id = ? AND domain_id = ? ORDER BY created_at DESC`,
 		learnerID, sessionID, domainID,
 	)
@@ -1894,7 +1897,7 @@ func scanInteractions(rows *sql.Rows) ([]*models.Interaction, error) {
 
 func (s *Store) GetInteractionsSince(ctx context.Context, learnerID string, since time.Time) ([]*models.Interaction, error) {
 	rows, err := s.query(ctx,
-		`SELECT `+interactionCols+` FROM interactions WHERE learner_id = ? AND created_at >= ? ORDER BY created_at ASC`,
+		`SELECT `+interactionCols+` FROM `+currentInteractionsSQL+` AS interactions WHERE learner_id = ? AND created_at >= ? ORDER BY created_at ASC`,
 		learnerID, since,
 	)
 	if err != nil {
@@ -1906,7 +1909,7 @@ func (s *Store) GetInteractionsSince(ctx context.Context, learnerID string, sinc
 
 func (s *Store) GetInteractionsSinceInDomain(ctx context.Context, learnerID, domainID string, since time.Time) ([]*models.Interaction, error) {
 	rows, err := s.query(ctx,
-		`SELECT `+interactionCols+` FROM interactions
+		`SELECT `+interactionCols+` FROM `+currentInteractionsSQL+` AS interactions
 		 WHERE learner_id = ? AND domain_id = ? AND created_at >= ?
 		 ORDER BY created_at ASC`,
 		learnerID, domainID, since,

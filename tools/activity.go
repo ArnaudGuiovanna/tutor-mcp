@@ -421,27 +421,21 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 		}
 		motivationMs := time.Since(motivationStart).Milliseconds()
 
-		// [6] FadeController — post-decision module gated on
-		// REGULATION_FADE=on (default OFF). Maps autonomy
-		// score+trend to handover params (verbosity, webhook
-		// cadence, ZPD aggressiveness, proactive review). When
-		// the flag is OFF, the result JSON is byte-identical to
-		// the pre-fade behaviour: no fade_params key, no mutation
-		// of motivation_brief. See
-		// docs/regulation-design/06-fade-controller.md.
+		// Keep the legacy opt-in's descriptive metrics visible, but do not
+		// remove help based on an unvalidated aggregate or changing coverage.
+		// A future fading policy must use task-specific independence evidence.
 		if regulationFadeEnabled() {
 			autonomyMetrics := engine.ComputeAutonomyMetrics(engine.AutonomyInput{
-				Interactions:    allInteractions,
-				ConceptStates:   domainStates,
-				CalibrationBias: calibBias,
-				SessionGap:      2 * time.Hour,
+				Interactions:      allInteractions,
+				ConceptStates:     domainStates,
+				CalibrationDeltas: calibHistory,
+				SessionGap:        2 * time.Hour,
 			})
-			trend := engine.AutonomyTrend(engine.ComputeAutonomyTrendExported(autonomyScores))
-			fadeParams := engine.Decide(autonomyMetrics.Score, trend)
-			motivationBrief = applyFadeToMotivation(motivationBrief, fadeParams.HintLevel)
-			extra["fade_params"] = fadeParams
+			autonomyMetrics.Trend = engine.ComputeAutonomyTrendExported(autonomyScores)
+			extra["fade_status"] = "disabled_unvalidated_autonomy_score"
 			extra["autonomy_score"] = autonomyMetrics.Score
-			extra["autonomy_trend"] = string(trend)
+			extra["autonomy_trend"] = autonomyMetrics.Trend
+			extra["autonomy_components"] = autonomyMetrics
 		}
 
 		diagnosticsStart := time.Now()
@@ -514,6 +508,11 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 			ctx, deps, learnerID, domain, domainStates, activity.Concept, alerts, now, evidenceSnapshot,
 		)
 		contract := buildPedagogicalContract(activity, intent, evidenceQuality, uncertainty, typedTransferProfile, goalRelevanceStatus, extra["fade_params"], episodicContext, activeMisconceptionCount, olmSnapshot)
+		if err := freezePedagogicalDecision(ctx, deps, learnerID, learningSession.ID, domain, &contract, activity, now,
+			map[string]any{"concept_state": selectedState, "evidence_quality": evidenceQuality, "uncertainty": uncertainty, "intent": intent}); err != nil {
+			r, _ := safeErrorResult(deps.Logger, "failed to freeze pedagogical decision", err)
+			return r, nil, nil
+		}
 
 		out := map[string]any{
 			"needs_domain_setup":        false,
@@ -534,6 +533,7 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 			"transfer_profile":          transferProfile,
 			"goal_relevance_status":     goalRelevanceStatus,
 			"pedagogical_contract":      contract,
+			"decision_id":               contract.DecisionID,
 			"audit_rationale":           contract.AuditRationale,
 			"llm_instruction":           contract.LLMInstruction,
 			"learner_explanation":       contract.LearnerExplanation,
@@ -753,6 +753,7 @@ func buildPedagogicalContract(
 	}
 
 	contract := models.PedagogicalContract{
+		BKTUpdateMode:           engine.BKTUpdateModeForActivity(activity.Type),
 		Intent:                  contractIntent(intent, activity),
 		TargetConcept:           activity.Concept,
 		RecommendedActivityType: activity.Type,

@@ -11,12 +11,13 @@ import (
 	"time"
 
 	"tutor-mcp/algorithms"
+	"tutor-mcp/engine"
 	"tutor-mcp/models"
 	"tutor-mcp/store"
 )
 
 // interactionInput carries the minimal fields needed to persist an
-// interaction and drive the BKT/FSRS/IRT update chain.  Fields not
+// interaction and drive the BKT/FSRS update chain. Fields not
 // relevant to a given call site (e.g. HintsRequested for submit_answer)
 // should be left at their zero values.
 type interactionInput struct {
@@ -35,6 +36,8 @@ type interactionInput struct {
 	DomainID                 string // persisted on the interaction row (issue #24)
 	SessionID                string // durable session boundary; blank only for legacy internal callers
 	AssessmentAttemptID      string
+	DecisionID               string // copied from the frozen attempt, never a caller claim
+	CurriculumVersion        int
 	EvaluatorID              string
 	EvaluationMethod         models.EvaluationMethod
 	EvaluationProvenanceJSON string
@@ -53,24 +56,16 @@ type interactionInput struct {
 }
 
 // applyInteraction persists the interaction and updates the learner's
-// cognitive state (BKT, FSRS, IRT) for the concept.  Returns the
+// cognitive state (BKT, FSRS) for the concept. Returns the
 // resulting ConceptState (post-update) and an error if any persistence
 // step failed.
 //
-// The BKT → FSRS → IRT update chain is *non-commutative* on
-// `cs.Difficulty` (and in spirit on `cs.Reps` / `cs.Stability` /
-// `cs.PMastery`): IRT consumes the FSRS difficulty to compute the θ
-// step, but FSRS itself rewrites that field. Reading `cs.*` directly
-// after running each step would silently mix prior- and post-update
-// values across the chain (issue #53). To keep the chain
-// order-independent we snapshot the read-only prior values at the top,
-// run all three updates against the snapshot, and write the merged
-// result back to `cs` exactly once at the end.
+// Both model updates read a snapshot of the prior state and write the merged
+// result once. Legacy theta is preserved for storage compatibility; generated
+// tasks have no calibrated item parameters, and FSRS concept difficulty is not
+// an IRT item difficulty.
 //
-// Note: PFA is intentionally NOT persisted on the concept state. The
-// PLATEAU alert in engine/alert.go recomputes a fresh PFAState from the
-// recent-interactions list on each call, so storing rolling counts
-// per-concept added schema weight without any reader (issue #55).
+// PFA is not part of the learner-model update or alert policy.
 func applyInteraction(
 	ctx context.Context,
 	deps *Deps,
@@ -80,7 +75,7 @@ func applyInteraction(
 ) (*models.ConceptState, map[string]any, error) {
 	if !isCognitiveEvidenceActivity(input.ActivityType) {
 		return nil, nil, fmt.Errorf(
-			"applyInteraction: activity_type %q is not learner evidence and cannot update BKT/FSRS/IRT",
+			"applyInteraction: activity_type %q is not learner evidence and cannot update BKT/FSRS",
 			input.ActivityType,
 		)
 	}
@@ -100,6 +95,8 @@ func applyInteraction(
 	var resultCS *models.ConceptState
 	var resultMeta map[string]any
 	err = deps.Store.WithTx(ctx, func(s store.Store) error {
+		// The store's for-update reads lock domain before assessment/model rows,
+		// serializing semantic revision with this entire observation.
 		// Lock and consume the assessment state in the same transaction as the
 		// interaction/model update. A duplicate evaluator call therefore cannot
 		// double-count one learner response, and any later write failure rolls the
@@ -109,7 +106,7 @@ func applyInteraction(
 			if err != nil {
 				return fmt.Errorf("load assessment attempt: %w", err)
 			}
-			if attempt.Status != models.AssessmentAttemptSubmitted ||
+			if attempt.Status != models.AssessmentAttemptSubmitted || attempt.CurriculumInvalidatedVersion != 0 ||
 				attempt.DomainID != input.DomainID || attempt.ConceptID != input.Concept ||
 				attempt.ActivityType != input.ActivityType ||
 				(attempt.SessionID != "" && attempt.SessionID != input.SessionID) {
@@ -122,6 +119,8 @@ func applyInteraction(
 			); err != nil {
 				return fmt.Errorf("complete assessment evaluation: %w", err)
 			}
+			input.DecisionID = attempt.DecisionID
+			input.CurriculumVersion = attempt.CurriculumVersion
 		}
 
 		// Load or bootstrap concept state. GetOrCreateConceptStateForUpdate
@@ -137,7 +136,7 @@ func applyInteraction(
 
 		// ── Snapshot read-only prior state ──────────────────────────────
 		// All downstream algorithm steps read from this snapshot, never
-		// from `cs` directly, to keep the BKT → FSRS → IRT chain
+		// from `cs` directly, to keep the BKT and FSRS updates
 		// commutative. See doc comment above and issue #53.
 		priorPMastery := cs.PMastery
 		priorPLearn := cs.PLearn
@@ -176,12 +175,23 @@ func applyInteraction(
 			recentForBKT = nil
 		}
 		bktProfile := buildIndividualBKTProfile(recentForBKT, priorStability)
-		bktResult := algorithms.BKTUpdateIndividualized(bktState, bktProfile, input.Success, input.ErrorType)
+		bktMode := engine.BKTUpdateModeForActivity(models.ActivityType(input.ActivityType))
+		var bktResult algorithms.IndividualBKTUpdateResult
+		if bktMode == models.BKTLearningOpportunity {
+			bktResult = algorithms.BKTUpdateIndividualized(bktState, bktProfile, input.Success, input.ErrorType)
+		} else {
+			bktResult = algorithms.BKTObserveIndividualized(bktState, bktProfile, input.Success, input.ErrorType)
+		}
 		bktState = bktResult.State
 		slipUsed := bktResult.Params.PSlip
 		guessUsed := bktResult.Params.PGuess
 
 		observation = mergeObservation(observation, map[string]any{
+			"bkt_update_mode":            bktMode,
+			"bkt_transition_applied":     bktResult.TransitionApplied,
+			"bkt_posterior":              bktResult.PosteriorMastery,
+			"bkt_transition_delta":       bktState.PMastery - bktResult.PosteriorMastery,
+			"bkt_forget":                 bktResult.Params.PForget,
 			"bkt_individualized_profile": individualBKTProfileSnapshot(bktProfile),
 			"bkt_individualized_params":  individualBKTParamsSnapshot(bktResult.Params),
 		})
@@ -271,14 +281,10 @@ func applyInteraction(
 		}
 		fsrsCard = algorithms.ReviewCard(fsrsCard, rating, now)
 
-		// ── IRT update — reads PRIOR difficulty from the snapshot, not
-		// the FSRS-rewritten value. This is the issue #53 fix: previously
-		// IRT consumed `cs.Difficulty` after FSRS had overwritten it. ──
-		item := algorithms.IRTItem{
-			Difficulty:     algorithms.FSRSDifficultyToIRT(priorDifficulty),
-			Discrimination: 1.0,
-		}
-		newTheta := algorithms.IRTUpdateThetaCumulative(priorTheta, priorReps, []algorithms.IRTItem{item}, []bool{input.Success})
+		// Preserve the legacy estimate. Updating it from FSRS would treat a
+		// learner/concept memory parameter as the difficulty of this task.
+		// Resume IRT only with an explicit, independently calibrated item model.
+		newTheta := priorTheta
 
 		// ── Single write-back of the merged result. ────────────────────
 		cs.PMastery = bktState.PMastery
@@ -449,6 +455,9 @@ func decisionSnapshot(input interactionInput, proactiveReview bool) map[string]a
 		"concept":             input.Concept,
 		"is_proactive_review": proactiveReview,
 		"source":              "record_interaction",
+		"decision_id":         input.DecisionID,
+		"curriculum_version":  input.CurriculumVersion,
+		"policy_version":      models.PedagogicalPolicyVersion,
 	}
 }
 

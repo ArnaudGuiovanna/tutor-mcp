@@ -73,13 +73,16 @@ func learnerInteract(t *testing.T, store *db.Store, concept string, activityType
 	if err != nil {
 		t.Fatalf("get state %q: %v", concept, err)
 	}
-	bkt := algorithms.BKTUpdate(algorithms.BKTState{
+	bkt := algorithms.BKTObserve(algorithms.BKTState{
 		PMastery: cs.PMastery,
 		PLearn:   cs.PLearn,
 		PForget:  cs.PForget,
 		PSlip:    cs.PSlip,
 		PGuess:   cs.PGuess,
 	}, success)
+	if BKTUpdateModeForActivity(activityType) == models.BKTLearningOpportunity {
+		bkt = algorithms.BKTTransition(bkt)
+	}
 	cs.PMastery = bkt.PMastery
 	if cs.CardState == "new" {
 		cs.CardState = "review"

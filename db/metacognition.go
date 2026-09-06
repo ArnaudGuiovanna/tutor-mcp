@@ -233,7 +233,7 @@ func (s *Store) GetTransferScoresInDomain(ctx context.Context, learnerID, domain
 
 func (s *Store) getTransferScores(ctx context.Context, learnerID, domainID, conceptID string, exactDomain bool) ([]*models.TransferRecord, error) {
 	query := `SELECT id, learner_id, domain_id, assessment_attempt_id, concept_id, context_type, score, session_id, created_at
-		 FROM transfer_records WHERE learner_id = ? AND concept_id = ?`
+		 FROM ` + currentTransfersSQL + ` AS transfer_records WHERE learner_id = ? AND concept_id = ?`
 	args := []any{learnerID, conceptID}
 	if exactDomain {
 		query += ` AND domain_id = ?`
@@ -275,7 +275,7 @@ func (s *Store) GetTransferRecordsByDomain(ctx context.Context, learnerID, domai
 
 func (s *Store) getTransferRecords(ctx context.Context, learnerID, domainID string) ([]*models.TransferRecord, error) {
 	query := `SELECT id, learner_id, domain_id, assessment_attempt_id, concept_id, context_type, score, session_id, created_at
-		 FROM transfer_records WHERE learner_id = ?`
+		 FROM ` + currentTransfersSQL + ` AS transfer_records WHERE learner_id = ?`
 	args := []any{learnerID}
 	if domainID != "" {
 		query += ` AND domain_id = ?`
@@ -308,7 +308,7 @@ func (s *Store) getTransferRecords(ctx context.Context, learnerID, domainID stri
 func (s *Store) GetHintStatsForMastered(ctx context.Context, learnerID string, threshold float64) (hints int, total int, err error) {
 	err = s.queryRow(ctx,
 		`SELECT COALESCE(SUM(i.hints_requested), 0), COUNT(*)
-		 FROM interactions i
+		 FROM `+currentInteractionsSQL+` i
 		 JOIN concept_states cs
 		   ON i.learner_id = cs.learner_id
 		  AND COALESCE(i.domain_id, '') = cs.domain_id

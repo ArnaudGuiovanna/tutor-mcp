@@ -1881,6 +1881,14 @@ END;`,
 		Version: "0063_platform_audit",
 		Body:    sqlitePlatformAuditMigration,
 	})
+	out = append(out, migration{
+		Version: "0064_pedagogical_contracts",
+		Body:    sqlitePedagogicalContractMigration,
+	})
+	out = append(out, migration{
+		Version: "0065_curriculum_reconciliation",
+		Body:    sqliteCurriculumReconciliationMigration,
+	})
 	return out
 }
 

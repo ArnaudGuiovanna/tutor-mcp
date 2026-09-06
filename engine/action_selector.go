@@ -63,19 +63,11 @@ type ActionHistory struct {
 }
 
 const (
-	// ZPDOffset is the IRT 2PL latent-difficulty offset that targets a
-	// pCorrect of 0.70 — centre of the ZPD per algorithms.IRTIsInZPD
-	// (which accepts pCorrect in [0.55, 0.80]).
-	//
-	// Derivation. Solving for b in the 2PL with discrimination a=1:
-	//
-	//     0.70 = 1 / (1 + exp(-(θ - b)))
-	//     exp(-(θ - b)) = 3/7
-	//     b = θ - ln(7/3) = θ - 0.847
-	//
-	// See docs/regulation-design/05-action-selector.md §5 for the full
-	// derivation and the rationale behind a=1.
-	ZPDOffset = 0.847
+	// PracticeDifficultyTarget is a generation instruction on the existing
+	// 0..1 scale, not a calibrated item parameter or probability of success.
+	// Generated tasks currently have no calibrated difficulty model, so the
+	// legacy FSRS-derived theta must not determine the next task's difficulty.
+	PracticeDifficultyTarget = 0.55
 
 	// HighMasteryStabilityWindow is the number of consecutive interactions
 	// above MasteryBKT() required before the high-mastery rotation
@@ -106,7 +98,7 @@ func NaNFallbackCount() int64 {
 //
 // Precedence cascade (each rule documented inline):
 //
-//  1. nil state or NaN in PMastery/Theta → REST (defence vs F-1.3).
+//  1. nil state or non-finite PMastery → REST (defence vs F-1.3).
 //  2. Active misconception → DEBUG_MISCONCEPTION.
 //     OQ-5.4 = A: misconception beats retention because recalling a
 //     concept while a faulty belief is active just re-anchors the
@@ -119,8 +111,8 @@ func NaNFallbackCount() int64 {
 //  4. Mastery brackets:
 //     - p < 0.30                     → NEW_CONCEPT
 //     - p < 0.70                     → PRACTICE (standard, diff=0.55)
-//     - p < MasteryBKT()             → PRACTICE (ZPD via IRT theta)
-//     - p ≥ MasteryBKT() unstable    → PRACTICE (ZPD), avoids ping-pong
+//     - p < MasteryBKT()             → PRACTICE (heuristic target)
+//     - p ≥ MasteryBKT() unstable    → PRACTICE (heuristic), avoids ping-pong
 //     - p ≥ MasteryBKT() stable (N=3)→ high-mastery rotation
 //
 // The threshold is read through algorithms.MasteryBKT() so the legacy
@@ -159,12 +151,11 @@ func SelectActionAt(concept string, cs *models.ConceptState, mc *models.Misconce
 			"concept", concept)
 		return restFallback("concept_state nil — fallback REST")
 	}
-	if math.IsNaN(cs.PMastery) || math.IsNaN(cs.Theta) {
+	if math.IsNaN(cs.PMastery) || math.IsInf(cs.PMastery, 0) {
 		nanFallbackCount.Add(1)
 		slog.Error("action_selector: NaN in concept state, falling back to REST",
 			"concept", concept,
-			"p_mastery", cs.PMastery,
-			"theta", cs.Theta)
+			"p_mastery", cs.PMastery)
 		return restFallback("concept_state corrupted (NaN) — fallback REST")
 	}
 
@@ -219,29 +210,29 @@ func SelectActionAt(concept string, cs *models.ConceptState, mc *models.Misconce
 			Rationale:        fmt.Sprintf("practice standard : model estimate %.2f", p),
 		}
 	case p < algorithms.MasteryBKT():
-		d := zpdDifficultyFromTheta(cs.Theta)
 		return Action{
 			Type:             models.ActivityPractice,
-			DifficultyTarget: d,
+			DifficultyTarget: PracticeDifficultyTarget,
+			// Retained as a legacy format identifier for existing clients;
+			// this label does not establish a measured ZPD.
 			Format:           "practice_zpd",
 			EstimatedMinutes: 12,
-			Rationale:        fmt.Sprintf("ZPD via IRT θ=%.2f → diff=%.2f", cs.Theta, d),
+			Rationale:        fmt.Sprintf("practice heuristic: model estimate %.2f, generation difficulty %.2f; no calibrated success probability", p, PracticeDifficultyTarget),
 		}
 	default:
 		// p ≥ MasteryBKT() — but require N=3 stable interactions before
 		// engaging the high-mastery rotation (OQ-5.5 = B). Below the
-		// window, stay in PRACTICE ZPD: the learner is plausibly above
+		// window, stay in guided PRACTICE: the learner is plausibly above
 		// threshold but not yet *consolidated* there.
 		if history.InteractionsAboveBKT < HighMasteryStabilityWindow {
-			d := zpdDifficultyFromTheta(cs.Theta)
 			return Action{
 				Type:             models.ActivityPractice,
-				DifficultyTarget: d,
+				DifficultyTarget: PracticeDifficultyTarget,
 				Format:           "practice_zpd",
 				EstimatedMinutes: 12,
 				Rationale: fmt.Sprintf(
-					"model estimate %.2f >= threshold but stability insufficient (%d/%d)",
-					p, history.InteractionsAboveBKT, HighMasteryStabilityWindow),
+					"model estimate %.2f >= threshold but stability insufficient (%d/%d); heuristic generation difficulty %.2f",
+					p, history.InteractionsAboveBKT, HighMasteryStabilityWindow, PracticeDifficultyTarget),
 			}
 		}
 		return selectHighMasteryAction(history)
@@ -305,28 +296,6 @@ func selectHighMasteryAction(history ActionHistory) Action {
 			Rationale:        "stable high model estimate: new challenge cycle",
 		}
 	}
-}
-
-// zpdDifficultyFromTheta maps IRT theta to a DifficultyTarget that
-// targets pCorrect ≈ 0.70 in a 2PL model with discrimination a=1, then
-// maps the latent difficulty to [0,1] via the logistic and clamps to
-// the [0.30, 0.85] envelope.
-//
-// The clamp prevents two failure modes:
-//   - very low θ producing a near-zero target (boredom / floor effect)
-//   - very high θ producing a near-one target (frustration / ceiling)
-//
-// See ZPDOffset for the derivation of the constant.
-func zpdDifficultyFromTheta(theta float64) float64 {
-	if math.IsNaN(theta) {
-		// Defensive — SelectAction already guards on NaN before calling
-		// this helper. Returns a benign middle so callers can still
-		// produce a valid Action even in pathological tests.
-		return 0.55
-	}
-	b := theta - ZPDOffset
-	d := 1.0 / (1.0 + math.Exp(-b))
-	return clampActionDifficulty(d)
 }
 
 func clampActionDifficulty(d float64) float64 {

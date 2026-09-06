@@ -348,6 +348,26 @@ func TestApplyGate_AntiRepeat_WindowZeroDisabled(t *testing.T) {
 	containsAll(t, r.AllowedConcepts, []string{"A", "B"})
 }
 
+func TestApplyGate_AntiRepeat_RelaxesForOnlyAccessiblePrerequisite(t *testing.T) {
+	in := GateInput{
+		Phase:            models.PhaseInstruction,
+		Concepts:         []string{"A", "B", "C"},
+		States:           statesMap(gateCS("A", 0.1), gateCS("B", 0.1), gateCS("C", 0.1)),
+		Graph:            graph([]string{"A", "B", "C"}, map[string][]string{"B": {"A"}, "C": {"B"}}),
+		RecentConcepts:   []string{"A"},
+		AntiRepeatWindow: DefaultAntiRepeatWindow,
+	}
+	result, err := ApplyGate(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	containsAll(t, result.AllowedConcepts, []string{"A"})
+	containsNone(t, result.AllowedConcepts, []string{"B", "C"})
+	if result.NoCandidate {
+		t.Fatal("diversity must not block the only accessible prerequisite")
+	}
+}
+
 func TestApplyGate_AntiRepeat_EffectiveWindowProtection(t *testing.T) {
 	// OQ-3.4 garde-fou: small domain (2 concepts) with N=3.
 	// effective_N capped at len(Concepts)-1 = 1, so only 1 concept

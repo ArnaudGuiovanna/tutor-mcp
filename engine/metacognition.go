@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	"tutor-mcp/algorithms"
@@ -18,20 +19,34 @@ import (
 
 // AutonomyInput holds the data needed to compute autonomy metrics.
 type AutonomyInput struct {
-	Interactions    []*models.Interaction
-	ConceptStates   []*models.ConceptState
+	Interactions      []*models.Interaction
+	ConceptStates     []*models.ConceptState
+	CalibrationDeltas []float64 // completed predictions minus outcomes, each in [-1,1]
+	// Deprecated: signed mean bias cannot identify prediction accuracy.
+	// Ignored; callers must provide CalibrationDeltas instead.
 	CalibrationBias float64
 	SessionGap      time.Duration // default: 2h
 }
 
-// ComputeAutonomyMetrics computes the four autonomy components.
-// Each component is 25% of the final score.
+// ComputeAutonomyMetrics computes descriptive rates, not a validated autonomy
+// scale. Score is a compatibility summary over the observed components only;
+// ScoreStatus and the component sample counts expose missing evidence. Neither
+// this summary nor changes in its coverage should determine pedagogical support.
 func ComputeAutonomyMetrics(input AutonomyInput) models.AutonomyMetrics {
 	now := time.Now().UTC()
+	interactions := make([]*models.Interaction, 0, len(input.Interactions))
+	for _, interaction := range input.Interactions {
+		if interaction != nil {
+			interactions = append(interactions, interaction)
+		}
+	}
+	if input.SessionGap <= 0 {
+		input.SessionGap = 2 * time.Hour
+	}
 
 	// 1. Initiative rate: % of sessions self-initiated
 	initiativeRate := 0.0
-	sessions := groupIntoSessions(input.Interactions, input.SessionGap)
+	sessions := groupIntoSessions(interactions, input.SessionGap)
 	if len(sessions) > 0 {
 		selfInitCount := 0
 		for _, s := range sessions {
@@ -42,29 +57,50 @@ func ComputeAutonomyMetrics(input AutonomyInput) models.AutonomyMetrics {
 		initiativeRate = float64(selfInitCount) / float64(len(sessions))
 	}
 
-	// 2. Calibration accuracy: 1 - |bias| clamped to [0, 1]
-	calibrationAccuracy := 1.0 - math.Min(math.Abs(input.CalibrationBias), 1.0)
+	// 2. Prediction accuracy: 1 - mean absolute prediction error. Taking the
+	// absolute value after averaging would incorrectly make +1/-1 perfect.
+	calibrationAccuracy := 0.0
+	calibrationSamples := 0
+	absErrorSum := 0.0
+	for _, delta := range input.CalibrationDeltas {
+		if math.IsNaN(delta) || math.IsInf(delta, 0) {
+			continue
+		}
+		absErrorSum += math.Min(math.Abs(delta), 1)
+		calibrationSamples++
+	}
+	if calibrationSamples > 0 {
+		calibrationAccuracy = 1 - absErrorSum/float64(calibrationSamples)
+	}
 
-	// 3. Hint independence: 1 - (hints on mastered / total on mastered)
-	hintIndependence := 1.0
+	// 3. Share of observed responses without hints on high-estimate concepts.
+	// Absence of observations is unknown, not perfect independence. Count
+	// assisted responses, not individual hints, so one response cannot count
+	// against several independent responses.
+	hintIndependence := 0.0
+	hintObservations := 0
 	if len(input.ConceptStates) > 0 {
 		masteryMid := algorithms.MasteryMid()
-		masteredConcepts := make(map[string]bool)
+		type conceptKey struct{ domainID, concept string }
+		masteredConcepts := make(map[conceptKey]bool)
 		for _, cs := range input.ConceptStates {
-			if cs.PMastery >= masteryMid {
-				masteredConcepts[cs.Concept] = true
+			if cs != nil && cs.PMastery >= masteryMid {
+				masteredConcepts[conceptKey{cs.DomainID, cs.Concept}] = true
 			}
 		}
 		if len(masteredConcepts) > 0 {
 			totalOnMastered := 0
 			hintsOnMastered := 0
-			for _, i := range input.Interactions {
-				if masteredConcepts[i.Concept] {
+			for _, i := range interactions {
+				if masteredConcepts[conceptKey{i.DomainID, i.Concept}] {
 					totalOnMastered++
-					hintsOnMastered += i.HintsRequested
+					if i.HintsRequested > 0 {
+						hintsOnMastered++
+					}
 				}
 			}
 			if totalOnMastered > 0 {
+				hintObservations = totalOnMastered
 				hintRatio := float64(hintsOnMastered) / float64(totalOnMastered)
 				hintIndependence = 1.0 - math.Min(hintRatio, 1.0)
 			}
@@ -75,8 +111,8 @@ func ComputeAutonomyMetrics(input AutonomyInput) models.AutonomyMetrics {
 	proactiveRate := 0.0
 	reviewCount := 0
 	proactiveCount := 0
-	for _, i := range input.Interactions {
-		if i.ActivityType != "NEW_CONCEPT" && i.ActivityType != "REST" && i.ActivityType != "SETUP_DOMAIN" {
+	for _, i := range interactions {
+		if i.ActivityType == string(models.ActivityRecall) {
 			reviewCount++
 			if i.IsProactiveReview {
 				proactiveCount++
@@ -87,14 +123,43 @@ func ComputeAutonomyMetrics(input AutonomyInput) models.AutonomyMetrics {
 		proactiveRate = float64(proactiveCount) / float64(reviewCount)
 	}
 
-	score := (initiativeRate + calibrationAccuracy + hintIndependence + proactiveRate) / 4.0
+	score := 0.0
+	observedComponents := 0
+	for _, component := range []struct {
+		value float64
+		count int
+	}{
+		{initiativeRate, len(sessions)},
+		{calibrationAccuracy, calibrationSamples},
+		{hintIndependence, hintObservations},
+		{proactiveRate, reviewCount},
+	} {
+		if component.count > 0 {
+			score += component.value
+			observedComponents++
+		}
+	}
+	scoreStatus := "unavailable"
+	if observedComponents > 0 {
+		score /= float64(observedComponents)
+		scoreStatus = "partial"
+		if observedComponents == 4 {
+			scoreStatus = "descriptive"
+		}
+	}
 
 	return models.AutonomyMetrics{
 		Score:               score,
+		ScoreStatus:         scoreStatus,
+		ObservedComponents:  observedComponents,
+		SessionCount:        len(sessions),
 		InitiativeRate:      initiativeRate,
 		CalibrationAccuracy: calibrationAccuracy,
+		CalibrationSamples:  calibrationSamples,
 		HintIndependence:    hintIndependence,
+		HintObservations:    hintObservations,
 		ProactiveReviewRate: proactiveRate,
+		ReviewObservations:  reviewCount,
 		ComputedAt:          now,
 	}
 }
@@ -196,42 +261,45 @@ func ComputeAutonomyTrendExported(scores []float64) string {
 type MirrorInput struct {
 	Interactions       []*models.Interaction
 	ConceptStates      []*models.ConceptState
-	AutonomyScores     []float64 // newest-first from affect_states.autonomy_score
+	AutonomyScores     []float64 // legacy input; composite scores no longer establish dependency
 	CalibrationBias    float64
 	CalibrationSamples int
 	SessionCount       int
 }
 
-// DetectMirrorPattern returns a mirror message if a dependency pattern is consolidated
-// over 3+ sessions. Returns nil if no pattern detected.
+// DetectMirrorPattern returns descriptive observations for a generative dialogue
+// after at least three sessions. It does not diagnose dependency, assume why a
+// session started, or author the learner-facing message.
 func DetectMirrorPattern(input MirrorInput) *models.MirrorMessage {
 	if input.SessionCount < 3 {
 		return nil
 	}
 
-	// Priority 1: dependency_increasing — autonomy declining over 3 consecutive sessions
-	if len(input.AutonomyScores) >= 3 {
-		declining := true
-		for i := 0; i < len(input.AutonomyScores)-1 && i < 2; i++ {
-			if input.AutonomyScores[i] >= input.AutonomyScores[i+1] {
-				declining = false
-				break
-			}
+	interactionCount := 0
+	for _, interaction := range input.Interactions {
+		if interaction != nil {
+			interactionCount++
 		}
-		if declining {
-			return &models.MirrorMessage{
-				Pattern:      "dependency_increasing",
-				Message:      "Your autonomy score has dropped over the last 3 sessions.",
-				OpenQuestion: "Do you feel you need more guidance right now, or would you like to try working more independently?",
-			}
+	}
+	observation := func(pattern, intent string, facts map[string]any) *models.MirrorMessage {
+		return &models.MirrorMessage{
+			Pattern: pattern,
+			Facts:   facts,
+			Window:  &models.MirrorWindow{SessionCount: input.SessionCount, InteractionCount: interactionCount},
+			// This is an evidence description, not a calibrated probability
+			// or a claim about the learner's psychological state.
+			Confidence:     "descriptive_only",
+			DialogueIntent: intent,
 		}
 	}
 
-	// Priority 2: hint_overuse — hints on high-estimate concepts (PMastery >= MasteryMid)
+	// Hint observations use current model estimates to describe the selected
+	// cohort. They do not imply the concept was mastered when a hint was used,
+	// or that requesting assistance was inappropriate.
 	masteryMid := algorithms.MasteryMid()
 	masteredConcepts := make(map[string]bool)
 	for _, cs := range input.ConceptStates {
-		if cs.PMastery >= masteryMid {
+		if cs != nil && cs.PMastery >= masteryMid {
 			masteredConcepts[cs.Concept] = true
 		}
 	}
@@ -239,51 +307,52 @@ func DetectMirrorPattern(input MirrorInput) *models.MirrorMessage {
 		hintsOnMastered := 0
 		totalOnMastered := 0
 		for _, i := range input.Interactions {
-			if masteredConcepts[i.Concept] {
+			if i != nil && masteredConcepts[i.Concept] {
 				totalOnMastered++
 				hintsOnMastered += i.HintsRequested
 			}
 		}
 		if totalOnMastered >= 5 && float64(hintsOnMastered)/float64(totalOnMastered) > 0.5 {
-			return &models.MirrorMessage{
-				Pattern:      "hint_overuse",
-				Message:      "You often ask for hints on concepts that your recent results make look familiar.",
-				OpenQuestion: "Is it by reflex, or is there an aspect of these concepts that still feels unclear to you?",
-			}
+			return observation("hint_use_observed", "explore_help_use_and_remaining_questions", map[string]any{
+				"hints_requested": hintsOnMastered,
+				"interactions_on_currently_high_estimate_concepts": totalOnMastered,
+				"estimate_threshold": masteryMid,
+				"estimate_scope":     "current_state_not_state_when_hint_was_requested",
+			})
 		}
 	}
 
-	// Priority 3: no_initiative — all sessions started after alert (no self_initiated)
-	if input.SessionCount >= 3 {
+	// Missing initiative flags do not establish that notifications caused
+	// sessions. Surface the recorded absence and let the tutor clarify it.
+	if interactionCount > 0 {
 		hasSelfInitiated := false
 		for _, i := range input.Interactions {
-			if i.SelfInitiated {
+			if i != nil && i.SelfInitiated {
 				hasSelfInitiated = true
 				break
 			}
 		}
 		if !hasSelfInitiated {
-			return &models.MirrorMessage{
-				Pattern:      "no_initiative",
-				Message:      "All recent sessions were triggered by a notification.",
-				OpenQuestion: "Do you prefer reminders from the system, or would you like to define your own learning moments?",
-			}
+			return observation("no_recorded_initiative", "clarify_session_initiation_preference", map[string]any{
+				"self_initiated_interactions":  0,
+				"notification_origin_verified": false,
+			})
 		}
 	}
 
-	// Priority 4: calibration_drift. Calibration deltas are normalized to
+	// Calibration deltas are normalized to
 	// [-1,1]; use the same evidence threshold as alerts and the OLM rather than
 	// an unreachable >1.0 comparison.
 	if calibrationBiasIsActionable(input.CalibrationBias, input.CalibrationSamples) {
-		direction := "overestimate"
+		direction := "predictions_above_outcomes"
 		if input.CalibrationBias < 0 {
-			direction = "underestimate"
+			direction = "predictions_below_outcomes"
 		}
-		return &models.MirrorMessage{
-			Pattern:      "calibration_drift",
-			Message:      fmt.Sprintf("You tend to %s your level repeatedly.", direction),
-			OpenQuestion: "Do you want to work with more frequent self-ratings to refine your perception?",
-		}
+		return observation("calibration_drift", "compare_predictions_with_observed_outcomes", map[string]any{
+			"mean_signed_error":     input.CalibrationBias,
+			"completed_predictions": input.CalibrationSamples,
+			"direction":             direction,
+		})
 	}
 
 	return nil
@@ -318,11 +387,13 @@ type MirrorWebhookContent struct {
 	OpenQuestion string `json:"open_question"`
 }
 
-// EnqueueMirrorWebhook persists an emitted mirror message into the shared
-// webhook_message_queue so it can be pushed proactively by the scheduler.
+// EnqueueMirrorWebhook preserves delivery of legacy authored mirror messages.
+// New observation-only mirrors need tutor-generated wording and are never
+// automatically put on the delivery queue. The tutor can explicitly queue its
+// generated message using the normal consent-aware webhook workflow.
 //
 // Behaviour:
-//   - Returns (0, false, nil) on a no-op (mirror is nil, or one was already
+//   - Returns (0, false, nil) on a no-op (no authored message, or one was already
 //     reserved for this learner today).
 //   - Queue insertion and the daily reservation are one database transaction,
 //     so concurrent callers cannot create duplicate official mirror items.
@@ -332,7 +403,7 @@ type MirrorWebhookContent struct {
 // scheduledFor defaults to `now`; the message expires 24h later (mirrors are
 // time-sensitive — a stale dependency-pattern nudge is noise, not signal).
 func EnqueueMirrorWebhook(ctx context.Context, store mirrorWebhookStore, learnerID string, mirror *models.MirrorMessage, now time.Time) (int64, bool, error) {
-	if store == nil || mirror == nil || learnerID == "" {
+	if store == nil || mirror == nil || learnerID == "" || strings.TrimSpace(mirror.Message) == "" {
 		return 0, false, nil
 	}
 

@@ -93,6 +93,7 @@ type RetentionReport struct {
 	AssessmentAbandonedAttempts  RetentionMetric `json:"assessment_abandoned_attempts"`
 	IdempotencyResponsePlaintext RetentionMetric `json:"idempotency_response_plaintext"`
 	PedagogicalSnapshots         RetentionMetric `json:"pedagogical_snapshots"`
+	PedagogicalDecisions         RetentionMetric `json:"pedagogical_decisions"`
 	WebhookPushEvents            RetentionMetric `json:"webhook_push_events"`
 	ScheduledAlertEvents         RetentionMetric `json:"scheduled_alert_events"`
 	CompletedConsolidations      RetentionMetric `json:"completed_consolidations"`
@@ -291,6 +292,24 @@ func (s *Store) runDataRetention(ctx context.Context, policy RetentionPolicy, no
 				return fmt.Errorf("delete pedagogical snapshots: %w", err)
 			}
 		}
+		// Decisions hold only a minimal immutable runtime contract. Once an
+		// assessment references it, that binding is retained with the evidence
+		// until explicit learner erasure. Unused decisions follow snapshot TTL;
+		// neither retention nor redaction may detach a live assessment's contract.
+		unusedDecision := `created_at < ? AND NOT EXISTS
+			(SELECT 1 FROM assessment_attempts a WHERE a.decision_id = pedagogical_decisions.id)`
+		report.PedagogicalDecisions.Eligible, report.PedagogicalDecisions.Held, err = s.retentionCountsByHold(
+			ctx, "pedagogical_decisions", unusedDecision, cutoff)
+		if err != nil {
+			return fmt.Errorf("count unused pedagogical decisions: %w", err)
+		}
+		if apply {
+			report.PedagogicalDecisions.Applied, err = s.retentionExec(ctx,
+				`DELETE FROM pedagogical_decisions WHERE `+unusedDecision+` AND `+retentionHoldClause("pedagogical_decisions", false), cutoff)
+			if err != nil {
+				return fmt.Errorf("delete unused pedagogical decisions: %w", err)
+			}
+		}
 	}
 
 	if policy.OperationalEventLogDays > 0 {
@@ -389,6 +408,7 @@ func RetentionReportTotals(report *RetentionReport) (eligible, applied, held int
 		report.AssessmentAbandonedAttempts,
 		report.IdempotencyResponsePlaintext,
 		report.PedagogicalSnapshots,
+		report.PedagogicalDecisions,
 		report.WebhookPushEvents,
 		report.ScheduledAlertEvents,
 		report.CompletedConsolidations,

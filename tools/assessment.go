@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,16 +21,18 @@ import (
 
 type PrepareAssessmentAttemptParams struct {
 	IdempotentMutationParams
-	DomainID        string `json:"domain_id,omitempty" jsonschema:"domain ID (optional; active domain used when absent)"`
-	Concept         string `json:"concept" jsonschema:"concept assessed"`
-	SessionID       string `json:"session_id,omitempty" jsonschema:"durable learning session ID when available"`
-	ActivityID      string `json:"activity_id,omitempty" jsonschema:"stable activity identifier; derived from immutable content when absent"`
-	ActivityVersion int    `json:"activity_version,omitempty" jsonschema:"positive activity version; defaults to 1"`
-	ActivityType    string `json:"activity_type" jsonschema:"evidence-bearing activity type"`
-	Observable      string `json:"observable" jsonschema:"observable learning outcome assessed by this task"`
-	TaskText        string `json:"task_text,omitempty" jsonschema:"exact learner-facing task; task_content_hash may be used instead for sensitive artefacts"`
-	TaskContentHash string `json:"task_content_hash,omitempty" jsonschema:"optional lowercase SHA-256 hex digest of the exact task"`
-	RubricJSON      string `json:"rubric_json" jsonschema:"rubric fixed before the response, including criteria and passing_score"`
+	DomainID        string   `json:"domain_id,omitempty" jsonschema:"domain ID (optional; active domain used when absent)"`
+	Concept         string   `json:"concept" jsonschema:"concept assessed"`
+	SessionID       string   `json:"session_id,omitempty" jsonschema:"durable learning session ID when available"`
+	ActivityID      string   `json:"activity_id,omitempty" jsonschema:"stable activity identifier; derived from immutable content when absent"`
+	ActivityVersion int      `json:"activity_version,omitempty" jsonschema:"positive activity version; defaults to 1"`
+	DecisionID      string   `json:"decision_id,omitempty" jsonschema:"decision_id returned by get_next_activity; omission explicitly creates an unbound standalone attempt"`
+	OutcomeIDs      []string `json:"outcome_ids,omitempty" jsonschema:"stable outcome IDs from the decision competency; required when bound competency defines outcomes"`
+	ActivityType    string   `json:"activity_type" jsonschema:"evidence-bearing activity type"`
+	Observable      string   `json:"observable" jsonschema:"observable learning outcome assessed by this task"`
+	TaskText        string   `json:"task_text,omitempty" jsonschema:"exact learner-facing task; task_content_hash may be used instead for sensitive artefacts"`
+	TaskContentHash string   `json:"task_content_hash,omitempty" jsonschema:"optional lowercase SHA-256 hex digest of the exact task"`
+	RubricJSON      string   `json:"rubric_json" jsonschema:"rubric fixed before the response, including criteria and passing_score"`
 }
 
 type SubmitAssessmentAttemptParams struct {
@@ -63,6 +66,7 @@ func registerPrepareAssessmentAttempt(server *mcp.Server, deps *Deps) {
 			{"concept", params.Concept, maxShortLabelLen},
 			{"session_id", params.SessionID, maxShortLabelLen},
 			{"activity_id", params.ActivityID, maxShortLabelLen},
+			{"decision_id", params.DecisionID, maxShortLabelLen},
 			{"activity_type", params.ActivityType, maxShortLabelLen},
 			{"observable", params.Observable, maxNoteLen},
 			{"task_text", params.TaskText, maxLongTextLen},
@@ -93,7 +97,17 @@ func registerPrepareAssessmentAttempt(server *mcp.Server, deps *Deps) {
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
 		}
-		rubric, warnings, err := normalizeRubricJSON(params.RubricJSON)
+		var rubric map[string]any
+		var warnings []string
+		if params.DecisionID != "" {
+			var strict models.AssessmentRubric
+			strict, err = normalizeAssessmentRubric(params.RubricJSON)
+			if err == nil {
+				rubric, warnings = assessmentRubricMap(strict), nil
+			}
+		} else {
+			rubric, warnings, err = normalizeRubricJSON(params.RubricJSON)
+		}
 		if err != nil {
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
@@ -154,6 +168,7 @@ func registerPrepareAssessmentAttempt(server *mcp.Server, deps *Deps) {
 			SessionID:       learningSession.ID,
 			ActivityID:      activityID,
 			ActivityVersion: version,
+			DecisionID:      params.DecisionID,
 			ActivityType:    params.ActivityType,
 			Observable:      strings.TrimSpace(params.Observable),
 			TaskText:        params.TaskText,
@@ -163,22 +178,35 @@ func registerPrepareAssessmentAttempt(server *mcp.Server, deps *Deps) {
 			Status:          models.AssessmentAttemptPrepared,
 			CreatedAt:       now,
 		}
+		if err := bindAssessmentCurriculum(ctx, deps, attempt, domain, params.OutcomeIDs); err != nil {
+			r, _ := errorResult(err.Error())
+			return r, nil, nil
+		}
+		bindingStatus := "decision_bound"
+		if attempt.DecisionID == "" {
+			bindingStatus = "standalone_unbound"
+			warnings = append(warnings, "No decision_id: this attempt does not attest compliance with a runtime decision.")
+		}
 		if err := deps.Store.CreateAssessmentAttempt(ctx, attempt); err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to prepare assessment attempt", err)
 			return r, nil, nil
 		}
 		r, _ := jsonResult(map[string]any{
-			"attempt_id":        attempt.ID,
-			"status":            attempt.Status,
-			"domain_id":         attempt.DomainID,
-			"concept":           attempt.ConceptID,
-			"session_id":        attempt.SessionID,
-			"activity_id":       attempt.ActivityID,
-			"activity_version":  attempt.ActivityVersion,
-			"task_content_hash": attempt.TaskContentHash,
-			"rubric":            rubric,
-			"rubric_warnings":   warnings,
-			"passing_score":     attempt.PassingScore,
+			"attempt_id":         attempt.ID,
+			"status":             attempt.Status,
+			"domain_id":          attempt.DomainID,
+			"concept":            attempt.ConceptID,
+			"session_id":         attempt.SessionID,
+			"activity_id":        attempt.ActivityID,
+			"activity_version":   attempt.ActivityVersion,
+			"decision_id":        attempt.DecisionID,
+			"binding_status":     bindingStatus,
+			"curriculum_version": attempt.CurriculumVersion,
+			"outcome_ids":        params.OutcomeIDs,
+			"task_content_hash":  attempt.TaskContentHash,
+			"rubric":             rubric,
+			"rubric_warnings":    warnings,
+			"passing_score":      attempt.PassingScore,
 		})
 		return r, nil, nil
 	})
@@ -292,7 +320,16 @@ func generateAssessmentID() (string, error) {
 // score may exceed its declared maximum. The pass/fail outcome is then derived
 // from the frozen passing_score, never accepted as an independent host field.
 func deriveAssessmentOutcome(rubric, score map[string]any) (float64, bool, error) {
-	maxByID, maxTotal := rubricMaxScores(rubric)
+	maxByID, _ := rubricMaxScores(rubric)
+	criterionIDs := make([]string, 0, len(maxByID))
+	for id := range maxByID {
+		criterionIDs = append(criterionIDs, id)
+	}
+	sort.Strings(criterionIDs)
+	maxTotal := 0.0
+	for _, id := range criterionIDs {
+		maxTotal += maxByID[id]
+	}
 	passing, _, ok := rubricFiniteNumber(rubric["passing_score"])
 	if !ok || passing <= 0 || maxTotal <= 0 || passing > maxTotal {
 		return 0, false, fmt.Errorf("assessment rubric has an invalid passing rule")
@@ -346,8 +383,195 @@ func deriveAssessmentOutcome(rubric, score map[string]any) (float64, bool, error
 		return 0, false, fmt.Errorf("assessment score must cover every frozen rubric criterion")
 	}
 	total := 0.0
-	for _, value := range scoresByID {
-		total += value
+	for _, id := range criterionIDs {
+		total += scoresByID[id]
 	}
 	return total, total >= passing || rubricFloatEqual(total, passing), nil
+}
+
+// normalizeAssessmentRubric is deliberately separate from the permissive
+// legacy normalizer. A bound assessment must preserve every declared scoring
+// rule or reject the rubric before the learner sees the task.
+func normalizeAssessmentRubric(raw string) (models.AssessmentRubric, error) {
+	var rubric models.AssessmentRubric
+	parsed, err := parseRubricSchemaJSON("rubric_json", raw)
+	if err != nil {
+		return rubric, err
+	}
+	object, ok := parsed.(map[string]any)
+	if !ok {
+		return rubric, fmt.Errorf("bound assessment rubric_json must be a canonical JSON object")
+	}
+	if err := rejectUnknownAssessmentRubricFields(object, "rubric_json", "criteria", "passing_score", "answer_key"); err != nil {
+		return rubric, err
+	}
+	passing, coerced, valid := rubricFiniteNumber(object["passing_score"])
+	if !valid || coerced {
+		return rubric, fmt.Errorf("rubric_json.passing_score must be a finite JSON number")
+	}
+	rubric.PassingScore = passing
+	if value, exists := object["answer_key"]; exists {
+		answerKey, ok := value.(string)
+		if !ok || strings.TrimSpace(answerKey) == "" {
+			return rubric, fmt.Errorf("rubric_json.answer_key must be a non-empty string when present")
+		}
+		rubric.AnswerKey = answerKey
+	}
+	criteria, ok := object["criteria"].([]any)
+	if !ok {
+		return rubric, fmt.Errorf("rubric_json.criteria must be an array of defined criteria")
+	}
+	for i, value := range criteria {
+		criterionObject, ok := value.(map[string]any)
+		if !ok {
+			return rubric, fmt.Errorf("rubric_json.criteria[%d] must be an object", i)
+		}
+		field := fmt.Sprintf("rubric_json.criteria[%d]", i)
+		if err := rejectUnknownAssessmentRubricFields(criterionObject, field, "id", "description", "max_score", "anchors"); err != nil {
+			return rubric, err
+		}
+		criterion := models.AssessmentRubricCriterion{}
+		criterion.ID, _ = criterionObject["id"].(string)
+		criterion.Description, _ = criterionObject["description"].(string)
+		maxScore, coerced, valid := rubricFiniteNumber(criterionObject["max_score"])
+		if !valid || coerced {
+			return rubric, fmt.Errorf("%s.max_score must be a finite JSON number", field)
+		}
+		criterion.MaxScore = maxScore
+		if value, exists := criterionObject["anchors"]; exists {
+			anchors, ok := value.([]any)
+			if !ok {
+				return rubric, fmt.Errorf("%s.anchors must be an array", field)
+			}
+			for j, value := range anchors {
+				anchorObject, ok := value.(map[string]any)
+				if !ok {
+					return rubric, fmt.Errorf("%s.anchors[%d] must be an object", field, j)
+				}
+				anchorField := fmt.Sprintf("%s.anchors[%d]", field, j)
+				if err := rejectUnknownAssessmentRubricFields(anchorObject, anchorField, "score", "description"); err != nil {
+					return rubric, err
+				}
+				score, coerced, valid := rubricFiniteNumber(anchorObject["score"])
+				if !valid || coerced {
+					return rubric, fmt.Errorf("%s.score must be a finite JSON number", anchorField)
+				}
+				description, _ := anchorObject["description"].(string)
+				criterion.Anchors = append(criterion.Anchors, models.AssessmentRubricAnchor{Score: score, Description: description})
+			}
+		}
+		rubric.Criteria = append(rubric.Criteria, criterion)
+	}
+	return rubric, validateBoundAssessmentRubric(rubric)
+}
+
+func rejectUnknownAssessmentRubricFields(object map[string]any, field string, allowed ...string) error {
+	for _, key := range sortedRubricKeys(object) {
+		known := false
+		for _, candidate := range allowed {
+			if key == candidate {
+				known = true
+				break
+			}
+		}
+		if !known {
+			return fmt.Errorf("%s contains unsupported field %q; supported fields: %s", field, key, strings.Join(allowed, ", "))
+		}
+	}
+	return nil
+}
+
+func validateBoundAssessmentRubric(rubric models.AssessmentRubric) error {
+	if len(rubric.Criteria) == 0 {
+		return fmt.Errorf("bound assessment rubric must contain at least one defined criterion")
+	}
+	maxByID := make(map[string]float64, len(rubric.Criteria))
+	criterionIDs := make([]string, 0, len(rubric.Criteria))
+	for i, criterion := range rubric.Criteria {
+		id, ok := normalizeRubricID(criterion.ID)
+		_, duplicate := maxByID[id]
+		if !ok || id != criterion.ID || duplicate {
+			return fmt.Errorf("rubric_json.criteria[%d].id must be a unique canonical criterion ID", i)
+		}
+		if strings.TrimSpace(criterion.Description) == "" {
+			return fmt.Errorf("rubric_json.criteria[%d].description must define the observable performance being scored", i)
+		}
+		if !rubricFinite(criterion.MaxScore) || criterion.MaxScore <= 0 {
+			return fmt.Errorf("rubric_json.criteria[%d].max_score must be positive and finite", i)
+		}
+		maxByID[id] = criterion.MaxScore
+		criterionIDs = append(criterionIDs, id)
+		anchorScores := make(map[float64]bool, len(criterion.Anchors))
+		for j, anchor := range criterion.Anchors {
+			if !rubricFinite(anchor.Score) || anchor.Score < 0 || anchor.Score > criterion.MaxScore || anchorScores[anchor.Score] {
+				return fmt.Errorf("rubric_json.criteria[%d].anchors[%d].score must be unique and between zero and max_score", i, j)
+			}
+			anchorScores[anchor.Score] = true
+			if strings.TrimSpace(anchor.Description) == "" {
+				return fmt.Errorf("rubric_json.criteria[%d].anchors[%d].description must define observable performance", i, j)
+			}
+		}
+	}
+	sort.Strings(criterionIDs)
+	maxTotal := 0.0
+	for _, id := range criterionIDs {
+		maxTotal += maxByID[id]
+	}
+	if !rubricFinite(maxTotal) || !rubricFinite(rubric.PassingScore) || rubric.PassingScore <= 0 || rubric.PassingScore > maxTotal {
+		return fmt.Errorf("bound assessment passing_score must be positive and no greater than the finite criteria maximum")
+	}
+	return nil
+}
+
+// assessmentRubricMap bridges the canonical envelope to existing score and
+// persistence helpers without dropping its generated answer key or anchors.
+func assessmentRubricMap(rubric models.AssessmentRubric) map[string]any {
+	criteria := make([]map[string]any, 0, len(rubric.Criteria))
+	for _, criterion := range rubric.Criteria {
+		item := map[string]any{"id": criterion.ID, "description": criterion.Description, "max_score": criterion.MaxScore}
+		if len(criterion.Anchors) > 0 {
+			anchors := make([]map[string]any, 0, len(criterion.Anchors))
+			for _, anchor := range criterion.Anchors {
+				anchors = append(anchors, map[string]any{"score": anchor.Score, "description": anchor.Description})
+			}
+			item["anchors"] = anchors
+		}
+		criteria = append(criteria, item)
+	}
+	out := map[string]any{"criteria": criteria, "passing_score": rubric.PassingScore}
+	if rubric.AnswerKey != "" {
+		out["answer_key"] = rubric.AnswerKey
+	}
+	return out
+}
+
+// deriveBoundAssessmentOutcome requires an observation of learner performance
+// for every criterion. The server verifies completeness and arithmetic; it does
+// not claim to independently validate the host's semantic judgment.
+func deriveBoundAssessmentOutcome(rubric models.AssessmentRubric, score map[string]any) (float64, bool, error) {
+	if err := validateBoundAssessmentRubric(rubric); err != nil {
+		return 0, false, err
+	}
+	var items []map[string]any
+	switch values := score["criteria_scores"].(type) {
+	case []map[string]any:
+		items = values
+	case []any:
+		for _, value := range values {
+			item, ok := value.(map[string]any)
+			if !ok {
+				return 0, false, fmt.Errorf("assessment criteria_scores must contain objects")
+			}
+			items = append(items, item)
+		}
+	default:
+		return 0, false, fmt.Errorf("assessment criteria_scores must be an array")
+	}
+	for _, item := range items {
+		evidence, _ := item["evidence"].(string)
+		if strings.TrimSpace(evidence) == "" {
+			return 0, false, fmt.Errorf("bound assessment score for criterion %q requires non-empty evidence from the learner response", item["id"])
+		}
+	}
+	return deriveAssessmentOutcome(assessmentRubricMap(rubric), score)
 }

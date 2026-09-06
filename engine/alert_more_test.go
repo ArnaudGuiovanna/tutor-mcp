@@ -110,11 +110,8 @@ func TestComputeAlerts_NoOverloadOnShortSession(t *testing.T) {
 	}
 }
 
-// TestComputeAlerts_PlateauDetected uses a long run of successes so the PFA
-// sigmoid saturates and the last 4 deltas all fall below 0.025.
-func TestComputeAlerts_PlateauDetected(t *testing.T) {
-	// With pfaBetaSuccess = 0.11, the sigmoid only saturates well after 20+
-	// successes — by then deltas drop below the 0.025 plateau threshold.
+// A run of successful responses is not evidence that learning has stalled.
+func TestComputeAlerts_SustainedSuccessDoesNotCreatePlateau(t *testing.T) {
 	var interactions []*models.Interaction
 	for i := 0; i < 30; i++ {
 		interactions = append(interactions, &models.Interaction{Concept: "P", Success: true})
@@ -127,31 +124,28 @@ func TestComputeAlerts_PlateauDetected(t *testing.T) {
 			found = true
 		}
 	}
-	if !found {
-		t.Error("expected PLATEAU alert after sustained successes")
+	if found {
+		t.Error("sustained successes must not be relabelled as a learning plateau")
 	}
 }
 
-func TestComputeAlertsForgettingCriticalSuppressesPlateau(t *testing.T) {
+func TestComputeAlertsForgettingDoesNotCreateSyntheticPlateau(t *testing.T) {
 	var interactions []*models.Interaction
 	for i := 0; i < 30; i++ {
 		interactions = append(interactions, &models.Interaction{Concept: "P", Success: true})
 	}
 
 	cases := []struct {
-		name        string
-		retention   float64
-		wantPlateau bool
+		name      string
+		retention float64
 	}{
 		{
-			name:        "critical forgetting suppresses plateau",
-			retention:   algorithms.RetentionAlertCriticalThreshold - 0.0001,
-			wantPlateau: false,
+			name:      "critical forgetting",
+			retention: algorithms.RetentionAlertCriticalThreshold - 0.0001,
 		},
 		{
-			name:        "warning forgetting keeps plateau",
-			retention:   algorithms.RetentionAlertWarningThreshold - 0.0001,
-			wantPlateau: true,
+			name:      "warning forgetting",
+			retention: algorithms.RetentionAlertWarningThreshold - 0.0001,
 		},
 	}
 
@@ -164,8 +158,8 @@ func TestComputeAlertsForgettingCriticalSuppressesPlateau(t *testing.T) {
 				t.Fatal("expected FORGETTING alert in plateau collision scenario")
 			}
 			_, gotPlateau := findAlert(alerts, models.AlertPlateau, "P")
-			if gotPlateau != tc.wantPlateau {
-				t.Fatalf("PLATEAU presence: got %v, want %v", gotPlateau, tc.wantPlateau)
+			if gotPlateau {
+				t.Fatal("recall history must not produce an unsupported plateau diagnosis")
 			}
 		})
 	}

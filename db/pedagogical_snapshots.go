@@ -65,7 +65,9 @@ func (s *Store) GetPedagogicalSnapshots(ctx context.Context, learnerID, domainID
 	args = append(args, limit)
 
 	rows, err := s.query(ctx,
-		`SELECT `+pedagogicalSnapshotCols+`
+		`SELECT `+pedagogicalSnapshotCols+`,
+		 COALESCE((SELECT i.curriculum_invalidated_version FROM interactions i
+		 WHERE i.id = pedagogical_snapshots.interaction_id AND i.learner_id = pedagogical_snapshots.learner_id), -1)
 		 FROM pedagogical_snapshots
 		 WHERE `+strings.Join(where, " AND ")+`
 		 ORDER BY created_at DESC, interaction_id DESC
@@ -89,6 +91,7 @@ func scanPedagogicalSnapshots(rows *sql.Rows) ([]*models.PedagogicalSnapshot, er
 			&snapshot.DomainID, &snapshot.Concept, &snapshot.ActivityType,
 			&snapshot.BeforeJSON, &snapshot.ObservationJSON, &snapshot.AfterJSON,
 			&snapshot.DecisionJSON, &snapshot.InterpretationBrief, &snapshot.CreatedAt,
+			&snapshot.CurriculumInvalidatedVersion,
 		); err != nil {
 			return nil, fmt.Errorf("scan pedagogical snapshot: %w", err)
 		}

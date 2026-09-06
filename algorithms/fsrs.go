@@ -28,24 +28,32 @@ const (
 )
 
 const (
+	// FSRSVersion identifies the memory equations and default parameter set.
+	// This is FSRS-5, as specified at:
+	// https://github.com/open-spaced-repetition/awesome-fsrs/wiki/The-Algorithm#fsrs-5
+	// The parameters/formulas also match go-fsrs v3.3.1 parameters.go/weights.go.
+	// The local scheduling adapter retains whole-day intervals and immediate
+	// relearning after Again; it does not implement Anki's minute learning steps.
+	FSRSVersion          = "FSRS-5"
+	FSRSDesiredRetention = 0.9
+
 	fsrsDecay  = -0.5
 	fsrsFactor = 19.0 / 81.0
-	// fsrsEpsilon is the floor applied to Difficulty/Stability before they
-	// feed math.Pow(x, -k) inside nextRecallStability/nextForgetStability.
-	// Pow(0, -k) returns +Inf and Pow(neg, non-integer) returns NaN; both
-	// would corrupt FSRSCard.Stability for the rest of the card's life.
-	// Clamping inputs to a small positive number preserves the standard
-	// update path for sane inputs and avoids the NaN/Inf without changing
-	// observable behaviour.
+	// Match the reference scheduler's 100-year interval ceiling, including
+	// before conversion to time.Duration in callers.
+	fsrsMaximumInterval = 36500
+	// fsrsEpsilon is the positive fallback for malformed stability inputs.
+	// Fractional/negative powers of zero or negative values must not poison
+	// subsequent memory updates. Valid persisted stability is kept as-is.
 	fsrsEpsilon = 1e-9
 )
 
 var defaultWeights = [19]float64{
-	0.4072, 1.1829, 3.1262, 15.4722,
-	7.2102, 0.5316, 1.0651, 0.0589,
-	1.5330, 0.1544, 1.0166, 1.9210,
-	0.0854, 0.2698, 2.2694, 0.2061,
-	0.2971, 0.6754, 0.5225,
+	0.40255, 1.18385, 3.173, 15.69105,
+	7.1949, 0.5345, 1.4604, 0.0046,
+	1.54575, 0.1192, 1.01925, 1.9395,
+	0.11, 0.29605, 2.2698, 0.2315,
+	2.9898, 0.51655, 0.6621,
 }
 
 type FSRSCard struct {
@@ -74,7 +82,7 @@ func clamp(v, min, max float64) float64 {
 }
 
 func Retrievability(elapsedDays int, stability float64) float64 {
-	if stability <= 0 {
+	if stability <= 0 || math.IsNaN(stability) || math.IsInf(stability, 0) {
 		return 0
 	}
 	// A review timestamp in the future (clock skew, bad import) must not
@@ -140,51 +148,86 @@ func InitialDifficulty(rating Rating) float64 {
 }
 
 func nextDifficulty(d float64, rating Rating) float64 {
-	newD := defaultWeights[7]*InitialDifficulty(Good) + (1-defaultWeights[7])*(d+defaultWeights[6]*float64(rating-3))
+	rating = clampRating(rating)
+	d = fsrsDifficulty(d)
+	// FSRS-5: higher ratings lower difficulty, with linear damping near D=10
+	// and mean reversion toward the initial difficulty of an Easy response.
+	delta := -defaultWeights[6] * float64(rating-3)
+	damped := d + delta*(10-d)/9
+	newD := defaultWeights[7]*InitialDifficulty(Easy) + (1-defaultWeights[7])*damped
 	return clamp(newD, 1, 10)
 }
 
 func nextRecallStability(d, s, r float64, rating Rating) float64 {
+	d = fsrsDifficulty(d)
+	s = fsrsPositiveStability(s, fsrsEpsilon)
+	r = fsrsRetrievability(r)
 	modifier := 1.0
-	switch rating {
+	switch clampRating(rating) {
 	case Hard:
 		modifier = defaultWeights[15]
 	case Easy:
-		modifier = defaultWeights[17]
+		modifier = defaultWeights[16]
 	}
-	// math.Pow(s, -w[9]) explodes to +Inf when s == 0 and is NaN for s < 0
-	// (non-integer exponent). Clamp to fsrsEpsilon so degenerate cards still
-	// update to a finite stability rather than poisoning the FSRS state.
-	if s < fsrsEpsilon {
-		s = fsrsEpsilon
-	}
-	return s * (math.Exp(defaultWeights[8])*(11-d)*math.Pow(s, -defaultWeights[9])*(math.Exp(defaultWeights[10]*(1-r))-1)*modifier + 1)
+	next := s * (math.Exp(defaultWeights[8])*(11-d)*math.Pow(s, -defaultWeights[9])*(math.Exp(defaultWeights[10]*(1-r))-1)*modifier + 1)
+	return fsrsPositiveStability(next, s)
 }
 
 func nextForgetStability(d, s, r float64) float64 {
-	// Same rationale as nextRecallStability: math.Pow(d, -w[12]) is +Inf for
-	// d==0 and NaN for d<0. Stability also feeds math.Pow(s+1, w[13]) which
-	// is well-defined for s >= -1 but goes negative for s < -1, so floor s
-	// at zero to keep the result non-negative as the spec demands.
-	if d < fsrsEpsilon {
-		d = fsrsEpsilon
+	d = fsrsDifficulty(d)
+	s = fsrsPositiveStability(s, fsrsEpsilon)
+	r = fsrsRetrievability(r)
+	next := defaultWeights[11] * math.Pow(d, -defaultWeights[12]) * (math.Pow(s+1, defaultWeights[13]) - 1) * math.Exp(defaultWeights[14]*(1-r))
+	return fsrsPositiveStability(next, fsrsEpsilon)
+}
+
+func nextShortTermStability(s float64, rating Rating) float64 {
+	s = fsrsPositiveStability(s, fsrsEpsilon)
+	rating = clampRating(rating)
+	next := s * math.Exp(defaultWeights[17]*(float64(rating-3)+defaultWeights[18]))
+	return fsrsPositiveStability(next, s)
+}
+
+func fsrsDifficulty(d float64) float64 {
+	if math.IsNaN(d) || math.IsInf(d, 0) {
+		return InitialDifficulty(Good)
 	}
-	if s < 0 {
-		s = 0
+	return clamp(d, 1, 10)
+}
+
+func fsrsPositiveStability(s, fallback float64) float64 {
+	if s <= 0 || math.IsNaN(s) || math.IsInf(s, 0) {
+		return fallback
 	}
-	return defaultWeights[11] * math.Pow(d, -defaultWeights[12]) * (math.Pow(s+1, defaultWeights[13]) - 1) * math.Exp(defaultWeights[14]*(1-r))
+	return s
+}
+
+func fsrsRetrievability(r float64) float64 {
+	if math.IsNaN(r) || math.IsInf(r, 0) {
+		return 0
+	}
+	return clamp(r, 0, 1)
 }
 
 func NextInterval(stability, desiredRetention float64) int {
-	interval := stability / fsrsFactor * (math.Pow(desiredRetention, 1.0/fsrsDecay) - 1)
-	days := int(math.Round(interval))
-	if days < 1 {
-		return 1
+	stability = fsrsPositiveStability(stability, fsrsEpsilon)
+	if desiredRetention <= 0 || desiredRetention > 1 || math.IsNaN(desiredRetention) || math.IsInf(desiredRetention, 0) {
+		desiredRetention = FSRSDesiredRetention
 	}
-	return days
+	interval := stability * ((math.Pow(desiredRetention, 1.0/fsrsDecay) - 1) / fsrsFactor)
+	if interval >= fsrsMaximumInterval {
+		return fsrsMaximumInterval
+	}
+	return int(math.Max(1, math.Round(interval)))
 }
 
+// ReviewCard advances the FSRS-5 memory state on an observed response.
+// Existing persisted cards are not reset or retrospectively recalibrated: their
+// finite S/D estimates remain the prior for the next update. Historical values
+// produced by the former mixed formulas therefore remain legacy estimates until
+// enough new evidence is collected; adopting this version cannot validate them.
 func ReviewCard(card FSRSCard, rating Rating, now time.Time) FSRSCard {
+	rating = clampRating(rating)
 	var lastReview *time.Time
 	if !card.LastReview.IsZero() {
 		lastReview = &card.LastReview
@@ -205,32 +248,35 @@ func ReviewCard(card FSRSCard, rating Rating, now time.Time) FSRSCard {
 			newCard.ScheduledDays = 0
 		} else {
 			newCard.State = Review
-			newCard.ScheduledDays = NextInterval(newCard.Stability, 0.9)
+			newCard.ScheduledDays = NextInterval(newCard.Stability, FSRSDesiredRetention)
 		}
-	case Learning, Relearning:
-		if rating == Again {
-			newCard.ScheduledDays = 0
-		} else {
-			if card.Stability > 0 {
-				newCard.Stability = nextRecallStability(card.Difficulty, card.Stability, r, rating)
-			} else {
-				newCard.Stability = InitialStability(rating)
-			}
-			newCard.Difficulty = nextDifficulty(card.Difficulty, rating)
-			newCard.State = Review
-			newCard.ScheduledDays = NextInterval(newCard.Stability, 0.9)
-		}
-	case Review:
+	case Learning, Relearning, Review:
 		newCard.Difficulty = nextDifficulty(card.Difficulty, rating)
+		switch {
+		case card.Stability <= 0 || math.IsNaN(card.Stability) || math.IsInf(card.Stability, 0):
+			// Repair malformed imported state without resetting its history.
+			newCard.Stability = InitialStability(rating)
+		case elapsedDays == 0 && lastReview != nil:
+			// FSRS-5 has a separate memory update for reviews within 24 hours.
+			// The whole-day storage format remains sufficient for this branch.
+			newCard.Stability = nextShortTermStability(card.Stability, rating)
+		case rating == Again:
+			// The reference short-term scheduler caps lapse stability so a
+			// subsequent Good relearning response cannot exceed pre-lapse S.
+			maxAfterLapse := card.Stability / math.Exp(defaultWeights[17]*defaultWeights[18])
+			newCard.Stability = math.Min(maxAfterLapse, nextForgetStability(card.Difficulty, card.Stability, r))
+		default:
+			newCard.Stability = nextRecallStability(card.Difficulty, card.Stability, r, rating)
+		}
 		if rating == Again {
-			newCard.Stability = nextForgetStability(card.Difficulty, card.Stability, r)
-			newCard.Lapses++
-			newCard.State = Relearning
+			if card.State == Review {
+				newCard.Lapses++
+				newCard.State = Relearning
+			}
 			newCard.ScheduledDays = 0
 		} else {
-			newCard.Stability = nextRecallStability(card.Difficulty, card.Stability, r, rating)
 			newCard.State = Review
-			newCard.ScheduledDays = NextInterval(newCard.Stability, 0.9)
+			newCard.ScheduledDays = NextInterval(newCard.Stability, FSRSDesiredRetention)
 		}
 	}
 	return newCard

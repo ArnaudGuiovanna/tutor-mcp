@@ -1657,6 +1657,14 @@ END $$;`,
 		Version: "postgres_0054_platform_audit",
 		Body:    postgresPlatformAuditMigration,
 	},
+	{
+		Version: "postgres_0055_pedagogical_contracts",
+		Body:    postgresPedagogicalContractMigration,
+	},
+	{
+		Version: "postgres_0056_curriculum_reconciliation",
+		Body:    postgresCurriculumReconciliationMigration,
+	},
 }
 
 // OpenPostgres opens a PostgreSQL-backed *sql.DB via the pgx database/sql

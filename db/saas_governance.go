@@ -390,7 +390,7 @@ func (s *Store) CompleteTenantDSARExport(ctx context.Context, scope models.Tenan
 			return err
 		}
 		counts := make(map[string]int64)
-		for _, table := range []string{"interactions", "concept_states", "narrative_objects", "audit_events"} {
+		for _, table := range []string{"interactions", "concept_states", "narrative_objects", "pedagogical_decisions", "audit_events"} {
 			var count int64
 			predicate := "learner_id = ?"
 			args := []any{learnerID}
@@ -450,7 +450,7 @@ func (s *Store) ResumeTenantDSAR(ctx context.Context, actor models.Principal, re
 var dsarErasurePhases = []string{
 	"webhook_delivery_transitions", "webhook_push_log", "webhook_message_queue",
 	"narrative_mutations", "narrative_objects", "pedagogical_snapshots",
-	"transfer_records", "interactions", "assessment_attempts", "affect_states",
+	"transfer_records", "interactions", "assessment_attempts", "pedagogical_decisions", "affect_states",
 	"implementation_intentions", "learning_sessions", "concept_states",
 	"scheduled_alerts", "availability", "scrub_learner",
 }
@@ -460,7 +460,7 @@ var dsarLearnerTables = map[string]string{
 	"webhook_message_queue": "learner_id", "narrative_mutations": "learner_id",
 	"narrative_objects": "learner_id", "pedagogical_snapshots": "learner_id",
 	"transfer_records": "learner_id", "interactions": "learner_id",
-	"assessment_attempts": "learner_id", "affect_states": "learner_id",
+	"assessment_attempts": "learner_id", "pedagogical_decisions": "learner_id", "affect_states": "learner_id",
 	"implementation_intentions": "learner_id", "learning_sessions": "learner_id",
 	"concept_states": "learner_id", "scheduled_alerts": "learner_id",
 	"availability": "learner_id",
@@ -479,8 +479,12 @@ func (s *Store) ProcessTenantDSARErasureBatch(ctx context.Context, scope models.
 	err := s.WithTenantTx(ctx, scope, func(txCtx context.Context, scoped storeport.Store) error {
 		txs := scoped.(*Store)
 		var learnerID, requestStatus string
-		if err := txs.queryRow(txCtx, `SELECT learner_id, status FROM tenant_dsar_requests
-			WHERE tenant_id = ? AND id = ? AND kind = 'erase'`, scope.TenantID, requestID).Scan(&learnerID, &requestStatus); err != nil {
+		requestQuery := `SELECT learner_id, status FROM tenant_dsar_requests
+			WHERE tenant_id = ? AND id = ? AND kind = 'erase'`
+		if txs.dialect == DialectPostgres {
+			requestQuery += ` FOR UPDATE`
+		}
+		if err := txs.queryRow(txCtx, requestQuery, scope.TenantID, requestID).Scan(&learnerID, &requestStatus); err != nil {
 			return err
 		}
 		if requestStatus == "completed" {
@@ -489,6 +493,18 @@ func (s *Store) ProcessTenantDSARErasureBatch(ctx context.Context, scope models.
 		}
 		if requestStatus != "pending" && requestStatus != "processing" {
 			return fmt.Errorf("process tenant DSAR erasure: request is not runnable")
+		}
+		// Requests created before the decision journal existed must also erase
+		// its rows. Append a checkpoint without rewriting existing positions;
+		// execution follows the current dependency order, not insertion order.
+		if _, err := txs.exec(txCtx, `INSERT INTO tenant_dsar_phases
+			(tenant_id, request_id, position, phase, status, affected_rows, updated_at)
+			SELECT ?, ?, COALESCE(MAX(position), -1) + 1, 'pedagogical_decisions', 'pending', 0, ?
+			FROM tenant_dsar_phases WHERE tenant_id = ? AND request_id = ?
+			HAVING NOT EXISTS (SELECT 1 FROM tenant_dsar_phases
+			 WHERE tenant_id = ? AND request_id = ? AND phase = 'pedagogical_decisions')`,
+			scope.TenantID, requestID, now, scope.TenantID, requestID, scope.TenantID, requestID); err != nil {
+			return err
 		}
 		var holds int
 		if err := txs.queryRow(txCtx, `SELECT COUNT(*) FROM retention_legal_holds
@@ -505,9 +521,14 @@ func (s *Store) ProcessTenantDSARErasureBatch(ctx context.Context, scope models.
 		var position int
 		var phase string
 		var priorAffected int64
+		phaseOrder := "CASE phase"
+		for index, name := range dsarErasurePhases {
+			phaseOrder += fmt.Sprintf(" WHEN '%s' THEN %d", name, index)
+		}
+		phaseOrder += " ELSE -1 END"
 		err := txs.queryRow(txCtx, `SELECT position, phase, affected_rows FROM tenant_dsar_phases
 			WHERE tenant_id = ? AND request_id = ? AND status IN ('pending','running')
-			ORDER BY position LIMIT 1`, scope.TenantID, requestID).Scan(&position, &phase, &priorAffected)
+			ORDER BY `+phaseOrder+`, position LIMIT 1`, scope.TenantID, requestID).Scan(&position, &phase, &priorAffected)
 		if errors.Is(err, sql.ErrNoRows) {
 			completed = true
 			_, err = txs.exec(txCtx, `UPDATE tenant_dsar_requests SET status = 'completed', result_json = ?, completed_at = ?

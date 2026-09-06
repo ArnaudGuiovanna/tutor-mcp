@@ -96,7 +96,19 @@ type Activity struct {
 	PromptForLLM     string       `json:"prompt_for_llm"`
 }
 
+type BKTUpdateMode string
+
+const (
+	BKTObservationOnly     BKTUpdateMode = "observation_only"
+	BKTLearningOpportunity BKTUpdateMode = "learning_opportunity"
+)
+
 type PedagogicalContract struct {
+	DecisionID              string                   `json:"decision_id,omitempty"`
+	PolicyVersion           string                   `json:"policy_version,omitempty"`
+	BKTUpdateMode           BKTUpdateMode            `json:"bkt_update_mode,omitempty"`
+	CurriculumVersion       int                      `json:"curriculum_version,omitempty"`
+	Competency              *CurriculumConcept       `json:"competency,omitempty"`
 	Intent                  string                   `json:"intent"`
 	TargetConcept           string                   `json:"target_concept,omitempty"`
 	RecommendedActivityType ActivityType             `json:"recommended_activity_type"`

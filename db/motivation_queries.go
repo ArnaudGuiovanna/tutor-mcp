@@ -82,7 +82,7 @@ func (s *Store) conceptMasteryDelta(ctx context.Context, learnerID, domainID str
 		args = append(args, since.UTC())
 		rows, err := s.query(ctx,
 			`SELECT concept, COUNT(*), COALESCE(SUM(success), 0)
-			 FROM interactions
+			 FROM `+currentInteractionsSQL+` AS interactions
 			 WHERE learner_id = ?`+domainClause+` AND concept IN (`+strings.Join(placeholders, ",")+`)
 			   AND created_at < ?
 			 GROUP BY concept`,
@@ -197,7 +197,7 @@ func (s *Store) milestonesInWindow(ctx context.Context, learnerID, domainID stri
 	}
 	args = append(args, since.UTC())
 	rows, err := s.query(ctx,
-		`SELECT DISTINCT concept FROM interactions
+		`SELECT DISTINCT concept FROM `+currentInteractionsSQL+` AS interactions
 		 WHERE learner_id = ?`+domainClause+` AND concept IN (`+strings.Join(placeholders, ",")+`)
 		   AND success = 1 AND created_at >= ?`,
 		args...,
@@ -226,7 +226,7 @@ func (s *Store) milestonesInWindow(ctx context.Context, learnerID, domainID stri
 func (s *Store) CountInteractionsByConcept(ctx context.Context, learnerID, concept string) (int, error) {
 	var count int
 	err := s.queryRow(ctx,
-		`SELECT COUNT(*) FROM interactions WHERE learner_id = ? AND concept = ?`,
+		`SELECT COUNT(*) FROM `+currentInteractionsSQL+` AS interactions WHERE learner_id = ? AND concept = ?`,
 		learnerID, concept,
 	).Scan(&count)
 	if err != nil {
@@ -238,7 +238,7 @@ func (s *Store) CountInteractionsByConcept(ctx context.Context, learnerID, conce
 func (s *Store) CountInteractionsByConceptInDomain(ctx context.Context, learnerID, domainID, concept string) (int, error) {
 	var count int
 	err := s.queryRow(ctx,
-		`SELECT COUNT(*) FROM interactions
+		`SELECT COUNT(*) FROM `+currentInteractionsSQL+` AS interactions
 		 WHERE learner_id = ? AND domain_id = ? AND concept = ?`,
 		learnerID, domainID, concept,
 	).Scan(&count)
@@ -257,7 +257,7 @@ func (s *Store) CountSessionsOnConcept(ctx context.Context, learnerID, concept s
 		`SELECT COUNT(DISTINCT CASE
 		     WHEN session_id IS NOT NULL THEN 'explicit:' || session_id
 		     ELSE 'legacy-day:' || `+s.utcDateExpr("created_at")+`
-		 END) FROM interactions
+		 END) FROM `+currentInteractionsSQL+` AS interactions
 		 WHERE learner_id = ? AND concept = ?`,
 		learnerID, concept,
 	).Scan(&count)
@@ -273,7 +273,7 @@ func (s *Store) CountSessionsOnConceptInDomain(ctx context.Context, learnerID, d
 		`SELECT COUNT(DISTINCT CASE
 		     WHEN session_id IS NOT NULL THEN 'explicit:' || session_id
 		     ELSE 'legacy-day:' || `+s.utcDateExpr("created_at")+`
-		 END) FROM interactions
+		 END) FROM `+currentInteractionsSQL+` AS interactions
 		 WHERE learner_id = ? AND domain_id = ? AND concept = ?`,
 		learnerID, domainID, concept,
 	).Scan(&count)
@@ -335,7 +335,7 @@ func (s *Store) SelfInitiatedRatio(ctx context.Context, learnerID, concept strin
 	var total, selfInit int
 	err := s.queryRow(ctx,
 		`SELECT COUNT(*), COALESCE(SUM(self_initiated), 0)
-		 FROM interactions WHERE learner_id = ? AND concept = ?`,
+		 FROM `+currentInteractionsSQL+` AS interactions WHERE learner_id = ? AND concept = ?`,
 		learnerID, concept,
 	).Scan(&total, &selfInit)
 	if err != nil {
@@ -351,7 +351,7 @@ func (s *Store) SelfInitiatedRatioInDomain(ctx context.Context, learnerID, domai
 	var total, selfInit int
 	err := s.queryRow(ctx,
 		`SELECT COUNT(*), COALESCE(SUM(self_initiated), 0)
-		 FROM interactions
+		 FROM `+currentInteractionsSQL+` AS interactions
 		 WHERE learner_id = ? AND domain_id = ? AND concept = ?`,
 		learnerID, domainID, concept,
 	).Scan(&total, &selfInit)
@@ -369,7 +369,7 @@ func (s *Store) SelfInitiatedRatioInDomain(ctx context.Context, learnerID, domai
 func (s *Store) LastFailureOnConcept(ctx context.Context, learnerID, concept string, window time.Duration) (*models.Interaction, error) {
 	cutoff := time.Now().UTC().Add(-window)
 	rows, err := s.query(ctx,
-		`SELECT `+interactionCols+` FROM interactions
+		`SELECT `+interactionCols+` FROM `+currentInteractionsSQL+` AS interactions
 		 WHERE learner_id = ? AND concept = ? AND success = 0 AND created_at >= ?
 		 ORDER BY created_at DESC LIMIT 1`,
 		learnerID, concept, cutoff,
@@ -391,7 +391,7 @@ func (s *Store) LastFailureOnConcept(ctx context.Context, learnerID, concept str
 func (s *Store) LastFailureOnConceptInDomain(ctx context.Context, learnerID, domainID, concept string, window time.Duration) (*models.Interaction, error) {
 	cutoff := time.Now().UTC().Add(-window)
 	rows, err := s.query(ctx,
-		`SELECT `+interactionCols+` FROM interactions
+		`SELECT `+interactionCols+` FROM `+currentInteractionsSQL+` AS interactions
 		 WHERE learner_id = ? AND domain_id = ? AND concept = ?
 		   AND success = 0 AND created_at >= ?
 		 ORDER BY created_at DESC LIMIT 1`,

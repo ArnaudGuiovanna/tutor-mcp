@@ -226,7 +226,7 @@ func (s *Store) highStakesNotificationAllowed(ctx context.Context, learnerID, do
 		   AND NOT EXISTS (
 		       SELECT 1 FROM assessment_attempts a
 		       WHERE a.learner_id = d.learner_id AND a.domain_id = d.id
-		         AND a.status = 'evaluated' AND a.trusted_evaluation = 1
+		         AND a.status = 'evaluated' AND a.trusted_evaluation = 1 AND a.curriculum_invalidated_version = 0
 		         AND a.evaluation_method = 'human_review'
 		   )`,
 		learnerID,

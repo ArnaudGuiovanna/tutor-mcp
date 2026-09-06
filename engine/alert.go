@@ -39,7 +39,7 @@ func ComputeAlertsWithEvidenceAt(states []*models.ConceptState, recentInteractio
 	var alerts []models.Alert
 
 	// criticalForgetting tracks concepts where FORGETTING fired at UrgencyCritical.
-	// These concepts suppress same-concept MASTERY_READY, ZPD_DRIFT and PLATEAU
+	// These concepts suppress same-concept MASTERY_READY and ZPD_DRIFT
 	// below: retrieval recovery is the dominant action while retention is below
 	// algorithms.RetentionAlertCriticalThreshold. FORGETTING at warning urgency
 	// is less severe, so non-retrieval nudges can still be surfaced.
@@ -135,58 +135,12 @@ func ComputeAlertsWithEvidenceAt(states []*models.ConceptState, recentInteractio
 		}
 	}
 
-	// Predictive ZPD via IRT: probability of success below 55% signals incoming drift
-	// before 3 failures accumulate. Only for concepts with review history (Reps > 0).
-	zpdConcepts := make(map[string]bool)
-	for _, a := range alerts {
-		if a.Type == models.AlertZPDDrift {
-			zpdConcepts[a.Concept] = true
-		}
-	}
-	for _, cs := range states {
-		if cs.CardState == "new" || cs.Reps == 0 || zpdConcepts[cs.Concept] || criticalForgetting[cs.Concept] {
-			continue
-		}
-		irtDiff := algorithms.FSRSDifficultyToIRT(cs.Difficulty)
-		pCorrect := algorithms.IRTProbability(cs.Theta, irtDiff, 1.0)
-		if pCorrect < 0.55 {
-			alerts = append(alerts, models.Alert{
-				Type:              models.AlertZPDDrift,
-				Concept:           cs.Concept,
-				Urgency:           models.UrgencyInfo,
-				ErrorRate:         1.0 - pCorrect,
-				RecommendedAction: fmt.Sprintf("IRT: success probability at %.0f%% - reduce difficulty", pCorrect*100),
-			})
-		}
-	}
+	// Generated items have no calibrated IRT difficulty. Legacy theta and
+	// FSRS difficulty therefore cannot predict a ZPD alert; the failure-based
+	// observation above remains available without claiming an item probability.
 
-	// PLATEAU: PFA probability stagnation (sigmoid saturates at extremes).
-	// recentInteractions arrives newest-first (DB ORDER BY created_at DESC).
-	// Iterate in reverse so PFAState evolves chronologically — PFADetectPlateau
-	// examines scores[len-minCount:] which must be the *most recent* states.
-	conceptInteractions := groupByConcept(recentInteractions)
-	for concept, interactions := range conceptInteractions {
-		if criticalForgetting[concept] {
-			continue
-		}
-		if len(interactions) >= 4 {
-			var scores []float64
-			state := algorithms.PFAState{}
-			for idx := len(interactions) - 1; idx >= 0; idx-- {
-				state = algorithms.PFAUpdate(state, interactions[idx].Success)
-				scores = append(scores, algorithms.PFAProbability(state))
-			}
-			if algorithms.PFADetectPlateau(scores, 4) {
-				alerts = append(alerts, models.Alert{
-					Type:              models.AlertPlateau,
-					Concept:           concept,
-					Urgency:           models.UrgencyWarning,
-					SessionsStalled:   len(interactions),
-					RecommendedAction: "change format - real-world case to debug",
-				})
-			}
-		}
-	}
+	// Historical PLATEAU alerts remain readable, but the runtime no longer
+	// infers stalled learning from saturation of a cumulative probability.
 
 	// OVERLOAD: session > 45 min
 	if !sessionStart.IsZero() && now.Sub(sessionStart) > 45*time.Minute {
@@ -226,14 +180,6 @@ func estimateReviewMinutes(cs *models.ConceptState) int {
 		return 12
 	}
 	return 8
-}
-
-func groupByConcept(interactions []*models.Interaction) map[string][]*models.Interaction {
-	m := make(map[string][]*models.Interaction)
-	for _, i := range interactions {
-		m[i.Concept] = append(m[i.Concept], i)
-	}
-	return m
 }
 
 // MetacognitiveAlertOptions holds optional data for metacognitive alerts.
@@ -276,23 +222,9 @@ func ComputeMetacognitiveAlerts(
 
 	var alerts []models.Alert
 
-	// DEPENDENCY_INCREASING: autonomy_score declining over 3 consecutive sessions
-	if len(autonomyScores) >= 3 {
-		declining := true
-		for i := 0; i < 2; i++ {
-			if autonomyScores[i] >= autonomyScores[i+1] {
-				declining = false
-				break
-			}
-		}
-		if declining {
-			alerts = append(alerts, models.Alert{
-				Type:              models.AlertDependencyIncreasing,
-				Urgency:           models.UrgencyWarning,
-				RecommendedAction: "miroir metacognitif active",
-			})
-		}
-	}
+	// Legacy autonomy scores remain accepted for compatibility. Their
+	// composite has not been validated as evidence of increasing dependency
+	// and no longer produces a pedagogical alert.
 
 	// CALIBRATION_DIVERGING: normalized bias is actionable only after enough
 	// completed predictions. This shares the same policy as the OLM and mirror

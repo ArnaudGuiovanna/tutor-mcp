@@ -125,6 +125,45 @@ func TestEnqueueMirrorWebhook_NilMirrorIsNoOp(t *testing.T) {
 	}
 }
 
+func TestEnqueueMirrorWebhook_ObservationsRequireGeneratedMessage(t *testing.T) {
+	rawDB, store, learnerID := rawTestSetup(t, "")
+	mirror := DetectMirrorPattern(MirrorInput{
+		SessionCount: 3,
+		Interactions: makeInteractions(10, false, false, 0, true, time.Now().UTC()),
+	})
+	if mirror == nil {
+		t.Fatal("expected a descriptive mirror for the in-session tutor")
+	}
+	body, err := json.Marshal(mirror)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(body, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if fields["facts"] == nil || fields["window"] == nil || fields["dialogue_intent"] == nil {
+		t.Fatalf("in-session response lacks generation context: %s", body)
+	}
+	if _, exists := fields["message"]; exists {
+		t.Fatal("new mirrors must not ship a static pedagogical message")
+	}
+	if _, exists := fields["open_question"]; exists {
+		t.Fatal("new mirrors must not ship a static pedagogical question")
+	}
+	id, enqueued, err := EnqueueMirrorWebhook(context.Background(), store, learnerID, mirror, time.Now().UTC())
+	if err != nil || enqueued || id != 0 {
+		t.Fatalf("observations must wait for generated wording, got id=%d enqueued=%v err=%v", id, enqueued, err)
+	}
+	var count int
+	if err := rawDB.QueryRow(`SELECT COUNT(*) FROM webhook_message_queue`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("observation-only mirror unexpectedly created %d deliveries", count)
+	}
+}
+
 // TestSendMirrorMessages_DispatchesQueuedItem covers the scheduler-side end
 // of the loop: a mirror enqueued in-session is picked up by the cron tick,
 // rendered into a Discord embed, and posted via the webhook.

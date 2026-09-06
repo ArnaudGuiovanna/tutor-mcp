@@ -335,7 +335,7 @@ func Migrate(db *sql.DB) error {
 // exclusive lock for longer under cold-start or race-detector load. Retrying
 // only SQLITE_BUSY/SQLITE_LOCKED keeps startup bounded without making every
 // application query wait for a minute.
-func MigrateContext(ctx context.Context, db *sql.DB) error {
+func MigrateContext(ctx context.Context, db *sql.DB) (resultErr error) {
 	if ctx == nil {
 		return fmt.Errorf("migrate: nil context")
 	}
@@ -344,6 +344,39 @@ func MigrateContext(ctx context.Context, db *sql.DB) error {
 		return fmt.Errorf("migrate: reserve connection: %w", err)
 	}
 	defer conn.Close()
+	var rebuild bool
+	for {
+		rebuild, err = sqliteCurriculumRebuildPending(ctx, conn)
+		if err == nil {
+			break
+		}
+		if !isSQLiteLockContention(err) {
+			return fmt.Errorf("migrate: inspect pending curriculum rebuild: %w", err)
+		}
+		timer := time.NewTimer(sqliteMigrationRetryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	var foreignKeys int
+	if rebuild {
+		if err := conn.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
+			return err
+		}
+		if foreignKeys != 0 {
+			if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+				return err
+			}
+			defer func() {
+				if _, err := conn.ExecContext(context.Background(), `PRAGMA foreign_keys = ON`); err != nil {
+					resultErr = errors.Join(resultErr, fmt.Errorf("migrate: restore foreign keys: %w", err))
+				}
+			}()
+		}
+	}
 
 	for {
 		if _, err = conn.ExecContext(ctx, `BEGIN EXCLUSIVE`); err == nil {
@@ -373,6 +406,11 @@ func MigrateContext(ctx context.Context, db *sql.DB) error {
 	for _, m := range buildMigrations() {
 		if err := applyMigrationInTx(ctx, conn, m); err != nil {
 			return fmt.Errorf("migrate: %w", err)
+		}
+	}
+	if rebuild && foreignKeys != 0 {
+		if err := checkSQLiteForeignKeys(ctx, conn); err != nil {
+			return err
 		}
 	}
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {

@@ -7,7 +7,7 @@ import (
 	"tutor-mcp/models"
 )
 
-func TestAssessMasteryStatusEvidenceLadder(t *testing.T) {
+func TestAssessMasteryStatusEvidenceAxes(t *testing.T) {
 	now := time.Date(2026, 8, 2, 12, 0, 0, 0, time.UTC)
 	last := now.Add(-time.Hour)
 	cs := &models.ConceptState{
@@ -63,6 +63,87 @@ func TestAssessMasteryStatusEvidenceLadder(t *testing.T) {
 	status = AssessMasteryStatus("L1", "fractions", cs, interactions, transfers, assessments, now)
 	if status.Transferred || status.TransferReadiness != TransferReadinessBlocked || status.Stage != MasteryStageDemonstrated {
 		t.Fatalf("recent trusted transfer failure escaped blocking semantics: %+v", status)
+	}
+}
+
+func TestAssessMasteryStatusDemonstrationIsIndependentOfModelAndRetention(t *testing.T) {
+	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	attempt := masteryStatusAssessment("expert-performance", "fractions", models.ActivityDiagnosticAssessment, true, now)
+	for _, tc := range []struct {
+		name  string
+		state *models.ConceptState
+	}{
+		{name: "no model state"},
+		{name: "new learner prior", state: models.NewConceptState("L1", "fractions")},
+		{name: "low estimate", state: &models.ConceptState{LearnerID: "L1", Concept: "fractions", CardState: "review", PMastery: 0.2, LastReview: &now, Stability: 10}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status := AssessMasteryStatus("L1", "fractions", tc.state, nil, nil, []*models.AssessmentAttempt{attempt}, now)
+			if !status.Demonstrated || status.Estimated || status.Retained || status.Transferred || status.Stage != MasteryStageDemonstrated {
+				t.Fatalf("direct demonstrated performance must not imply a model estimate or delayed retention: %+v", status)
+			}
+		})
+	}
+}
+
+func TestAssessMasteryStatusRetentionIsIndependentOfMasteryEstimate(t *testing.T) {
+	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	cs, recall, attempt := retentionFixture(now)
+	cs.PMastery = 0.2
+	interactions := []*models.Interaction{
+		masteryStatusInteraction("L1", "fractions", models.ActivityPractice, true, now.Add(-48*time.Hour)),
+		recall,
+	}
+	status := AssessMasteryStatus("L1", "fractions", cs, interactions, nil, []*models.AssessmentAttempt{attempt}, now)
+	if status.Estimated || !status.Retained || status.Demonstrated || status.Transferred || status.Stage != MasteryStageRetained {
+		t.Fatalf("observed delayed retrieval must remain separate from the BKT threshold: %+v", status)
+	}
+}
+
+func TestAssessMasteryStatusTransferIsIndependentOfRetentionButRequiresTrustedEvidence(t *testing.T) {
+	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	var transfers []*models.TransferRecord
+	var attempts []*models.AssessmentAttempt
+	for _, dimension := range []string{"near", "far", "teaching"} {
+		id := "transfer-" + dimension
+		transfers = append(transfers, &models.TransferRecord{
+			LearnerID: "L1", ConceptID: "fractions", AssessmentAttemptID: id,
+			ContextType: dimension, Score: 0.9, CreatedAt: now,
+		})
+		attempts = append(attempts, masteryStatusAssessment(id, "fractions", models.ActivityTransferProbe, true, now))
+	}
+	status := AssessMasteryStatus("L1", "fractions", nil, nil, transfers, attempts, now)
+	if !status.Demonstrated || !status.Transferred || status.Estimated || status.Retained || status.Stage != MasteryStageTransferred {
+		t.Fatalf("trusted transfer evidence must not manufacture retention or depend on its absence: %+v", status)
+	}
+	for _, attempt := range attempts {
+		attempt.TrustedEvaluation = false
+	}
+	status = AssessMasteryStatus("L1", "fractions", nil, nil, transfers, attempts, now)
+	if status.Demonstrated || status.Transferred {
+		t.Fatalf("untrusted transfer observations must not establish either axis: %+v", status)
+	}
+}
+
+func TestAssessMasteryStatusDemonstrationRejectsForeignAndFutureEvidence(t *testing.T) {
+	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []string{"another learner", "future evaluation", "response after evaluation"} {
+		t.Run(tc, func(t *testing.T) {
+			attempt := masteryStatusAssessment("expert-performance", "fractions", models.ActivityDiagnosticAssessment, true, now)
+			future := now.Add(time.Hour)
+			switch tc {
+			case "another learner":
+				attempt.LearnerID = "L2"
+			case "future evaluation":
+				attempt.EvaluatedAt = &future
+			case "response after evaluation":
+				attempt.SubmittedAt = &future
+			}
+			status := AssessMasteryStatus("L1", "fractions", nil, nil, nil, []*models.AssessmentAttempt{attempt}, now)
+			if status.Demonstrated || status.Transferred {
+				t.Fatalf("invalid evidence established a claim: %+v", status)
+			}
+		})
 	}
 }
 

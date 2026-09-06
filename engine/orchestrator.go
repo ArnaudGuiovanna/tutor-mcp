@@ -165,12 +165,9 @@ func OrchestrateWithPhase(ctx context.Context, store storeport.Store, input Orch
 
 	// 4. Run pipeline with one-shot retry on NoFringe.
 	//
-	// Important : if the FSM just transitioned this call, we do NOT
-	// retry on NoFringe — that would risk *undoing* the transition
-	// (e.g. MAINTENANCE → INSTRUCTION on retention drop, then INSTRUCTION
-	// has no fringe because the concept is still BKT-mastered, then
-	// retry sends us back to MAINTENANCE). The FSM decision wins ;
-	// NoFringe in the new phase is reported via REST.
+	// A settled FSM transition is not undone by an empty selection pool.
+	// Diversity is relaxed inside runPipeline before it reports NoFringe;
+	// recall needs are selected independently of the acquisition fringe.
 	for retry := 0; retry <= orchestratorMaxRetries; retry++ {
 		activity, sig, err := runPipeline(ctx, store, domain, pf, currentPhase, input)
 		if err != nil {
@@ -375,9 +372,7 @@ func buildObservables(domain *models.Domain, pf *pipelineFixtures, cfg PhaseConf
 		}
 		if cs.PMastery >= bkt {
 			estimated++
-			// Even high-estimate concepts can be "below retention" —
-			// the MAINTENANCE → INSTRUCTION trigger looks at
-			// retention drop on goal-relevants, mastered or not.
+			// High estimates and recall needs are separate signals.
 		}
 		if cs.CardState != "new" {
 			retention := algorithms.CurrentRetrievability(now, cs.LastReview, cs.Stability)
@@ -433,9 +428,6 @@ func runPipeline(
 ) (models.Activity, pipelineSignal, error) {
 	// ── [3] Gate ───────────────────────────────────────────────────
 	antiRep := input.Config.AntiRepeatWindow
-	if antiRep == 0 {
-		antiRep = DefaultAntiRepeatWindow
-	}
 	gateResult, err := ApplyGate(GateInput{
 		Phase:                phase,
 		Concepts:             domain.Graph.Concepts,
@@ -454,6 +446,13 @@ func runPipeline(
 	}
 	if !input.ReviewOnly && phase != models.PhaseDiagnostic {
 		if selection, ok := criticalForgettingBypassSelection(pf.Alerts, phase); ok {
+			action, err := selectActionForSelection(ctx, store, pf, selection, phase, input)
+			if err != nil {
+				return models.Activity{}, pipelineSignal{}, err
+			}
+			return composeActivity(action, selection, phase), pipelineSignal{}, nil
+		}
+		if selection, ok := recallNeedSelection(domain, pf, phase, input); ok {
 			action, err := selectActionForSelection(ctx, store, pf, selection, phase, input)
 			if err != nil {
 				return models.Activity{}, pipelineSignal{}, err
@@ -485,6 +484,17 @@ func runPipeline(
 		}
 	}
 	if selection.NoFringe {
+		// The phase's eligible fringe can be narrower than the gate's pool
+		// (e.g. only one concept still needs acquisition). Relax diversity once
+		// before interpreting that empty fringe as a phase-level signal.
+		if antiRep > 0 {
+			input.Config.AntiRepeatWindow = 0
+			activity, signal, err := runPipeline(ctx, store, domain, pf, phase, input)
+			if err == nil && !signal.IsNoFringe {
+				activity.Rationale += " - anti-repetition relaxed: no phase-eligible activity remained"
+			}
+			return activity, signal, err
+		}
 		return models.Activity{}, pipelineSignal{IsNoFringe: true}, nil
 	}
 
@@ -509,6 +519,36 @@ func runPipeline(
 	}
 
 	return composeActivity(action, selection, phase), pipelineSignal{}, nil
+}
+
+// recallNeedSelection keeps a previously studied concept available for recall
+// even when its high acquisition estimate excludes it from the instruction
+// fringe. Lower retrievability wins; ties use concept IDs for stable replay.
+// Active misconceptions still take precedence in the action selector.
+func recallNeedSelection(domain *models.Domain, pf *pipelineFixtures, phase models.Phase, input OrchestratorInput) (Selection, bool) {
+	best := Selection{Phase: phase}
+	bestRetention := input.Config.RetentionRecallThreshold
+	for _, concept := range domain.Graph.Concepts {
+		relevance, eligible := resolveRelevance(pf.GoalRelevance, concept)
+		if !eligible || relevance <= input.Config.GoalRelevantCutoff {
+			continue
+		}
+		cs := pf.StatesByConcept[concept]
+		if cs == nil || cs.CardState == "new" || cs.LastReview == nil || cs.LastReview.IsZero() {
+			continue
+		}
+		retention := algorithms.CurrentRetrievability(input.Now, cs.LastReview, cs.Stability)
+		if !(retention < input.Config.RetentionRecallThreshold) {
+			continue
+		}
+		if best.Concept == "" || retention < bestRetention || (retention == bestRetention && concept < best.Concept) {
+			best.Concept = concept
+			best.Score = 1 - retention
+			best.Rationale = fmt.Sprintf("recall need: current retention %.2f below %.2f", retention, input.Config.RetentionRecallThreshold)
+			bestRetention = retention
+		}
+	}
+	return best, best.Concept != ""
 }
 
 func criticalForgettingBypassSelection(alerts []models.Alert, phase models.Phase) (Selection, bool) {

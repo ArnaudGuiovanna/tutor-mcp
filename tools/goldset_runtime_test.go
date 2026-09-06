@@ -114,11 +114,21 @@ func TestRuntimeGoldsetStatic(t *testing.T) {
 					t.Fatalf("%s: record %d failed: %s", scenario.Name, i, resultText(res))
 				}
 				if record.AgeHours > 0 {
+					at := time.Now().UTC().Add(-time.Duration(record.AgeHours) * time.Hour)
 					if _, err := store.RawDB().Exec(`UPDATE interactions SET created_at = ?
 						WHERE learner_id = ? AND domain_id = ? AND concept = ? AND activity_type = ?`,
-						time.Now().UTC().Add(-time.Duration(record.AgeHours)*time.Hour),
+						at,
 						"L_owner", domain.ID, goldsetConcept, record.ActivityType); err != nil {
 						t.Fatalf("%s: backdate record %d: %v", scenario.Name, i, err)
+					}
+					if record.WithRubric {
+						// A historical interaction also needs a historical committed
+						// response. Grading time alone cannot establish a recall gap.
+						if _, err := store.RawDB().Exec(`UPDATE assessment_attempts
+							SET created_at = ?, submitted_at = ?, evaluated_at = ? WHERE id = ?`,
+							at.Add(-2*time.Minute), at.Add(-time.Minute), at, args["attempt_id"]); err != nil {
+							t.Fatalf("%s: backdate assessment %d: %v", scenario.Name, i, err)
+						}
 					}
 				}
 			}

@@ -82,21 +82,37 @@ type IndividualBKTProfile struct {
 // IndividualBKTParameters reports the BKT parameters effectively used for one
 // individualized update.
 type IndividualBKTParameters struct {
-	PLearn float64
-	PSlip  float64
-	PGuess float64
+	PLearn  float64
+	PForget float64
+	PSlip   float64
+	PGuess  float64
 }
 
-// IndividualBKTUpdateResult is the complete output of BKTUpdateIndividualized.
+// IndividualBKTUpdateResult exposes the observation posterior separately from
+// the optional transition, along with the parameters effectively applied.
 type IndividualBKTUpdateResult struct {
-	State  BKTState
-	Params IndividualBKTParameters
+	State             BKTState
+	Params            IndividualBKTParameters
+	PosteriorMastery  float64
+	TransitionApplied bool
 }
 
 // BKTUpdateIndividualized applies a deterministic learner/concept adjustment
 // before delegating to the standard BKT update. An empty profile keeps the
 // existing BKT behaviour, including the current error-type heuristic.
 func BKTUpdateIndividualized(state BKTState, profile IndividualBKTProfile, correct bool, errorType string) IndividualBKTUpdateResult {
+	result := BKTObserveIndividualized(state, profile, correct, errorType)
+	result.Params.PLearn = result.State.PLearn
+	result.Params.PForget = result.State.PForget
+	result.State = BKTTransition(result.State)
+	result.TransitionApplied = true
+	return result
+}
+
+// BKTObserveIndividualized uses the same observation parameters as a learning
+// update, but records only the posterior. Effective transition parameters are
+// zero; the state's adjusted transition parameters are retained, not erased.
+func BKTObserveIndividualized(state BKTState, profile IndividualBKTProfile, correct bool, errorType string) IndividualBKTUpdateResult {
 	adjusted := sanitizeBKTProbabilities(state)
 	weight := individualBKTEvidenceWeight(profile)
 
@@ -126,15 +142,17 @@ func BKTUpdateIndividualized(state BKTState, profile IndividualBKTProfile, corre
 		}
 	}
 
-	next := BKTUpdate(adjusted, correct)
+	next := BKTObserve(adjusted, correct)
 	next = sanitizeBKTProbabilities(next)
 
 	return IndividualBKTUpdateResult{
-		State: next,
+		State:            next,
+		PosteriorMastery: next.PMastery,
 		Params: IndividualBKTParameters{
-			PLearn: adjusted.PLearn,
-			PSlip:  adjusted.PSlip,
-			PGuess: adjusted.PGuess,
+			PLearn:  0,
+			PForget: 0,
+			PSlip:   adjusted.PSlip,
+			PGuess:  adjusted.PGuess,
 		},
 	}
 }

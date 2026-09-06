@@ -19,10 +19,10 @@ func TestComputeAutonomyMetrics(t *testing.T) {
 		{
 			name: "all self-initiated, perfect calibration, no hints, all proactive",
 			input: AutonomyInput{
-				Interactions:    makeInteractions(10, true, true, 0, true, now),
-				ConceptStates:   []*models.ConceptState{{Concept: "A", PMastery: 0.9}},
-				CalibrationBias: 0.0,
-				SessionGap:      2 * time.Hour,
+				Interactions:      makeInteractions(10, true, true, 0, true, now),
+				ConceptStates:     []*models.ConceptState{{Concept: "A", PMastery: 0.9}},
+				CalibrationDeltas: []float64{0, 0, 0},
+				SessionGap:        2 * time.Hour,
 			},
 			wantMin: 0.9,
 			wantMax: 1.0,
@@ -30,10 +30,10 @@ func TestComputeAutonomyMetrics(t *testing.T) {
 		{
 			name: "no initiative, poor calibration, heavy hints, no proactive",
 			input: AutonomyInput{
-				Interactions:    makeInteractions(10, false, false, 3, false, now),
-				ConceptStates:   []*models.ConceptState{{Concept: "A", PMastery: 0.9}},
-				CalibrationBias: 1.5,
-				SessionGap:      2 * time.Hour,
+				Interactions:      makeInteractions(10, false, false, 3, false, now),
+				ConceptStates:     []*models.ConceptState{{Concept: "A", PMastery: 0.9}},
+				CalibrationDeltas: []float64{1, -1},
+				SessionGap:        2 * time.Hour,
 			},
 			wantMin: 0.0,
 			wantMax: 0.15,
@@ -47,7 +47,7 @@ func TestComputeAutonomyMetrics(t *testing.T) {
 				SessionGap:      2 * time.Hour,
 			},
 			wantMin: 0.0,
-			wantMax: 0.55,
+			wantMax: 0.0,
 		},
 	}
 
@@ -137,7 +137,7 @@ func TestDetectMirrorPattern(t *testing.T) {
 		wantPat string
 	}{
 		{
-			name: "hint_overuse detected",
+			name: "hint use described without overuse diagnosis",
 			input: MirrorInput{
 				Interactions:    makeInteractions(15, true, false, 3, true, time.Now().UTC()),
 				ConceptStates:   []*models.ConceptState{{Concept: "A", PMastery: 0.9}},
@@ -146,7 +146,7 @@ func TestDetectMirrorPattern(t *testing.T) {
 				SessionCount:    5,
 			},
 			wantNil: false,
-			wantPat: "hint_overuse",
+			wantPat: "hint_use_observed",
 		},
 		{
 			name: "no pattern — too few sessions",
@@ -160,19 +160,18 @@ func TestDetectMirrorPattern(t *testing.T) {
 			wantNil: true,
 		},
 		{
-			name: "dependency_increasing detected",
+			name: "declining composite is not a dependency diagnosis",
 			input: MirrorInput{
-				Interactions:    makeInteractions(10, false, false, 0, true, time.Now().UTC()),
+				Interactions:    makeInteractions(10, true, false, 0, true, time.Now().UTC()),
 				ConceptStates:   []*models.ConceptState{{Concept: "A", PMastery: 0.5}},
 				AutonomyScores:  []float64{0.4, 0.5, 0.6},
 				CalibrationBias: 0.0,
 				SessionCount:    5,
 			},
-			wantNil: false,
-			wantPat: "dependency_increasing",
+			wantNil: true,
 		},
 		{
-			name: "no_initiative detected",
+			name: "no recorded initiative described",
 			input: MirrorInput{
 				Interactions:    makeInteractions(10, false, false, 0, true, time.Now().UTC()),
 				ConceptStates:   []*models.ConceptState{{Concept: "A", PMastery: 0.5}},
@@ -181,7 +180,7 @@ func TestDetectMirrorPattern(t *testing.T) {
 				SessionCount:    5,
 			},
 			wantNil: false,
-			wantPat: "no_initiative",
+			wantPat: "no_recorded_initiative",
 		},
 		{
 			name: "calibration_drift detected",
@@ -214,7 +213,34 @@ func TestDetectMirrorPattern(t *testing.T) {
 			if !tt.wantNil && got != nil && got.Pattern != tt.wantPat {
 				t.Errorf("got pattern %q, want %q", got.Pattern, tt.wantPat)
 			}
+			if got != nil {
+				if got.Message != "" || got.OpenQuestion != "" {
+					t.Fatal("runtime must leave the pedagogical message and question to generation")
+				}
+				if len(got.Facts) == 0 || got.DialogueIntent == "" || got.Confidence != "descriptive_only" {
+					t.Fatalf("missing descriptive generation context: %+v", got)
+				}
+				if got.Window == nil || got.Window.SessionCount != tt.input.SessionCount || got.Window.InteractionCount != len(tt.input.Interactions) {
+					t.Fatalf("observation window must state its evidence counts: %+v", got.Window)
+				}
+			}
 		})
+	}
+}
+
+func TestMirrorMissingInitiativeDoesNotInferNotificationOrigin(t *testing.T) {
+	mirror := DetectMirrorPattern(MirrorInput{
+		SessionCount: 3,
+		Interactions: makeInteractions(10, false, false, 0, true, time.Now().UTC()),
+	})
+	if mirror == nil || mirror.Pattern != "no_recorded_initiative" {
+		t.Fatalf("expected observed missing initiative, got %+v", mirror)
+	}
+	if mirror.Facts["notification_origin_verified"] != false {
+		t.Fatal("absence of an initiative flag must not establish a notification as the cause")
+	}
+	if got := DetectMirrorPattern(MirrorInput{SessionCount: 3}); got != nil {
+		t.Fatalf("no interactions cannot establish an initiative pattern: %+v", got)
 	}
 }
 

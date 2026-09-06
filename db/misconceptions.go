@@ -44,7 +44,7 @@ func (s *Store) GetMisconceptionGroupsInDomain(ctx context.Context, learnerID, d
 
 func (s *Store) getMisconceptionGroups(ctx context.Context, learnerID, domainID string, conceptFilter map[string]bool, exactDomain bool) ([]models.MisconceptionGroup, error) {
 	query := `SELECT concept, misconception_type, COUNT(*) AS cnt, MIN(created_at), MAX(created_at)
-		 FROM interactions
+		 FROM ` + currentInteractionsSQL + ` AS interactions
 		 WHERE learner_id = ? AND misconception_type IS NOT NULL`
 	args := []any{learnerID}
 	if exactDomain {
@@ -151,7 +151,7 @@ func (s *Store) lastMisconceptionDetails(ctx context.Context, learnerID, domainI
 		    SELECT concept, misconception_type, misconception_detail,
 		           ROW_NUMBER() OVER (PARTITION BY concept, misconception_type
 		                              ORDER BY created_at DESC, id DESC) AS rn
-		    FROM interactions
+		    FROM `+currentInteractionsSQL+` AS interactions
 		    WHERE learner_id = ?`+domainClause+` AND misconception_type IS NOT NULL
 		      AND concept IN (`+strings.Join(placeholders, ",")+`)
 		 )
@@ -203,7 +203,7 @@ func (s *Store) misconceptionStatuses(ctx context.Context, learnerID, domainID s
 		    SELECT concept, misconception_type,
 		           ROW_NUMBER() OVER (PARTITION BY concept
 		                              ORDER BY created_at DESC, id DESC) AS rn
-		    FROM interactions
+		    FROM `+currentInteractionsSQL+` AS interactions
 		    WHERE learner_id = ?`+domainClause+` AND concept IN (`+strings.Join(placeholders, ",")+`)
 		 )
 		 WHERE rn <= ? AND misconception_type IS NOT NULL`,
@@ -234,7 +234,7 @@ func (s *Store) GetDistinctMisconceptionTypesInDomain(ctx context.Context, learn
 }
 
 func (s *Store) getDistinctMisconceptionTypes(ctx context.Context, learnerID, domainID, concept string, exactDomain bool) ([]string, error) {
-	query := `SELECT DISTINCT misconception_type FROM interactions
+	query := `SELECT DISTINCT misconception_type FROM ` + currentInteractionsSQL + ` AS interactions
 		 WHERE learner_id = ? AND concept = ? AND misconception_type IS NOT NULL`
 	args := []any{learnerID, concept}
 	if exactDomain {

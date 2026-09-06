@@ -51,6 +51,12 @@ func TestPostgresForcedRLSAllOperationsAndPoolReset(t *testing.T) {
 	s := setupTestPG(t, pgDSN)
 	ctx := context.Background()
 	now := time.Now().UTC()
+	fixture := newPedagogicalDecisionFixture(t, s, "L1", "rls-check")
+	decision := fixture.decision
+	if err := s.CreateInteraction(ctx, &models.Interaction{LearnerID: "L1", DomainID: fixture.domain.ID, Concept: "a", ActivityType: "PRACTICE"}); err != nil {
+		t.Fatal(err)
+	}
+	seedBatchTransfer(t, s, fixture.domain.ID, "a", "near", 1, now)
 
 	if _, err := s.exec(ctx, `INSERT INTO tenants
         (id, slug, name, status, region, policy_json, created_at, updated_at)
@@ -106,6 +112,34 @@ func TestPostgresForcedRLSAllOperationsAndPoolReset(t *testing.T) {
 	if visible != 1 {
 		t.Fatalf("tenant A visible learners = %d, want 1", visible)
 	}
+	for _, relation := range []string{currentInteractionsSQL, currentTransfersSQL} {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+relation+` AS evidence`).Scan(&visible); err != nil || visible != 1 {
+			t.Fatalf("owner current-evidence visibility: %d %v", visible, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `SELECT set_config('app.current_tenant', 'tenant-b', true)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, relation := range []string{currentInteractionsSQL, currentTransfersSQL} {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+relation+` AS evidence`).Scan(&visible); err != nil || visible != 0 {
+			t.Fatalf("derived current-evidence relation bypassed RLS: %d %v", visible, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `SELECT set_config('app.current_tenant', 'tenant_legacy', true)`); err != nil {
+		t.Fatal(err)
+	}
+	mutator := &Store{db: tx, dialect: DialectPostgres}
+	if err := mutator.CompareAndSwapCurriculum(ctx, "L1", fixture.domain.ID, 1, revisionForTest(fixture.curriculum)); err != nil {
+		t.Fatalf("owner curriculum reconciliation under forced RLS: %v", err)
+	}
+	for _, relation := range []string{currentInteractionsSQL, currentTransfersSQL} {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+relation+` AS evidence`).Scan(&visible); err != nil || visible != 0 {
+			t.Fatalf("RLS-scoped reconciliation did not invalidate evidence: %d %v", visible, err)
+		}
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM pedagogical_decisions`).Scan(&visible); err != nil || visible != 1 {
+		t.Fatalf("tenant A decision visibility = %d, want 1: %v", visible, err)
+	}
 	for name, statement := range map[string]string{
 		"update": `UPDATE learners SET objective = 'leak' WHERE id = 'L2'`,
 		"delete": `DELETE FROM domains WHERE id = 'domain-b'`,
@@ -143,6 +177,9 @@ func TestPostgresForcedRLSAllOperationsAndPoolReset(t *testing.T) {
 	if visible != 0 {
 		t.Fatalf("pooled connection leaked tenant scope: visible=%d, want 0", visible)
 	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM pedagogical_decisions`).Scan(&visible); err != nil || visible != 0 {
+		t.Fatalf("unscoped decision visibility = %d, want 0: %v", visible, err)
+	}
 	if _, err := tx.ExecContext(ctx, `SELECT set_config('app.current_tenant', 'tenant-b', true)`); err != nil {
 		t.Fatal(err)
 	}
@@ -151,5 +188,15 @@ func TestPostgresForcedRLSAllOperationsAndPoolReset(t *testing.T) {
 	}
 	if visible != 1 {
 		t.Fatalf("tenant B visible learners = %d, want 1", visible)
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM pedagogical_decisions`).Scan(&visible); err != nil || visible != 0 {
+		t.Fatalf("tenant B sees tenant A decisions = %d, want 0: %v", visible, err)
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM pedagogical_decisions WHERE id = $1`, decision.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if affected, _ := result.RowsAffected(); affected != 0 {
+		t.Fatalf("tenant B deleted %d tenant A decisions", affected)
 	}
 }

@@ -617,18 +617,9 @@ func TestGetNextActivity_FlagOff_NoFadeFields(t *testing.T) {
 	}
 }
 
-// TestGetNextActivity_FadeFlagOn_VerbosityDecreasesAsAutonomyRises is
-// the integration test required by the FadeController acceptance
-// criteria. We simulate a learner whose autonomy_score rises across
-// multiple sessions, call get_next_activity at successive points, and
-// assert that:
-//
-//   - fade_params is present in the JSON,
-//   - the hint_level transitions from "full" toward "none" as the
-//     score climbs,
-//   - the motivation_brief.instruction length is non-increasing along
-//     the sequence (verbosity monotonically drops).
-func TestGetNextActivity_FadeFlagOn_VerbosityDecreasesAsAutonomyRises(t *testing.T) {
+// Rising descriptive scores must not remove help or create a fading contract.
+// The legacy flag exposes metrics and the disabled policy's reason only.
+func TestGetNextActivity_FadeFlagOn_DoesNotWithdrawHelpFromDescriptiveScores(t *testing.T) {
 	t.Setenv("REGULATION_FADE", "on")
 
 	store, deps := setupToolsTest(t)
@@ -644,18 +635,13 @@ func TestGetNextActivity_FadeFlagOn_VerbosityDecreasesAsAutonomyRises(t *testing
 	// (the upsert path's CASE WHEN excluded.autonomy_score > 0 guard
 	// preserves the value we set).
 	steps := []struct {
-		name           string
-		affectScores   []float64 // newest-first; one row per session
-		wantHintAtMost int       // 2 = full, 1 = partial, 0 = none
+		name         string
+		affectScores []float64 // newest-first; one row per session
 	}{
-		{"start: low autonomy", []float64{0.10, 0.10, 0.10}, 2},
-		{"climbing: mid autonomy", []float64{0.55, 0.50, 0.40, 0.20, 0.10, 0.10}, 1},
-		{"high autonomy + improving", []float64{0.95, 0.92, 0.90, 0.88, 0.30, 0.25, 0.20, 0.15, 0.10, 0.10}, 0},
+		{"start: low autonomy", []float64{0.10, 0.10, 0.10}},
+		{"climbing: mid autonomy", []float64{0.55, 0.50, 0.40, 0.20, 0.10, 0.10}},
+		{"high autonomy + improving", []float64{0.95, 0.92, 0.90, 0.88, 0.30, 0.25, 0.20, 0.15, 0.10, 0.10}},
 	}
-
-	hintRank := map[string]int{"full": 2, "partial": 1, "none": 0, "": 0}
-
-	prevInstrLen := -1
 	for stepIdx, st := range steps {
 		// Wipe prior affect rows to reseed the timeline cleanly per
 		// step — newest-first ordering of GetRecentAffectStates is
@@ -690,38 +676,22 @@ func TestGetNextActivity_FadeFlagOn_VerbosityDecreasesAsAutonomyRises(t *testing
 		}
 		out := decodeResult(t, res)
 
-		fp, ok := out["fade_params"].(map[string]any)
-		if !ok {
-			t.Fatalf("step %s: expected fade_params, got %v", st.name, out)
+		if _, ok := out["fade_params"]; ok {
+			t.Fatalf("step %s: descriptive score produced control parameters: %v", st.name, out["fade_params"])
 		}
-		gotHint, _ := fp["hint_level"].(string)
-		if hintRank[gotHint] > st.wantHintAtMost {
-			t.Errorf("step %s: hint_level=%q (rank %d), want at most rank %d",
-				st.name, gotHint, hintRank[gotHint], st.wantHintAtMost)
+		if out["fade_status"] != "disabled_unvalidated_autonomy_score" {
+			t.Fatalf("step %s: absent explanation for retired score-based fading: %v", st.name, out)
+		}
+		if _, ok := out["autonomy_components"].(map[string]any); !ok {
+			t.Fatalf("step %s: descriptive metrics and coverage should remain available", st.name)
 		}
 		contract, ok := out["pedagogical_contract"].(map[string]any)
 		if !ok {
 			t.Fatalf("step %s: expected pedagogical_contract, got %v", st.name, out)
 		}
-		fadeGuidance, ok := contract["fade_guidance"].(map[string]any)
-		if !ok {
-			t.Fatalf("step %s: expected fade_guidance in contract, got %v", st.name, contract)
+		if guidance, ok := contract["fade_guidance"]; ok && guidance != nil {
+			t.Errorf("step %s: descriptive scores must not issue fading guidance: %v", st.name, guidance)
 		}
-		if got := fadeGuidance["hint_level"]; got != gotHint {
-			t.Errorf("step %s: contract hint_level=%v, want %q", st.name, got, gotHint)
-		}
-
-		var instrLen int
-		if mb, ok := out["motivation_brief"].(map[string]any); ok {
-			if instr, ok := mb["instruction"].(string); ok {
-				instrLen = len(instr)
-			}
-		}
-		if prevInstrLen >= 0 && instrLen > prevInstrLen {
-			t.Errorf("step %s: motivation instruction length grew (was %d, now %d) — verbosity should be monotonically non-increasing as autonomy rises",
-				st.name, prevInstrLen, instrLen)
-		}
-		prevInstrLen = instrLen
 	}
 }
 

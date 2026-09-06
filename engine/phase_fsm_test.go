@@ -168,14 +168,26 @@ func TestEvaluatePhase_Instruction_NoGoalRelevantConcepts_Stays(t *testing.T) {
 
 // ─── MAINTENANCE → INSTRUCTION ─────────────────────────────────────────────
 
-func TestEvaluatePhase_MaintenanceToInstruction_RetentionLow(t *testing.T) {
+func TestEvaluatePhase_Maintenance_RetentionLowKeepsRecallInMaintenance(t *testing.T) {
 	cfg := defaultCfg()
 	obs := PhaseObservables{
+		EstimatedGoalRelevant:      1,
+		TotalGoalRelevant:          1,
 		GoalRelevantBelowRetention: true,
 	}
 	got := EvaluatePhase(models.PhaseMaintenance, obs, cfg)
+	if got.Transitioned || got.To != models.PhaseMaintenance {
+		t.Fatalf("recall need must not change the acquisition phase, got %+v", got)
+	}
+}
+
+func TestEvaluatePhase_MaintenanceToInstruction_AcquisitionGap(t *testing.T) {
+	got := EvaluatePhase(models.PhaseMaintenance, PhaseObservables{
+		EstimatedGoalRelevant: 1,
+		TotalGoalRelevant:     2,
+	}, defaultCfg())
 	if !got.Transitioned || got.To != models.PhaseInstruction {
-		t.Fatalf("expected INSTRUCTION on retention drop, got %+v", got)
+		t.Fatalf("a new acquisition gap should return to instruction, got %+v", got)
 	}
 }
 

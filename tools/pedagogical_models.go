@@ -74,9 +74,10 @@ func individualBKTProfileSnapshot(profile algorithms.IndividualBKTProfile) map[s
 
 func individualBKTParamsSnapshot(params algorithms.IndividualBKTParameters) map[string]any {
 	return map[string]any{
-		"p_learn": params.PLearn,
-		"p_slip":  params.PSlip,
-		"p_guess": params.PGuess,
+		"p_forget": params.PForget,
+		"p_learn":  params.PLearn,
+		"p_slip":   params.PSlip,
+		"p_guess":  params.PGuess,
 	}
 }
 

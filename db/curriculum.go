@@ -193,7 +193,8 @@ func (s *Store) CompareAndSwapCurriculum(ctx context.Context, learnerID, domainI
 		// The parent snapshot is a lineage guard in addition to domains'
 		// graph_version CAS. It prevents publishing on an un-audited legacy
 		// version; callers must EnsureCurriculumBaseline first.
-		if _, err := txs.getCurriculumSnapshot(ctx, learnerID, domainID, expectedVersion); err != nil {
+		previous, err := txs.getCurriculumSnapshot(ctx, learnerID, domainID, expectedVersion)
+		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return storeport.ErrCurriculumVersionConflict
 			}
@@ -217,6 +218,9 @@ func (s *Store) CompareAndSwapCurriculum(ctx context.Context, learnerID, domainI
 		}
 		if n != 1 {
 			return storeport.ErrCurriculumVersionConflict
+		}
+		if err := txs.reconcileCurriculumLearning(ctx, learnerID, previous, next); err != nil {
+			return err
 		}
 		if _, err := txs.insertCurriculumSnapshot(ctx, learnerID, next, false); err != nil {
 			return err
@@ -357,6 +361,7 @@ func validateCurriculumSnapshot(snapshot *models.CurriculumSnapshot) error {
 	case models.CurriculumOperationCreate, models.CurriculumOperationBaselineImport,
 		models.CurriculumOperationAdd, models.CurriculumOperationRename,
 		models.CurriculumOperationUpdateMetadata, models.CurriculumOperationSplit,
+		models.CurriculumOperationRepairPrerequisites,
 		models.CurriculumOperationMerge, models.CurriculumOperationRemove,
 		models.CurriculumOperationLegacyUpdate:
 	default:
