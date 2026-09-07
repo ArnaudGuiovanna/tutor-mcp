@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"tutor-mcp/assessment"
+	"tutor-mcp/certification"
 	"tutor-mcp/models"
 	storeport "tutor-mcp/store"
 )
@@ -26,18 +27,28 @@ type AssessmentReviewStore interface {
 }
 
 type AssessmentReviewAPI struct {
-	store  AssessmentReviewStore
-	logger *slog.Logger
+	store       AssessmentReviewStore
+	logger      *slog.Logger
+	adjudicator AssessmentAdjudicationStore
 }
 
-func NewAssessmentReview(store AssessmentReviewStore, logger *slog.Logger) *AssessmentReviewAPI {
+type AssessmentAdjudicationStore interface {
+	AdjudicateAssessment(context.Context, models.Principal, string, string) (*models.AssessmentAdjudication, bool, error)
+	GetAssessmentAdjudication(context.Context, models.Principal, string) (*models.AssessmentAdjudication, error)
+}
+
+func NewAssessmentReview(store AssessmentReviewStore, logger *slog.Logger, adjudicator ...AssessmentAdjudicationStore) *AssessmentReviewAPI {
 	if store == nil {
 		panic("adminapi: nil assessment review store")
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &AssessmentReviewAPI{store: store, logger: logger}
+	api := &AssessmentReviewAPI{store: store, logger: logger}
+	if len(adjudicator) == 1 {
+		api.adjudicator = adjudicator[0]
+	}
+	return api
 }
 
 func (api *AssessmentReviewAPI) Handler() http.Handler {
@@ -47,7 +58,47 @@ func (api *AssessmentReviewAPI) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/assessment-reviews/attempts/{attemptID}/preview", api.preview)
 	mux.HandleFunc("POST /admin/assessment-reviews/attempts/{attemptID}/reviews", api.record)
 	mux.HandleFunc("GET /admin/assessment-reviews/attempts/{attemptID}/reviews/mine", api.ownReview)
+	if api.adjudicator != nil {
+		mux.HandleFunc("POST /admin/assessment-reviews/attempts/{attemptID}/adjudications", api.adjudicate)
+		mux.HandleFunc("GET /admin/assessment-reviews/attempts/{attemptID}/adjudications/current", api.currentAdjudication)
+	}
 	return mux
+}
+
+func (api *AssessmentReviewAPI) adjudicate(w http.ResponseWriter, r *http.Request) {
+	actor, ok := principalFor(r, models.OAuthScopeLearnerWrite)
+	if _, read := principalFor(r, models.OAuthScopeLearnerRead); !ok || !read {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	raw, ok := readReviewScore(w, r)
+	if !ok {
+		return
+	}
+	disposition, replayed, err := api.adjudicator.AdjudicateAssessment(r.Context(), actor, r.PathValue("attemptID"), raw)
+	if err != nil {
+		api.writeError(w, err)
+		return
+	}
+	status := http.StatusCreated
+	if replayed {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, map[string]any{"adjudication": disposition, "replayed": replayed, "learning_replayed": false})
+}
+
+func (api *AssessmentReviewAPI) currentAdjudication(w http.ResponseWriter, r *http.Request) {
+	actor, ok := principalFor(r, models.OAuthScopeLearnerRead)
+	if !ok {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	disposition, err := api.adjudicator.GetAssessmentAdjudication(r.Context(), actor, r.PathValue("attemptID"))
+	if err != nil {
+		api.writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, disposition)
 }
 
 func (api *AssessmentReviewAPI) list(w http.ResponseWriter, r *http.Request) {
@@ -191,6 +242,8 @@ func (api *AssessmentReviewAPI) preview(w http.ResponseWriter, r *http.Request) 
 
 func (api *AssessmentReviewAPI) writeError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, certification.ErrInvalid):
+		writeError(w, http.StatusBadRequest, "invalid_certification")
 	case errors.Is(err, storeport.ErrInvalidPrincipal):
 		writeError(w, http.StatusForbidden, "forbidden")
 	case errors.Is(err, storeport.ErrNotFound):

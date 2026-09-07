@@ -2,8 +2,11 @@
 
 Ce canal HTTP permet de consulter les entrées figées d'une tentative liée et
 de prévisualiser une proposition de notation et d'enregistrer un avis authentifié.
-Il ne certifie aucun évaluateur et n'actualise ni BKT, ni FSRS, ni les preuves de
-maîtrise. Le contenu reste généré ; aucune banque de tâches n'est introduite.
+La consultation et l'enregistrement d'avis ne certifient aucun évaluateur et
+n'actualisent ni BKT, ni FSRS, ni les preuves de maîtrise. Un canal distinct
+d'[arbitrage sur attestation externe signée](assessment-certification.md) peut
+désormais sélectionner un avis pour les lectures de preuve. Le contenu reste
+généré ; aucune banque de tâches n'est introduite.
 
 ## Accès et confidentialité
 
@@ -161,8 +164,9 @@ L'audit atteste l'enregistrement d'un avis par un compte, pas la lecture effecti
 du matériel ni une vérification humaine. Tout export conservé hors du service
 nécessite sa propre gestion de confidentialité et de suppression.
 
-Il reste à brancher une autorité indépendante de certification (service distinct
-ou processus humain vérifiable), puis à implémenter l'adjudication. Une divergence
-avec la note du tuteur ne doit ni écraser l'historique, ni rejouer la réponse
-comme une seconde occasion d'apprentissage. Les règles actuelles de confiance
-et l'exigence de revue humaine pour les enjeux élevés restent inchangées.
+Le mécanisme de certification externe et d'arbitrage est décrit dans
+[assessment-certification.md](assessment-certification.md). Il reste à configurer
+une autorité effectivement indépendante et à évaluer sa qualité. Le processus
+humain vérifiable exigé pour les enjeux élevés n'est pas remplacé par une clé
+de service. Une divergence n'écrase pas l'historique et ne rejoue pas la réponse
+comme une seconde occasion d'apprentissage.

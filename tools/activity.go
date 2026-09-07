@@ -718,6 +718,7 @@ func buildPedagogicalContract(
 
 	contract := models.PedagogicalContract{
 		BKTUpdateMode:           engine.BKTUpdateModeForActivity(activity.Type),
+		LearningEventProtocol:   models.LearningEventProtocol,
 		Intent:                  contractIntent(intent, activity),
 		TargetConcept:           activity.Concept,
 		RecommendedActivityType: activity.Type,

@@ -95,6 +95,8 @@ func applyInteraction(
 	var resultCS *models.ConceptState
 	var resultMeta map[string]any
 	err = deps.Store.WithTx(ctx, func(s store.Store) error {
+		fsrsObservationAt := now
+		fsrsEventProtocol := "legacy_grading_time"
 		// The store's for-update reads lock domain before assessment/model rows,
 		// serializing semantic revision with this entire observation.
 		// Lock and consume the assessment state in the same transaction as the
@@ -121,6 +123,13 @@ func applyInteraction(
 			}
 			input.DecisionID = attempt.DecisionID
 			input.CurriculumVersion = attempt.CurriculumVersion
+			if attempt.EventProtocol == models.LearningEventProtocol {
+				if attempt.SubmittedAt == nil || attempt.SubmittedAt.After(now) {
+					return fmt.Errorf("invalid committed response time")
+				}
+				fsrsObservationAt = *attempt.SubmittedAt
+				fsrsEventProtocol = attempt.EventProtocol
+			}
 		}
 
 		// Load or bootstrap concept state. GetOrCreateConceptStateForUpdate
@@ -279,7 +288,15 @@ func applyInteraction(
 			State:         algorithms.CardState(priorCardState),
 			LastReview:    priorLastReview,
 		}
-		fsrsCard = algorithms.ReviewCard(fsrsCard, rating, now)
+		fsrsApplied := priorLastReview.IsZero() || fsrsObservationAt.After(priorLastReview) || fsrsEventProtocol == "legacy_grading_time"
+		if fsrsApplied {
+			fsrsCard = algorithms.ReviewCard(fsrsCard, rating, fsrsObservationAt)
+		}
+		observation = mergeObservation(observation, map[string]any{
+			"learning_event_protocol": fsrsEventProtocol,
+			"fsrs_observation_at":     fsrsObservationAt,
+			"fsrs_update_applied":     fsrsApplied,
+		})
 
 		// Preserve the legacy estimate. Updating it from FSRS would treat a
 		// learner/concept memory parameter as the difficulty of this task.
@@ -295,9 +312,11 @@ func applyInteraction(
 		cs.Reps = fsrsCard.Reps
 		cs.Lapses = fsrsCard.Lapses
 		cs.CardState = string(fsrsCard.State)
-		cs.LastReview = &now
-		nextReview := now.Add(time.Duration(fsrsCard.ScheduledDays) * 24 * time.Hour)
-		cs.NextReview = &nextReview
+		if fsrsApplied {
+			cs.LastReview = &fsrsObservationAt
+			nextReview := fsrsObservationAt.Add(time.Duration(fsrsCard.ScheduledDays) * 24 * time.Hour)
+			cs.NextReview = &nextReview
+		}
 		cs.Theta = newTheta
 
 		// Persist updated concept state.

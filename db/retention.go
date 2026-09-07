@@ -90,6 +90,7 @@ type RetentionReport struct {
 	AssessmentTaskPlaintext      RetentionMetric `json:"assessment_task_plaintext"`
 	AssessmentResponsePlaintext  RetentionMetric `json:"assessment_response_plaintext"`
 	AssessmentReviewPlaintext    RetentionMetric `json:"assessment_review_plaintext"`
+	CurriculumReviewPlaintext    RetentionMetric `json:"curriculum_review_plaintext"`
 	AssessmentPlaintextBlocked   int64           `json:"assessment_plaintext_blocked"`
 	AssessmentAbandonedAttempts  RetentionMetric `json:"assessment_abandoned_attempts"`
 	IdempotencyResponsePlaintext RetentionMetric `json:"idempotency_response_plaintext"`
@@ -206,6 +207,18 @@ func (s *Store) runDataRetention(ctx context.Context, policy RetentionPolicy, no
 
 	if policy.AssessmentPlaintextDays > 0 {
 		cutoff := retentionCutoff(now, policy.AssessmentPlaintextDays)
+		curriculumEligible := `created_at < ? AND findings_json IS NOT NULL`
+		var curriculumErr error
+		report.CurriculumReviewPlaintext.Eligible, report.CurriculumReviewPlaintext.Held, curriculumErr = s.retentionCountsByHold(ctx, "curriculum_review_opinions", curriculumEligible, cutoff)
+		if curriculumErr != nil {
+			return fmt.Errorf("count curriculum review plaintext: %w", curriculumErr)
+		}
+		if apply {
+			report.CurriculumReviewPlaintext.Applied, curriculumErr = s.retentionExec(ctx, `UPDATE curriculum_review_opinions SET findings_json = NULL WHERE `+curriculumEligible+` AND `+retentionHoldClause("curriculum_review_opinions", false), cutoff)
+			if curriculumErr != nil {
+				return fmt.Errorf("redact curriculum review plaintext: %w", curriculumErr)
+			}
+		}
 		reviewEligible := `created_at < ? AND rubric_score_json IS NOT NULL`
 		var reviewErr error
 		report.AssessmentReviewPlaintext.Eligible, report.AssessmentReviewPlaintext.Held, reviewErr = s.retentionCountsByHold(ctx, "assessment_reviews", reviewEligible, cutoff)
@@ -420,6 +433,7 @@ func RetentionReportTotals(report *RetentionReport) (eligible, applied, held int
 		report.AssessmentTaskPlaintext,
 		report.AssessmentResponsePlaintext,
 		report.AssessmentReviewPlaintext,
+		report.CurriculumReviewPlaintext,
 		report.AssessmentAbandonedAttempts,
 		report.IdempotencyResponsePlaintext,
 		report.PedagogicalSnapshots,

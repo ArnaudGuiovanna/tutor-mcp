@@ -23,25 +23,45 @@ const assessmentColumns = `id, learner_id, domain_id, concept_id, session_id,
        rubric_json, passing_score, status, rubric_score_json, score, passed,
        evaluator_id, evaluation_method, evaluation_provenance_json,
        trusted_evaluation, created_at, submitted_at, evaluated_at, cancelled_at,
-       decision_id, curriculum_version, curriculum_concept_json, outcome_ids_json, curriculum_invalidated_version`
+       decision_id, curriculum_version, curriculum_concept_json, outcome_ids_json, curriculum_invalidated_version,
+       event_protocol, prior_exposure_at`
 
 // assessmentEvidenceColumns deliberately derives effective trust at the read
 // boundary. Both the single-concept and batched evidence paths use this exact
 // projection so batching cannot weaken the supported-evaluator or high-stakes
 // policies.
+const assessmentEffectiveTrust = `CASE
+ WHEN j.verdict = 'accept' AND d.high_stakes = 0 THEN 1
+ WHEN j.id IS NOT NULL THEN 0
+ WHEN a.trusted_evaluation = 1
+  AND a.evaluation_method IN ('external_service','human_review','deterministic')
+  AND (d.high_stakes = 0 OR a.evaluation_method = 'human_review') THEN 1
+ ELSE 0 END`
+
+const assessmentEffectivePassed = `CASE WHEN j.verdict = 'accept' THEN r.passed ELSE a.passed END`
+
+// Join the current disposition before filtering/ranking. Raw attempts and
+// blind-review material continue to read the immutable host evaluation.
+const assessmentEvidenceFrom = `assessment_attempts a
+ JOIN domains d ON d.id = a.domain_id AND d.learner_id = a.learner_id
+ LEFT JOIN assessment_adjudications j ON j.tenant_id = a.tenant_id AND j.attempt_id = a.id
+  AND j.revision = (SELECT MAX(j2.revision) FROM assessment_adjudications j2 WHERE j2.tenant_id = a.tenant_id AND j2.attempt_id = a.id)
+ LEFT JOIN assessment_reviews r ON r.tenant_id = j.tenant_id AND r.id = j.review_id`
+
 const assessmentEvidenceColumns = `a.id, a.learner_id, a.domain_id, a.concept_id, a.session_id,
        a.activity_id, a.activity_version, a.activity_type, a.observable,
        a.task_text, a.task_content_hash, a.response_text, a.response_content_hash,
-       a.rubric_json, a.passing_score, a.status, a.rubric_score_json, a.score, a.passed,
-       a.evaluator_id, a.evaluation_method, a.evaluation_provenance_json,
-       CASE
-         WHEN a.trusted_evaluation = 1
-          AND a.evaluation_method IN ('external_service','human_review','deterministic')
-          AND (d.high_stakes = 0 OR a.evaluation_method = 'human_review')
-         THEN 1 ELSE 0
-       END AS trusted_evaluation,
-       a.created_at, a.submitted_at, a.evaluated_at, a.cancelled_at,
-       a.decision_id, a.curriculum_version, a.curriculum_concept_json, a.outcome_ids_json, a.curriculum_invalidated_version`
+       a.rubric_json, a.passing_score, a.status,
+       CASE WHEN j.verdict = 'accept' THEN r.rubric_score_json ELSE a.rubric_score_json END AS rubric_score_json,
+       CASE WHEN j.verdict = 'accept' THEN r.total ELSE a.score END AS score,
+       ` + assessmentEffectivePassed + ` AS passed,
+       CASE WHEN j.verdict = 'accept' THEN j.authority_id ELSE a.evaluator_id END AS evaluator_id,
+       CASE WHEN j.verdict = 'accept' THEN 'external_service' ELSE a.evaluation_method END AS evaluation_method,
+       CASE WHEN j.id IS NOT NULL THEN '{"adjudication_id":"' || j.id || '"}' ELSE a.evaluation_provenance_json END AS evaluation_provenance_json,
+       ` + assessmentEffectiveTrust + ` AS trusted_evaluation,
+       a.created_at, a.submitted_at, COALESCE(j.created_at, a.evaluated_at) AS evaluated_at, a.cancelled_at,
+       a.decision_id, a.curriculum_version, a.curriculum_concept_json, a.outcome_ids_json, a.curriculum_invalidated_version,
+       a.event_protocol, a.prior_exposure_at`
 
 func (s *Store) CreateAssessmentAttempt(ctx context.Context, a *models.AssessmentAttempt) error {
 	return s.inTx(ctx, nil, func(txs *Store) error { return txs.createAssessmentAttempt(ctx, a) })
@@ -76,6 +96,7 @@ func (s *Store) createAssessmentAttempt(ctx context.Context, a *models.Assessmen
 	if err != nil {
 		return err
 	}
+	a.EventProtocol = ""
 	if a.DecisionID != "" {
 		rubric, err := assessment.ParseRubric(a.RubricJSON)
 		if err != nil {
@@ -105,6 +126,10 @@ func (s *Store) createAssessmentAttempt(ctx context.Context, a *models.Assessmen
 		if err := json.Unmarshal([]byte(payload), &decision); err != nil {
 			return err
 		}
+		if decision.Contract.LearningEventProtocol != "" && decision.Contract.LearningEventProtocol != models.LearningEventProtocol {
+			return fmt.Errorf("unsupported learning event protocol")
+		}
+		a.EventProtocol = decision.Contract.LearningEventProtocol
 		competency, err := json.Marshal(decision.Contract.Competency)
 		if err != nil {
 			return err
@@ -122,13 +147,13 @@ func (s *Store) createAssessmentAttempt(ctx context.Context, a *models.Assessmen
 		 session_id, activity_id,
 		 activity_version, activity_type, observable, task_text,
 		 task_content_hash, rubric_json, passing_score, status, created_at,
-		 decision_id, curriculum_version, curriculum_concept_json, outcome_ids_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 decision_id, curriculum_version, curriculum_concept_json, outcome_ids_json, event_protocol)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		a.ID, a.LearnerID, a.DomainID, a.ConceptID,
 		scope.TenantID, scope.EnrollmentID, scope.FormationConceptID, nullString(a.SessionID),
 		a.ActivityID, a.ActivityVersion, a.ActivityType, a.Observable,
 		nullString(a.TaskText), a.TaskContentHash, a.RubricJSON, a.PassingScore,
-		string(a.Status), a.CreatedAt.UTC(), nullString(a.DecisionID), a.CurriculumVersion, a.CurriculumConceptJSON, a.OutcomeIDsJSON)
+		string(a.Status), a.CreatedAt.UTC(), nullString(a.DecisionID), a.CurriculumVersion, a.CurriculumConceptJSON, a.OutcomeIDsJSON, a.EventProtocol)
 	if err != nil {
 		return fmt.Errorf("create assessment attempt: %w", err)
 	}
@@ -167,7 +192,8 @@ func scanAssessmentAttempt(row *sql.Row) (*models.AssessmentAttempt, error) {
 func scanAssessmentValues(scanner assessmentScanner) (*models.AssessmentAttempt, error) {
 	a := &models.AssessmentAttempt{}
 	var sessionID, taskText, responseText, responseHash, scoreJSON, evaluatorID, method, provenance, decisionID sql.NullString
-	var submittedAt, evaluatedAt, cancelledAt sql.NullTime
+	var submittedAt, cancelledAt sql.NullTime
+	var evaluatedAt, priorExposureAt strictAssessmentTime
 	var passed, trusted int
 	if err := scanner.Scan(
 		&a.ID, &a.LearnerID, &a.DomainID, &a.ConceptID, &sessionID,
@@ -177,6 +203,7 @@ func scanAssessmentValues(scanner assessmentScanner) (*models.AssessmentAttempt,
 		&evaluatorID, &method, &provenance, &trusted, &a.CreatedAt,
 		&submittedAt, &evaluatedAt, &cancelledAt,
 		&decisionID, &a.CurriculumVersion, &a.CurriculumConceptJSON, &a.OutcomeIDsJSON, &a.CurriculumInvalidatedVersion,
+		&a.EventProtocol, &priorExposureAt,
 	); err != nil {
 		return nil, fmt.Errorf("get assessment attempt: %w", err)
 	}
@@ -191,6 +218,10 @@ func scanAssessmentValues(scanner assessmentScanner) (*models.AssessmentAttempt,
 	a.EvaluationProvenanceJSON = provenance.String
 	a.Passed = passed != 0
 	a.TrustedEvaluation = trusted != 0
+	if priorExposureAt.Valid {
+		t := priorExposureAt.Time
+		a.PriorExposureAt = &t
+	}
 	if submittedAt.Valid {
 		t := submittedAt.Time
 		a.SubmittedAt = &t
@@ -206,6 +237,20 @@ func scanAssessmentValues(scanner assessmentScanner) (*models.AssessmentAttempt,
 	return a, nil
 }
 
+// SQLite expression columns lose timestamp affinity. Accept its known storage
+// formats without silently treating a corrupted evidence date as missing.
+type strictAssessmentTime struct{ flexTime }
+
+func (f *strictAssessmentTime) Scan(src any) error {
+	if err := f.flexTime.Scan(src); err != nil {
+		return err
+	}
+	if src != nil && !f.Valid {
+		return fmt.Errorf("invalid assessment timestamp")
+	}
+	return nil
+}
+
 func (s *Store) SubmitAssessmentAttempt(ctx context.Context, learnerID, attemptID, responseText, responseHash string, now time.Time) error {
 	if responseText == "" && responseHash == "" {
 		return fmt.Errorf("submit assessment attempt: response text or content hash is required")
@@ -213,14 +258,67 @@ func (s *Store) SubmitAssessmentAttempt(ctx context.Context, learnerID, attemptI
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	res, err := s.exec(ctx, `UPDATE assessment_attempts
-        SET response_text = ?, response_content_hash = ?, status = 'submitted', submitted_at = ?
+	return s.inTx(ctx, nil, func(txs *Store) (err error) {
+		// MCP returns a tool error as data, so its surrounding tenant
+		// transaction can still commit. Keep response + event atomic even
+		// when a caller handles our error inside an existing transaction.
+		if _, err = txs.exec(ctx, `SAVEPOINT submit_assessment_response`); err != nil {
+			return err
+		}
+		defer func() {
+			if err != nil {
+				_, rollbackErr := txs.exec(ctx, `ROLLBACK TO SAVEPOINT submit_assessment_response`)
+				err = errors.Join(err, rollbackErr)
+			}
+			_, releaseErr := txs.exec(ctx, `RELEASE SAVEPOINT submit_assessment_response`)
+			err = errors.Join(err, releaseErr)
+		}()
+		discovered, err := txs.GetAssessmentAttempt(ctx, learnerID, attemptID)
+		if err != nil {
+			return err
+		}
+		if discovered.EventProtocol == models.LearningEventProtocol {
+			if err := txs.lockLearningEventStream(ctx, learnerID, discovered.DomainID); err != nil {
+				return err
+			}
+		}
+		attempt, err := txs.GetAssessmentAttemptForUpdate(ctx, learnerID, attemptID)
+		if err != nil {
+			return err
+		}
+		var prior any
+		if attempt.EventProtocol == models.LearningEventProtocol {
+			var exposure strictAssessmentTime
+			if err := txs.queryRow(ctx, `SELECT MAX(occurred_at) FROM learning_events WHERE learner_id = ? AND domain_id = ? AND concept_id = ? AND curriculum_invalidated_version = 0`, learnerID, attempt.DomainID, attempt.ConceptID).Scan(&exposure); err != nil {
+				return err
+			}
+			if exposure.Valid {
+				prior = exposure.Time
+			}
+		}
+		res, err := txs.exec(ctx, `UPDATE assessment_attempts
+        SET response_text = ?, response_content_hash = ?, status = 'submitted', submitted_at = ?, prior_exposure_at = ?
         WHERE id = ? AND learner_id = ? AND status = 'prepared' AND curriculum_invalidated_version = 0`,
-		nullString(responseText), responseHash, now.UTC(), attemptID, learnerID)
-	if err != nil {
-		return fmt.Errorf("submit assessment attempt: %w", err)
-	}
-	return requireAssessmentTransition(res)
+			nullString(responseText), responseHash, now.UTC(), prior, attemptID, learnerID)
+		if err != nil {
+			return fmt.Errorf("submit assessment attempt: %w", err)
+		}
+		if err := requireAssessmentTransition(res); err != nil {
+			return err
+		}
+		if attempt.EventProtocol == models.LearningEventProtocol {
+			scope, err := txs.resolveLearningScope(ctx, learnerID, attempt.DomainID, attempt.ConceptID)
+			if err != nil {
+				return err
+			}
+			return txs.insertLearningEvent(ctx, scope.TenantID, learnerID, scope.EnrollmentID, &models.LearningEvent{
+				ID: "response_" + attemptID, EventKey: "response:" + reviewDigest([]byte(attemptID)), DomainID: attempt.DomainID,
+				ConceptID: attempt.ConceptID, AttemptID: attemptID, Kind: "response", Source: "committed_response",
+				CurriculumVersion: attempt.CurriculumVersion, OccurredAt: now.UTC(),
+			})
+		}
+		return nil
+	})
 }
 
 // CompleteAssessmentEvaluation is the persistence port exposed to MCP tools.
@@ -307,12 +405,11 @@ func (s *Store) GetEvaluatedAssessmentAttemptsInDomain(ctx context.Context, lear
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := s.query(ctx, `SELECT `+assessmentEvidenceColumns+` FROM assessment_attempts a
-		JOIN domains d ON d.id = a.domain_id AND d.learner_id = a.learner_id
+	rows, err := s.query(ctx, `SELECT `+assessmentEvidenceColumns+` FROM `+assessmentEvidenceFrom+`
 		WHERE a.learner_id = ? AND a.domain_id = ? AND a.concept_id = ?
 		  AND a.status = 'evaluated' AND a.curriculum_invalidated_version = 0
 		  AND a.submitted_at IS NOT NULL AND a.evaluated_at IS NOT NULL
-		ORDER BY a.evaluated_at DESC LIMIT ?`, learnerID, domainID, conceptID, limit)
+		ORDER BY COALESCE(j.created_at, a.evaluated_at) DESC LIMIT ?`, learnerID, domainID, conceptID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("get evaluated assessment attempts: %w", err)
 	}
@@ -346,13 +443,11 @@ func (s *Store) GetTrustedPassedAssessmentAttemptsInDomain(ctx context.Context, 
 	if limit <= 0 {
 		limit = 20
 	}
-	rows, err := s.query(ctx, `SELECT `+assessmentEvidenceColumns+` FROM assessment_attempts a
-		JOIN domains d ON d.id = a.domain_id AND d.learner_id = a.learner_id
+	rows, err := s.query(ctx, `SELECT `+assessmentEvidenceColumns+` FROM `+assessmentEvidenceFrom+`
 		WHERE a.learner_id = ? AND a.domain_id = ? AND a.concept_id = ?
-		  AND a.status = 'evaluated' AND a.passed = 1 AND a.trusted_evaluation = 1 AND a.curriculum_invalidated_version = 0
-		  AND a.evaluation_method IN ('external_service','human_review','deterministic')
-		  AND (d.high_stakes = 0 OR a.evaluation_method = 'human_review')
-		ORDER BY a.evaluated_at DESC LIMIT ?`, learnerID, domainID, conceptID, limit)
+		  AND a.status = 'evaluated' AND (`+assessmentEffectivePassed+`) = 1
+		  AND (`+assessmentEffectiveTrust+`) = 1 AND a.curriculum_invalidated_version = 0
+		ORDER BY COALESCE(j.created_at, a.evaluated_at) DESC LIMIT ?`, learnerID, domainID, conceptID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("get trusted assessment attempts: %w", err)
 	}

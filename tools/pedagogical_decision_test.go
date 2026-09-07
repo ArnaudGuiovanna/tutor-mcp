@@ -99,6 +99,14 @@ func TestPedagogicalDecisionBindingLifecycle(t *testing.T) {
 	if res := callTool(t, deps, registerPrepareAssessmentAttempt, "L_owner", "prepare_assessment_attempt", args); !res.IsError {
 		t.Fatal("decision reused for a second attempt")
 	}
+	if attempt.EventProtocol != models.LearningEventProtocol {
+		t.Fatal("new decision did not freeze event protocol")
+	}
+	eventArgs := map[string]any{"domain_id": domain.ID, "concept": args["concept"], "event_key": "instruction-before-response", "kind": "instruction", "attempt_id": attemptID}
+	instruction := callTool(t, deps, registerRecordLearningEvent, "L_owner", "record_learning_event", eventArgs)
+	if instruction.IsError || decodeResult(t, instruction)["model_updated"] != false {
+		t.Fatalf("instruction: %s", resultText(instruction))
+	}
 	if res := callTool(t, deps, registerSubmitAssessmentAttempt, "L_owner", "submit_assessment_attempt", map[string]any{"attempt_id": attemptID, "learner_response": "My answer"}); res.IsError {
 		t.Fatal(resultText(res))
 	}
@@ -120,6 +128,17 @@ func TestPedagogicalDecisionBindingLifecycle(t *testing.T) {
 	before, err := store.GetConceptStateInDomain(context.Background(), "L_owner", domain.ID, decision.Contract.TargetConcept)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if before.LastReview == nil || attempt.SubmittedAt == nil || !before.LastReview.Equal(*attempt.SubmittedAt) || obs["fsrs_update_applied"] != true || obs["learning_event_protocol"] != models.LearningEventProtocol {
+		t.Fatalf("FSRS did not use the committed response: %+v %v", before, obs)
+	}
+	if attempt.PriorExposureAt == nil {
+		t.Fatal("declared instruction did not bound recall exposure")
+	}
+	eventArgs["event_key"], eventArgs["kind"] = "feedback-after-response", "feedback"
+	feedback := callTool(t, deps, registerRecordLearningEvent, "L_owner", "record_learning_event", eventArgs)
+	if feedback.IsError || decodeResult(t, feedback)["presentation_verified"] != false {
+		t.Fatalf("feedback: %s", resultText(feedback))
 	}
 	if res := callTool(t, deps, registerRecordInteraction, "L_owner", "record_interaction", eval); !res.IsError {
 		t.Fatal("diagnostic response evaluated twice")

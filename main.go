@@ -27,6 +27,7 @@ import (
 
 	"tutor-mcp/adminapi"
 	"tutor-mcp/auth"
+	"tutor-mcp/certification"
 	"tutor-mcp/db"
 	"tutor-mcp/engine"
 	"tutor-mcp/memory"
@@ -432,11 +433,19 @@ func main() {
 	mux.Handle("/admin/catalog/", adminHandler)
 	// Raw response review and opinion recording are separate administrative capabilities;
 	// the MCP handler never receives a trusted evaluation mutation port.
+	assessmentCertifiers, err := certification.New(strings.TrimRight(baseURL, "/")+"/admin/assessment-reviews", os.Getenv("ASSESSMENT_CERTIFIERS_JSON"))
+	if err != nil {
+		logger.Error("invalid independent assessment authority configuration")
+		os.Exit(1)
+	}
 	reviewHandler := auth.RateLimitMiddleware(mcpIPLimiter,
 		auth.BearerMiddlewareWithPrincipalValidator(baseURL, initialOAuthScope, store,
 			auth.LearnerRateLimitMiddleware(mcpLearnerLimiter,
-				adminapi.NewAssessmentReview(store, logger).Handler())))
+				adminapi.NewAssessmentReview(store, logger, db.NewAssessmentAdjudicator(store, assessmentCertifiers)).Handler())))
 	mux.Handle("/admin/assessment-reviews/", reviewHandler)
+	mux.Handle("/admin/curriculum-reviews/", auth.RateLimitMiddleware(mcpIPLimiter,
+		auth.BearerMiddlewareWithPrincipalValidator(baseURL, initialOAuthScope, store,
+			auth.LearnerRateLimitMiddleware(mcpLearnerLimiter, adminapi.NewCurriculumReview(store, logger).Handler()))))
 
 	if runsWorker {
 		// Development PROCESS_ROLE=all preserves the one-process experience.

@@ -55,6 +55,9 @@ jobs:
       - name: Test task publication hooks (offline)
         run: python3 -B -m unittest discover -s scripts -p test_finish_task.py
 
+      - name: Test learning policy analysis (offline)
+        run: python3 -B -m unittest discover -s scripts -p test_evaluate_learning_policies.py
+
       - name: Staticcheck
         run: |
           go install honnef.co/go/tools/cmd/staticcheck@2026.1

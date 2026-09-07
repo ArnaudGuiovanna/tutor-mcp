@@ -86,10 +86,9 @@ func (s *Store) GetEvaluatedAssessmentAttemptsBatchInDomain(ctx context.Context,
 	rows, err := s.query(ctx, `WITH ranked_evidence AS (
        SELECT `+assessmentEvidenceColumns+`,
               ROW_NUMBER() OVER (
-                  PARTITION BY a.concept_id ORDER BY a.evaluated_at DESC
+                  PARTITION BY a.concept_id ORDER BY COALESCE(j.created_at, a.evaluated_at) DESC
               ) AS evidence_rank
-       FROM assessment_attempts a
-       JOIN domains d ON d.id = a.domain_id AND d.learner_id = a.learner_id
+       FROM `+assessmentEvidenceFrom+`
        WHERE a.learner_id = ? AND a.domain_id = ?
          AND a.concept_id IN (`+strings.Join(placeholders, ",")+`)
          AND a.status = 'evaluated' AND a.curriculum_invalidated_version = 0

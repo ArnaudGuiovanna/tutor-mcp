@@ -610,6 +610,7 @@ type CatalogStore interface {
 // Store is the aggregate persistence interface. db.Store implements all
 // sub-interfaces; a future PostgresStore can do the same.
 type Store interface {
+	RecordLearningEvent(context.Context, models.Principal, models.LearningEventRequest) (*models.LearningEvent, bool, error)
 	LearnerStore
 	IdentityStore
 	IntegrationSecretStore

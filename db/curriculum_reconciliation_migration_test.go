@@ -36,7 +36,20 @@ func TestCurriculumReconciliationMigrationPreservesReferencesAndForeignKeys(t *t
 			s := NewStore(raw)
 			f := newPedagogicalDecisionFixture(t, s, "L1", "upgrade")
 			a := f.attempt(t, "pre-upgrade-attempt")
-			if err := s.CreateAssessmentAttempt(ctx, a); err != nil {
+			// Seed the pre-upgrade schema explicitly; the current writer requires
+			// later additive exposure columns that do not exist in this fixture.
+			scope, err := s.resolveLearningScope(ctx, "L1", f.domain.ID, "a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := raw.Exec(`INSERT INTO assessment_attempts
+ (id,learner_id,domain_id,concept_id,tenant_id,enrollment_id,formation_concept_id,session_id,
+ activity_id,activity_version,activity_type,observable,task_text,task_content_hash,rubric_json,
+ passing_score,status,created_at,decision_id,curriculum_version,curriculum_concept_json,outcome_ids_json)
+ VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, a.ID, a.LearnerID, a.DomainID, a.ConceptID,
+				scope.TenantID, scope.EnrollmentID, scope.FormationConceptID, a.SessionID, a.ActivityID, a.ActivityVersion,
+				a.ActivityType, a.Observable, a.TaskText, a.TaskContentHash, a.RubricJSON, a.PassingScore, a.Status, a.CreatedAt,
+				a.DecisionID, a.CurriculumVersion, a.CurriculumConceptJSON, a.OutcomeIDsJSON); err != nil {
 				t.Fatal(err)
 			}
 			next := models.CloneCurriculumSnapshot(f.curriculum)

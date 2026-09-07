@@ -390,7 +390,7 @@ func (s *Store) CompleteTenantDSARExport(ctx context.Context, scope models.Tenan
 			return err
 		}
 		counts := make(map[string]int64)
-		for _, table := range []string{"interactions", "concept_states", "narrative_objects", "pedagogical_decisions", "assessment_reviews", "audit_events"} {
+		for _, table := range []string{"interactions", "learning_events", "concept_states", "narrative_objects", "pedagogical_decisions", "assessment_adjudications", "assessment_reviews", "curriculum_review_opinions", "audit_events"} {
 			var count int64
 			predicate := "learner_id = ?"
 			args := []any{learnerID}
@@ -450,7 +450,7 @@ func (s *Store) ResumeTenantDSAR(ctx context.Context, actor models.Principal, re
 var dsarErasurePhases = []string{
 	"webhook_delivery_transitions", "webhook_push_log", "webhook_message_queue",
 	"narrative_mutations", "narrative_objects", "pedagogical_snapshots",
-	"transfer_records", "interactions", "assessment_reviews", "assessment_attempts", "pedagogical_decisions", "affect_states",
+	"transfer_records", "interactions", "learning_events", "assessment_adjudications", "assessment_reviews", "curriculum_review_opinions", "assessment_attempts", "pedagogical_decisions", "affect_states",
 	"implementation_intentions", "learning_sessions", "concept_states",
 	"scheduled_alerts", "availability", "scrub_learner",
 }
@@ -460,8 +460,11 @@ var dsarLearnerTables = map[string]string{
 	"webhook_message_queue": "learner_id", "narrative_mutations": "learner_id",
 	"narrative_objects": "learner_id", "pedagogical_snapshots": "learner_id",
 	"transfer_records": "learner_id", "interactions": "learner_id",
-	"assessment_reviews":  "learner_id",
-	"assessment_attempts": "learner_id", "pedagogical_decisions": "learner_id", "affect_states": "learner_id",
+	"assessment_reviews":         "learner_id",
+	"assessment_adjudications":   "learner_id",
+	"learning_events":            "learner_id",
+	"curriculum_review_opinions": "learner_id",
+	"assessment_attempts":        "learner_id", "pedagogical_decisions": "learner_id", "affect_states": "learner_id",
 	"implementation_intentions": "learner_id", "learning_sessions": "learner_id",
 	"concept_states": "learner_id", "scheduled_alerts": "learner_id",
 	"availability": "learner_id",
@@ -498,7 +501,7 @@ func (s *Store) ProcessTenantDSARErasureBatch(ctx context.Context, scope models.
 		// Requests created before the journals existed must also erase their
 		// rows. Append checkpoints without rewriting existing positions;
 		// execution follows the current dependency order, not insertion order.
-		for _, phase := range []string{"pedagogical_decisions", "assessment_reviews"} {
+		for _, phase := range []string{"pedagogical_decisions", "assessment_reviews", "assessment_adjudications", "learning_events", "curriculum_review_opinions"} {
 			if _, err := txs.exec(txCtx, `INSERT INTO tenant_dsar_phases
 			(tenant_id, request_id, position, phase, status, affected_rows, updated_at)
 			SELECT ?, ?, COALESCE(MAX(position), -1) + 1, ?, 'pending', 0, ?

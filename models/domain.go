@@ -104,6 +104,7 @@ const (
 )
 
 type PedagogicalContract struct {
+	LearningEventProtocol   string                   `json:"learning_event_protocol,omitempty"`
 	DecisionID              string                   `json:"decision_id,omitempty"`
 	PolicyVersion           string                   `json:"policy_version,omitempty"`
 	BKTUpdateMode           BKTUpdateMode            `json:"bkt_update_mode,omitempty"`

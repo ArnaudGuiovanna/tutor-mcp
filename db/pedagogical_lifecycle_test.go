@@ -80,13 +80,28 @@ func testPedagogicalDecisionDSAR(t *testing.T, legacy bool) {
 	owner := ownerPrincipal(t, s)
 	now := time.Now().UTC()
 	template := pedagogicalLifecycleFixture(t, s, owner, now)
+	template.Contract.LearningEventProtocol = models.LearningEventProtocol
 	decision := createLifecycleDecision(t, s, owner, template, "decision-dsar", now)
 	createLifecycleAssessment(t, s, decision)
 	if err := s.SubmitAssessmentAttempt(ctx, owner.LearnerID, "attempt-"+decision.ID, "Committed learner answer", "answer-hash", now); err != nil {
 		t.Fatal(err)
 	}
 	reviewer := reviewWriter(reviewRoleForTest(t, s, "lifecycle-reviewer", models.RolePedagogyManager))
-	recordReviewForTest(t, s, reviewer, "attempt-"+decision.ID, "lifecycle-opinion")
+	opinion := recordReviewForTest(t, s, reviewer, "attempt-"+decision.ID, "lifecycle-opinion")
+	if err := s.CompleteAssessmentEvaluation(ctx, owner.LearnerID, opinion.AttemptID, completeBoundScore, "host", models.EvaluationMethodHostLLM, "{}", 1, true, now); err != nil {
+		t.Fatal(err)
+	}
+	adjudicator, sign := adjudicatorForTest(t, s, reviewer.TenantID)
+	if _, _, err := adjudicator.AdjudicateAssessment(ctx, reviewer, opinion.AttemptID, sign(opinion, "lifecycle-certificate", "accept", 0)); err != nil {
+		t.Fatal(err)
+	}
+	material, err := s.GetCurriculumReviewMaterial(ctx, reviewer, decision.DomainID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.RecordCurriculumReview(ctx, reviewer, decision.DomainID, 1, "lifecycle-curriculum", material.MaterialHash, curriculumFindingsForTest(t, material.Snapshot)); err != nil {
+		t.Fatal(err)
+	}
 	curriculum, err := s.GetCurriculumSnapshot(ctx, owner.LearnerID, decision.DomainID, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -117,8 +132,10 @@ func testPedagogicalDecisionDSAR(t *testing.T, legacy bool) {
 	if manifest.Counts["pedagogical_decisions"] != 1 {
 		t.Fatalf("decision missing from export manifest: %s", raw)
 	}
-	if manifest.Counts["assessment_reviews"] != 1 {
-		t.Fatalf("review missing from export manifest: %s", raw)
+	for _, table := range []string{"assessment_reviews", "assessment_adjudications", "learning_events", "curriculum_review_opinions"} {
+		if manifest.Counts[table] != 1 {
+			t.Fatalf("%s missing from export manifest: %s", table, raw)
+		}
 	}
 	erasure, err := s.RequestTenantDSAR(ctx, owner, owner.LearnerID, "erase", "verified erasure request")
 	if err != nil {
@@ -126,7 +143,7 @@ func testPedagogicalDecisionDSAR(t *testing.T, legacy bool) {
 	}
 	if legacy {
 		// Simulate a durable pre-upgrade request without the new checkpoint.
-		if _, err := s.exec(ctx, `DELETE FROM tenant_dsar_phases WHERE tenant_id = ? AND request_id = ? AND phase IN ('pedagogical_decisions', 'assessment_reviews')`, owner.TenantID, erasure.ID); err != nil {
+		if _, err := s.exec(ctx, `DELETE FROM tenant_dsar_phases WHERE tenant_id = ? AND request_id = ? AND phase IN ('pedagogical_decisions', 'assessment_reviews', 'assessment_adjudications', 'learning_events', 'curriculum_review_opinions')`, owner.TenantID, erasure.ID); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -140,7 +157,7 @@ func testPedagogicalDecisionDSAR(t *testing.T, legacy bool) {
 	if !complete {
 		t.Fatal("DSAR erasure did not finish")
 	}
-	for _, table := range []string{"assessment_reviews", "assessment_attempts", "pedagogical_decisions", "learning_sessions"} {
+	for _, table := range []string{"assessment_adjudications", "learning_events", "curriculum_review_opinions", "assessment_reviews", "assessment_attempts", "pedagogical_decisions", "learning_sessions"} {
 		if got := retentionCountTable(t, s, table); got != 0 {
 			t.Fatalf("%s: %d learner rows remain after erasure", table, got)
 		}

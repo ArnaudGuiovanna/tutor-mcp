@@ -88,8 +88,8 @@ func toolsTestDBTemplateBytes() ([]byte, error) {
 		now := time.Now().UTC()
 		for _, id := range []string{"L_owner", "L_attacker"} {
 			if _, err := raw.Exec(
-				`INSERT INTO learners (id, email, password_hash, objective, created_at) VALUES (?, ?, 'hash', 'test', ?)`,
-				id, id+"@test.com", now,
+				`INSERT INTO learners (id, email, password_hash, objective, created_at, email_verified_at) VALUES (?, ?, 'hash', 'test', ?, ?)`,
+				id, id+"@test.com", now, now,
 			); err != nil {
 				_ = raw.Close()
 				toolsTestDBTemplate.err = err

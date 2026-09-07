@@ -46,6 +46,7 @@ func TestRegisterTools_Smoke(t *testing.T) {
 		"get_pending_alerts",
 		"get_next_activity",
 		"record_interaction",
+		"record_learning_event",
 		"prepare_assessment_attempt",
 		"submit_assessment_attempt",
 		"cancel_assessment_attempt",
@@ -217,8 +218,8 @@ func TestRegisterTools_LegacyRolloutAdvertisesOnlyBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(listed.Tools) != 45 {
-		t.Fatalf("listed tools=%d, want 45", len(listed.Tools))
+	if len(listed.Tools) != 46 {
+		t.Fatalf("listed tools=%d, want 46", len(listed.Tools))
 	}
 	for _, tool := range listed.Tools {
 		encoded, err := json.Marshal(tool.Meta["securitySchemes"])

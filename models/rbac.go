@@ -15,12 +15,14 @@ const (
 	PermissionProgressRead     Permission = "progress:read"
 	// Reading raw assessment material is distinct from aggregate progression.
 	// This permission never grants the right to certify an evaluation.
-	PermissionAssessmentReview  Permission = "assessment:review"
-	PermissionLearningSelf      Permission = "learning:self"
-	PermissionBillingManage     Permission = "billing:manage"
-	PermissionAuditRead         Permission = "audit:read"
-	PermissionIntegrationManage Permission = "integration:manage"
-	PermissionUsageRead         Permission = "usage:read"
+	PermissionAssessmentReview     Permission = "assessment:review"
+	PermissionAssessmentAdjudicate Permission = "assessment:adjudicate"
+	PermissionCurriculumReview     Permission = "curriculum:review"
+	PermissionLearningSelf         Permission = "learning:self"
+	PermissionBillingManage        Permission = "billing:manage"
+	PermissionAuditRead            Permission = "audit:read"
+	PermissionIntegrationManage    Permission = "integration:manage"
+	PermissionUsageRead            Permission = "usage:read"
 )
 
 // AuthorizationResource carries only trusted identifiers loaded from the
@@ -35,7 +37,9 @@ type AuthorizationResource struct {
 
 var rolePermissions = map[string]map[Permission]bool{
 	RoleOwner: {
-		PermissionTenantManage: true, PermissionMembershipManage: true,
+		PermissionCurriculumReview:     true,
+		PermissionAssessmentAdjudicate: true,
+		PermissionTenantManage:         true, PermissionMembershipManage: true,
 		PermissionFormationWrite: true, PermissionCohortManage: true,
 		PermissionProgressRead: true, PermissionBillingManage: true,
 		PermissionAuditRead: true, PermissionIntegrationManage: true,
@@ -43,19 +47,24 @@ var rolePermissions = map[string]map[Permission]bool{
 		PermissionAssessmentReview: true,
 	},
 	RoleAdmin: {
-		PermissionTenantManage: true, PermissionMembershipManage: true,
+		PermissionCurriculumReview:     true,
+		PermissionAssessmentAdjudicate: true,
+		PermissionTenantManage:         true, PermissionMembershipManage: true,
 		PermissionFormationWrite: true, PermissionCohortManage: true,
 		PermissionProgressRead: true, PermissionAuditRead: true,
 		PermissionIntegrationManage: true, PermissionUsageRead: true,
 		PermissionAssessmentReview: true,
 	},
 	RolePedagogyManager: {
-		PermissionFormationWrite: true, PermissionCohortManage: true,
+		PermissionCurriculumReview:     true,
+		PermissionAssessmentAdjudicate: true,
+		PermissionFormationWrite:       true, PermissionCohortManage: true,
 		PermissionProgressRead: true, PermissionUsageRead: true,
 		PermissionAssessmentReview: true,
 	},
 	RoleTrainer: {
-		PermissionProgressRead: true, PermissionAssessmentReview: true,
+		PermissionCurriculumReview: true,
+		PermissionProgressRead:     true, PermissionAssessmentReview: true,
 	},
 	RoleAuditor: {
 		PermissionProgressRead: true, PermissionAuditRead: true,
@@ -87,7 +96,7 @@ func (p Principal) Authorize(permission Permission, resource AuthorizationResour
 		switch {
 		case permission == PermissionLearningSelf:
 			return resource.OwnerUserID != "" && resource.OwnerUserID == p.UserID
-		case role == RoleTrainer && (permission == PermissionProgressRead || permission == PermissionAssessmentReview):
+		case role == RoleTrainer && (permission == PermissionProgressRead || permission == PermissionAssessmentReview || permission == PermissionCurriculumReview):
 			if resource.CohortID != "" && slices.Contains(resource.AssignedCohortIDs, resource.CohortID) {
 				return true
 			}
@@ -106,6 +115,6 @@ func KnownPermissions() []Permission {
 		PermissionCohortManage, PermissionProgressRead, PermissionLearningSelf,
 		PermissionBillingManage, PermissionAuditRead, PermissionIntegrationManage,
 		PermissionUsageRead,
-		PermissionAssessmentReview,
+		PermissionAssessmentReview, PermissionAssessmentAdjudicate, PermissionCurriculumReview,
 	}
 }

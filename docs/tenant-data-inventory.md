@@ -62,6 +62,10 @@ activité, `H` flux potentiellement non borné.
 | `learner_concept_states` | Tenant-owned / enrollment + formation concept | H | politique progression/RGPD | Source canonique M3; PK tenant/enrollment/concept et double FK de version. |
 | `learning_sessions` | Tenant-owned / enrollment | H | politique preuves/RGPD | Learner et domaine doivent converger; domaine NULL reste traçable. |
 | `assessment_attempts` | Tenant-owned / enrollment + concept | H | politique preuves/formation | Learner, session, domaine et concept contrôlés ensemble. |
+| `assessment_reviews` | Tenant-owned / learner + attempt + reviewer | H | prose selon rétention, journal jusqu'au DSAR | Avis aveugle figé, empreintes conservées après purge des justifications. |
+| `assessment_adjudications` | Tenant-owned / learner + attempt + review | M | historique de preuve jusqu'au DSAR | Verdict, certificat signé et clé publique immuables ; aucune prose de réponse. |
+| `learning_events` | Tenant-owned / learner + enrollment + concept | H | historique jusqu'au DSAR | Réponses et expositions déclarées, horodatées sans prose ; invalidation prospective du curriculum. |
+| `curriculum_review_opinions` | Tenant-owned / learner + domain version + reviewer | H | justifications selon rétention, journal jusqu'au DSAR | Avis sémantiques figés, couverture et empreintes préservées après purge. |
 | `interactions` | Tenant-owned / enrollment + attempt | H | rétention preuves/RGPD | Contrôler learner/session/attempt/domain; aucune inférence de domaine ambigu. |
 | `pedagogical_snapshots` | Tenant-owned / interaction | H | alignée sur interaction | Tenant vient de l'interaction; mismatch learner/domain quarantainé. |
 | `affect_states` | Tenant-owned / enrollment + session | H | rétention courte configurable | Learner/session doivent converger. |

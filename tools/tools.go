@@ -75,6 +75,7 @@ var writeTools = map[string]bool{
 	"record_affect":                   true,
 	"record_calibration_result":       true,
 	"record_interaction":              true,
+	"record_learning_event":           true,
 	"record_session_close":            true,
 	"record_transfer_result":          true,
 	"set_domain_priority":             true,
@@ -98,6 +99,7 @@ var additiveWriteTools = map[string]bool{
 	"get_curriculum_snapshot":    true,
 	"get_memory_state":           true,
 	"record_interaction":         true,
+	"record_learning_event":      true,
 	"prepare_assessment_attempt": true,
 	"init_domain":                true,
 	"add_concepts":               true,
@@ -342,6 +344,7 @@ func RegisterTools(server *mcp.Server, deps *Deps) {
 	registerGetPendingAlerts(server, deps)
 	registerGetNextActivity(server, deps)
 	registerRecordInteraction(server, deps)
+	registerRecordLearningEvent(server, deps)
 	registerPrepareAssessmentAttempt(server, deps)
 	registerSubmitAssessmentAttempt(server, deps)
 	registerCancelAssessmentAttempt(server, deps)

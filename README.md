@@ -132,7 +132,7 @@ silently.
 | **Gemini CLI** | [`geminicli.com/docs/tools/mcp-server/`](https://geminicli.com/docs/tools/mcp-server/) | Local CLI |
 | **Claude Code** (CLI, local) | `.mcp.json` with `"url": "http://localhost:3000/mcp"` | No HTTPS needed |
 
-## MCP tools (45)
+## MCP tools (46)
 
 Domain-scoped learning tools accept an optional `domain_id`; where documented, omitting it selects the most recently active non-archived domain. Learner-global and lifecycle tools intentionally have different contracts—use each tool's schema as the source of truth.
 
@@ -145,7 +145,7 @@ opts into cached-response retention, an expired response produces an explicit
 already-completed error; the durable key and request hash remain, so the tool
 handler is never executed again for that key.
 
-### Core learning loop (11)
+### Core learning loop (12)
 
 | Tool | Purpose |
 |---|---|
@@ -155,6 +155,7 @@ handler is never executed again for that key.
 | `get_next_activity` | Next optimal activity + episodic context + reasoning request + tutor mode + motivation brief + mastery uncertainty + transfer profile |
 | `prepare_assessment_attempt` / `submit_assessment_attempt` / `cancel_assessment_attempt` | Freeze task/rubric before the response, commit the response before evaluation, or explicitly cancel the attempt |
 | `record_interaction` | Persist an observation and update BKT/FSRS; unlinked practice stays explicitly unverified, while retention/demonstration/transfer evidence references a submitted/evaluated attempt |
+| `record_learning_event` | Record delivered feedback/instruction separately from responses; server time and idempotent event key, without awarding model progress |
 | `check_mastery` | Mastery-challenge readiness: BKT + evidence diversity + uncertainty + transfer status |
 | `get_olm_snapshot` | Open Learner Model: evidence-backed stages per concept — estimated, retained, demonstrated and transferred |
 | `get_dashboard_state` | Evidence-backed progress (estimated/retained/demonstrated/transferred), routing state, retention, autonomy, calibration bias and affect history |
@@ -345,6 +346,16 @@ Go 1.25.13+ · [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk) · [
 ## Pedagogical reliability
 
 The runtime deliberately separates deterministic decisions from LLM coaching freedom: the runtime owns state transitions, thresholds, graph validation, evidence gates, scheduling and audit snapshots; the LLM owns examples, hints, feedback, tone and explanations. `record_interaction` accepts structured `rubric_json` / `rubric_score_json` and persists them on interactions + pedagogical snapshots. `get_decision_replay_summary` surfaces audit quality (missing rubrics, transfer gaps, JSON issues). A static goldset covers known failure modes (false-positive high BKT, missing rubrics, missing transfer, clean replay).
+
+Independent [assessment certification](docs/assessment-certification.md) can
+accept or withdraw a reviewed score through signed, tenant-bound attestations.
+Authorities must be configured by the operator; host grading remains untrusted
+and high-stakes evidence still requires human review. [Curriculum opinions](docs/curriculum-review.md)
+record semantic findings without certifying the graph. The [event protocol](docs/learning-events.md)
+separates response timing from reported feedback and instruction. A reproducible
+[policy evaluation tool](docs/learning-policy-evaluation.md) prepares allocation
+and reports delayed outcomes, missing data and prediction calibration; empirical
+validation still requires independently assessed learner data.
 
 ## Acknowledgments
 

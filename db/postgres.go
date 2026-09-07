@@ -1669,6 +1669,9 @@ END $$;`,
 		Version: "postgres_0057_assessment_reviews",
 		Body:    postgresAssessmentReviewMigration,
 	},
+	{Version: "postgres_0058_assessment_adjudications", Body: postgresAdjudicationMigration},
+	{Version: "postgres_0059_learning_events", Body: postgresLearningEventMigration},
+	{Version: "postgres_0060_curriculum_review_opinions", Body: postgresCurriculumReviewMigration},
 }
 
 // OpenPostgres opens a PostgreSQL-backed *sql.DB via the pgx database/sql

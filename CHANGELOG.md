@@ -17,6 +17,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Pedagogical runtime corrections
 
+- Add Ed25519 assessment certification from operator-configured, tenant-bound
+  external authorities. Append immutable accept/reject adjudications with
+  revision checks, audit and signed provenance; derive effective evidence before
+  query limits without rewriting host grades or replaying learner models.
+  High-stakes evidence still requires human review; no authority is enabled by default.
+- Version new decision contracts as `2026-09-events-v5`: persist committed
+  responses atomically, record delivered feedback/instruction separately with
+  `record_learning_event`, freeze prior exposure and date FSRS at submission.
+  Preserve legacy contracts and guard against out-of-order FSRS updates.
+- Add scoped curriculum-review material and immutable semantic opinions with
+  explicit coverage, hash preconditions, idempotence and no automatic certification.
+- Add SQLite migrations 0067–0069 / PostgreSQL 0058–0060, forced tenant RLS,
+  DSAR export/erasure and review-text retention, including worker grants.
+- Add offline preregistered policy assignment and outcome analysis: fixed delayed
+  endpoints, missing-data bounds, coverage and Brier scores. No empirical result
+  or automatic policy calibration is claimed.
+
 - Share decision-bound rubric/scoring validation between MCP and persistence.
   Reject duplicate JSON keys, coercions, unsupported fields and contradictory
   aggregates; recompute outcomes under the assessment/curriculum transaction.

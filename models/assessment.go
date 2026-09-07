@@ -84,6 +84,8 @@ type AssessmentAttempt struct {
 	EvaluationMethod             EvaluationMethod
 	EvaluationProvenanceJSON     string
 	TrustedEvaluation            bool
+	EventProtocol                string
+	PriorExposureAt              *time.Time
 	CreatedAt                    time.Time
 	SubmittedAt                  *time.Time
 	EvaluatedAt                  *time.Time

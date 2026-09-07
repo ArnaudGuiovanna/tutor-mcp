@@ -4,10 +4,12 @@
 package engine
 
 import (
+	"encoding/json"
 	"sort"
 	"time"
 
 	"tutor-mcp/algorithms"
+	"tutor-mcp/assessment"
 	"tutor-mcp/models"
 )
 
@@ -160,8 +162,12 @@ func assessmentResponseTimeline(learnerID, concept string, interactions []*model
 		if attempt := attempts[interaction.AssessmentAttemptID]; assessmentMatchesEvaluatedInteraction(attempt, interaction, learnerID, concept) {
 			observation := *interaction
 			observation.CreatedAt = *attempt.SubmittedAt
+			observation.Success = attempt.Passed
+			if attempt.EventProtocol == models.LearningEventProtocol && attempt.PriorExposureAt != nil && !attempt.PriorExposureAt.Before(*attempt.SubmittedAt) {
+				observation.Success = false
+			}
 			timeline = append(timeline, &observation)
-			if interaction.CreatedAt.After(observation.CreatedAt) {
+			if attempt.EventProtocol == "" && interaction.CreatedAt.After(observation.CreatedAt) {
 				// Keep the later grading/feedback event as an exposure for
 				// subsequent tasks, but never as another successful retrieval.
 				feedback := *interaction
@@ -172,6 +178,18 @@ func assessmentResponseTimeline(learnerID, concept string, interactions []*model
 		} else {
 			timeline = append(timeline, interaction)
 		}
+	}
+	seen := make(map[int64]bool, len(timeline))
+	for _, interaction := range timeline {
+		seen[interaction.CreatedAt.UnixNano()] = true
+	}
+	for _, attempt := range assessments {
+		if attempt.EventProtocol != models.LearningEventProtocol || attempt.PriorExposureAt == nil || seen[attempt.PriorExposureAt.UnixNano()] ||
+			(!now.IsZero() && attempt.PriorExposureAt.After(now)) {
+			continue
+		}
+		seen[attempt.PriorExposureAt.UnixNano()] = true
+		timeline = append(timeline, &models.Interaction{LearnerID: learnerID, Concept: concept, ActivityType: string(models.ActivityNewConcept), CreatedAt: *attempt.PriorExposureAt})
 	}
 	return timeline
 }
@@ -295,6 +313,22 @@ func trustedTransferRecords(concept string, transfers []*models.TransferRecord, 
 		// transfer score must not turn a trusted failed attempt into a pass.
 		// Clone so callers' audit records remain immutable.
 		verifiedRecord := *record
+		var provenance struct {
+			AdjudicationID string `json:"adjudication_id"`
+		}
+		if json.Unmarshal([]byte(attempt.EvaluationProvenanceJSON), &provenance) == nil && provenance.AdjudicationID != "" {
+			// The accepted independent grade supersedes the host's auxiliary
+			// transfer score in this read model, without rewriting that record.
+			if rubric, err := assessment.ParseRubric(attempt.RubricJSON); err == nil {
+				var maximum float64
+				for _, criterion := range rubric.Criteria {
+					maximum += criterion.MaxScore
+				}
+				if maximum > 0 {
+					verifiedRecord.Score = min(1, max(0, attempt.Score/maximum))
+				}
+			}
+		}
 		if !attempt.Passed {
 			verifiedRecord.Score = 0
 		}

@@ -193,21 +193,22 @@ func registerPrepareAssessmentAttempt(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 		r, _ := jsonResult(map[string]any{
-			"attempt_id":         attempt.ID,
-			"status":             attempt.Status,
-			"domain_id":          attempt.DomainID,
-			"concept":            attempt.ConceptID,
-			"session_id":         attempt.SessionID,
-			"activity_id":        attempt.ActivityID,
-			"activity_version":   attempt.ActivityVersion,
-			"decision_id":        attempt.DecisionID,
-			"binding_status":     bindingStatus,
-			"curriculum_version": attempt.CurriculumVersion,
-			"outcome_ids":        params.OutcomeIDs,
-			"task_content_hash":  attempt.TaskContentHash,
-			"rubric":             rubric,
-			"rubric_warnings":    warnings,
-			"passing_score":      attempt.PassingScore,
+			"attempt_id":              attempt.ID,
+			"status":                  attempt.Status,
+			"domain_id":               attempt.DomainID,
+			"concept":                 attempt.ConceptID,
+			"session_id":              attempt.SessionID,
+			"activity_id":             attempt.ActivityID,
+			"activity_version":        attempt.ActivityVersion,
+			"decision_id":             attempt.DecisionID,
+			"binding_status":          bindingStatus,
+			"learning_event_protocol": attempt.EventProtocol,
+			"curriculum_version":      attempt.CurriculumVersion,
+			"outcome_ids":             params.OutcomeIDs,
+			"task_content_hash":       attempt.TaskContentHash,
+			"rubric":                  rubric,
+			"rubric_warnings":         warnings,
+			"passing_score":           attempt.PassingScore,
 		})
 		return r, nil, nil
 	})

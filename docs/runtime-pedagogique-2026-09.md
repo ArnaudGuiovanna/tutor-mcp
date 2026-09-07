@@ -1,7 +1,7 @@
 # Runtime pédagogique : corrections et trajectoire
 
 État des lots de correction, séparation BKT, réconciliation du curriculum et
-validation partagée de la notation et accès administratif à la revue,
+validation partagée de la notation, certification et journaux de revue,
 septembre 2026. Ce document distingue les corrections
 implémentées d'une validation pédagogique, qui nécessite encore des données
 d'apprentissage. Il prévaut sur les anciennes descriptions PFA/IRT/fade des
@@ -43,7 +43,7 @@ qualité de la tâche ni la fidélité de sa présentation à l'apprenant.
 ## BKT : observation et opportunité d'apprentissage
 
 La séparation introduite par `2026-09-observation-v2`, conservée dans la politique
-courante `2026-09-scoring-v4`, distingue deux opérations :
+courante `2026-09-events-v5`, distingue deux opérations :
 
 - `BKTObserve` : calcul de la probabilité de maîtrise conditionnée par la réponse,
   avec les probabilités de slip et guess ; aucun terme d'apprentissage ou d'oubli.
@@ -85,9 +85,11 @@ L'hôte doit enregistrer la mesure avant la correction pédagogique. Une activit
 d'enseignement ultérieure nécessite sa propre observation de l'apprenant :
 rejouer la même réponse pour déclencher une transition n'est pas un enseignement.
 Cette règle d'ordre est une consigne à l'hôte, pas une vérification de ce qui a
-réellement été montré dans le dialogue. FSRS continue à traiter les réponses
-comme des expositions ; distinguer finement réponse, feedback et enseignement
-reste un chantier séparé. Les coefficients individualisés restent heuristiques.
+réellement été montré dans le dialogue. Le [protocole d'événements](learning-events.md)
+sépare désormais réponse soumise, feedback et enseignement déclarés. Les nouvelles
+tentatives liées datent FSRS à la soumission et figent la dernière exposition ;
+les événements sans réponse notée ne créent aucun gain BKT/FSRS. Les contrats
+anciens conservent leur comportement. Les coefficients restent heuristiques.
 
 ## Réconciliation lors d'une révision du curriculum
 
@@ -236,13 +238,20 @@ vérifiés par organisation/cohorte et les réponses de l'acteur lui-même sont 
 Ce canal persiste désormais un premier avis par compte/tentative, lié par empreinte
 aux artefacts lus, avec idempotence et audit atomique. Les justifications suivent
 la rétention et le DSAR de l'apprenant évalué. Il authentifie un compte, **pas**
-une exécution humaine ni la correction de l'avis, et ne fournit **pas encore**
-de mécanisme d'adjudication ou d'évaluation fiable. Le canal
+une exécution humaine ni la correction de l'avis. Une [certification indépendante](assessment-certification.md)
+peut maintenant accepter ou retirer cet avis au moyen d’une attestation signée
+par une autorité externe configurée. L’adjudication est journalisée et modifie
+la lecture des preuves sans réécrire les notes ni rejouer BKT/FSRS. Le canal
 public reste `host_llm` non fiable ; il ne peut pas se promouvoir en revue humaine
 ou externe en ajoutant un champ au score. Une observation textuelle non vide ne
 prouve pas davantage sa fidélité à la réponse de l'apprenant.
 
 ## Données et migrations
+
+- Certification, événements et avis sémantiques : SQLite `0067`–`0069`,
+  PostgreSQL `0058`–`0060`. Journaux sous RLS forcée, inclus dans le DSAR et la
+  reprise des anciens checkpoints ; justifications des avis soumises à rétention.
+  Aucune migration appliquée à une base applicative pendant ce travail.
 
 - Journal d'avis : SQLite `0066_assessment_reviews`, PostgreSQL
   `postgres_0057_assessment_reviews`. RLS tenant et immutabilité hors purge du
@@ -315,29 +324,27 @@ les attentes fonctionnelles pour les contourner.
 
 Ce lot ne rend pas le système « optimal » ni validé expérimentalement.
 
-1. **Évaluation fiable opérationnelle.** Le canal public reste `host_llm`, non
-   fiable pour une revendication de démonstration. Le contrat commun de notation
-   et le journal authentifié/audité sont implémentés ; il faut encore une vraie
-   frontière de certification indépendante et une adjudication. Une seconde requête
-   au même modèle n'est pas automatiquement une évaluation indépendante. En
-   contexte à enjeux élevés, la règle de revue humaine reste inchangée.
-2. **Qualité et historique du curriculum.** La réconciliation prospective et la
-   réparation explicite des arêtes sont implémentées. Restent la revue de leur
-   pertinence sémantique, le traitement des changements antérieurs à la politique
-   et la mesure du coût des invalidations conservatrices. Une formulation changée
-   n'est pas nécessairement une compétence différente, et l'inverse reste possible.
-3. **Affiner les événements d'apprentissage.** La séparation BKT est implémentée
-   au niveau des types d'activité. Il reste à distinguer les événements de réponse,
-   feedback et enseignement réellement présentés, à revoir leur effet sur FSRS et
-   à calibrer les paramètres individualisés sur des données.
-4. **Évaluer les politiques.** Construire des familles de tâches générées et des
-   évaluations indépendantes de rappel/transfert. Mesurer les résultats sans aide,
-   à délai fixé, et comparer à une politique simple. Les tests logiciels ne
-   mesurent ni l'apprentissage ni la validité psychométrique.
-5. **Configuration et calibration.** Revoir seuils de délai, budget de session,
-   cibles de difficulté et dimensions de transfert à partir d'observations ; ne
-   pas remplacer des constantes arbitraires par un modèle plus opaque. Le
-   calendrier reste en jours malgré les équations FSRS court terme.
+1. **Activer une évaluation indépendante.** Le vérificateur signé et l’adjudication
+   sont implémentés. Il reste à sélectionner et exploiter une autorité externe,
+   protéger ses clés et examiner sa qualité. La configuration vide refuse toute
+   certification. La revue humaine vérifiable pour les enjeux élevés reste à fournir.
+2. **Revoir réellement le curriculum.** Le [journal d’avis sémantiques](curriculum-review.md)
+   couvre définitions, outcomes, critères et prérequis, avec couverture explicite.
+   Il faut encore mener les revues, traiter les désaccords et mesurer le coût
+   des invalidations conservatrices. Un avis complet ne certifie pas le graphe.
+3. **Observer les événements.** Les réponses sont enregistrées atomiquement ;
+   feedback et enseignement sont déclarés par l’hôte après présentation.
+   La réalité du dialogue reste non vérifiée. Leurs effets sur les modèles
+   demandent encore une calibration empirique, sans reconstruction du passé.
+4. **Exécuter les mesures.** Le [protocole et l’outil d’évaluation](learning-policy-evaluation.md)
+   figent les groupes, comparent des résultats différés admissibles et publient
+   couverture, données manquantes et erreur de prédiction. Les familles de tâches,
+   l’application effective des politiques et les données indépendantes restent à
+   produire ; les tests logiciels ne mesurent pas l’apprentissage.
+5. **Calibrer à partir des observations.** Seuils de délai, budget de session,
+   cibles de difficulté et dimensions de transfert restent à confronter aux
+   résultats. Aucun ajustement automatique n’a été ajouté. Le calendrier reste
+   en jours malgré les équations FSRS court terme.
 
 Référence des équations implémentées :
 [FSRS-5, spécification officielle](https://github.com/open-spaced-repetition/awesome-fsrs/wiki/The-Algorithm#fsrs-5),

@@ -66,6 +66,7 @@ TOOLS (reference)
 - record_interaction(): record an exercise outcome; updates BKT/FSRS, atomically records required transfer evidence for TRANSFER_PROBE, and stores optional interpretation_brief for audit
 - prepare_assessment_attempt(): freeze the activity/rubric/evaluator provenance before showing a graded task
 - submit_assessment_attempt(): store the learner response before evaluation
+- record_learning_event(): after delivering feedback or instruction, record the exposure once with a stable event_key; never use this tool to submit or score a response
 - cancel_assessment_attempt(): explicitly cancel an uncompleted prepared/submitted attempt
 - record_affect(): emotional check-in at session start/end
 - record_session_close(): close the session; returns recap_brief and, when memory is enabled, summary_request
@@ -138,6 +139,7 @@ B. EXERCISE LOOP (per exercise)
    - Call record_interaction() with the active session_id, hints_requested and self_initiated, plus the submitted attempt_id whenever one was prepared. A call without attempt_id is routing-only and cannot establish retained/demonstrated/transferred evidence. For TRANSFER_PROBE, transfer_dimension and transfer_score are mandatory and are stored atomically with the interaction under that same session_id; do not also call record_transfer_result for the same attempt.
    - When you grade a prepared attempt, pass only rubric_score_json to record_interaction: a compact JSON object with per-criterion score/evidence and a short summary aligned with the frozen rubric and the learner's actual answer. Never resend or rewrite rubric_json after the response.
    - If record_interaction returns bkt_individualized_params, treat them as audit/model signals for the next task design; do not explain parameter values to the learner.
+   - After feedback or instruction has actually been delivered, call record_learning_event(domain_id, concept, kind, event_key, attempt_id when applicable). Reuse that event_key for retries. Do not report planned explanations as delivered, and do not replay the learner's answer as a second learning opportunity. The response-feedback-v1 contract dates FSRS observations at submission; grading alone is not delivered feedback.
    - Never generate the next exercise before recording the previous one.
 
 C. SESSION END

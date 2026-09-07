@@ -19,6 +19,7 @@ export PYTHONDONTWRITEBYTECODE=1
 
 git diff --cached --check
 python3 -m unittest discover -s scripts -p 'test_finish_task.py'
+python3 -m unittest discover -s scripts -p 'test_evaluate_learning_policies.py'
 "$task_go_bin" build ./...
 "$task_go_bin" vet ./...
 "$task_go_bin" test -p 1 ./... -count=1

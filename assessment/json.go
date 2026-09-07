@@ -17,6 +17,17 @@ import (
 // MaxJSONBytes bounds each rubric or scoring document, including nested data.
 const MaxJSONBytes = 16_384
 
+// DecodeDocument rejects ambiguous, oversized and extended JSON documents.
+// Callers must not expose the parser error: it can contain supplied text.
+func DecodeDocument(raw string, target any) error {
+	if _, err := parseRubricSchemaJSON("document", raw); err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(target)
+}
+
 // Unlike encoding/json's ordinary object decoding, this reader rejects
 // duplicate keys (including escaped equivalents) instead of keeping the last.
 // A signed or independently reviewed payload must have only one interpretation.

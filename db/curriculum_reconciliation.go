@@ -87,7 +87,7 @@ func (s *Store) reconcileCurriculumLearning(ctx context.Context, learnerID strin
 			}
 		}
 		for _, target := range []struct{ table, concept string }{
-			{"interactions", "concept"}, {"assessment_attempts", "concept_id"}, {"transfer_records", "concept_id"},
+			{"interactions", "concept"}, {"assessment_attempts", "concept_id"}, {"transfer_records", "concept_id"}, {"learning_events", "concept_id"},
 		} {
 			// Identifiers are a closed internal list, never generated/user input.
 			if _, err := s.exec(ctx, `UPDATE `+target.table+` SET curriculum_invalidated_version = ?
