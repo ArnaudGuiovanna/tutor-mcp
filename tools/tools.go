@@ -7,6 +7,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -400,6 +401,8 @@ func RegisterTools(server *mcp.Server, deps *Deps) {
 	)
 }
 
+var errToolApplicationFailure = errors.New("MCP tool returned an application error")
+
 func toolTenantTransactionMiddleware(deps *Deps) mcp.Middleware {
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
@@ -421,11 +424,20 @@ func toolTenantTransactionMiddleware(deps *Deps) mcp.Middleware {
 			var callErr error
 			err := deps.Store.WithTenantTx(ctx, principal.TenantScope(), func(txCtx context.Context, _ storeport.Store) error {
 				result, callErr = next(txCtx, method, req)
+				// MCP application errors normally carry a nil Go error. Nested
+				// store operations share this transaction, so only this boundary
+				// can roll back their partial writes and idempotency reservation.
+				if toolResult, ok := result.(*mcp.CallToolResult); callErr == nil && ok && toolResult != nil && toolResult.IsError {
+					return errToolApplicationFailure
+				}
 				return callErr
 			})
 			if err != nil {
 				if callErr != nil {
 					return nil, callErr
+				}
+				if errors.Is(err, errToolApplicationFailure) {
+					return result, nil
 				}
 				if deps.Logger != nil {
 					deps.Logger.Error("tenant tool transaction failed", "err", err, "tool", toolNameFromRequest(req))

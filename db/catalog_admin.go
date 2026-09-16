@@ -50,8 +50,12 @@ func catalogRequestHash(request any) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-func runCatalogMutation[T any](ctx context.Context, s *Store, actor models.Principal, key, operation string, request any, mutate func(context.Context, *Store) (T, error)) (T, bool, error) {
+func runCatalogMutation[T any](ctx context.Context, s *Store, actor models.Principal, key, operation string, permission models.Permission, request any, mutate func(context.Context, *Store) (T, error)) (T, bool, error) {
 	var zero T
+	if !actor.Authorize(permission, models.AuthorizationResource{TenantID: actor.TenantID}) ||
+		!models.OAuthScopeAllows(strings.Join(actor.Scopes, " "), models.OAuthScopeLearnerWrite) {
+		return zero, false, storeport.ErrInvalidPrincipal
+	}
 	key = strings.TrimSpace(key)
 	if key == "" || len(key) > 128 || operation == "" {
 		return zero, false, fmt.Errorf("catalog mutation: idempotency key is required and bounded")
@@ -61,17 +65,23 @@ func runCatalogMutation[T any](ctx context.Context, s *Store, actor models.Princ
 		return zero, false, err
 	}
 	load := func(txCtx context.Context, txs *Store) (T, bool, error) {
-		var responseJSON, currentOperation, currentHash string
-		err := txs.queryRow(txCtx, `SELECT operation, request_hash, response_json
+		// A replay is still an administrative request. Recheck current
+		// membership, roles, MFA and token version before reading any cached
+		// response, including the recovery read after a concurrent insert.
+		if err := txs.ValidatePrincipal(txCtx, actor); err != nil {
+			return zero, false, err
+		}
+		var responseJSON, currentOperation, currentHash, currentActor string
+		err := txs.queryRow(txCtx, `SELECT operation, request_hash, response_json, actor_user_id
 			FROM catalog_admin_mutations WHERE tenant_id = ? AND idempotency_key = ?`,
-			actor.TenantID, key).Scan(&currentOperation, &currentHash, &responseJSON)
+			actor.TenantID, key).Scan(&currentOperation, &currentHash, &responseJSON, &currentActor)
 		if errors.Is(err, sql.ErrNoRows) {
 			return zero, false, nil
 		}
 		if err != nil {
 			return zero, false, err
 		}
-		if currentOperation != operation || currentHash != requestHash {
+		if currentOperation != operation || currentHash != requestHash || currentActor != actor.UserID {
 			return zero, false, fmt.Errorf("catalog mutation: idempotency key conflict")
 		}
 		var response T
@@ -136,7 +146,7 @@ type formationDraftMutationResponse struct {
 func (s *Store) CreateFormationDraftIdempotent(ctx context.Context, actor models.Principal, idempotencyKey, name, description string) (*models.Formation, *models.FormationVersion, bool, error) {
 	request := struct{ Name, Description string }{name, description}
 	response, replayed, err := runCatalogMutation(ctx, s, actor, idempotencyKey,
-		"formation.create", request, func(txCtx context.Context, txs *Store) (formationDraftMutationResponse, error) {
+		"formation.create", models.PermissionFormationWrite, request, func(txCtx context.Context, txs *Store) (formationDraftMutationResponse, error) {
 			formation, version, err := txs.CreateFormationDraft(txCtx, actor, name, description)
 			if err != nil {
 				return formationDraftMutationResponse{}, err
@@ -155,7 +165,7 @@ func (s *Store) AddFormationModuleIdempotent(ctx context.Context, actor models.P
 		Input     models.FormationModuleInput
 	}{versionID, input}
 	response, replayed, err := runCatalogMutation(ctx, s, actor, idempotencyKey,
-		"formation.module.add", request, func(txCtx context.Context, txs *Store) (string, error) {
+		"formation.module.add", models.PermissionFormationWrite, request, func(txCtx context.Context, txs *Store) (string, error) {
 			return txs.AddFormationModule(txCtx, actor, versionID, input)
 		})
 	return response, replayed, err
@@ -167,7 +177,7 @@ func (s *Store) AddFormationConceptIdempotent(ctx context.Context, actor models.
 		Input     models.FormationConceptInput
 	}{versionID, input}
 	response, replayed, err := runCatalogMutation(ctx, s, actor, idempotencyKey,
-		"formation.concept.add", request, func(txCtx context.Context, txs *Store) (string, error) {
+		"formation.concept.add", models.PermissionFormationWrite, request, func(txCtx context.Context, txs *Store) (string, error) {
 			return txs.AddFormationConcept(txCtx, actor, versionID, input)
 		})
 	return response, replayed, err
@@ -175,7 +185,7 @@ func (s *Store) AddFormationConceptIdempotent(ctx context.Context, actor models.
 
 func (s *Store) PublishFormationVersionIdempotent(ctx context.Context, actor models.Principal, idempotencyKey, versionID string) (*models.FormationVersion, bool, error) {
 	response, replayed, err := runCatalogMutation(ctx, s, actor, idempotencyKey,
-		"formation.publish", struct{ VersionID string }{versionID},
+		"formation.publish", models.PermissionFormationWrite, struct{ VersionID string }{versionID},
 		func(txCtx context.Context, txs *Store) (models.FormationVersion, error) {
 			version, err := txs.PublishFormationVersion(txCtx, actor, versionID)
 			if err != nil {
@@ -198,7 +208,7 @@ func (s *Store) CreateCohortIdempotent(ctx context.Context, actor models.Princip
 		EndsAt    *time.Time
 	}{versionID, name, capacity, startsAt, endsAt}
 	response, replayed, err := runCatalogMutation(ctx, s, actor, idempotencyKey,
-		"cohort.create", request, func(txCtx context.Context, txs *Store) (models.Cohort, error) {
+		"cohort.create", models.PermissionCohortManage, request, func(txCtx context.Context, txs *Store) (models.Cohort, error) {
 			cohort, err := txs.CreateCohort(txCtx, actor, versionID, name, capacity, startsAt, endsAt)
 			if err != nil {
 				return models.Cohort{}, err
@@ -214,7 +224,7 @@ func (s *Store) CreateCohortIdempotent(ctx context.Context, actor models.Princip
 func (s *Store) EnrollMembershipIdempotent(ctx context.Context, actor models.Principal, idempotencyKey, cohortID, membershipID, objectivesJSON string) (*models.Enrollment, bool, error) {
 	request := struct{ CohortID, MembershipID, ObjectivesJSON string }{cohortID, membershipID, objectivesJSON}
 	response, replayed, err := runCatalogMutation(ctx, s, actor, idempotencyKey,
-		"enrollment.create", request, func(txCtx context.Context, txs *Store) (models.Enrollment, error) {
+		"enrollment.create", models.PermissionCohortManage, request, func(txCtx context.Context, txs *Store) (models.Enrollment, error) {
 			enrollment, err := txs.EnrollMembership(txCtx, actor, cohortID, membershipID, objectivesJSON)
 			if err != nil {
 				return models.Enrollment{}, err
