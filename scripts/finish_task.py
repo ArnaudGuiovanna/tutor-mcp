@@ -11,9 +11,12 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
+import time
+from urllib.parse import urlparse
 
 
 class FinishError(Exception):
@@ -26,6 +29,25 @@ def command(args, cwd, timeout=120):
     if result.returncode:
         raise FinishError(f"{args[0]} {args[1]} failed: {result.stderr.strip() or result.stdout.strip()}")
     return result.stdout.strip()
+
+
+def github_repository(origin):
+    """Recognize GitHub remotes; only local test remotes omit the CI gate."""
+    if origin.startswith("git@github.com:"):
+        repository = origin.removeprefix("git@github.com:")
+    else:
+        parsed = urlparse(origin)
+        if not parsed.scheme and ":" not in origin:
+            return None
+        if parsed.scheme == "file" and parsed.netloc in ("", "localhost"):
+            return None
+        if parsed.scheme not in ("https", "ssh") or parsed.hostname != "github.com":
+            raise FinishError("publication requires a GitHub origin or a local test remote")
+        repository = parsed.path.lstrip("/")
+    repository = repository.removesuffix(".git")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        raise FinishError("invalid GitHub origin repository")
+    return repository
 
 
 class Publisher:
@@ -144,6 +166,51 @@ class Publisher:
         if result.returncode:
             raise FinishError("task verification failed; nothing new was published")
 
+    def github_check_runs(self, repository, commit):
+        pages = json.loads(command([
+            "gh", "api", f"repos/{repository}/commits/{commit}/check-runs?per_page=100&filter=latest",
+            "--paginate", "--slurp",
+        ], self.root))
+        if not isinstance(pages, list) or any(not isinstance(page, dict) or not isinstance(page.get("check_runs"), list) for page in pages):
+            raise FinishError("invalid GitHub check-runs response")
+        return [check for page in pages for check in page["check_runs"]]
+
+    def wait_for_checks(self, commit):
+        repository = github_repository(self.remote())
+        if repository is None:
+            return None
+        policy = json.loads((self.root / ".github/required-checks.json").read_text())
+        if not isinstance(policy, dict):
+            raise FinishError("invalid required GitHub checks policy")
+        contexts, app_id = policy.get("contexts"), policy.get("app_id")
+        if (not isinstance(contexts, list) or not contexts
+                or any(not isinstance(name, str) or not name.strip() for name in contexts)
+                or len(set(contexts)) != len(contexts) or type(app_id) is not int or app_id <= 0):
+            raise FinishError("invalid required GitHub checks policy")
+        deadline = time.monotonic() + 3600
+        previous_pending = None
+        while True:
+            latest = {}
+            for check in self.github_check_runs(repository, commit):
+                name = check.get("name")
+                if (name in contexts and check.get("head_sha") == commit
+                        and check.get("app", {}).get("id") == app_id
+                        and check.get("id", 0) > latest.get(name, {}).get("id", 0)):
+                    latest[name] = check
+            failed = [f"{name} ({check.get('conclusion')})" for name, check in latest.items()
+                      if check.get("status") == "completed" and check.get("conclusion") != "success"]
+            if failed:
+                raise FinishError("GitHub checks failed; main was not advanced: " + ", ".join(failed))
+            pending = [name for name in contexts if name not in latest or latest[name].get("status") != "completed"]
+            if not pending:
+                return {"commit": commit, "conclusion": "success", "contexts": contexts, "app_id": app_id}
+            if time.monotonic() >= deadline:
+                raise FinishError("timed out waiting for GitHub checks; resume publish for the same commit: " + ", ".join(pending))
+            if pending != previous_pending:
+                print(f"Waiting for GitHub checks on {commit[:12]}: {', '.join(pending)}", file=sys.stderr, flush=True)
+                previous_pending = pending
+            time.sleep(15)
+
     def publish(self):
         if not self.intent.exists():
             return {"published": False, "reason": "no prepared task"}
@@ -193,7 +260,13 @@ class Publisher:
             raise FinishError("new staged work exists; refusing to resume publication")
         self.unchanged_worktree()
         self.git("push", "origin", f"{commit}:refs/heads/staging")
+        checks = self.wait_for_checks(commit)
         self.git("fetch", "origin")
+        self.no_operation()
+        self.unchanged_worktree()
+        if (self.git("rev-parse", "origin/staging") != commit or self.git("rev-parse", "staging") != commit
+                or self.git("diff", "--cached", "--name-only")):
+            raise FinishError("staging or the index changed while waiting for CI; inspect before promoting main")
         self.ancestor("origin/main", commit)
         self.ancestor("main", commit)
         self.git("switch", "main")
@@ -204,6 +277,8 @@ class Publisher:
             raise FinishError("remote heads changed; inspect before declaring publication complete")
         self.git("switch", "staging")
         report = {"published": True, "commit": commit, "branches": ["staging", "main"]}
+        if checks is not None:
+            report["github_checks"] = checks
         self.save(self.receipt, report)
         self.intent.unlink()
         return report

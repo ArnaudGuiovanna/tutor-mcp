@@ -27,7 +27,9 @@ message final, afin que celui-ci puisse rapporter le résultat réel.
 ## Préparer et publier
 
 Prérequis : Git, Bash, Python 3.9+ sur POSIX, Go compatible avec le projet,
-identité Git et accès au remote `origin`. Les permissions ordinaires restent
+identité Git, accès au remote `origin` et CLI GitHub `gh` authentifié avec accès
+en lecture aux contrôles du dépôt. Le scan Go utilise la base publique des
+vulnérabilités et peut télécharger son outil épinglé. Les permissions ordinaires restent
 applicables ; le script ne configure ni identifiants ni dérogation au sandbox.
 
 Avant une nouvelle tâche, avec un arbre suivi propre :
@@ -59,19 +61,44 @@ La publication :
 1. Vérifie l'absence d'opération Git inachevée et de modification suivie hors index.
 2. Recharge les branches distantes ; exige que leur histoire et celle de `main`
    soient déjà contenues dans le parent du lot. Une divergence exige une revue.
-3. Exécute `scripts/verify-task.sh` : tests hors ligne du publisher, build, vet et
-   suite Go complète. `TUTOR_GO_BIN` permet de choisir le binaire Go local.
+3. Exécute `scripts/verify-task.sh` : tests hors ligne du publisher, build, vet,
+   `govulncheck` et suite Go complète. `TUTOR_GO_BIN` permet de choisir le binaire
+   Go local ; utiliser la version corrigée de la CI pour reproduire ses résultats.
 4. Vérifie que le parent et l'arbre indexé n'ont pas changé durant les tests,
    puis crée le commit sur `staging` et le pousse.
-5. Fusionne ce commit dans `main` avec `--ff-only`, puis le pousse sans force.
-6. Vérifie les deux références distantes, conserve un reçu local et revient sur
+5. Attend les contrôles GitHub listés dans `.github/required-checks.json` sur
+   ce SHA précis, émis par l'application GitHub Actions indiquée dans ce fichier.
+   Un contrôle absent reste en attente ; un échec, une annulation ou un contrôle
+   ignoré bloque la promotion. L'attente est limitée à une heure.
+6. Recharge les références et vérifie que `staging` et l'index n'ont pas changé,
+   puis fusionne le commit dans `main` avec `--ff-only` et le pousse sans force.
+7. Vérifie les deux références distantes, conserve un reçu local avec les
+   contrôles observés et revient sur
    `staging`. Un nouvel appel sans intention est sans effet.
 
 Les fichiers non suivis hors lot, comme un fichier de passation personnel, ne
 sont pas ajoutés. Les modifications suivies sans rapport bloquent la procédure
 au lieu d'être cachées dans un stash. Les tests s'exécutent dans l'environnement
-de travail courant ; ils ne constituent pas une construction hermétique ni une
-preuve de succès de la CI GitHub, qui s'exécute séparément après les pushes.
+de travail courant ; ils ne constituent pas une construction hermétique. Le
+reçu distingue cette vérification locale des contrôles GitHub réellement
+observés sur le commit de `staging`. Le push sur `main` déclenche aussi ses
+propres workflows. Seuls les remotes locaux des tests hors ligne omettent
+l'attente GitHub ; les autres hébergeurs ne sont pas pris en charge.
+
+## Protection des branches
+
+`main` doit exiger les contrôles de `.github/required-checks.json`, liés à
+l'application GitHub Actions, y compris pour les administrateurs. Les mises
+à jour directes restent possibles après succès des contrôles sur `staging` :
+aucune PR supplémentaire n'est exigée pour le fast-forward du mainteneur.
+Les pushs forcés et suppressions doivent être interdits sur les deux branches.
+`staging` accepte le push initial qui déclenche la CI ; le publisher attend
+ensuite son résultat avant de promouvoir le commit. Toute modification de la
+liste des contrôles doit être reportée dans la protection GitHub de `main`.
+
+Le workflow `Security` exécute le même scan `govulncheck` pour les PR, les pushs,
+chaque semaine et sur déclenchement manuel, afin de détecter aussi les avis
+publiés après la dernière modification du code.
 
 ## Échecs, annulation et reprise
 
@@ -81,6 +108,10 @@ preuve de succès de la CI GitHub, qui s'exécute séparément après les pushes
 - Si le commit existe mais qu'un push échoue, l'intention conserve son SHA.
   Après examen de l'erreur, `publish` reprend ce commit : il ne crée pas un
   nouveau commit et ne réécrit pas les branches.
+- Un échec ou un délai d'attente CI conserve également cette intention et
+  laisse `main` inchangée. Après résolution ou relance du contrôle, reprendre
+  avec `publish`. Si une correction de code est nécessaire, examiner l'état
+  puis annuler l'intention avant de préparer explicitement le nouveau lot.
 - Il est possible que `staging` ait été publié et que `main` ne le soit pas
   encore. La procédure est ordonnée, pas une transaction distante entre les
   deux pushes. Elle ne tente pas de rollback destructeur.
@@ -105,3 +136,6 @@ python3 -B -m unittest discover -s scripts -p test_finish_task.py -v
 Tous les pushes de ces tests ciblent des dépôts bare temporaires locaux, pas
 GitHub. Ils couvrent les rejets, les notes préservées, la concurrence et la
 reprise après une interruption de commit ou de push.
+Ils vérifient aussi le refus de promouvoir un commit sans contrôles valides,
+la reprise du même commit après un échec CI et les changements concurrents
+pendant l'attente.

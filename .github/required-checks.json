@@ -1,0 +1,15 @@
+{
+  "app_id": 15368,
+  "contexts": [
+    "Format, modules, vet, staticcheck",
+    "Test (race detector)",
+    "Test (PostgreSQL 17)",
+    "Build (linux/amd64)",
+    "Build (linux/arm64)",
+    "Build (darwin/amd64)",
+    "Build (darwin/arm64)",
+    "Govulncheck",
+    "Secret scan (full history)",
+    "CodeQL"
+  ]
+}
