@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
-  <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-1.25.13+-00ADD8.svg?logo=go&logoColor=white" alt="Go 1.25.13+" /></a>
+  <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-1.26.8+-00ADD8.svg?logo=go&logoColor=white" alt="Go 1.26.8+" /></a>
   <a href="https://modelcontextprotocol.io/"><img src="https://img.shields.io/badge/MCP-server-7c3aed.svg" alt="MCP server" /></a>
   <a href="https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/v0.5.0"><img src="https://img.shields.io/badge/release-v0.5.0-orange.svg" alt="Release v0.5.0" /></a>
   <a href="https://github.com/ArnaudGuiovanna/tutor-mcp/issues"><img src="https://img.shields.io/badge/status-alpha-yellow.svg" alt="Status: alpha" /></a>
@@ -341,7 +341,7 @@ workload-dependent; validate it with the noisy-neighbour gate and the
 
 ## Tech stack
 
-Go 1.25.13+ · [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk) · [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) (pure-Go, no CGO, local default) · [jackc/pgx](https://github.com/jackc/pgx) (PostgreSQL SaaS, pure-Go) · OpenTelemetry · [robfig/cron](https://github.com/robfig/cron) · [golang-jwt/jwt](https://github.com/golang-jwt/jwt) · bcrypt.
+Go 1.26.8+ · [MCP Go SDK](https://github.com/modelcontextprotocol/go-sdk) · [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) (pure-Go, no CGO, local default) · [jackc/pgx](https://github.com/jackc/pgx) (PostgreSQL SaaS, pure-Go) · OpenTelemetry · [robfig/cron](https://github.com/robfig/cron) · [golang-jwt/jwt](https://github.com/golang-jwt/jwt) · bcrypt.
 
 ## Pedagogical reliability
 

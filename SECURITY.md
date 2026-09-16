@@ -2,11 +2,11 @@
 
 ## Supported versions
 
-Tutor MCP is in alpha. Only the most recent release tag (`v0.4.1`) and the `main` branch receive fixes. Older snapshots are not supported.
+Tutor MCP is in alpha. Only the [most recent release tag](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/latest) and the `main` branch receive fixes. Older snapshots are not supported.
 
 | Version | Supported |
 |---|---|
-| latest `v0.4.1` | ✅ |
+| latest release tag | ✅ |
 | older release tags | ❌ — please upgrade |
 | `main` (HEAD) | ✅ |
 
@@ -55,6 +55,26 @@ Out of scope:
 - Issues that require physical access to the host
 - Issues that require an attacker to already have valid learner credentials *and* shell access to the host
 - Vulnerabilities in upstream dependencies (please report those upstream first; we'll coordinate the bump once a fix lands there)
+
+## Automated checks
+
+The `Security` workflow runs `govulncheck`, CodeQL and a full-history secret scan
+on pull requests, pushes to `staging` and `main`, and a weekly schedule. Pull
+requests also receive dependency review, which rejects advisories of moderate
+severity or higher. The [publication workflow](docs/task-publication.md) scans
+locally and waits for the required GitHub checks before promoting a commit to
+the protected `main` branch.
+
+Run the same Go scan locally with `bash scripts/check-vulnerabilities.sh`.
+`TUTOR_GO_BIN` selects the Go executable; CI uses Go 1.26.8. The scanner reports
+reachable vulnerable symbols separately from advisories in unimported packages
+of required modules.
+
+The module-level advisory [GO-2026-5932](https://pkg.go.dev/vuln/GO-2026-5932)
+concerns the unmaintained `golang.org/x/crypto/openpgp` packages and has no fixed
+version. Tutor MCP uses `x/crypto/bcrypt`; its dependency graph does not import
+OpenPGP. Keep these OpenPGP packages out of the application. This advisory is
+left visible in scan results; it is not suppressed.
 
 ## Hardening checklist for operators
 
