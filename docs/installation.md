@@ -5,6 +5,10 @@ one person on their own machine, hobby for one VPS shared by a small group,
 or institution for the existing PostgreSQL deployment model. See
 [profile behavior and accounts](profiles.md).
 
+**Release availability:** v0.6.0 is currently a draft. Until it is published,
+use the [source quickstart](../README.md#quickstart); the release installer
+commands below require public v0.6.0 artifacts.
+
 ## Linux and macOS
 
 Download the shell installer from the release's source, inspect it, and run it:
