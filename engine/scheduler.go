@@ -1757,7 +1757,7 @@ func (s *Scheduler) sendOLMTarget(ctx context.Context, target models.WebhookDisp
 		}
 		var memCtx *memory.EpisodicContext
 		if memory.Enabled() && snap.FocusReason == "next frontier" {
-			if ctx, err := memory.LoadContextForDomain(learner.ID, d.ID, snap.FocusConcept, &memory.OLMView{FocusConcept: snap.FocusConcept}, nil); err == nil {
+			if ctx, err := memory.LoadContextForDomainContext(ctx, learner.ID, d.ID, snap.FocusConcept, &memory.OLMView{FocusConcept: snap.FocusConcept}, nil); err == nil {
 				memCtx = ctx
 			} else {
 				failed = true
@@ -1923,7 +1923,7 @@ func (s *Scheduler) runConsolidationCycleAt(now time.Time) scheduledJobResult {
 		return scheduledJobSucceeded()
 	}
 	return s.processConsolidationLearners(func(ctx context.Context, learnerID string) bool {
-		jobs, err := memory.PrepareJobs(learnerID, now)
+		jobs, err := memory.PrepareJobsContext(ctx, learnerID, now)
 		if err != nil {
 			s.logger.Warn("scheduler: consolidation prepare", "err", err, "learner", learnerID)
 			return true

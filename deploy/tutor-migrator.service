@@ -1,0 +1,18 @@
+[Unit]
+Description=TUTOR MCP institutional database migration
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=tutor-migrator
+Group=tutor-migrator
+EnvironmentFile=/etc/tutor-mcp/migrator.env
+Environment=PROCESS_ROLE=migrator
+ExecStart=/usr/local/bin/tutor-mcp --profile institution
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+TimeoutStartSec=10min

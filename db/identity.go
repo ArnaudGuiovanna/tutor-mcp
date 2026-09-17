@@ -24,7 +24,7 @@ func (s *Store) GetLocalUserByEmail(ctx context.Context, normalizedEmail string)
 	}
 	rows, err := s.query(ctx, `SELECT id, email, normalized_email, password_hash,
                status, email_verified_at, token_version, created_at, updated_at
-        FROM users WHERE normalized_email = ? ORDER BY id LIMIT 2`, normalizedEmail)
+        FROM users WHERE normalized_email = ? AND identity_mode = 'email' ORDER BY id LIMIT 2`, normalizedEmail)
 	if err != nil {
 		return nil, fmt.Errorf("get local user: %w", err)
 	}
@@ -32,6 +32,7 @@ func (s *Store) GetLocalUserByEmail(ctx context.Context, normalizedEmail string)
 	var matches []models.User
 	for rows.Next() {
 		var user models.User
+		user.IdentityMode = "email"
 		var verifiedAt sql.NullTime
 		if err := rows.Scan(&user.ID, &user.Email, &user.NormalizedEmail, &user.PasswordHash,
 			&user.Status, &verifiedAt, &user.TokenVersion, &user.CreatedAt, &user.UpdatedAt); err != nil {

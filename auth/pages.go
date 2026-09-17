@@ -35,6 +35,7 @@ func formActionOriginFromRedirectURI(redirectURI string) string {
 }
 
 type authPageData struct {
+	Hobby               bool
 	ClientID            string
 	ClientName          string
 	RedirectURI         string
@@ -249,6 +250,7 @@ var authTmpl = template.Must(template.New("auth").Parse(`<!DOCTYPE html>
     }
     label:first-of-type { margin-top: 0; }
 
+    input[type="text"],
     input[type="email"],
 	input[type="password"],
 	select {
@@ -384,8 +386,13 @@ var authTmpl = template.Must(template.New("auth").Parse(`<!DOCTYPE html>
           <input type="hidden" name="scope"                 value="{{.Data.Scope}}" />
 		  <input type="hidden" name="resource"              value="{{.Data.Resource}}" />
 
+          {{if .Data.Hobby}}
+          <label for="login-name">Identifier</label>
+          <input id="login-name" type="text" name="email" maxlength="64" required autocomplete="username" />
+          {{else}}
           <label for="login-email">Email</label>
           <input id="login-email" type="email" name="email" placeholder="you@example.com" required autocomplete="email" />
+          {{end}}
 
           <label for="login-password">Password</label>
           <input id="login-password" type="password" name="password" placeholder="••••••••" required autocomplete="current-password" />
@@ -410,10 +417,15 @@ var authTmpl = template.Must(template.New("auth").Parse(`<!DOCTYPE html>
 
           <button type="submit">Sign in →</button>
         </form>
+        {{if .Data.Hobby}}
+        <p class="toggle">For an invitation or password reset, contact the server operator.</p>
+        {{else}}
         <p class="toggle"><a href="/recover">Forgot your password?</a></p>
         <p class="toggle">No account? <a href="#" class="toggle-link">Create one</a></p>
+        {{end}}
       </div>
 
+      {{if not .Data.Hobby}}
       <!-- Register form -->
       <div id="register-view" class="hidden">
         <p class="subtitle">Enter your email. You will choose your password and approve the client from the verification link.</p>
@@ -442,6 +454,7 @@ var authTmpl = template.Must(template.New("auth").Parse(`<!DOCTYPE html>
         </form>
         <p class="toggle">Already have an account? <a href="#" class="toggle-link">Sign in</a></p>
       </div>
+      {{end}}
     </div>
 
     <p class="footnote">

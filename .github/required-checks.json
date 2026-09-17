@@ -10,6 +10,12 @@
     "Build (darwin/arm64)",
     "Govulncheck",
     "Secret scan (full history)",
-    "CodeQL"
+    "CodeQL",
+    "Build (windows/amd64)",
+    "Build (windows/arm64)",
+    "Local (ubuntu-latest)",
+    "Local (macos-latest)",
+    "Local (windows-latest)",
+    "Deployment (hobby)"
   ]
 }

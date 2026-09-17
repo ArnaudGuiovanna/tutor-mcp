@@ -23,11 +23,14 @@ import (
 
 // Deps holds shared dependencies for all MCP tool handlers.
 type Deps struct {
+	LocalStdio          bool
 	Store               storeport.Store
 	Logger              *slog.Logger
 	BaseURL             string
 	OAuthGranularScopes bool
 }
+
+var toolRegistrationLocalModes sync.Map
 
 var toolRegistrationOAuthModes sync.Map // map[*mcp.Server]bool; populated only during RegisterTools
 
@@ -188,6 +191,9 @@ func addTool[In, Out any](server *mcp.Server, tool *mcp.Tool, handler mcp.ToolHa
 		"type":   "oauth2",
 		"scopes": advertisedScopes,
 	}}
+	if local, _ := toolRegistrationLocalModes.Load(server); local == true {
+		tool.Meta["securitySchemes"] = []map[string]any{{"type": "noauth"}}
+	}
 	scopedHandler := func(ctx context.Context, req *mcp.CallToolRequest, input In) (*mcp.CallToolResult, Out, error) {
 		var zero Out
 		startedAt := time.Now()
@@ -338,6 +344,8 @@ func noActiveDomainResult() (*mcp.CallToolResult, any) {
 // RegisterTools registers all MCP tools and prompts on the given server.
 func RegisterTools(server *mcp.Server, deps *Deps) {
 	granularScopes := deps != nil && deps.OAuthGranularScopes
+	toolRegistrationLocalModes.Store(server, deps != nil && deps.LocalStdio)
+	defer toolRegistrationLocalModes.Delete(server)
 	toolRegistrationOAuthModes.Store(server, granularScopes)
 	defer toolRegistrationOAuthModes.Delete(server)
 	addIdempotencyMiddleware(server, deps)

@@ -13,6 +13,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -24,6 +25,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	_ "time/tzdata" // Portable binaries must resolve learner IANA zones without a Go installation.
 
 	"tutor-mcp/adminapi"
 	"tutor-mcp/auth"
@@ -50,13 +52,41 @@ func main() {
 		return
 	}
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+	options, err := parseCommand(os.Args[1:], os.Stderr)
+	if errors.Is(err, flag.ErrHelp) {
+		return
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level:       parseLogLevel(os.Getenv("LOG_LEVEL")),
 		ReplaceAttr: newPrivacySafeLogAttr(),
 	}))
 	// Packages using the package-level slog helpers must inherit the same
 	// privacy and level policy as explicitly injected components.
 	slog.SetDefault(logger)
+	if options.Local {
+		if err := runLocal(options, logger); err != nil && !errors.Is(err, context.Canceled) {
+			fmt.Fprintln(os.Stderr, "local startup/session:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if handled, err := configureProfileCommand(context.Background(), options, os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	} else if handled {
+		return
+	}
+	releaseServer, err := lockHobbyServer(options)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer releaseServer()
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -188,6 +218,17 @@ func main() {
 		logger.Error("unknown DB_DRIVER (want sqlite|postgres)", "driver", dbDriver)
 		os.Exit(1)
 	}
+	installationProfile := "legacy"
+	if cfg.DeploymentProfile == "production" {
+		installationProfile = "institution"
+	}
+	if options.Profile == "hobby" {
+		installationProfile = "hobby"
+	}
+	if err := store.EnsureInstallation(context.Background(), installationProfile); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	if cfg.ProcessRole == "migrator" {
 		logger.Info("database migrations complete", "driver", dbDriver)
 		return
@@ -254,25 +295,12 @@ func main() {
 		return
 	}
 
-	// Create MCP server
-	mcpServer := mcp.NewServer(&mcp.Implementation{
-		Name:    "tutor-mcp",
-		Version: mcpVersion(),
-	}, nil)
-
-	// Register tools
-	deps := &tools.Deps{
-		Store:               store,
-		Logger:              logger,
-		BaseURL:             baseURL,
+	// Both transports share tool registration and the same transaction,
+	// idempotency, scope and deadline boundaries.
+	mcpServer := newTutorServer(&tools.Deps{
+		Store: store, Logger: logger, BaseURL: baseURL,
 		OAuthGranularScopes: cfg.OAuthGranularScopes,
-	}
-	tools.RegisterTools(mcpServer, deps)
-	// Install the deadline after tool registration so it wraps the idempotency
-	// middleware too: reservation, handler execution and replay finalization all
-	// share the same bounded context. It applies only to tools/call, never to
-	// initialization, discovery, prompts, or long-lived transport responses.
-	mcpServer.AddReceivingMiddleware(mcpToolCallDeadlineMiddleware(cfg.MCPToolCallTimeout))
+	}, cfg.MCPToolCallTimeout)
 
 	// Create MCP handler — disable localhost protection (server is reached via a public reverse proxy)
 	// and allow Claude.ai cross-origin requests
@@ -311,6 +339,12 @@ func main() {
 
 	// OAuth server
 	oauthServer := auth.NewOAuthServer(store, baseURL, logger)
+	if options.Profile == "hobby" {
+		if err := oauthServer.EnableHobbyAccounts(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
 	oauthServer.SetGranularScopesEnabled(cfg.OAuthGranularScopes)
 	if err := oauthServer.ConfigureDynamicClientRegistration(cfg.OAuthDCRMode, cfg.OAuthDCRInitialTokenHash); err != nil {
 		logger.Error("configure dynamic client registration", "err", err)
@@ -331,7 +365,7 @@ func main() {
 		}
 		oauthServer.SetEmailSender(emailSender)
 		logger.Info("account email delivery enabled", "transport", "smtp_starttls")
-	} else {
+	} else if options.Profile != "hobby" {
 		logger.Warn("account email delivery disabled; public registration and password recovery cannot complete")
 	}
 
@@ -396,14 +430,21 @@ func main() {
 	mux.Handle("POST /authorize", auth.RateLimitMiddleware(loginLimiter, http.HandlerFunc(oauthServer.HandleAuthorizePost)))
 	mux.Handle("POST /token", auth.RateLimitMiddleware(tokenLimiter, http.HandlerFunc(oauthServer.HandleToken)))
 	mountDynamicClientRegistration(mux, cfg.OAuthDCRMode, oauthServer, registerLimiter)
-	mux.Handle("GET /verify-email", auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleVerifyEmailGet)))
-	mux.Handle("POST /verify-email", auth.RateLimitMiddleware(accountLimiter, http.HandlerFunc(oauthServer.HandleVerifyEmailPost)))
-	mux.Handle("GET /recover", auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleRecoverGet)))
-	mux.Handle("POST /recover", auth.RateLimitMiddleware(accountLimiter, http.HandlerFunc(oauthServer.HandleRecoverPost)))
-	mux.Handle("GET /reset-password", auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleResetPasswordGet)))
-	mux.Handle("POST /reset-password", auth.RateLimitMiddleware(accountLimiter, http.HandlerFunc(oauthServer.HandleResetPasswordPost)))
-	mux.Handle("GET /login-challenge", auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleLoginChallengeGet)))
-	mux.Handle("POST /login-challenge", auth.RateLimitMiddleware(accountLimiter, http.HandlerFunc(oauthServer.HandleLoginChallengePost)))
+	if options.Profile == "hobby" {
+		for _, path := range []string{"/account/invite", "/account/reset"} {
+			mux.Handle("GET "+path, auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleHobbyAccountGet)))
+			mux.Handle("POST "+path, auth.RateLimitMiddleware(accountLimiter, http.HandlerFunc(oauthServer.HandleHobbyAccountPost)))
+		}
+	} else {
+		mux.Handle("GET /verify-email", auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleVerifyEmailGet)))
+		mux.Handle("POST /verify-email", auth.RateLimitMiddleware(accountLimiter, http.HandlerFunc(oauthServer.HandleVerifyEmailPost)))
+		mux.Handle("GET /recover", auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleRecoverGet)))
+		mux.Handle("POST /recover", auth.RateLimitMiddleware(accountLimiter, http.HandlerFunc(oauthServer.HandleRecoverPost)))
+		mux.Handle("GET /reset-password", auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleResetPasswordGet)))
+		mux.Handle("POST /reset-password", auth.RateLimitMiddleware(accountLimiter, http.HandlerFunc(oauthServer.HandleResetPasswordPost)))
+		mux.Handle("GET /login-challenge", auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleLoginChallengeGet)))
+		mux.Handle("POST /login-challenge", auth.RateLimitMiddleware(accountLimiter, http.HandlerFunc(oauthServer.HandleLoginChallengePost)))
+	}
 
 	// MCP route: per-IP shield before auth, then per-learner limiting after auth.
 	// The body limit runs after both guards so rejected callers cannot make the
@@ -463,7 +504,7 @@ func main() {
 	)))))
 
 	server := &http.Server{
-		Addr:              ":" + port,
+		Addr:              httpListenAddress(options, port),
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,

@@ -34,12 +34,12 @@ var allowedMemoryOperations = []string{
 }
 
 var (
-	writeLearnerMemory        = memory.Write
+	writeLearnerMemory        = memory.WriteContext
 	ensureLearnerMemoryDirs   = memory.EnsureLearnerDirs
-	readLearnerMemory         = memory.Read
-	listLearnerMemorySessions = memory.ListSessions
-	listLearnerMemoryArchives = memory.ListArchives
-	listLearnerMemoryConcepts = memory.ListConcepts
+	readLearnerMemory         = memory.ReadContext
+	listLearnerMemorySessions = memory.ListSessionsContext
+	listLearnerMemoryArchives = memory.ListArchivesContext
+	listLearnerMemoryConcepts = memory.ListConceptsContext
 	pathForLearnerMemoryRead  = memory.PathForRead
 	statLearnerMemoryPath     = os.Lstat
 )
@@ -120,7 +120,7 @@ func registerUpdateLearnerMemory(server *mcp.Server, deps *Deps) {
 			writeReq.MutationID = idempotencyKeyFromContext(ctx)
 		}
 		var degradedComponents []string
-		if err := writeLearnerMemory(writeReq); err != nil {
+		if err := writeLearnerMemory(ctx, writeReq); err != nil {
 			if !memory.IsCommittedWriteError(err) {
 				if errors.Is(err, memory.ErrQuotaExceeded) {
 					r, _ := errorResult("memory quota exceeded")
@@ -197,7 +197,7 @@ func registerReadRawSession(server *mcp.Server, deps *Deps) {
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
 		}
-		raw, err := readLearnerMemory(learnerID, memory.ScopeSession, ts.Format(time.RFC3339))
+		raw, err := readLearnerMemory(ctx, learnerID, memory.ScopeSession, ts.Format(time.RFC3339))
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "memory session unavailable", err)
 			return r, nil, nil
@@ -235,22 +235,22 @@ func registerGetMemoryState(server *mcp.Server, deps *Deps) {
 			r, _ := safeErrorResult(deps.Logger, "memory state unavailable", err)
 			return r, nil, nil
 		}
-		sessions, err := listLearnerMemorySessions(learnerID)
+		sessions, err := listLearnerMemorySessions(ctx, learnerID)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "memory state unavailable", err)
 			return r, nil, nil
 		}
-		archives, err := listLearnerMemoryArchives(learnerID)
+		archives, err := listLearnerMemoryArchives(ctx, learnerID)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "memory state unavailable", err)
 			return r, nil, nil
 		}
-		concepts, err := listLearnerMemoryConcepts(learnerID)
+		concepts, err := listLearnerMemoryConcepts(ctx, learnerID)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "memory state unavailable", err)
 			return r, nil, nil
 		}
-		pending, err := readLearnerMemory(learnerID, memory.ScopeMemoryPending, "")
+		pending, err := readLearnerMemory(ctx, learnerID, memory.ScopeMemoryPending, "")
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "memory state unavailable", err)
 			return r, nil, nil
@@ -258,7 +258,7 @@ func registerGetMemoryState(server *mcp.Server, deps *Deps) {
 
 		var degradedComponents []string
 		var recentNarrativeSignal any
-		ec, contextErr := memory.LoadContext(learnerID, "", nil, nil)
+		ec, contextErr := memory.LoadContextForDomainContext(ctx, learnerID, "", "", nil, nil)
 		if contextErr != nil {
 			logMemoryStateDegradation(deps, "narrative_context", contextErr)
 			degradedComponents = append(degradedComponents, "narrative_context")
@@ -267,7 +267,7 @@ func registerGetMemoryState(server *mcp.Server, deps *Deps) {
 		}
 
 		var memorySizeValue any
-		memorySize, narrativeStats, sizeErr := learnerMemorySize(learnerID, concepts, archives, sessions)
+		memorySize, narrativeStats, sizeErr := learnerMemorySize(ctx, learnerID, concepts, archives, sessions)
 		if sizeErr != nil {
 			logMemoryStateDegradation(deps, "memory_statistics", sizeErr)
 			degradedComponents = append(degradedComponents, "memory_statistics")
@@ -282,7 +282,7 @@ func registerGetMemoryState(server *mcp.Server, deps *Deps) {
 		}
 
 		var consolidationLagValue any
-		consolidationLag, lagErr := consolidationLagDays(learnerID, sessions, archives)
+		consolidationLag, lagErr := consolidationLagDays(ctx, learnerID, sessions, archives)
 		if lagErr != nil {
 			logMemoryStateDegradation(deps, "consolidation_lag", lagErr)
 			degradedComponents = append(degradedComponents, "consolidation_lag")
@@ -548,9 +548,9 @@ func countPendingMemoryItems(content string) int {
 	return count
 }
 
-func learnerMemorySize(learnerID string, concepts, archives []string, sessions []time.Time) (int64, memory.NarrativeStats, error) {
+func learnerMemorySize(ctx context.Context, learnerID string, concepts, archives []string, sessions []time.Time) (int64, memory.NarrativeStats, error) {
 	if memory.UsingSharedNarrativeStore() {
-		stats, err := memory.NarrativeState(context.Background(), learnerID)
+		stats, err := memory.NarrativeState(ctx, learnerID)
 		return stats.TotalBytes, stats, err
 	}
 	var total int64
@@ -593,14 +593,14 @@ func learnerMemorySize(learnerID string, concepts, archives []string, sessions [
 	return total, memory.NarrativeStats{}, nil
 }
 
-func consolidationLagDays(learnerID string, sessions []time.Time, archives []string) (int, error) {
+func consolidationLagDays(ctx context.Context, learnerID string, sessions []time.Time, archives []string) (int, error) {
 	if len(sessions) == 0 {
 		return 0, nil
 	}
 	var newestArchive time.Time
 	for _, archive := range archives {
 		if memory.UsingSharedNarrativeStore() {
-			updatedAt, err := memory.NarrativeUpdatedAt(context.Background(), memory.NarrativeKey{
+			updatedAt, err := memory.NarrativeUpdatedAt(ctx, memory.NarrativeKey{
 				LearnerID: learnerID, Scope: memory.ScopeArchive, Key: archive,
 			})
 			if err != nil {

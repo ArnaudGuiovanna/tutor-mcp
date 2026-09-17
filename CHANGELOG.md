@@ -6,6 +6,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Local and VPS profiles
+
+- Add `--local` stdio with a persistent learner-only SQLite identity and encrypted,
+  versioned narrative memory. Share transactions, quotas and idempotency with
+  HTTP tools; coordinate concurrent clients and scheduled work with durable leases.
+- Add hobby username/password accounts, SSH invitations and recovery without
+  SMTP, and explicit institutional startup preserving existing production gates.
+- Fix #172: allow up to 32 CIMD redirects independently of DCR's five-redirect
+  limit, and negotiate plural authentication methods while retaining legacy
+  metadata support. Include the reported Hermes document in OAuth regression tests.
+- Fix #174: native Windows ownership/ACL protection, SQLite file URI handling,
+  Windows builds and native local-mode tests on Linux, macOS and Windows.
+- Add installers, six release archives with checksums, systemd/Caddy and non-root
+  Compose templates, and English setup/backup/restore documentation. Live Claude
+  and ChatGPT acceptance remains unverified.
+
 ### Development workflow
 
 - Add an explicitly armed Codex Stop hook and task publisher: verify, commit/push

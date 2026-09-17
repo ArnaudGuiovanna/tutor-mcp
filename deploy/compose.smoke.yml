@@ -1,0 +1,9 @@
+# Test override: only a random loopback HTTPS port, no public ACME requests.
+services:
+  caddy:
+    ports: !override
+      - "127.0.0.1::443"
+    volumes: !override
+      - ./Caddyfile.smoke:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config

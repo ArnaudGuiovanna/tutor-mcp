@@ -4,6 +4,7 @@
 package memory
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"os"
@@ -29,6 +30,10 @@ type ConsolidationJob struct {
 }
 
 func PrepareJobs(learnerID string, now time.Time) ([]ConsolidationJob, error) {
+	return PrepareJobsContext(context.Background(), learnerID, now)
+}
+
+func PrepareJobsContext(ctx context.Context, learnerID string, now time.Time) ([]ConsolidationJob, error) {
 	if !Enabled() {
 		return nil, nil
 	}
@@ -38,7 +43,7 @@ func PrepareJobs(learnerID string, now time.Time) ([]ConsolidationJob, error) {
 		start := time.Date(now.Year(), now.Month()-1, 1, 0, 0, 0, 0, time.UTC)
 		end := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 		key := start.Format("2006-01")
-		if !archiveExists(learnerID, key) {
+		if !archiveExists(ctx, learnerID, key) {
 			jobs = append(jobs, ConsolidationJob{LearnerID: learnerID, Period: PeriodMonthly, PeriodKey: key, StartDate: start, EndDate: end})
 		}
 	}
@@ -46,7 +51,7 @@ func PrepareJobs(learnerID string, now time.Time) ([]ConsolidationJob, error) {
 		start := previousQuarterStart(now)
 		end := start.AddDate(0, 3, 0)
 		key := fmt.Sprintf("%04d-Q%d", start.Year(), quarter(start.Month()))
-		if monthlyArchivesExist(learnerID, start) && !archiveExists(learnerID, key) {
+		if monthlyArchivesExist(ctx, learnerID, start) && !archiveExists(ctx, learnerID, key) {
 			jobs = append(jobs, ConsolidationJob{LearnerID: learnerID, Period: PeriodQuarterly, PeriodKey: key, StartDate: start, EndDate: end})
 		}
 	}
@@ -54,7 +59,7 @@ func PrepareJobs(learnerID string, now time.Time) ([]ConsolidationJob, error) {
 		start := time.Date(now.Year()-1, time.January, 1, 0, 0, 0, 0, time.UTC)
 		end := time.Date(now.Year(), time.January, 1, 0, 0, 0, 0, time.UTC)
 		key := strconv.Itoa(start.Year())
-		if quarterlyArchivesExist(learnerID, start.Year()) && !archiveExists(learnerID, key) {
+		if quarterlyArchivesExist(ctx, learnerID, start.Year()) && !archiveExists(ctx, learnerID, key) {
 			jobs = append(jobs, ConsolidationJob{LearnerID: learnerID, Period: PeriodAnnual, PeriodKey: key, StartDate: start, EndDate: end})
 		}
 	}
@@ -62,7 +67,11 @@ func PrepareJobs(learnerID string, now time.Time) ([]ConsolidationJob, error) {
 }
 
 func SessionsInRange(learnerID string, start, end time.Time) ([]SessionPayload, error) {
-	timestamps, err := ListSessions(learnerID)
+	return SessionsInRangeContext(context.Background(), learnerID, start, end)
+}
+
+func SessionsInRangeContext(ctx context.Context, learnerID string, start, end time.Time) ([]SessionPayload, error) {
+	timestamps, err := ListSessionsContext(ctx, learnerID)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +80,7 @@ func SessionsInRange(learnerID string, start, end time.Time) ([]SessionPayload, 
 		if ts.Before(start) || !ts.Before(end) {
 			continue
 		}
-		raw, err := Read(learnerID, ScopeSession, ts.Format(time.RFC3339))
+		raw, err := ReadContext(ctx, learnerID, ScopeSession, ts.Format(time.RFC3339))
 		if err != nil {
 			return nil, err
 		}
@@ -85,7 +94,11 @@ func SessionsInRange(learnerID string, start, end time.Time) ([]SessionPayload, 
 }
 
 func InterleavedReplaySessions(learnerID string, before time.Time, limit int) ([]SessionPayload, error) {
-	timestamps, err := ListSessions(learnerID)
+	return InterleavedReplaySessionsContext(context.Background(), learnerID, before, limit)
+}
+
+func InterleavedReplaySessionsContext(ctx context.Context, learnerID string, before time.Time, limit int) ([]SessionPayload, error) {
+	timestamps, err := ListSessionsContext(ctx, learnerID)
 	if err != nil {
 		return nil, err
 	}
@@ -111,7 +124,7 @@ func InterleavedReplaySessions(learnerID string, before time.Time, limit int) ([
 	}
 	out := make([]SessionPayload, 0, len(older))
 	for _, ts := range older {
-		raw, err := Read(learnerID, ScopeSession, ts.Format(time.RFC3339))
+		raw, err := ReadContext(ctx, learnerID, ScopeSession, ts.Format(time.RFC3339))
 		if err != nil {
 			return nil, err
 		}
@@ -157,23 +170,23 @@ func ConceptsFromSessions(sessions []SessionPayload) []string {
 	return out
 }
 
-func archiveExists(learnerID, key string) bool {
-	body, err := Read(learnerID, ScopeArchive, key)
+func archiveExists(ctx context.Context, learnerID, key string) bool {
+	body, err := ReadContext(ctx, learnerID, ScopeArchive, key)
 	return err == nil && strings.TrimSpace(body) != ""
 }
 
-func monthlyArchivesExist(learnerID string, start time.Time) bool {
+func monthlyArchivesExist(ctx context.Context, learnerID string, start time.Time) bool {
 	for i := 0; i < 3; i++ {
-		if !archiveExists(learnerID, start.AddDate(0, i, 0).Format("2006-01")) {
+		if !archiveExists(ctx, learnerID, start.AddDate(0, i, 0).Format("2006-01")) {
 			return false
 		}
 	}
 	return true
 }
 
-func quarterlyArchivesExist(learnerID string, year int) bool {
+func quarterlyArchivesExist(ctx context.Context, learnerID string, year int) bool {
 	for q := 1; q <= 4; q++ {
-		if !archiveExists(learnerID, fmt.Sprintf("%04d-Q%d", year, q)) {
+		if !archiveExists(ctx, learnerID, fmt.Sprintf("%04d-Q%d", year, q)) {
 			return false
 		}
 	}

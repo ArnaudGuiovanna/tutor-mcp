@@ -10,6 +10,7 @@ import (
 )
 
 type accountPageData struct {
+	HobbyPurpose       string
 	Title              string
 	Message            string
 	Token              string
@@ -49,6 +50,22 @@ var accountTmpl = template.Must(template.New("account").Parse(`<!doctype html>
 <body><main>
   <h1>{{.Title}}</h1>
   {{if .Message}}<p>{{.Message}}</p>{{end}}
+  {{if .HobbyPurpose}}
+  <form method="post" action="/account/{{.HobbyPurpose}}">
+    <input type="hidden" name="token" value="{{.Token}}">
+    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+    {{if eq .HobbyPurpose "invite"}}
+    <label for="login-name">Choose your identifier</label>
+    <input id="login-name" name="login_name" autocomplete="username" pattern="[a-zA-Z0-9][a-zA-Z0-9_.\-]{2,63}" minlength="3" maxlength="64" required>
+    <p>3–64 letters, digits, dots, underscores or hyphens. Case does not matter.</p>
+    {{end}}
+    <label for="hobby-password">Choose your password</label>
+    <input id="hobby-password" name="password" type="password" autocomplete="new-password" minlength="12" maxlength="72" required>
+    <label for="hobby-confirm">Confirm password</label>
+    <input id="hobby-confirm" name="password_confirm" type="password" autocomplete="new-password" minlength="12" maxlength="72" required>
+    <button type="submit">Save credentials</button>
+  </form>
+  {{end}}
   {{if .ShowVerify}}
   <form method="post" action="/verify-email">
     <input type="hidden" name="token" value="{{.Token}}">

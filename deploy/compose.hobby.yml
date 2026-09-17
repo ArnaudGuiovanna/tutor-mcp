@@ -1,0 +1,48 @@
+name: tutor-hobby
+services:
+  tutor:
+    image: tutor-mcp:${TUTOR_VERSION:-v0.6.0}
+    build:
+      context: ..
+      args:
+        VERSION: ${TUTOR_VERSION:-v0.6.0}
+    command: ["--profile", "hobby", "--data-dir", "/data/hobby"]
+    environment:
+      LISTEN_ADDR: 0.0.0.0:3000
+      TRUSTED_PROXY_CIDRS: 172.30.42.2/32
+    volumes:
+      - tutor_data:/data
+    networks:
+      backend:
+        ipv4_address: 172.30.42.3
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    stop_grace_period: 40s
+  caddy:
+    image: caddy:2
+    environment:
+      TUTOR_DOMAIN: ${TUTOR_DOMAIN:?Set TUTOR_DOMAIN to your public DNS name}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile.compose:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      backend:
+        ipv4_address: 172.30.42.2
+    restart: unless-stopped
+volumes:
+  tutor_data:
+  caddy_data:
+  caddy_config:
+networks:
+  backend:
+    ipam:
+      config:
+        - subnet: 172.30.42.0/24

@@ -1,0 +1,64 @@
+name: tutor-institution
+x-runtime: &runtime
+  image: tutor-mcp:${TUTOR_VERSION:-v0.6.0}
+  build:
+    context: ..
+    args:
+      VERSION: ${TUTOR_VERSION:-v0.6.0}
+  command: ["--profile", "institution"]
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  stop_grace_period: 40s
+services:
+  migrator:
+    <<: *runtime
+    profiles: [maintenance]
+    env_file: ./migrator.env
+    environment:
+      PROCESS_ROLE: migrator
+    volumes:
+      - ./secrets/postgres-ca.pem:/etc/tutor-mcp/secrets/postgres-ca.pem:ro
+  tutor:
+    <<: *runtime
+    env_file: ./api.env
+    environment:
+      PROCESS_ROLE: api
+      LISTEN_ADDR: 0.0.0.0:3000
+      TRUSTED_PROXY_CIDRS: 172.30.43.2/32
+    volumes:
+      - ./secrets/postgres-ca.pem:/etc/tutor-mcp/secrets/postgres-ca.pem:ro
+    networks:
+      backend:
+        ipv4_address: 172.30.43.3
+    restart: unless-stopped
+  worker:
+    <<: *runtime
+    env_file: ./worker.env
+    environment:
+      PROCESS_ROLE: worker
+    volumes:
+      - ./secrets/postgres-ca.pem:/etc/tutor-mcp/secrets/postgres-ca.pem:ro
+    restart: unless-stopped
+  caddy:
+    image: caddy:2
+    environment:
+      TUTOR_DOMAIN: ${TUTOR_DOMAIN:?Set TUTOR_DOMAIN to your public DNS name}
+    ports: ["80:80", "443:443", "443:443/udp"]
+    volumes:
+      - ./Caddyfile.compose:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      backend:
+        ipv4_address: 172.30.43.2
+    restart: unless-stopped
+volumes:
+  caddy_data:
+  caddy_config:
+networks:
+  backend:
+    ipam:
+      config:
+        - subnet: 172.30.43.0/24

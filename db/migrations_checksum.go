@@ -1896,6 +1896,7 @@ END;`,
 	out = append(out, migration{Version: "0067_assessment_adjudications", Body: sqliteAdjudicationMigration})
 	out = append(out, migration{Version: "0068_learning_events", Body: sqliteLearningEventMigration})
 	out = append(out, migration{Version: "0069_curriculum_review_opinions", Body: sqliteCurriculumReviewMigration})
+	out = append(out, migration{Version: "0070_installation_identities", Body: installationIdentityMigration})
 	return out
 }
 

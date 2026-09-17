@@ -26,7 +26,7 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO tutor_api;
 -- Workers use the same RLS policies and SET LOCAL wrapper as API requests.
 -- They receive no BYPASSRLS and enumerate only the global tenants root before
 -- opening one scoped transaction per tenant.
-GRANT SELECT ON tenants, plans, schema_migrations TO tutor_worker;
+GRANT SELECT ON tenants, plans, schema_migrations, installation TO tutor_worker;
 
 -- Read models used by the pedagogical scheduler. learners contains the
 -- encrypted webhook credential required at the final dispatch boundary; the

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -45,7 +46,13 @@ func sqliteFilesystemDSN(dbPath, mode string, immediate bool, pragmas ...string)
 	if err != nil {
 		return "", fmt.Errorf("resolve SQLite db path: %w", err)
 	}
-	dsnURL := &url.URL{Scheme: "file", Path: absPath}
+	uriPath := filepath.ToSlash(absPath)
+	if filepath.VolumeName(absPath) != "" && !strings.HasPrefix(uriPath, "/") {
+		// SQLite expects file:///C:/path on Windows, not escaped backslashes
+		// or a drive letter interpreted as a URI authority.
+		uriPath = "/" + uriPath
+	}
+	dsnURL := &url.URL{Scheme: "file", Path: uriPath}
 	params := url.Values{}
 	params.Set("mode", mode)
 	for _, pragma := range pragmas {

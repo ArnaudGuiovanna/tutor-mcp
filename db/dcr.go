@@ -315,14 +315,18 @@ func (s *Store) RegisterDynamicOAuthClient(ctx context.Context, registration mod
 
 		var clientID, secretHash, replayCiphertext string
 		var issuedAt, expiresAt flexTime
+		var permanent bool
 		err := txs.queryRow(ctx,
-			`SELECT client_id, client_secret_hash, registration_secret_ciphertext, created_at, expires_at
+			`SELECT client_id, client_secret_hash, registration_secret_ciphertext, created_at, expires_at, expires_at IS NULL
 			 FROM oauth_clients WHERE registration_fingerprint = ?`,
 			registration.Fingerprint,
-		).Scan(&clientID, &secretHash, &replayCiphertext, &issuedAt, &expiresAt)
+		).Scan(&clientID, &secretHash, &replayCiphertext, &issuedAt, &expiresAt, &permanent)
 		switch {
 		case err == nil:
-			if !expiresAt.Valid || !expiresAt.Time.After(registration.Now) {
+			// A successful authorization-code exchange activates the client by
+			// clearing its provisional expiry. It must remain replayable after
+			// restart; an invalid non-NULL timestamp still fails closed.
+			if !permanent && (!expiresAt.Valid || !expiresAt.Time.After(registration.Now)) {
 				return storeport.ErrDCRReplaySecretUnavailable
 			}
 			secret := ""

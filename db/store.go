@@ -512,7 +512,7 @@ func (s *Store) createLearnerWithID(ctx context.Context, id, email, passwordHash
 
 func (s *Store) GetLearnerByID(ctx context.Context, id string) (*models.Learner, error) {
 	row := s.queryRow(ctx,
-		`SELECT id, email, password_hash, objective, profile_json, created_at, last_active, email_verified_at
+		`SELECT id, email, password_hash, objective, profile_json, created_at, last_active, email_verified_at, identity_mode
 		 FROM learners WHERE id = ?`, id,
 	)
 	return s.scanLearner(row)
@@ -520,8 +520,8 @@ func (s *Store) GetLearnerByID(ctx context.Context, id string) (*models.Learner,
 
 func (s *Store) GetLearnerByEmail(ctx context.Context, email string) (*models.Learner, error) {
 	row := s.queryRow(ctx,
-		`SELECT id, email, password_hash, objective, profile_json, created_at, last_active, email_verified_at
-		 FROM learners WHERE email = ?`, email,
+		`SELECT id, email, password_hash, objective, profile_json, created_at, last_active, email_verified_at, identity_mode
+		 FROM learners WHERE email = ? AND identity_mode = 'email'`, email,
 	)
 	return s.scanLearner(row)
 }
@@ -532,10 +532,13 @@ func (s *Store) scanLearner(row *sql.Row) (*models.Learner, error) {
 	var emailVerifiedAt sql.NullTime
 	var profileJSON sql.NullString
 	err := row.Scan(
-		&l.ID, &l.Email, &l.PasswordHash, &l.Objective, &profileJSON, &l.CreatedAt, &lastActive, &emailVerifiedAt,
+		&l.ID, &l.Email, &l.PasswordHash, &l.Objective, &profileJSON, &l.CreatedAt, &lastActive, &emailVerifiedAt, &l.IdentityMode,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("scan learner: %w", err)
+	}
+	if l.IdentityMode != "email" {
+		l.Email = ""
 	}
 	if lastActive.Valid {
 		l.LastActive = lastActive.Time
@@ -583,7 +586,7 @@ func (s *Store) ListWebhookDispatchTargetsPage(ctx context.Context, afterLearner
 		        a.updated_at
 		 FROM learners l
 		 LEFT JOIN availability a ON a.learner_id = l.id
-		 WHERE l.webhook_url <> '' AND l.email_verified_at IS NOT NULL AND l.id > ?
+		 WHERE l.webhook_url <> '' AND ((l.identity_mode = 'email' AND l.email_verified_at IS NOT NULL) OR l.identity_mode = 'username') AND l.id > ?
 		 ORDER BY l.id
 		 LIMIT ?`, afterLearnerID, limit,
 	)
@@ -628,7 +631,7 @@ func (s *Store) GetWebhookDispatchURL(ctx context.Context, learnerID string) (st
 	var stored string
 	err := s.queryRow(ctx,
 		`SELECT webhook_url FROM learners
-		 WHERE id = ? AND email_verified_at IS NOT NULL AND webhook_url <> ''`,
+		 WHERE id = ? AND ((identity_mode = 'email' AND email_verified_at IS NOT NULL) OR identity_mode = 'username') AND webhook_url <> ''`,
 		learnerID,
 	).Scan(&stored)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -2359,7 +2362,7 @@ func (s *Store) GetAuthCode(ctx context.Context, code, clientID string) (*models
 		        AND tm.user_id = l.user_id AND tm.status = 'active'
 		       WHERE l.tenant_id = oauth_codes.tenant_id
 		         AND l.id = oauth_codes.learner_id
-		         AND l.email_verified_at IS NOT NULL
+		         AND ((l.identity_mode = 'email' AND l.email_verified_at IS NOT NULL) OR l.identity_mode = 'username')
 		   )`,
 		code, scope.TenantID, scope.UserID, scope.MembershipID, scope.LearnerID,
 		clientID, time.Now().UTC(),
@@ -2405,7 +2408,7 @@ func (s *Store) ConsumeAuthCode(ctx context.Context, code, clientID string) (*mo
 		        AND tm.user_id = l.user_id AND tm.status = 'active'
 		       WHERE l.tenant_id = oauth_codes.tenant_id
 		         AND l.id = oauth_codes.learner_id
-		         AND l.email_verified_at IS NOT NULL
+		         AND ((l.identity_mode = 'email' AND l.email_verified_at IS NOT NULL) OR l.identity_mode = 'username')
 		   )
 		 RETURNING code, user_id, tenant_id, membership_id, membership_version, learner_id,
 		           code_challenge, code_challenge_method, client_id, redirect_uri, resource, scope, expires_at`,

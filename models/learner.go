@@ -7,6 +7,7 @@ package models
 import "time"
 
 type Learner struct {
+	IdentityMode    string
 	ID              string
 	Email           string
 	PasswordHash    string

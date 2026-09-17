@@ -65,6 +65,11 @@ func LoadContext(learnerID, focusConcept string, olmSnapshot *OLMView, alerts []
 // remain available through LoadContext for maintenance/export, but are not fed
 // into activity generation where homonymous concepts could contaminate it.
 func LoadContextForDomain(learnerID, domainID, focusConcept string, olmSnapshot *OLMView, alerts []models.Alert) (*EpisodicContext, error) {
+	return LoadContextForDomainContext(context.Background(), learnerID, domainID, focusConcept, olmSnapshot, alerts)
+}
+
+// LoadContextForDomainContext preserves the caller transaction and cancellation.
+func LoadContextForDomainContext(ctx context.Context, learnerID, domainID, focusConcept string, olmSnapshot *OLMView, alerts []models.Alert) (*EpisodicContext, error) {
 	if !Enabled() {
 		return &EpisodicContext{LoadedAt: time.Now().UTC()}, nil
 	}
@@ -78,36 +83,36 @@ func LoadContextForDomain(learnerID, domainID, focusConcept string, olmSnapshot 
 
 	var err error
 	if domainID == "" {
-		ec.LearnerMemory, err = Read(learnerID, ScopeMemory, "")
+		ec.LearnerMemory, err = ReadContext(ctx, learnerID, ScopeMemory, "")
 		if err != nil {
 			return nil, err
 		}
-		ec.memoryModifiedAt = modifiedAt(learnerID, ScopeMemory, "")
+		ec.memoryModifiedAt = modifiedAt(ctx, learnerID, ScopeMemory, "")
 
-		ec.PendingMemory, err = Read(learnerID, ScopeMemoryPending, "")
+		ec.PendingMemory, err = ReadContext(ctx, learnerID, ScopeMemoryPending, "")
 		if err != nil {
 			return nil, err
 		}
-		ec.pendingModifiedAt = modifiedAt(learnerID, ScopeMemoryPending, "")
+		ec.pendingModifiedAt = modifiedAt(ctx, learnerID, ScopeMemoryPending, "")
 	}
 
 	if focusConcept != "" {
 		if domainID == "" {
-			ec.ConceptNotes, err = Read(learnerID, ScopeConcept, focusConcept)
+			ec.ConceptNotes, err = ReadContext(ctx, learnerID, ScopeConcept, focusConcept)
 		} else {
-			ec.ConceptNotes, err = ReadDomainConcept(learnerID, domainID, focusConcept)
+			ec.ConceptNotes, err = ReadDomainConceptContext(ctx, learnerID, domainID, focusConcept)
 		}
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	sessions, err := ListSessions(learnerID)
+	sessions, err := ListSessionsContext(ctx, learnerID)
 	if err != nil {
 		return nil, err
 	}
 	for _, ts := range sessions {
-		raw, err := Read(learnerID, ScopeSession, ts.Format(time.RFC3339))
+		raw, err := ReadContext(ctx, learnerID, ScopeSession, ts.Format(time.RFC3339))
 		if err != nil {
 			return nil, err
 		}
@@ -125,7 +130,7 @@ func LoadContextForDomain(learnerID, domainID, focusConcept string, olmSnapshot 
 	}
 
 	if domainID == "" {
-		archives, err := ListArchives(learnerID)
+		archives, err := ListArchivesContext(ctx, learnerID)
 		if err != nil {
 			return nil, err
 		}
@@ -133,7 +138,7 @@ func LoadContextForDomain(learnerID, domainID, focusConcept string, olmSnapshot 
 			archives = archives[:2]
 		}
 		for _, period := range archives {
-			body, err := Read(learnerID, ScopeArchive, period)
+			body, err := ReadContext(ctx, learnerID, ScopeArchive, period)
 			if err != nil {
 				return nil, err
 			}
@@ -343,12 +348,12 @@ func contextSize(ec *EpisodicContext) int {
 	return size
 }
 
-func modifiedAt(learnerID string, scope Scope, key string) time.Time {
+func modifiedAt(ctx context.Context, learnerID string, scope Scope, key string) time.Time {
 	objectKey, err := narrativeKeyForRead(learnerID, scope, key)
 	if err != nil {
 		return time.Time{}
 	}
-	return NarrativeModifiedAt(context.Background(), objectKey)
+	return NarrativeModifiedAt(ctx, objectKey)
 }
 
 func truthy(v any) bool {

@@ -1,0 +1,23 @@
+[Unit]
+Description=TUTOR MCP institutional %i process
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tutor-%i
+Group=tutor-%i
+EnvironmentFile=/etc/tutor-mcp/%i.env
+Environment=PROCESS_ROLE=%i
+ExecStart=/usr/local/bin/tutor-mcp --profile institution
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=40s
+
+[Install]
+WantedBy=multi-user.target

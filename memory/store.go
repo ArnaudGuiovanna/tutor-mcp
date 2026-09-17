@@ -480,9 +480,13 @@ func readNarrativeFile(path string, maxBytes int64) ([]byte, error) {
 }
 
 func ListSessions(learnerID string) ([]time.Time, error) {
+	return ListSessionsContext(context.Background(), learnerID)
+}
+
+func ListSessionsContext(ctx context.Context, learnerID string) ([]time.Time, error) {
 	if backend := configuredNarrativeStore(); backend != nil {
 		limits, _ := configuredLimits()
-		items, err := backend.ListNarratives(context.Background(), learnerID, ScopeSession, "", limits.MaxFilesPerLearner)
+		items, err := backend.ListNarratives(ctx, learnerID, ScopeSession, "", limits.MaxFilesPerLearner)
 		if err != nil {
 			return nil, err
 		}
@@ -524,15 +528,23 @@ func ListSessions(learnerID string) ([]time.Time, error) {
 }
 
 func ListArchives(learnerID string) ([]string, error) {
+	return ListArchivesContext(context.Background(), learnerID)
+}
+
+func ListArchivesContext(ctx context.Context, learnerID string) ([]string, error) {
 	if backend := configuredNarrativeStore(); backend != nil {
-		return listSharedNarrativeKeys(context.Background(), backend, learnerID, ScopeArchive, "")
+		return listSharedNarrativeKeys(ctx, backend, learnerID, ScopeArchive, "")
 	}
 	return listMarkdownKeys(learnerID, "archives", false)
 }
 
 func ListConcepts(learnerID string) ([]string, error) {
+	return ListConceptsContext(context.Background(), learnerID)
+}
+
+func ListConceptsContext(ctx context.Context, learnerID string) ([]string, error) {
 	if backend := configuredNarrativeStore(); backend != nil {
-		return listSharedNarrativeKeys(context.Background(), backend, learnerID, ScopeConcept, "")
+		return listSharedNarrativeKeys(ctx, backend, learnerID, ScopeConcept, "")
 	}
 	return listMarkdownKeys(learnerID, "concepts", true)
 }

@@ -70,7 +70,7 @@ func maybeBuildConsolidationRequest(ctx context.Context, deps *Deps, learnerID s
 	if len(pending) == 0 {
 		return nil
 	}
-	req, ids, err := buildConsolidationRequest(learnerID, pending)
+	req, ids, err := buildConsolidationRequest(ctx, learnerID, pending)
 	if err != nil {
 		deps.Logger.Warn("get_next_activity: consolidation_request build failed", "err", err, "learner", learnerID)
 		if releaseErr := deps.Store.ReleaseConsolidationClaims(ctx, learnerID, consolidationIDs(pending)); releaseErr != nil {
@@ -97,7 +97,7 @@ func consolidationIDs(items []*models.PendingConsolidation) []int64 {
 	return ids
 }
 
-func buildConsolidationRequest(learnerID string, pending []*models.PendingConsolidation) (*ConsolidationRequest, []int64, error) {
+func buildConsolidationRequest(ctx context.Context, learnerID string, pending []*models.PendingConsolidation) (*ConsolidationRequest, []int64, error) {
 	req := &ConsolidationRequest{
 		Instruction: consolidationRequestInstruction,
 		Template:    memory.ConsolidationTemplate,
@@ -111,23 +111,23 @@ func buildConsolidationRequest(learnerID string, pending []*models.PendingConsol
 		if err != nil {
 			return nil, nil, err
 		}
-		sessions, err := memory.SessionsInRange(learnerID, start, end)
+		sessions, err := memory.SessionsInRangeContext(ctx, learnerID, start, end)
 		if err != nil {
 			return nil, nil, err
 		}
-		replay, err := memory.InterleavedReplaySessions(learnerID, start, 3)
+		replay, err := memory.InterleavedReplaySessionsContext(ctx, learnerID, start, 3)
 		if err != nil {
 			return nil, nil, err
 		}
-		memorySnapshot, err := memory.Read(learnerID, memory.ScopeMemory, "")
+		memorySnapshot, err := memory.ReadContext(ctx, learnerID, memory.ScopeMemory, "")
 		if err != nil {
 			return nil, nil, err
 		}
-		pendingSnapshot, err := memory.Read(learnerID, memory.ScopeMemoryPending, "")
+		pendingSnapshot, err := memory.ReadContext(ctx, learnerID, memory.ScopeMemoryPending, "")
 		if err != nil {
 			return nil, nil, err
 		}
-		concepts, err := consolidationConceptSnapshots(learnerID, memory.ConceptsFromSessions(sessions))
+		concepts, err := consolidationConceptSnapshots(ctx, learnerID, memory.ConceptsFromSessions(sessions))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -184,10 +184,10 @@ func consolidationPeriodBounds(periodType, periodKey string) (time.Time, time.Ti
 	}
 }
 
-func consolidationConceptSnapshots(learnerID string, slugs []string) ([]ConceptSnapshot, error) {
+func consolidationConceptSnapshots(ctx context.Context, learnerID string, slugs []string) ([]ConceptSnapshot, error) {
 	out := make([]ConceptSnapshot, 0, len(slugs))
 	for _, slug := range slugs {
-		content, err := memory.Read(learnerID, memory.ScopeConcept, slug)
+		content, err := memory.ReadContext(ctx, learnerID, memory.ScopeConcept, slug)
 		if err != nil {
 			return nil, err
 		}

@@ -1,0 +1,43 @@
+name: Prepare release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to prepare as a draft (for example v0.6.0)
+        required: true
+        type: string
+permissions:
+  contents: write
+concurrency:
+  group: prepare-release
+  cancel-in-progress: false
+jobs:
+  package:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.8
+          cache: true
+      - name: Build archives and checksums
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          GOTOOLCHAIN: local
+        run: python3 scripts/package-release.py --version "$RELEASE_VERSION"
+      - name: Retain release artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-archives
+          path: dist/*
+          retention-days: 30
+      - name: Create reviewable draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          gh release create "$RELEASE_VERSION" --draft --target "$GITHUB_SHA" \
+            --title "TUTOR MCP $RELEASE_VERSION" --notes-file "docs/release-$RELEASE_VERSION.md" \
+            dist/tutor-mcp_*.tar.gz dist/tutor-mcp_*.zip dist/SHA256SUMS

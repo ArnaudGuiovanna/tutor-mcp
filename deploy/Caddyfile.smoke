@@ -1,0 +1,4 @@
+tutor.localhost {
+	tls internal
+	reverse_proxy tutor:3000
+}

@@ -602,7 +602,7 @@ func loadEpisodicContextForActivity(
 	if olmSnapshot != nil && olmSnapshot.FocusConcept != "" {
 		view.FocusConcept = olmSnapshot.FocusConcept
 	}
-	ec, err := memory.LoadContextForDomain(learnerID, domain.ID, focusConcept, view, alerts)
+	ec, err := memory.LoadContextForDomainContext(ctx, learnerID, domain.ID, focusConcept, view, alerts)
 	if err != nil {
 		if deps.Logger != nil {
 			deps.Logger.Warn("get_next_activity: episodic context load failed", "err", err, "learner", learnerID)

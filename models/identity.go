@@ -3,7 +3,12 @@
 
 package models
 
-import "time"
+import (
+	"fmt"
+	"regexp"
+	"strings"
+	"time"
+)
 
 const (
 	TenantStatusActive    = "active"
@@ -35,6 +40,8 @@ type Tenant struct {
 // User is a global authentication identity. It intentionally carries no
 // tenant role or pedagogical profile.
 type User struct {
+	IdentityMode    string
+	LoginName       string
 	ID              string
 	Email           string
 	NormalizedEmail string
@@ -144,4 +151,14 @@ type ServiceAccount struct {
 	UpdatedAt  time.Time
 	ExpiresAt  *time.Time
 	LastUsedAt *time.Time
+}
+
+var loginNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{2,63}$`)
+
+func NormalizeLoginName(name string) (string, error) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if !loginNamePattern.MatchString(name) {
+		return "", fmt.Errorf("identifier must contain 3–64 ASCII letters, digits, dots, underscores or hyphens and start with a letter or digit")
+	}
+	return name, nil
 }

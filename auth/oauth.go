@@ -177,6 +177,7 @@ type oauthCSRFConsumer interface {
 
 // OAuthServer implements the OAuth 2.1 authorization server.
 type OAuthServer struct {
+	hobbyAccounts        bool
 	store                oauthStore
 	baseURL              string
 	logger               *slog.Logger
@@ -405,6 +406,7 @@ func (s *OAuthServer) HandleAuthorizeGet(w http.ResponseWriter, r *http.Request)
 	setAuthorizeCSRFCookie(w, csrfToken, 3600)
 
 	data := authPageData{
+		Hobby:               s.hobbyAccounts,
 		ClientID:            clientID,
 		ClientName:          client.ClientName,
 		RedirectURI:         redirectURI,
@@ -516,10 +518,15 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 	// canonical form.
 	email := NormalizeEmail(r.FormValue("email"))
 	password := r.FormValue("password")
+	invalidCredentialsMessage := "Invalid email or password."
+	if s.hobbyAccounts {
+		invalidCredentialsMessage = "Invalid identifier or password."
+	}
 
 	state := r.FormValue("state")
 
 	data := authPageData{
+		Hobby:               s.hobbyAccounts,
 		ClientID:            clientID,
 		ClientName:          client.ClientName,
 		RedirectURI:         redirectURI,
@@ -532,16 +539,36 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 		CSRFToken:           formCSRF,
 	}
 
+	if s.hobbyAccounts && mode == "register" {
+		renderAuthPage(w, data, "Ask the server operator for an invitation.", "login")
+		return
+	}
 	if email == "" {
-		renderAuthPage(w, data, "Email is required.", mode)
+		message := "Email is required."
+		if s.hobbyAccounts {
+			message = "Identifier is required."
+		}
+		renderAuthPage(w, data, message, mode)
 		return
 	}
 	if mode != "register" && password == "" {
-		renderAuthPage(w, data, "Email and password are required.", mode)
+		message := "Email and password are required."
+		if s.hobbyAccounts {
+			message = "Identifier and password are required."
+		}
+		renderAuthPage(w, data, message, mode)
 		return
 	}
-	if err := validateEmail(email); err != nil {
-		renderAuthPage(w, data, "Please enter a valid email address.", mode)
+	validateIdentifier := validateEmail
+	if s.hobbyAccounts {
+		validateIdentifier = func(value string) error { _, err := models.NormalizeLoginName(value); return err }
+	}
+	if err := validateIdentifier(email); err != nil {
+		message := "Please enter a valid email address."
+		if s.hobbyAccounts {
+			message = "Please enter a valid identifier."
+		}
+		renderAuthPage(w, data, message, mode)
 		return
 	}
 
@@ -625,7 +652,7 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 		// inactive accounts use their stored hash but remain indistinguishable
 		// from absent/wrong credentials. Most importantly, a correct active
 		// credential is never refused because an attacker filled its counter.
-		globalUser, lookupErr := s.store.GetLocalUserByEmail(ctx, email)
+		globalUser, lookupErr := s.loginUser(ctx, email)
 		passwordHash := dummyPasswordHash
 		if lookupErr == nil && globalUser != nil {
 			passwordHash = []byte(globalUser.PasswordHash)
@@ -646,7 +673,7 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 			renderAuthPage(w, data, "Internal error. Please try again.", "login")
 			return
 		}
-		if lookupErr != nil || globalUser == nil || passwordErr != nil || globalUser.EmailVerifiedAt == nil || globalUser.Status != models.UserStatusActive {
+		if lookupErr != nil || passwordErr != nil || !s.activeLoginUser(globalUser) {
 			count := s.loginFailures.RecordContext(ctx, email)
 			status := http.StatusUnauthorized
 			if retryAfter := s.loginFailures.RetryAfter(count); retryAfter > 0 {
@@ -656,10 +683,10 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 					s.logger.Warn("login failure threshold reached; correct credentials remain allowed")
 				}
 			}
-			renderAuthPageStatus(w, status, data, "Invalid email or password.", "login")
+			renderAuthPageStatus(w, status, data, invalidCredentialsMessage, "login")
 			return
 		}
-		if !s.loginFailures.AllowContext(ctx, email) {
+		if !s.hobbyAccounts && !s.loginFailures.AllowContext(ctx, email) {
 			memberships, membershipErr := s.store.ListActiveMembershipsForUser(ctx, globalUser.ID)
 			if membershipErr != nil || len(memberships) != 1 {
 				renderAuthPage(w, data, "Choose an organization after signing in.", "login")
@@ -1190,8 +1217,12 @@ func writeTokenError(w http.ResponseWriter, errCode string, status int) {
 // validateRegistrationRedirectURIs enforces https-or-loopback and rejects
 // private IPs to prevent SSRF / open-redirect through client registration.
 func validateRegistrationRedirectURIs(uris []string) error {
-	if len(uris) > 5 {
-		return fmt.Errorf("too many redirect_uris (max 5)")
+	return validateRedirectURIs(uris, 5)
+}
+
+func validateRedirectURIs(uris []string, maxCount int) error {
+	if len(uris) > maxCount {
+		return fmt.Errorf("too many redirect_uris (max %d)", maxCount)
 	}
 	for _, raw := range uris {
 		if len(raw) > 512 {
@@ -1449,6 +1480,10 @@ func (s *OAuthServer) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Echo back all client metadata + add our fields (RFC 7591 compliance)
+	expiry := int64(0)
+	if !registration.ExpiresAt.IsZero() {
+		expiry = registration.ExpiresAt.Unix()
+	}
 	resp := map[string]interface{}{
 		"client_id":                  registration.ClientID,
 		"client_id_issued_at":        registration.IssuedAt.Unix(),
@@ -1458,7 +1493,7 @@ func (s *OAuthServer) HandleRegister(w http.ResponseWriter, r *http.Request) {
 		"response_types":             []string{"code"},
 		"token_endpoint_auth_method": authMethod,
 		"application_type":           applicationType,
-		"client_id_expires_at":       registration.ExpiresAt.Unix(),
+		"client_id_expires_at":       expiry,
 	}
 	if confidential {
 		resp["client_secret"] = registration.ClientSecret

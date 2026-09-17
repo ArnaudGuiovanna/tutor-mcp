@@ -29,15 +29,17 @@ const (
 	cimdMaxCacheTTL              = 24 * time.Hour
 	cimdFetchTimeout             = 5 * time.Second
 	cimdCacheCapacity            = 256
+	cimdMaxRedirectURIs          = 32
 )
 
 type cimdDocument struct {
-	ClientID                string   `json:"client_id"`
-	ClientName              string   `json:"client_name"`
-	RedirectURIs            []string `json:"redirect_uris"`
-	GrantTypes              []string `json:"grant_types"`
-	ResponseTypes           []string `json:"response_types"`
-	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
+	ClientID                          string          `json:"client_id"`
+	ClientName                        string          `json:"client_name"`
+	RedirectURIs                      []string        `json:"redirect_uris"`
+	GrantTypes                        []string        `json:"grant_types"`
+	ResponseTypes                     []string        `json:"response_types"`
+	TokenEndpointAuthMethod           string          `json:"token_endpoint_auth_method"`
+	TokenEndpointAuthMethodsSupported json.RawMessage `json:"token_endpoint_auth_methods_supported"`
 }
 
 type cachedCIMDClient struct {
@@ -299,10 +301,21 @@ func (s *OAuthServer) fetchCIMDDocument(ctx context.Context, clientID string) (*
 		!utf8.ValidString(doc.ClientName) || strings.ContainsAny(doc.ClientName, "\r\n\t") {
 		return nil, 0, fmt.Errorf("invalid CIMD identity metadata")
 	}
-	if doc.TokenEndpointAuthMethod != "none" {
+	// The plural field declares capabilities, not an ordered preference. Our
+	// CIMD implementation supports public clients (none + PKCE) only. Preserve
+	// the binding legacy field for documents which omit the plural field.
+	supportsNone := doc.TokenEndpointAuthMethod == "none"
+	if doc.TokenEndpointAuthMethodsSupported != nil {
+		var methods []string
+		if err := json.Unmarshal(doc.TokenEndpointAuthMethodsSupported, &methods); err != nil {
+			return nil, 0, fmt.Errorf("invalid CIMD token_endpoint_auth_methods_supported: %w", err)
+		}
+		supportsNone = containsString(methods, "none")
+	}
+	if !supportsNone {
 		return nil, 0, fmt.Errorf("unsupported CIMD token_endpoint_auth_method")
 	}
-	if len(doc.RedirectURIs) == 0 || validateRegistrationRedirectURIs(doc.RedirectURIs) != nil {
+	if len(doc.RedirectURIs) == 0 || validateRedirectURIs(doc.RedirectURIs, cimdMaxRedirectURIs) != nil {
 		return nil, 0, fmt.Errorf("invalid CIMD redirect_uris")
 	}
 	if len(doc.GrantTypes) > 0 && !containsString(doc.GrantTypes, "authorization_code") {

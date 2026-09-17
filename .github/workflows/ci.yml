@@ -152,6 +152,10 @@ jobs:
             goarch: amd64
           - goos: darwin
             goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
 
     steps:
       - name: Checkout
@@ -168,3 +172,36 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: go build -trimpath -o tutor-mcp .
+
+  local-native:
+    name: Local (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Native permissions and stdio persistence
+        run: go test -count=1 -timeout 5m . ./db ./internal/privatefs -run 'TestLocal|TestInstallationProfile|TestProfileCLI|TestHobbyLoopback|TestPrivateProfile|TestWindows'
+      - name: Shell installer checksum and OS selection
+        if: runner.os != 'Windows'
+        run: python3 -B -m unittest discover -s scripts -p test_installers.py
+      - name: Windows user installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/test-install-windows.ps1
+
+  deployment:
+    name: Deployment (hobby)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: HTTPS, OAuth and persistence with non-root Compose
+        run: sh scripts/smoke-compose.sh

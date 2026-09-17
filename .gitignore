@@ -2,6 +2,8 @@
 *.jwt_secret
 ..jwt_secret
 .env
+/deploy/*.env
+/deploy/secrets/
 
 # Database
 data/
@@ -12,6 +14,7 @@ data/
 # Binary
 tutor-mcp
 learning-runtime
+tutor-mcp.exe
 
 # IDE
 .idea/

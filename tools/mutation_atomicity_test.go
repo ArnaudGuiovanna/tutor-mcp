@@ -184,7 +184,7 @@ func TestUpdateLearnerMemory_PostRenameSyncFailureIsDegradedSuccess(t *testing.T
 	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
 	_, deps := setupToolsTest(t)
 	originalWrite := writeLearnerMemory
-	writeLearnerMemory = func(memory.WriteRequest) error {
+	writeLearnerMemory = func(context.Context, memory.WriteRequest) error {
 		return &memory.CommittedWriteError{Err: errors.New("injected directory sync failure")}
 	}
 	t.Cleanup(func() { writeLearnerMemory = originalWrite })

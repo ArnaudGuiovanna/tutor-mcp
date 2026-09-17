@@ -7,14 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"path/filepath"
-	"syscall"
-)
 
-const (
-	privateDirMode  fs.FileMode = 0o700
-	privateFileMode fs.FileMode = 0o600
+	"tutor-mcp/internal/privatefs"
 )
 
 // PrepareSQLitePath establishes a fail-closed file permission boundary before
@@ -47,28 +42,15 @@ func prepareSQLitePath(dbPath string, requirePrivateParent bool) error {
 	}
 
 	parent := filepath.Dir(cleanPath)
-	parentInfo, err := os.Lstat(parent)
-	if errors.Is(err, fs.ErrNotExist) {
-		if err := os.MkdirAll(parent, privateDirMode); err != nil {
-			return fmt.Errorf("create SQLite parent %q: %w", parent, err)
-		}
-		parentInfo, err = os.Lstat(parent)
-	}
-	if err != nil {
-		return fmt.Errorf("inspect SQLite parent %q: %w", parent, err)
-	}
-	if parentInfo.Mode()&os.ModeSymlink != 0 || !parentInfo.IsDir() {
-		return fmt.Errorf("SQLite parent %q must be a real directory, not a symlink", parent)
-	}
-	if !ownedByCurrentUser(parentInfo) {
-		return fmt.Errorf("SQLite parent %q is not owned by the current user", parent)
-	}
-	if got := parentInfo.Mode().Perm(); requirePrivateParent && got != privateDirMode {
-		return fmt.Errorf("SQLite parent %q permissions are %04o; require 0700", parent, got)
+	if err := privatefs.PrepareDir(parent, requirePrivateParent); err != nil {
+		return err
 	}
 
 	if err := secureExistingSQLiteFile(cleanPath); errors.Is(err, fs.ErrNotExist) {
-		file, createErr := os.OpenFile(cleanPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, privateFileMode)
+		file, createErr := privatefs.CreateFile(cleanPath)
+		if errors.Is(createErr, fs.ErrExist) {
+			return SecureSQLiteFiles(cleanPath)
+		}
 		if createErr != nil {
 			return fmt.Errorf("create SQLite database %q: %w", cleanPath, createErr)
 		}
@@ -95,30 +77,5 @@ func SecureSQLiteFiles(dbPath string) error {
 }
 
 func secureExistingSQLiteFile(path string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return fmt.Errorf("SQLite file %q must be a regular file, not a symlink", path)
-	}
-	if !ownedByCurrentUser(info) {
-		return fmt.Errorf("SQLite file %q is not owned by the current user", path)
-	}
-	if err := os.Chmod(path, privateFileMode); err != nil {
-		return fmt.Errorf("chmod SQLite file %q to 0600: %w", path, err)
-	}
-	verified, err := os.Lstat(path)
-	if err != nil {
-		return fmt.Errorf("verify SQLite file %q: %w", path, err)
-	}
-	if got := verified.Mode().Perm(); got != privateFileMode {
-		return fmt.Errorf("SQLite file %q permissions remain %04o; require 0600", path, got)
-	}
-	return nil
-}
-
-func ownedByCurrentUser(info fs.FileInfo) bool {
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	return ok && int(stat.Uid) == os.Geteuid()
+	return privatefs.SecureFile(path)
 }

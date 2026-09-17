@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Copyright (c) 2026 Arnaud Guiovanna <https://github.com/ArnaudGuiovanna/tutor-mcp>
 // SPDX-License-Identifier: MIT
 

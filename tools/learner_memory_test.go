@@ -183,7 +183,7 @@ func TestUpdateLearnerMemory_WriteFailureIsSafeAndQuotaIsStable(t *testing.T) {
 	t.Cleanup(func() { writeLearnerMemory = originalWrite })
 
 	secretPath := "/private/tenant/L_owner/MEMORY.md"
-	writeLearnerMemory = func(memory.WriteRequest) error {
+	writeLearnerMemory = func(context.Context, memory.WriteRequest) error {
 		return &os.PathError{Op: "rename", Path: secretPath, Err: os.ErrPermission}
 	}
 	res := callTool(t, deps, registerUpdateLearnerMemory, "L_owner", "update_learner_memory", map[string]any{
@@ -196,7 +196,7 @@ func TestUpdateLearnerMemory_WriteFailureIsSafeAndQuotaIsStable(t *testing.T) {
 		t.Fatalf("write failure leaked a path: %q", resultText(res))
 	}
 
-	writeLearnerMemory = func(memory.WriteRequest) error {
+	writeLearnerMemory = func(context.Context, memory.WriteRequest) error {
 		return fmt.Errorf("%w: private limit details", memory.ErrQuotaExceeded)
 	}
 	quota := callTool(t, deps, registerUpdateLearnerMemory, "L_owner", "update_learner_memory", map[string]any{
@@ -325,7 +325,7 @@ func TestGetMemoryState_RequiredListingFailureIsSafe(t *testing.T) {
 	original := listLearnerMemorySessions
 	t.Cleanup(func() { listLearnerMemorySessions = original })
 	secretPath := "/private/tenant/L_owner/sessions"
-	listLearnerMemorySessions = func(string) ([]time.Time, error) {
+	listLearnerMemorySessions = func(context.Context, string) ([]time.Time, error) {
 		return nil, &os.PathError{Op: "readdir", Path: secretPath, Err: os.ErrPermission}
 	}
 
@@ -346,11 +346,11 @@ func TestGetMemoryState_RequiredPendingReadFailureIsSafe(t *testing.T) {
 	original := readLearnerMemory
 	t.Cleanup(func() { readLearnerMemory = original })
 	secretPath := "/private/tenant/L_owner/MEMORY_pending.md"
-	readLearnerMemory = func(learnerID string, scope memory.Scope, key string) (string, error) {
+	readLearnerMemory = func(ctx context.Context, learnerID string, scope memory.Scope, key string) (string, error) {
 		if scope == memory.ScopeMemoryPending {
 			return "", &os.PathError{Op: "read", Path: secretPath, Err: errors.New("storage unavailable")}
 		}
-		return original(learnerID, scope, key)
+		return original(ctx, learnerID, scope, key)
 	}
 
 	res := callTool(t, deps, registerGetMemoryState, "L_owner", "get_memory_state", map[string]any{})
@@ -485,7 +485,7 @@ func TestReadRawSession_FailureIsSafeAndAbsenceIsNormal(t *testing.T) {
 	original := readLearnerMemory
 	t.Cleanup(func() { readLearnerMemory = original })
 	secretContent := "private learner content"
-	readLearnerMemory = func(string, memory.Scope, string) (string, error) {
+	readLearnerMemory = func(context.Context, string, memory.Scope, string) (string, error) {
 		return "---\ntimestamp: [" + secretContent + "\n---\ncorrupt", nil
 	}
 	corrupt := callTool(t, deps, registerReadRawSession, "L_owner", "read_raw_session", map[string]any{"timestamp": timestamp})
@@ -497,7 +497,7 @@ func TestReadRawSession_FailureIsSafeAndAbsenceIsNormal(t *testing.T) {
 	}
 
 	secretPath := "/private/tenant/L_owner/sessions/secret.md"
-	readLearnerMemory = func(string, memory.Scope, string) (string, error) {
+	readLearnerMemory = func(context.Context, string, memory.Scope, string) (string, error) {
 		return "", &os.PathError{Op: "read", Path: secretPath, Err: os.ErrPermission}
 	}
 	failed := callTool(t, deps, registerReadRawSession, "L_owner", "read_raw_session", map[string]any{"timestamp": timestamp})

@@ -1,28 +1,42 @@
-# Contrat de scope du Store
+# Store scope contract
 
-Toute nouvelle méthode métier exportée sur `db.Store` doit recevoir un
-`models.TenantScope` ou un `models.Principal`. Le test
-`TestNoNewUnscopedStoreMethods` fige par SHA-256 l'ensemble des méthodes
-legacy encore exposées sans ce type : ajouter ou renommer une méthode non
-scopée casse le gate de CI.
+Every new exported business method on `db.Store` must receive a
+`models.TenantScope` or `models.Principal`. The
+`TestNoNewUnscopedStoreMethods` test records a SHA-256 fingerprint of legacy
+methods still exposed without either type. Adding or renaming an unscoped
+method fails the CI gate.
 
-Les exceptions gelées relèvent de quatre catégories : API pédagogique legacy
-encore maintenue pendant le dual-read/write, authentification/control plane
-global, migrations/santé, et accès de test (`RawDB`). Elles ne constituent pas
-un modèle pour du nouveau code. `VerifySchemaCurrent` est l'exception santé
-ajoutée le 2026-08-12 : elle ne lit que le ledger global de migrations pour
-`/ready` et ne touche aucune donnée métier. Les méthodes SaaS, catalogue, RBAC, quotas,
-usage, jobs et outbox utilisent toutes une frontière tenant typée.
+The frozen exceptions fall into four categories: the legacy teaching API
+maintained during dual reads and writes, global authentication/control-plane
+operations, migrations/health checks, and test access (`RawDB`). They are not
+patterns for new code. `VerifySchemaCurrent`, the health-check exception added
+on 2026-08-12, reads only the global migration ledger for `/ready` and never
+accesses business data. SaaS, catalog, RBAC, quota, usage, job and outbox methods
+all use a typed tenant boundary.
 
-Lorsqu'un credential doit nécessairement être résolu avant que le tenant soit
-connu, la méthode reçoit une capability typée qui ne contient aucun sélecteur
-tenant libre (`BillingWebhookCredential`, `ServiceAccountCredential`,
-`SupportAccessCredential` ou assertion fédérée déjà vérifiée). La table de
-routage globale ne conserve qu'un digest et fournit le tenant autoritatif ; la
-lecture métier suivante se déroule immédiatement sous `SET LOCAL` et RLS.
+When a credential must be resolved before its tenant is known, the method
+receives a typed capability without a freely supplied tenant selector
+(`BillingWebhookCredential`, `ServiceAccountCredential`,
+`SupportAccessCredential` or an already verified federated assertion). The
+global routing table stores only a digest and supplies the authoritative
+tenant. The subsequent business read immediately uses `SET LOCAL` and RLS.
 
-Le remplacement progressif se fait sans modifier le hash à la hausse : une
-méthode retirée peut faire évoluer l'empreinte après revue ; une nouvelle
-exception exige une justification explicite dans ce document. Les requêtes
-tenant-owned restent en plus protégées par transaction `SET LOCAL`, FK
-composites et `FORCE ROW LEVEL SECURITY` sur PostgreSQL.
+Gradual replacement must not silently expand the fingerprint's allowlist.
+Removing a method may change the fingerprint after review; every new exception
+requires an explicit justification in this document. Tenant-owned queries also
+remain protected by transactional `SET LOCAL`, composite foreign keys and
+`FORCE ROW LEVEL SECURITY` on PostgreSQL.
+
+The local and hobby implementation adds nine explicitly documented exceptions
+to this boundary. `EnsureInstallation` validates the global deployment marker
+before starting any transport. `EnsureLocalIdentity` transactionally creates
+the single learner in a SQLite database marked `local`. The seven methods
+`CreateHobbyLink`, `AcceptHobbyInvite`, `HobbyLinkValid`, `ResetHobbyPassword`,
+`GetUserByLoginName`, `ListHobbyUsers` and `DisableHobbyUser` serve authentication
+before a principal is resolved, or SSH administration. They reject PostgreSQL
+and installations not marked `hobby`. Links carry a random secret whose digest
+alone is stored; transactional consumption selects the authoritative identity.
+None of these methods is an MCP tool. After authentication, both new profiles
+use the existing learner principal's transactions and permissions. The test
+fingerprint explicitly includes these exceptions; business methods remain
+subject to the general rule.

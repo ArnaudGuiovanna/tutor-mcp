@@ -32,6 +32,7 @@ download() {
 detect_os() {
 	case "$(uname -s)" in
 		Linux) printf '%s\n' linux ;;
+		Darwin) printf '%s\n' darwin ;;
 		*) die "unsupported OS: $(uname -s)" ;;
 	esac
 }
@@ -120,3 +121,4 @@ else
 fi
 
 printf '%s\n' "Installed ${binary_name} to ${install_dir}/${binary_name}"
+printf '%s\n' 'For local MCP clients, use command: tutor-mcp and args: ["--local"].'

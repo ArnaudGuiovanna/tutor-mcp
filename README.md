@@ -25,6 +25,8 @@ default-on; automatic help withdrawal from the descriptive autonomy score is dis
 with quarantine of ambiguous outcomes; signed SaaS webhooks expose a stable
 deduplication contract.
 
+> Local stdio and VPS profiles: see [installation](docs/installation.md) and [profile behavior](docs/profiles.md).
+
 ## Compatible clients
 
 <p align="left">
@@ -88,14 +90,36 @@ These models are deterministic and auditable routing heuristics, not a claim of 
 ### 1. Install or build
 
 ```bash
-# Latest Linux release (no sudo: set TUTOR_MCP_INSTALL_DIR)
-curl -fsSL https://tutor-mcp.dev/install.sh | sh
+# Linux or macOS (no sudo: choose a user directory)
+curl -fsSL https://raw.githubusercontent.com/ArnaudGuiovanna/tutor-mcp/main/scripts/install.sh -o install-tutor.sh
+TUTOR_MCP_INSTALL_DIR="$HOME/.local/bin" sh install-tutor.sh
 
 # Or build from source
 go build -o tutor-mcp
 ```
 
 ### 2. Run
+
+For an individual local installation, configure your MCP client to start TUTOR:
+
+```json
+{"mcpServers":{"tutor":{"command":"tutor-mcp","args":["--local"]}}}
+```
+
+No account or environment configuration is needed. See the
+[installation guide](docs/installation.md) for Hermes, Claude Desktop, Claude
+Code, Windows and both VPS installation options. The new profiles require
+v0.6.0 or later. For a hobby VPS, initialize once over SSH:
+
+```sh
+tutor-mcp init --profile hobby --public-url https://your.domain
+tutor-mcp --profile hobby
+```
+
+Use the printed invitation to choose a username and password. Put the service
+behind the provided Caddy configuration and connect to `https://your.domain/mcp`.
+
+Existing email-based server installations retain their environment setup:
 
 ```bash
 export JWT_SECRET="$(openssl rand -base64 32)"   # development compatibility only
@@ -130,7 +154,7 @@ silently.
 | **Le Chat** | Connectors → + Add Connector → Custom MCP | Auto-detects OAuth |
 | **Gemini Enterprise** | GCP Console → Custom MCP server data store | StreamableHTTP transport |
 | **Gemini CLI** | [`geminicli.com/docs/tools/mcp-server/`](https://geminicli.com/docs/tools/mcp-server/) | Local CLI |
-| **Claude Code** (CLI, local) | `.mcp.json` with `"url": "http://localhost:3000/mcp"` | No HTTPS needed |
+| **Claude Code** (CLI, local) | `.mcp.json` with `"command": "tutor-mcp", "args": ["--local"]` | Stdio, automatic local identity |
 
 ## MCP tools (46)
 
