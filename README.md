@@ -12,7 +12,7 @@
 
 **Your personal learning academy: any subject, a complete learning path, an adaptive AI tutor.**
 
-[Description](#description) · [Installation](#installation) · [Quickstart](#quickstart) · [How it works](#how-it-works) · [Documentation](#documentation) · [Creator](#creator) · [License](#license)
+[Description](#description) · [Demo](#demo) · [Installation](#installation) · [Quickstart](#quickstart) · [How it works](#how-it-works) · [Documentation](#documentation) · [Creator](#creator) · [License](#license)
 
 ## Description
 
@@ -36,6 +36,16 @@
   &nbsp;&nbsp;
   <a href="docs/clients.md"><img src="docs/assets/logos/mistral.svg" width="36" height="36" alt="Le Chat by Mistral AI" title="Le Chat" /></a>
 </p>
+
+## Demo
+
+<p align="center">
+  <img src="docs/assets/demo.gif" alt="A real Tutor MCP session in Claude Code: skill graph, cold diagnostics and the engine's choice of the next concept" width="100%" />
+</p>
+
+A real first session, running locally over stdio in Claude Code, sped up. Tutor maps Go backend
+development into a skill graph, diagnoses what transfers from the learner's Python background, then
+explains why the engine selected the next concept and what it unlocks.
 
 ## Installation
 
