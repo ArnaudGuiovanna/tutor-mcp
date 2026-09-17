@@ -10,20 +10,32 @@
 
 # Tutor MCP
 
-**Turn your favorite AI into a tutor that remembers your progress.**
+**Your personal learning academy: any subject, a complete learning path, an adaptive AI tutor.**
 
 [Description](#description) · [Installation](#installation) · [Quickstart](#quickstart) · [How it works](#how-it-works) · [Documentation](#documentation) · [Creator](#creator) · [License](#license)
 
 ## Description
 
-Tutor MCP is an open-source learning engine for AI assistants. Tell your AI what you want to learn — Spanish for travel, Go for backend development, medieval history — and Tutor keeps track of your progress, recommends the next activity and schedules reviews across sessions.
+**Tutor MCP is an open-source MCP engine for adaptive learning, self-learning and personalized AI tutoring.** Built on the Model Context Protocol, it brings course creation, a structured learning path and ongoing tutoring into your AI assistant. Choose a subject and a goal — from conversational Spanish to backend engineering — and build a course that evolves with your progress.
 
-- **Learn any topic.** Your AI creates explanations and exercises around your goals.
-- **Keep your learning history.** Progress, recurring mistakes and session notes survive the conversation.
-- **Practice with a purpose.** Prerequisites, spaced repetition and learning evidence guide what comes next.
-- **Understand your progress.** Inspect the evidence behind a recommendation and distinguish estimated knowledge from demonstrated skills.
+- **Build a curriculum on any subject.** Your AI maps the subject into a skill graph with concepts, prerequisites and goals. Tutor validates and versions that graph as your course develops.
+- **Follow a guided learning journey.** Diagnose your starting point, work through personalized lessons and exercises, revisit weak areas, and test your ability to apply what you learn.
+- **Get ongoing, personalized guidance.** Knowledge estimates, review dates, misconceptions and session memory shape the next activity, across conversations.
+- **See the evidence behind your progress.** Inspect why an activity was recommended and distinguish estimated knowledge, retained learning and demonstrated skills.
 
-**Use the AI client you already know:** Claude Code, Claude Desktop, ChatGPT, Hermes, Pi (with an MCP extension), Gemini CLI, Le Chat and other compatible MCP clients. Connect locally over stdio or to your own server over HTTPS/OAuth. See the [client guide](docs/clients.md) for connection options and compatibility details.
+**Generative teaching. Deterministic pedagogy.** This is Tutor's defining engineering choice: the AI creates and explains; a persistent, auditable engine governs progression. Bayesian Knowledge Tracing (BKT), FSRS spaced repetition, prerequisite rules and assessment evidence drive what to learn, practice or revisit next. Narrative memory gives the tutor the context to make that guidance personal.
+
+**Your learning engine travels across AI clients.** Use Claude Code, Claude Desktop, ChatGPT, Hermes, Pi (with an MCP extension), Gemini CLI, Le Chat and other compatible MCP clients. Keep the same learning history by connecting to the same Tutor installation, locally over stdio or remotely over HTTPS/OAuth. See the [client guide](docs/clients.md).
+
+<p align="left">
+  <a href="docs/clients.md"><img src="docs/assets/logos/claude.svg" width="36" height="36" alt="Claude Code and Claude Desktop" title="Claude" /></a>
+  &nbsp;&nbsp;
+  <a href="docs/clients.md"><img src="docs/assets/logos/openai.svg" width="36" height="36" alt="ChatGPT" title="ChatGPT" /></a>
+  &nbsp;&nbsp;
+  <a href="docs/clients.md"><img src="docs/assets/logos/gemini.svg" width="36" height="36" alt="Gemini CLI" title="Gemini" /></a>
+  &nbsp;&nbsp;
+  <a href="docs/clients.md"><img src="docs/assets/logos/mistral.svg" width="36" height="36" alt="Le Chat by Mistral AI" title="Le Chat" /></a>
+</p>
 
 ## Installation
 
