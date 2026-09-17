@@ -5,9 +5,9 @@ one person on their own machine, hobby for one VPS shared by a small group,
 or institution for the existing PostgreSQL deployment model. See
 [profile behavior and accounts](profiles.md).
 
-**Release availability:** v0.6.0 is currently a draft. Until it is published,
-use the [source quickstart](../README.md#quickstart); the release installer
-commands below require public v0.6.0 artifacts.
+**Release availability:** [v0.6.0](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/v0.6.0)
+is available with binaries and checksums for all supported platforms. Use the
+installers below or the [source quickstart](../README.md#quickstart).
 
 ## Linux and macOS
 

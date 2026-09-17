@@ -47,7 +47,7 @@ Choose where your learning data lives. Every profile uses the same learning engi
 | **Hobby** | A personal VPS or a small group | `--profile hobby`, SQLite and an HTTPS proxy. Invite users over SSH; they sign in with a username and password. [Native installation](docs/installation.md#native-hobby-vps-binary-systemd-and-caddy) · [Docker Compose](docs/installation.md#hobby-vps-with-docker-compose) |
 | **Institution** | An organization running a shared service | `--profile institution`, PostgreSQL, verified email and separate API/worker/migrator roles. [Institutional setup](docs/installation.md#institutional-deployment) |
 
-Binaries target **Linux, macOS and Windows**, on amd64 and arm64. Profiles require **v0.6.0+**; v0.6.0 is currently a draft, so use the source quickstart below until its public release. See [installation details](docs/installation.md) for installers, service configuration and backups.
+Binaries target **Linux, macOS and Windows**, on amd64 and arm64. Profiles require **v0.6.0+**, available from the [v0.6.0 release](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/v0.6.0). See [installation details](docs/installation.md) for installers, service configuration and backups.
 
 ## Quickstart
 
