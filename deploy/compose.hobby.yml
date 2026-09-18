@@ -1,11 +1,11 @@
 name: tutor-hobby
 services:
   tutor:
-    image: tutor-mcp:${TUTOR_VERSION:-v0.6.0}
+    image: tutor-mcp:${TUTOR_VERSION:-v0.6.1}
     build:
       context: ..
       args:
-        VERSION: ${TUTOR_VERSION:-v0.6.0}
+        VERSION: ${TUTOR_VERSION:-v0.6.1}
     command: ["--profile", "hobby", "--data-dir", "/data/hobby"]
     environment:
       LISTEN_ADDR: 0.0.0.0:3000

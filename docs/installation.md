@@ -5,7 +5,7 @@ one person on their own machine, hobby for one VPS shared by a small group,
 or institution for the existing PostgreSQL deployment model. See
 [profile behavior and accounts](profiles.md).
 
-**Release availability:** [v0.6.0](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/v0.6.0)
+**Release availability:** [v0.6.1](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/v0.6.1)
 is available with binaries and checksums for all supported platforms. Use the
 installers below or the [source quickstart](../README.md#quickstart).
 
@@ -15,7 +15,7 @@ Download the shell installer from the release's source, inspect it, and run it:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ArnaudGuiovanna/tutor-mcp/main/scripts/install.sh -o install-tutor.sh
-TUTOR_MCP_VERSION=v0.6.0 TUTOR_MCP_INSTALL_DIR="$HOME/.local/bin" sh install-tutor.sh
+TUTOR_MCP_VERSION=v0.6.1 TUTOR_MCP_INSTALL_DIR="$HOME/.local/bin" sh install-tutor.sh
 ```
 
 Add `$HOME/.local/bin` to your PATH and restart your MCP client. The installer
@@ -30,7 +30,7 @@ Download [install.ps1](../scripts/install.ps1), inspect it, then run it from
 PowerShell as your normal user:
 
 ```powershell
-.\install.ps1 -Version v0.6.0
+.\install.ps1 -Version v0.6.1
 ```
 
 The installer chooses amd64 or arm64, verifies SHA-256, and installs under
@@ -149,7 +149,7 @@ Install Docker with Compose. From the matching release checkout:
 
 ```sh
 export TUTOR_DOMAIN=tutor.example.org
-export TUTOR_VERSION=v0.6.0
+export TUTOR_VERSION=v0.6.1
 docker compose -f deploy/compose.hobby.yml build
 docker compose -f deploy/compose.hobby.yml run --rm --no-deps tutor \
   init --profile hobby --data-dir /data/hobby --public-url "https://$TUTOR_DOMAIN"

@@ -1,10 +1,10 @@
 name: tutor-institution
 x-runtime: &runtime
-  image: tutor-mcp:${TUTOR_VERSION:-v0.6.0}
+  image: tutor-mcp:${TUTOR_VERSION:-v0.6.1}
   build:
     context: ..
     args:
-      VERSION: ${TUTOR_VERSION:-v0.6.0}
+      VERSION: ${TUTOR_VERSION:-v0.6.1}
   command: ["--profile", "institution"]
   read_only: true
   tmpfs: [/tmp]

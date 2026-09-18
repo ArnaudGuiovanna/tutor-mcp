@@ -6,6 +6,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-09-18
+
+### Fixed
+
+- Save session summaries with `domain_id` on the encrypted database narrative
+  backend used by local, hobby and institution profiles. Keep the tool's domain
+  validation while using the same learner-scoped storage key as the file backend.
+- Accept assessment `criteria_scores` objects keyed by criterion ID, including
+  numeric values, consistently with rubric validation and the existing array form.
+- Add regression coverage for database-backed session memory and object-form
+  assessment scores.
+
+## Previously accumulated changes (through v0.6.0)
+
 ### Local and VPS profiles
 
 - Add `--local` stdio with a persistent learner-only SQLite identity and encrypted,
@@ -529,7 +543,8 @@ Three algorithmic refinements deferred for a later release:
 - Go 1.25+ required.
 - SQLite >= 3.35 (DROP COLUMN support).
 
-[Unreleased]: https://github.com/ArnaudGuiovanna/tutor-mcp/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/ArnaudGuiovanna/tutor-mcp/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/v0.6.1
 [0.4.1]: https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/v0.4.1
 [0.4.0]: https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/v0.4.0
 [0.3.1]: https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/v0.3.1
