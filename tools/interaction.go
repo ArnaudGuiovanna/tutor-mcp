@@ -27,7 +27,7 @@ type RecordInteractionParams struct {
 	ResponseTimeSeconds      float64  `json:"response_time_seconds" jsonschema:"response time in seconds"`
 	Confidence               float64  `json:"confidence" jsonschema:"estimated confidence as a 0..1 float"`
 	ErrorType                string   `json:"error_type,omitempty" jsonschema:"error type on failure - leave empty or use exactly: SYNTAX_ERROR, LOGIC_ERROR, KNOWLEDGE_GAP"`
-	Notes                    string   `json:"notes" jsonschema:"optional notes about the interaction"`
+	Notes                    string   `json:"notes,omitempty" jsonschema:"optional notes about the interaction"`
 	DomainID                 string   `json:"domain_id,omitempty" jsonschema:"domain ID (optional)"`
 	SessionID                string   `json:"session_id,omitempty" jsonschema:"durable learning session ID; omit only for legacy clients, which resume or open the active session"`
 	AssessmentAttemptID      string   `json:"attempt_id,omitempty" jsonschema:"submitted assessment attempt whose frozen rubric is being evaluated"`
@@ -39,8 +39,8 @@ type RecordInteractionParams struct {
 	CalibrationID            string   `json:"calibration_id,omitempty" jsonschema:"id of the associated calibration prediction (optional)"`
 	MisconceptionType        string   `json:"misconception_type,omitempty" jsonschema:"free-form label of the detected misconception (optional, ignored if success=true)"`
 	MisconceptionDetail      string   `json:"misconception_detail,omitempty" jsonschema:"one-sentence description of the misconception (optional)"`
-	RubricJSON               string   `json:"rubric_json,omitempty" jsonschema:"optional rubric as a JSON object or array"`
-	RubricScoreJSON          string   `json:"rubric_score_json,omitempty" jsonschema:"optional rubric scoring result as a JSON object or array"`
+	RubricJSON               string   `json:"rubric_json,omitempty" jsonschema:"optional rubric as a JSON object or array: {criteria: [{id, description, max_score, anchors}], passing_score, answer_key}. Scoring fields such as evidence or total belong to rubric_score_json, not here"`
+	RubricScoreJSON          string   `json:"rubric_score_json,omitempty" jsonschema:"optional rubric scoring result as a JSON object or array: {criteria_scores: [{id, score, evidence, error_type, max_score}], total, max_total, summary, confidence}. One entry per frozen rubric criterion"`
 	SemanticObservationJSON  string   `json:"semantic_observation_json,omitempty" jsonschema:"optional semantic observation as a JSON object"`
 	InterpretationBrief      string   `json:"interpretation_brief,omitempty" jsonschema:"optional brief hypothesis produced before the activity, stored for pedagogical audit"`
 	TransferDimension        string   `json:"transfer_dimension,omitempty" jsonschema:"required for TRANSFER_PROBE: near, far, debugging, teaching, or creative"`
