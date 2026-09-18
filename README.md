@@ -40,7 +40,7 @@
 ## Demo
 
 <p align="center">
-  <img src="docs/assets/demo.gif" alt="A real Tutor MCP session in Claude Code: domain creation, cold diagnostics, gated Feynman and transfer probes, and mastery verified by transfer" width="100%" />
+  <img src="docs/assets/demo.gif" alt="A real Tutor MCP session in Claude Code: a goal turned into a scored curriculum, a cold diagnostic graded against a frozen rubric, and a session closed with its summary written to learner memory" width="100%" />
 </p>
 
 A real first session, running locally over stdio in Claude Code. Tutor maps Go backend development
