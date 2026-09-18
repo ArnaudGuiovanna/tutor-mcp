@@ -138,6 +138,12 @@ func UsingSharedNarrativeStore() bool { return configuredNarrativeStore() != nil
 func narrativeKeyForWrite(req WriteRequest) (NarrativeKey, error) {
 	key := NarrativeKey{TenantID: req.TenantID, EnrollmentID: req.EnrollmentID,
 		LearnerID: req.LearnerID, DomainID: req.DomainID, Scope: req.Scope}
+	if req.Scope != ScopeConcept {
+		// Only concept notes are domain-scoped. The local-file backend already
+		// drops the domain for every other scope, so keeping it here would make
+		// the two backends disagree on a request the caller is allowed to make.
+		key.DomainID = ""
+	}
 	switch req.Scope {
 	case ScopeSession:
 		if req.Timestamp.IsZero() {

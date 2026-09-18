@@ -378,8 +378,29 @@ func deriveAssessmentOutcome(rubric, score map[string]any) (float64, bool, error
 				return 0, false, err
 			}
 		}
+	case map[string]any:
+		// normalizeRubricScoreCriteria already accepts this shape, so a score
+		// keyed by criterion id clears rubric validation. Rejecting it here
+		// would fail the attempt after the rubric had approved it.
+		for _, key := range sortedRubricKeys(items) {
+			item, isObject := items[key].(map[string]any)
+			if !isObject {
+				item = map[string]any{"score": items[key]}
+			}
+			if _, hasID := item["id"]; !hasID {
+				withID := make(map[string]any, len(item)+1)
+				for k, v := range item {
+					withID[k] = v
+				}
+				withID["id"] = key
+				item = withID
+			}
+			if err := add(item); err != nil {
+				return 0, false, err
+			}
+		}
 	default:
-		return 0, false, fmt.Errorf("assessment criteria_scores must be an array")
+		return 0, false, fmt.Errorf("assessment criteria_scores must be an array or object")
 	}
 	if len(scoresByID) != len(maxByID) {
 		return 0, false, fmt.Errorf("assessment score must cover every frozen rubric criterion")
