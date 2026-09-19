@@ -18,6 +18,7 @@ import (
 	"tutor-mcp/observability"
 	storeport "tutor-mcp/store"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -160,6 +161,59 @@ func hasRequiredOAuthScopes(ctx context.Context, required []string) bool {
 // addTool is the single registration boundary for authorization and safety
 // metadata. ChatGPT consumes the securitySchemes compatibility entry from
 // _meta, while standard MCP clients consume ToolAnnotations.
+// toolInputEnums pins the exact values a tool's string input accepts. The store
+// already rejects everything else, but a jsonschema struct tag only becomes the
+// property description, and a description is advice the caller is free to
+// ignore: a recorded session shows a client inventing "diagnostic_feedback"
+// four times while the description named the two real kinds. Listing them in
+// the schema makes the same constraint part of what the client validates.
+var toolInputEnums = map[string]map[string][]any{
+	"record_learning_event": {"kind": {"feedback", "instruction"}},
+}
+
+// toolInputStringForms names inputs declared as an object that also accept a
+// plain sentence, decoded by the type's own UnmarshalJSON. The schema has to
+// advertise both shapes, because the SDK validates arguments against it before
+// any decoding happens.
+var toolInputStringForms = map[string][]string{
+	"record_session_close": {"implementation_intention"},
+}
+
+// constrainInputSchema infers the schema the SDK would have inferred anyway and
+// adds the enums and alternate shapes above, leaving every tool without an
+// entry untouched.
+func constrainInputSchema[In any](tool *mcp.Tool) {
+	enums, hasEnums := toolInputEnums[tool.Name]
+	stringForms, hasStringForms := toolInputStringForms[tool.Name]
+	if (!hasEnums && !hasStringForms) || tool.InputSchema != nil {
+		return
+	}
+	schema, err := jsonschema.For[In](&jsonschema.ForOptions{})
+	if err != nil {
+		panic("cannot infer the input schema of MCP tool " + tool.Name + ": " + err.Error())
+	}
+	for field, values := range enums {
+		property, ok := schema.Properties[field]
+		if !ok {
+			panic("MCP tool " + tool.Name + " has no " + field + " input to constrain")
+		}
+		property.Enum = values
+	}
+	for _, field := range stringForms {
+		property, ok := schema.Properties[field]
+		if !ok {
+			panic("MCP tool " + tool.Name + " has no " + field + " input to constrain")
+		}
+		object := *property
+		object.Description = ""
+		schema.Properties[field] = &jsonschema.Schema{
+			Description: property.Description,
+			AnyOf:       []*jsonschema.Schema{&object, {Type: "string"}},
+		}
+	}
+	tool.InputSchema = schema
+}
+
 func addTool[In, Out any](server *mcp.Server, tool *mcp.Tool, handler mcp.ToolHandlerFor[In, Out]) {
 	readOnly := readOnlyTools[tool.Name]
 	requiredScopes, known := requiredOAuthScopesForTool(tool.Name)
@@ -218,6 +272,7 @@ func addTool[In, Out any](server *mcp.Server, tool *mcp.Tool, handler mcp.ToolHa
 		}
 		return result, output, err
 	}
+	constrainInputSchema[In](tool)
 	mcp.AddTool(server, tool, scopedHandler)
 }
 

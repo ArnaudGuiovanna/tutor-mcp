@@ -27,7 +27,7 @@ func ParseRubric(raw string) (models.AssessmentRubric, error) {
 	if !ok {
 		return rubric, fmt.Errorf("bound assessment rubric_json must be a canonical JSON object")
 	}
-	if err := rejectUnknownAssessmentRubricFields(object, "rubric_json", "criteria", "passing_score", "answer_key"); err != nil {
+	if err := rejectUnknownAssessmentRubricFields(object, "rubric_json", "criteria", "passing_score", "answer_key", "max_total"); err != nil {
 		return rubric, err
 	}
 	passing, coerced, valid := rubricFiniteNumber(object["passing_score"])
@@ -86,6 +86,22 @@ func ParseRubric(raw string) (models.AssessmentRubric, error) {
 			}
 		}
 		rubric.Criteria = append(rubric.Criteria, criterion)
+	}
+	// max_total is a supported field of rubric_score_json, so a caller writing
+	// both documents tends to carry it up into the rubric as well. It is
+	// redundant with the criteria, never stored, and accepted only when it
+	// agrees with them — the same rule a redundant criterion max_score follows
+	// when a score is evaluated.
+	if supplied, present := object["max_total"]; present {
+		maximum := new(big.Rat)
+		for _, criterion := range rubric.Criteria {
+			maximum.Add(maximum, decimal(criterion.MaxScore))
+		}
+		expected, _ := maximum.Float64()
+		value, _, valid := rubricFiniteNumber(supplied)
+		if !valid || value != expected {
+			return rubric, fmt.Errorf("rubric_json.max_total contradicts the criteria, which total %v", expected)
+		}
 	}
 	if err := ValidateRubric(rubric); err != nil {
 		return rubric, err

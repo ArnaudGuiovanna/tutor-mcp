@@ -15,8 +15,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   validation while using the same learner-scoped storage key as the file backend.
 - Accept assessment `criteria_scores` objects keyed by criterion ID, including
   numeric values, consistently with rubric validation and the existing array form.
-- Add regression coverage for database-backed session memory and object-form
-  assessment scores.
+- Accept object-form `criteria_scores` in the bound-evaluation scorer as well,
+  which the runtime uses and which the first fix did not reach.
+- Accept a `rubric_json.max_total` that matches the criteria it summarises, and
+  keep refusing one that contradicts them.
+- Advertise the two accepted `record_learning_event` kinds as a schema enum
+  rather than naming them only in the description.
+- Accept a plain "when, what" sentence for `implementation_intention` alongside
+  the `{trigger, action}` object.
+- Stop requiring `record_interaction.notes`, which its own description calls
+  optional, and list the accepted fields of `rubric_json` and
+  `rubric_score_json` so callers stop mixing the two documents.
+- Return `last_session` and `opening_message` in English.
+- Add regression coverage for database-backed session memory, object-form
+  assessment scores on both scoring paths, rubric aggregates, the sentence form
+  of an implementation intention, and a guard against any schema-required tool
+  input whose description calls it optional.
 
 ## Previously accumulated changes (through v0.6.0)
 

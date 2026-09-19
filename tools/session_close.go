@@ -6,8 +6,10 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"tutor-mcp/memory"
@@ -23,11 +25,48 @@ type ImplementationIntentionInput struct {
 	ScheduledFor string `json:"scheduled_for,omitempty" jsonschema:"optional ISO 8601 timestamp (UTC)"`
 }
 
+// UnmarshalJSON accepts the object this input is declared as, and also a plain
+// sentence. Naming the two clauses in the description was not enough: recorded
+// sessions show callers sending prose, and the call then died in schema
+// validation before the handler could do anything with it.
+func (in *ImplementationIntentionInput) UnmarshalJSON(data []byte) error {
+	var sentence string
+	if err := json.Unmarshal(data, &sentence); err == nil {
+		*in = implementationIntentionFromSentence(sentence)
+		return nil
+	}
+	// A named type drops the method set, so this decodes the object normally
+	// instead of calling back into UnmarshalJSON.
+	type object ImplementationIntentionInput
+	var decoded object
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*in = ImplementationIntentionInput(decoded)
+	return nil
+}
+
+// implementationIntentionFromSentence splits "when, what" prose into the two
+// clauses the schema asks for. A sentence with no separator yields a trigger
+// alone, which record_session_close already reads as "no if-then commitment"
+// and skips: better than inventing an action the learner never stated.
+func implementationIntentionFromSentence(sentence string) ImplementationIntentionInput {
+	trimmed := strings.TrimSpace(sentence)
+	for _, separator := range []string{", ", ": ", " then ", " - ", " \u2014 "} {
+		before, after, found := strings.Cut(trimmed, separator)
+		trigger, action := strings.TrimSpace(before), strings.TrimSpace(after)
+		if found && trigger != "" && action != "" {
+			return ImplementationIntentionInput{Trigger: trigger, Action: action}
+		}
+	}
+	return ImplementationIntentionInput{Trigger: trimmed}
+}
+
 type RecordSessionCloseParams struct {
 	IdempotentMutationParams
 	SessionID               string                        `json:"session_id,omitempty" jsonschema:"durable learning session ID; omit to close the learner's active session"`
 	DomainID                string                        `json:"domain_id,omitempty" jsonschema:"domain ID (optional)"`
-	ImplementationIntention *ImplementationIntentionInput `json:"implementation_intention,omitempty" jsonschema:"optional if-then commitment (Gollwitzer)"`
+	ImplementationIntention *ImplementationIntentionInput `json:"implementation_intention,omitempty" jsonschema:"optional if-then commitment (Gollwitzer): an object with a trigger clause and an action clause, or a single 'when, what' sentence"`
 }
 
 func registerRecordSessionClose(server *mcp.Server, deps *Deps) {

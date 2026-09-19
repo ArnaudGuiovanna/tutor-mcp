@@ -54,8 +54,29 @@ func Evaluate(rubric models.AssessmentRubric, score map[string]any) (Result, err
 			}
 			items = append(items, item)
 		}
+	case map[string]any:
+		// parseRubricSchemaJSON already accepts a score keyed by criterion id, so
+		// that shape reaches this function unchanged. Rejecting it here would fail
+		// an evaluation the rubric layer had just approved. Keys are walked in
+		// sorted order so a duplicate or unknown criterion is always reported
+		// against the same item.
+		for _, key := range sortedRubricKeys(values) {
+			item, isObject := values[key].(map[string]any)
+			if !isObject {
+				item = map[string]any{"score": values[key]}
+			}
+			if _, hasID := item["id"]; !hasID {
+				withID := make(map[string]any, len(item)+1)
+				for field, value := range item {
+					withID[field] = value
+				}
+				withID["id"] = key
+				item = withID
+			}
+			items = append(items, item)
+		}
 	default:
-		return Result{}, fmt.Errorf("assessment criteria_scores must be an array")
+		return Result{}, fmt.Errorf("assessment criteria_scores must be an array or object")
 	}
 	maxByID := make(map[string]float64, len(rubric.Criteria))
 	for _, criterion := range rubric.Criteria {

@@ -110,13 +110,13 @@ func registerGetLearnerContext(server *mcp.Server, deps *Deps) {
 		dayNumber := int(math.Floor(now.Sub(overview.Learner.CreatedAt).Hours()/24)) + 1
 
 		// Last session info
-		lastSessionInfo := "premiere session"
+		lastSessionInfo := "first session"
 		if !overview.Learner.LastActive.IsZero() {
 			hoursSince := now.Sub(overview.Learner.LastActive).Hours()
 			if hoursSince < 24 {
-				lastSessionInfo = fmt.Sprintf("derniere session il y a %.0fh", hoursSince)
+				lastSessionInfo = fmt.Sprintf("last session %.0fh ago", hoursSince)
 			} else {
-				lastSessionInfo = fmt.Sprintf("derniere session il y a %d jours", int(hoursSince/24))
+				lastSessionInfo = fmt.Sprintf("last session %d days ago", int(hoursSince/24))
 			}
 		}
 
