@@ -525,6 +525,43 @@ func TestOrchestrate_RecallNeedIndependentOfAcquisitionPhase(t *testing.T) {
 	}
 }
 
+func TestOrchestrate_NoRecallOnConceptNeverAcquired(t *testing.T) {
+	// "target" failed a cold diagnostic a week ago: its card is still in the
+	// learning state with a decayed retention, and its prerequisite is not
+	// mastered. Recall selection must leave it alone and let instruction
+	// work on the prerequisite.
+	store := setupOrchStore(t)
+	domainID := seedOrchDomain(t, store,
+		[]string{"pre", "target"},
+		map[string][]string{"target": {"pre"}},
+		models.PhaseInstruction,
+	)
+	cs, err := store.GetConceptState(context.Background(), "L1", "target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lastReview := time.Now().UTC().Add(-7 * 24 * time.Hour)
+	cs.PMastery = 0.05
+	cs.CardState = "learning"
+	cs.Stability = 0.4
+	cs.Reps = 1
+	cs.LastReview = &lastReview
+	if err := store.UpsertConceptState(context.Background(), cs); err != nil {
+		t.Fatal(err)
+	}
+
+	activity, err := Orchestrate(context.Background(), store, defaultInput(domainID))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if activity.Concept == "target" {
+		t.Fatalf("a never-acquired concept was routed to recall: %+v", activity)
+	}
+	if activity.Concept != "pre" {
+		t.Fatalf("expected instruction on the prerequisite, got %+v", activity)
+	}
+}
+
 // ─── OQ-2.7 : Goal-relevant cutoff (uncovered exclusion) ───────────────────
 
 func TestOrchestrate_GoalRelevant_RestrictiveGoal_FastMaintenance(t *testing.T) {

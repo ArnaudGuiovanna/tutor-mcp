@@ -289,6 +289,14 @@ func applyInteraction(
 			LastReview:    priorLastReview,
 		}
 		fsrsApplied := priorLastReview.IsZero() || fsrsObservationAt.After(priorLastReview) || fsrsEventProtocol == "legacy_grading_time"
+		fsrsSkipReason := ""
+		if fsrsApplied && failedColdDiagnostic(priorCardState, input) {
+			// A cold diagnostic that fails measures prior knowledge; it does
+			// not create a memory to schedule. Creating a card here made the
+			// runtime schedule recall on a concept the learner never learned.
+			fsrsApplied = false
+			fsrsSkipReason = "failed_cold_diagnostic_creates_no_card"
+		}
 		if fsrsApplied {
 			fsrsCard = algorithms.ReviewCard(fsrsCard, rating, fsrsObservationAt)
 		}
@@ -297,6 +305,9 @@ func applyInteraction(
 			"fsrs_observation_at":     fsrsObservationAt,
 			"fsrs_update_applied":     fsrsApplied,
 		})
+		if fsrsSkipReason != "" {
+			observation["fsrs_skip_reason"] = fsrsSkipReason
+		}
 
 		// Preserve the legacy estimate. Updating it from FSRS would treat a
 		// learner/concept memory parameter as the difficulty of this task.
@@ -348,6 +359,14 @@ func applyInteraction(
 	}
 
 	return resultCS, resultMeta, nil
+}
+
+// failedColdDiagnostic is true for a failed DIAGNOSTIC_ASSESSMENT on a
+// concept that has no memory card yet.
+func failedColdDiagnostic(priorCardState string, input interactionInput) bool {
+	return !input.Success &&
+		algorithms.CardState(priorCardState) == algorithms.New &&
+		models.ActivityType(input.ActivityType) == models.ActivityDiagnosticAssessment
 }
 
 func isCognitiveEvidenceActivity(activityType string) bool {

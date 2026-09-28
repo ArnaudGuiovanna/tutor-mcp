@@ -50,9 +50,10 @@ func ComputeAlertsWithEvidenceAt(states []*models.ConceptState, recentInteractio
 			continue
 		}
 
-		// FORGETTING: FSRS retention below the named alert warning threshold.
+		// FORGETTING: FSRS retention below the named alert warning threshold,
+		// only for cards that were acquired at least once (see RecallEligible).
 		retention := algorithms.CurrentRetrievability(now, cs.LastReview, cs.Stability)
-		if retention < algorithms.RetentionAlertWarningThreshold {
+		if RecallEligible(cs) && retention < algorithms.RetentionAlertWarningThreshold {
 			urgency := models.UrgencyWarning
 			if retention < algorithms.RetentionAlertCriticalThreshold {
 				urgency = models.UrgencyCritical

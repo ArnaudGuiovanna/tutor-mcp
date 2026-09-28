@@ -534,7 +534,7 @@ func recallNeedSelection(domain *models.Domain, pf *pipelineFixtures, phase mode
 			continue
 		}
 		cs := pf.StatesByConcept[concept]
-		if cs == nil || cs.CardState == "new" || cs.LastReview == nil || cs.LastReview.IsZero() {
+		if !RecallEligible(cs) {
 			continue
 		}
 		retention := algorithms.CurrentRetrievability(input.Now, cs.LastReview, cs.Stability)

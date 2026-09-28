@@ -30,6 +30,9 @@ type conceptProgress struct {
 	MasteryStatus engine.MasteryStatus `json:"mastery_status"`
 	RoutingStatus string               `json:"routing_status" jsonschema:"KST routing state; never a demonstrated-learning claim"`
 	CardState     string               `json:"card_state"`
+	// recallEligible mirrors engine.RecallEligible: retention alerts only
+	// concern concepts that were acquired at least once.
+	recallEligible bool
 }
 
 type domainDashboard struct {
@@ -184,6 +187,7 @@ func registerGetDashboardState(server *mcp.Server, deps *Deps) {
 				if cs != nil {
 					cp.CardState = cs.CardState
 					cp.Retention = algorithms.CurrentRetrievability(now, cs.LastReview, cs.Stability)
+					cp.recallEligible = engine.RecallEligible(cs)
 				}
 
 				if masteryStatus.Estimated {
@@ -203,7 +207,7 @@ func registerGetDashboardState(server *mcp.Server, deps *Deps) {
 
 			var retentionAlerts []map[string]interface{}
 			for _, cp := range concepts {
-				if cp.Retention < 0.50 && cp.CardState != "new" {
+				if cp.Retention < 0.50 && cp.recallEligible {
 					color := "orange"
 					if cp.Retention < 0.30 {
 						color = "red"
