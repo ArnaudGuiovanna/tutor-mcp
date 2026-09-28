@@ -57,7 +57,7 @@ Environment variables read at boot:
 | `INTEGRATION_SECRET_KEYS` | — | Comma-separated `key_id:base64-32-byte-key` keyring used to encrypt webhook credentials and shared narrative memory at rest. Supply old and new keys during rotation. |
 | `INTEGRATION_SECRET_CURRENT_KEY_ID` | — | Key ID used for new envelopes; startup atomically re-encrypts legacy/old-key records. Required with `INTEGRATION_SECRET_KEYS`. |
 | `TENANT_INTEGRATION_ALLOWED_HOSTS` | — | Comma-separated HTTPS host allowlist for signed tenant webhooks; mandatory in production. IP literals and non-443 ports are refused. |
-| `TUTOR_MCP_MEMORY_ENABLED` | `on` | Enables narrative learner memory. Runtime concept notes and sessions are domain-scoped; ambiguous legacy/global narratives are excluded from activity generation. |
+| `TUTOR_MCP_MEMORY_ENABLED` | `on` | Enables narrative learner memory. Runtime concept notes and sessions are domain-scoped; legacy global concept notes are excluded from activity generation, while the learner-level stable memory, pending observations and consolidated archives are always injected within a 40 KiB budget. |
 | `TUTOR_MCP_MEMORY_BACKEND` | `local` on SQLite, `database` on PostgreSQL | `local` Markdown or encrypted/versioned relational objects. Active distributed and production profiles require `database`. See the [migration and rotation runbook](narrative-memory-operations.md). |
 | `TUTOR_MCP_MEMORY_ROOT` | `~/.tutor-mcp/` | Local backend root and create-only backfill source when switching to `database`. |
 | `TUTOR_MCP_MEMORY_MAX_WRITE_BYTES` | `262144` | Maximum content supplied to one narrative-memory write. |

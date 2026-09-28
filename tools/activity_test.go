@@ -240,6 +240,35 @@ func TestGetNextActivity_IncludesEpisodicContextAndReasoningRequest(t *testing.T
 	}
 }
 
+func TestGetNextActivity_InjectsStableLearnerMemoryInDomainContext(t *testing.T) {
+	// The stable learner memory is learner-level: it must reach the
+	// domain-scoped context that get_next_activity builds, not only the
+	// learner-global maintenance loader.
+	t.Setenv("TUTOR_MCP_MEMORY_ROOT", t.TempDir())
+	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
+	store, deps := setupToolsTest(t)
+	d := makeOwnerDomain(t, store, "L_owner", "math")
+	if err := memory.Write(memory.WriteRequest{
+		LearnerID: "L_owner", Scope: memory.ScopeMemory, Operation: memory.OpReplaceFile,
+		Content: "## Stable\nPrefers worked examples before abstract rules.",
+	}); err != nil {
+		t.Fatalf("write stable memory: %v", err)
+	}
+
+	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{"domain_id": d.ID})
+	if res.IsError {
+		t.Fatalf("got %q", resultText(res))
+	}
+	out := decodeResult(t, res)
+	ec, ok := out["episodic_context"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected episodic_context, got %v", out)
+	}
+	if learnerMemory, _ := ec["learner_memory"].(string); !strings.Contains(learnerMemory, "worked examples") {
+		t.Fatalf("stable learner memory missing from the domain context: %v", ec)
+	}
+}
+
 func TestGetNextActivity_AttachesClientInitiatedConsolidationRequest(t *testing.T) {
 	t.Setenv("TUTOR_MCP_MEMORY_ROOT", t.TempDir())
 	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
