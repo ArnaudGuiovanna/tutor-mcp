@@ -124,3 +124,30 @@ func baseEvidenceControllerInput() EvidenceControllerInput {
 		EvidenceQuality: EvidenceQualityAssessment{Quality: EvidenceQualityStrong},
 	}
 }
+
+func TestApplyEvidenceController_RecallAndMisconceptionWorkAreNeverReplaced(t *testing.T) {
+	// A decayed memory or an active confusion outranks the wish to probe
+	// transfer on a high estimate; only practice-like activities are eligible.
+	for _, activityType := range []models.ActivityType{
+		models.ActivityRecall, models.ActivityDebugMisconception, models.ActivityDebuggingCase, models.ActivityNewConcept,
+	} {
+		t.Run(string(activityType), func(t *testing.T) {
+			in := baseEvidenceControllerInput()
+			in.Activity.Type = activityType
+			in.TransferProfile.ReadinessLabel = TransferReadinessUnobserved
+			if got := ApplyEvidenceController(in); got.Adjusted || got.Activity.Type != activityType {
+				t.Fatalf("%s was replaced by the evidence controller: %+v", activityType, got)
+			}
+			in.TransferProfile.ReadinessLabel = TransferReadinessBlocked
+			if got := ApplyEvidenceController(in); got.Adjusted || got.Activity.Type != activityType {
+				t.Fatalf("%s was replaced on blocked transfer: %+v", activityType, got)
+			}
+		})
+	}
+	in := baseEvidenceControllerInput()
+	in.Activity.Type = models.ActivityPractice
+	in.TransferProfile.ReadinessLabel = TransferReadinessUnobserved
+	if got := ApplyEvidenceController(in); !got.Adjusted || got.Activity.Type != models.ActivityTransferProbe {
+		t.Fatalf("practice on a high estimate should still become a transfer probe: %+v", got)
+	}
+}

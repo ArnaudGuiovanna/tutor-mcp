@@ -51,12 +51,21 @@ func ApplyEvidenceController(input EvidenceControllerInput) EvidenceControllerDe
 	return EvidenceControllerDecision{Activity: activity}
 }
 
+// evidenceControllerEligible lists the activities the controller may replace
+// with a transfer or Feynman probe. It is a positive list on purpose: recall
+// exercises and misconception work carry their own priority (a decayed memory
+// or an active confusion) that a high mastery estimate must not override,
+// and diagnostics, rest and session control are never probes.
 func evidenceControllerEligible(activity models.Activity) bool {
-	switch activity.Type {
-	case models.ActivityCloseSession, models.ActivityRest, models.ActivitySetupDomain, models.ActivityDiagnosticAssessment:
+	if activity.Concept == "" {
 		return false
+	}
+	switch activity.Type {
+	case models.ActivityPractice, models.ActivityMasteryChallenge,
+		models.ActivityFeynmanPrompt, models.ActivityTransferProbe:
+		return true
 	default:
-		return activity.Concept != ""
+		return false
 	}
 }
 

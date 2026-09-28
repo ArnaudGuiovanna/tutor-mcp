@@ -462,6 +462,37 @@ func TestGetNextActivity_IdleSessionExpiresWithoutOverload(t *testing.T) {
 	}
 }
 
+func TestGetNextActivity_MaintenanceRecallSurvivesEvidenceController(t *testing.T) {
+	// A mastered concept whose memory decayed must get its recall exercise,
+	// not a transfer probe: the evidence controller used to replace every
+	// activity on a high estimate whenever transfer was unobserved.
+	store, deps := setupToolsTest(t)
+	d := makeOwnerDomain(t, store, "L_owner", "math")
+	cs := models.NewConceptStateInDomain("L_owner", d.ID, "a")
+	cs.PMastery = 0.95
+	cs.CardState = "review"
+	cs.Stability = 1
+	cs.Reps = 3
+	lastReview := time.Now().UTC().Add(-24 * 24 * time.Hour)
+	cs.LastReview = &lastReview
+	if err := store.UpsertConceptState(context.Background(), cs); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	if err := store.UpdateDomainPhase(context.Background(), d.ID, models.PhaseMaintenance, 0, time.Now().UTC()); err != nil {
+		t.Fatalf("set phase: %v", err)
+	}
+
+	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{"domain_id": d.ID})
+	if res.IsError {
+		t.Fatalf("got %q", resultText(res))
+	}
+	out := decodeResult(t, res)
+	activity, _ := out["activity"].(map[string]any)
+	if activity["type"] != string(models.ActivityRecall) || activity["concept"] != "a" {
+		t.Fatalf("expected RECALL_EXERCISE on the decayed concept, got %v (adjustment=%v)", activity, out["evidence_adjustment"])
+	}
+}
+
 func TestBuildGoalRelevanceStatus(t *testing.T) {
 	base := func() *models.Domain {
 		return &models.Domain{
