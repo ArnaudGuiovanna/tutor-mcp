@@ -242,6 +242,66 @@ func (d *Domain) IsGoalRelevanceStale() bool {
 	return gr.ForGraphVersion < d.GraphVersion
 }
 
+// defaultUncoveredRelevanceFloor bounds the relevance granted to a concept
+// that joined the graph after the relevance vector was set.
+const defaultUncoveredRelevanceFloor = 0.1
+
+// EffectiveGoalRelevance returns the relevance vector the routing pipeline
+// should use. It is nil when no vector exists (uniform fallback).
+//
+// When the stored vector is current for this graph version, omitting a
+// concept still means "not relevant to the goal" (a restrictive goal). When
+// the vector is stale — the graph gained concepts after the vector was set,
+// typically through add_concepts — the uncovered concepts receive a default
+// weight equal to the mean of the existing weights (bounded to [0.1, 1], or
+// 1.0 when the vector is empty). Without this default a newly added concept
+// stays invisible to routing until the host calls set_goal_relevance again,
+// which fails silently when the host forgets. get_goal_relevance and the
+// goal_relevance_status field keep reporting these concepts as uncovered so
+// the host is still asked to decompose them.
+func (d *Domain) EffectiveGoalRelevance() map[string]float64 {
+	gr := d.ParseGoalRelevance()
+	if gr == nil {
+		return nil
+	}
+	effective := make(map[string]float64, len(gr.Relevance)+len(d.Graph.Concepts))
+	for concept, weight := range gr.Relevance {
+		effective[concept] = weight
+	}
+	if !d.IsGoalRelevanceStale() {
+		return effective
+	}
+	fallback := DefaultUncoveredRelevance(gr.Relevance)
+	for _, concept := range d.Graph.Concepts {
+		if _, covered := effective[concept]; !covered {
+			effective[concept] = fallback
+		}
+	}
+	return effective
+}
+
+// DefaultUncoveredRelevance is the weight granted to a concept absent from a
+// stale relevance vector: the mean of the existing weights bounded to
+// [0.1, 1], or 1.0 when the vector carries no weight at all.
+func DefaultUncoveredRelevance(relevance map[string]float64) float64 {
+	if len(relevance) == 0 {
+		return 1.0
+	}
+	sum := 0.0
+	for _, weight := range relevance {
+		sum += weight
+	}
+	mean := sum / float64(len(relevance))
+	switch {
+	case mean < defaultUncoveredRelevanceFloor:
+		return defaultUncoveredRelevanceFloor
+	case mean > 1:
+		return 1
+	default:
+		return mean
+	}
+}
+
 // UncoveredConcepts returns the concepts present in d.Graph.Concepts that
 // have no entry in the stored relevance vector. Per OQ-1.2 these are the
 // "per-concept stale" concepts: visible to the LLM via get_goal_relevance,

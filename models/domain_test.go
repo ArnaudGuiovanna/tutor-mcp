@@ -232,3 +232,60 @@ func TestActivityType_NoInterleaving(t *testing.T) {
 		}
 	}
 }
+
+// ─── EffectiveGoalRelevance ────────────────────────────────────────────────
+
+func TestEffectiveGoalRelevance_NilVectorStaysNil(t *testing.T) {
+	d := &Domain{ID: "d1", GraphVersion: 2, Graph: KnowledgeSpace{Concepts: []string{"A", "B"}}}
+	if got := d.EffectiveGoalRelevance(); got != nil {
+		t.Errorf("no vector: want nil (uniform fallback), got %v", got)
+	}
+}
+
+func TestEffectiveGoalRelevance_CurrentVectorKeepsOmissionAsExclusion(t *testing.T) {
+	d := &Domain{
+		ID:                "d1",
+		GoalRelevanceJSON: `{"for_graph_version":2,"relevance":{"A":0.5}}`,
+		GraphVersion:      2,
+		Graph:             KnowledgeSpace{Concepts: []string{"A", "B"}},
+	}
+	got := d.EffectiveGoalRelevance()
+	if _, covered := got["B"]; covered {
+		t.Errorf("current vector: B must stay uncovered (restrictive goal), got %v", got)
+	}
+	if got["A"] != 0.5 {
+		t.Errorf("A weight altered: %v", got)
+	}
+}
+
+func TestEffectiveGoalRelevance_StaleVectorDefaultsUncoveredToMean(t *testing.T) {
+	d := &Domain{
+		ID:                "d1",
+		GoalRelevanceJSON: `{"for_graph_version":1,"relevance":{"A":0.8,"B":0.4}}`,
+		GraphVersion:      2,
+		Graph:             KnowledgeSpace{Concepts: []string{"A", "B", "C"}},
+	}
+	got := d.EffectiveGoalRelevance()
+	if got["C"] < 0.599 || got["C"] > 0.601 {
+		t.Errorf("stale vector: C should default to the mean 0.6, got %v", got["C"])
+	}
+	if got["A"] != 0.8 || got["B"] != 0.4 {
+		t.Errorf("existing weights altered: %v", got)
+	}
+	// The stored vector is not mutated.
+	if gr := d.ParseGoalRelevance(); len(gr.Relevance) != 2 {
+		t.Errorf("stored vector mutated: %v", gr.Relevance)
+	}
+}
+
+func TestDefaultUncoveredRelevance_Bounds(t *testing.T) {
+	if got := DefaultUncoveredRelevance(nil); got != 1.0 {
+		t.Errorf("empty vector: want 1.0, got %v", got)
+	}
+	if got := DefaultUncoveredRelevance(map[string]float64{"A": 0, "B": 0.02}); got != 0.1 {
+		t.Errorf("near-zero mean: want floor 0.1, got %v", got)
+	}
+	if got := DefaultUncoveredRelevance(map[string]float64{"A": 1, "B": 1}); got != 1 {
+		t.Errorf("full relevance: want 1, got %v", got)
+	}
+}

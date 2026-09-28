@@ -564,6 +564,35 @@ func TestOrchestrate_GoalRelevant_BroadGoal_StaysInstruction(t *testing.T) {
 	}
 }
 
+// ─── Concepts added after the relevance vector was set ─────────────────────
+
+func TestOrchestrate_GoalRelevant_StaleVector_NewConceptStaysRoutable(t *testing.T) {
+	// A vector set against graph version 1 covers A and B. The graph then
+	// gains C (version 2) and the host forgets to call set_goal_relevance.
+	// C must still be selectable instead of leaving the learner with no
+	// fringe once A and B are mastered.
+	store := setupOrchStore(t)
+	domainID := seedOrchDomain(t, store, []string{"A", "B", "C"}, nil, models.PhaseInstruction)
+	setGoalRelevance(t, store, domainID, map[string]float64{"A": 0.9, "B": 0.9})
+	if _, err := store.RawDB().Exec(`UPDATE domains SET graph_version = graph_version + 1 WHERE id = ?`, domainID); err != nil {
+		t.Fatal(err)
+	}
+	setMastery(t, store, "A", 0.95)
+	setMastery(t, store, "B", 0.95)
+
+	activity, err := Orchestrate(context.Background(), store, defaultInput(domainID))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if activity.Concept != "C" {
+		t.Fatalf("expected the concept added after the vector to be routable, got %+v", activity)
+	}
+	d, _ := store.GetDomainByID(context.Background(), domainID)
+	if d.Phase != models.PhaseInstruction {
+		t.Errorf("C is not estimated yet: expected INSTRUCTION, got %q", d.Phase)
+	}
+}
+
 // ─── Phase invalide en DB → INSTRUCTION fallback ──────────────────────────
 
 func TestOrchestrate_PhaseCorruptedInDB_FallsBackGracefully(t *testing.T) {

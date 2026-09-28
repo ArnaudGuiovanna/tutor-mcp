@@ -266,10 +266,10 @@ func fetchPipelineFixtures(ctx context.Context, store storeport.Store, domain *m
 		stateMap[cs.Concept] = cs
 	}
 
-	var goalRelevance map[string]float64
-	if gr := domain.ParseGoalRelevance(); gr != nil {
-		goalRelevance = gr.Relevance
-	}
+	// A stale vector grants a default weight to concepts added since it was
+	// set, so add_concepts never hides a concept from routing. A current
+	// vector keeps omission as "not goal-relevant".
+	goalRelevance := domain.EffectiveGoalRelevance()
 
 	activeMisc, err := store.GetActiveMisconceptionsBatchInDomain(ctx, input.LearnerID, domain.ID, domain.Graph.Concepts)
 	if err != nil {
