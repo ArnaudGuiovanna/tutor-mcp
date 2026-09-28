@@ -294,6 +294,43 @@ func TestOrchestrate_Diagnostic_NMaxReached_TransitionsToInstruction(t *testing.
 	}
 }
 
+func TestOrchestrate_DiagnosticCoversDistinctConceptsBeforeRetesting(t *testing.T) {
+	// Five concepts, diagnostic phase. Each qualified diagnostic raises the
+	// tested concept to P=0.33, whose information gain beats an untested
+	// concept at P=0.10. Coverage must still visit every concept once
+	// before any concept is re-tested.
+	store := setupOrchStore(t)
+	concepts := []string{"A", "B", "C", "D", "E"}
+	domainID := seedOrchDomain(t, store, concepts, nil, models.PhaseDiagnostic)
+	now := time.Now().UTC()
+	if err := store.UpdateDomainPhase(context.Background(), domainID, models.PhaseDiagnostic, 0.469, now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for call := range len(concepts) {
+		input := defaultInput(domainID)
+		input.Now = now.Add(time.Duration(call) * time.Minute)
+		activity, phase, err := OrchestrateWithPhase(context.Background(), store, input)
+		if err != nil {
+			t.Fatalf("call %d: %v", call, err)
+		}
+		if phase != models.PhaseDiagnostic || activity.Type != models.ActivityDiagnosticAssessment {
+			t.Fatalf("call %d: expected a diagnostic, got phase=%s activity=%+v", call, phase, activity)
+		}
+		if seen[activity.Concept] {
+			t.Fatalf("call %d re-tested %s before covering %v", call, activity.Concept, concepts)
+		}
+		seen[activity.Concept] = true
+		if _, err := recordSyntheticInteraction(t, store, domainID, activity.Concept, string(models.ActivityDiagnosticAssessment), true, input.Now); err != nil {
+			t.Fatal(err)
+		}
+		setMastery(t, store, activity.Concept, 0.33)
+	}
+	if len(seen) != len(concepts) {
+		t.Fatalf("coverage incomplete: %v", seen)
+	}
+}
+
 func TestOrchestrate_DiagnosticRequiresAttemptLinkedHintFreeDistinctCoverage(t *testing.T) {
 	store := setupOrchStore(t)
 	domainID := seedOrchDomain(t, store, []string{"A", "B", "C"}, nil, models.PhaseDiagnostic)

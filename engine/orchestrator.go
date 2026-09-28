@@ -244,7 +244,8 @@ type pipelineFixtures struct {
 	RecentConcepts     []string
 	RecentInteractions []*models.Interaction
 	Alerts             []models.Alert
-	DiagnosticItems    int // count since phase_changed_at
+	DiagnosticItems    int             // count since phase_changed_at
+	DiagnosedConcepts  map[string]bool // qualified diagnostic coverage since phase_changed_at
 }
 
 func fetchPipelineFixtures(ctx context.Context, store storeport.Store, domain *models.Domain, input OrchestratorInput) (*pipelineFixtures, error) {
@@ -285,6 +286,7 @@ func fetchPipelineFixtures(ctx context.Context, store storeport.Store, domain *m
 	// when current phase is DIAGNOSTIC, but cheap enough to always
 	// fetch.
 	var diagItems int
+	diagnosed := map[string]bool{}
 	if !domain.PhaseChangedAt.IsZero() {
 		qualifiedConcepts, queryErr := store.GetQualifiedDiagnosticConceptsSinceInDomain(ctx, input.LearnerID, domain.ID, domain.PhaseChangedAt)
 		err = queryErr
@@ -294,6 +296,7 @@ func fetchPipelineFixtures(ctx context.Context, store storeport.Store, domain *m
 		for _, concept := range qualifiedConcepts {
 			if domainConcepts[concept] {
 				diagItems++
+				diagnosed[concept] = true
 			}
 		}
 	}
@@ -336,6 +339,7 @@ func fetchPipelineFixtures(ctx context.Context, store storeport.Store, domain *m
 		RecentInteractions: domainInteractions,
 		Alerts:             alerts,
 		DiagnosticItems:    diagItems,
+		DiagnosedConcepts:  diagnosed,
 	}, nil
 }
 
@@ -487,6 +491,7 @@ func runPipeline(
 	} else {
 		selection, err = SelectConceptAtWithContext(phase, pf.StatesList, filteredGraph, pf.GoalRelevance, input.Now, SelectionContext{
 			MaintenanceMasteryFloor: input.Config.EffectiveMasteryExitThreshold(),
+			DiagnosedConcepts:       pf.DiagnosedConcepts,
 		})
 		if err != nil {
 			return models.Activity{}, pipelineSignal{}, fmt.Errorf("concept_selector: %w", err)

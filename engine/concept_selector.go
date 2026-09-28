@@ -103,6 +103,13 @@ type SelectionContext struct {
 	// passes the phase hysteresis floor so a concept that slipped below the
 	// routing threshold keeps receiving practice without leaving MAINTENANCE.
 	MaintenanceMasteryFloor float64
+
+	// DiagnosedConcepts lists the concepts already covered by a qualified
+	// diagnostic since the phase started. DIAGNOSTIC selection prefers the
+	// remaining concepts: a concept answered once carries more information
+	// gain than an untested one, so pure argmax re-tested the same items
+	// instead of covering the curriculum.
+	DiagnosedConcepts map[string]bool
 }
 
 func (c SelectionContext) maintenanceFloor() float64 {
@@ -127,7 +134,7 @@ func SelectConceptAtWithContext(
 	case models.PhaseMaintenance:
 		return selectMaintenance(states, graph, goalRelevance, now, sctx.maintenanceFloor()), nil
 	case models.PhaseDiagnostic:
-		return selectDiagnostic(states, graph), nil
+		return selectDiagnostic(states, graph, sctx.DiagnosedConcepts), nil
 	default:
 		slog.Error("concept_selector: unknown phase",
 			"phase", string(phase))
@@ -403,7 +410,7 @@ func selectMaintenance(
 // treated as "no filter" to preserve existing call sites that pass
 // models.KnowledgeSpace{}; the orchestrator always supplies a non-empty
 // graph for the active domain.
-func selectDiagnostic(states []*models.ConceptState, graph models.KnowledgeSpace) Selection {
+func selectDiagnostic(states []*models.ConceptState, graph models.KnowledgeSpace, diagnosed map[string]bool) Selection {
 	var domainSet map[string]struct{}
 	if len(graph.Concepts) > 0 {
 		domainSet = make(map[string]struct{}, len(graph.Concepts))
@@ -438,8 +445,32 @@ func selectDiagnostic(states []*models.ConceptState, graph models.KnowledgeSpace
 		return candidates[i].Concept < candidates[j].Concept
 	})
 
+	// First pass: concepts not yet covered by a qualified diagnostic. Only
+	// when every candidate has been diagnosed does the argmax run over all
+	// of them (coverage is then complete and the FSM exits on its own).
 	bestConcept := ""
 	bestScore := math.Inf(-1)
+	untested := 0
+	for _, cs := range candidates {
+		if diagnosed[cs.Concept] {
+			continue
+		}
+		untested++
+		ig := algorithms.BKTInfoGain(cs)
+		if ig > bestScore {
+			bestScore = ig
+			bestConcept = cs.Concept
+		}
+	}
+	if bestConcept != "" {
+		return Selection{
+			Concept: bestConcept,
+			Score:   bestScore,
+			Phase:   models.PhaseDiagnostic,
+			Rationale: fmt.Sprintf("max info-gain=%.3f sur %d candidats non encore diagnostiques (%d non satures)",
+				bestScore, untested, len(candidates)),
+		}
+	}
 	for _, cs := range candidates {
 		ig := algorithms.BKTInfoGain(cs)
 		if ig > bestScore {
@@ -451,7 +482,7 @@ func selectDiagnostic(states []*models.ConceptState, graph models.KnowledgeSpace
 		Concept: bestConcept,
 		Score:   bestScore,
 		Phase:   models.PhaseDiagnostic,
-		Rationale: fmt.Sprintf("max info-gain=%.3f sur %d candidats non satures",
+		Rationale: fmt.Sprintf("max info-gain=%.3f sur %d candidats non satures (tous deja diagnostiques)",
 			bestScore, len(candidates)),
 	}
 }
