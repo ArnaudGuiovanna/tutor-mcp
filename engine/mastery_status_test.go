@@ -213,3 +213,21 @@ func masteryStatusAssessment(id, concept string, activity models.ActivityType, t
 		EvaluationMethod: method, SubmittedAt: &submittedAt, EvaluatedAt: &evaluatedAt,
 	}
 }
+
+func TestAssessMasteryStatus_TrustedHostLLMEvaluationDemonstrates(t *testing.T) {
+	// The persistence projection grants TrustedEvaluation to a decision-bound
+	// host_llm evaluation under the deployment policy; the engine must then
+	// accept that method like the server-side ones.
+	now := time.Now().UTC()
+	attempt := masteryStatusAssessment("host-trusted", "a", models.ActivityMasteryChallenge, false, now)
+	attempt.TrustedEvaluation = true
+	status := AssessMasteryStatus("L1", "a", nil, nil, nil, []*models.AssessmentAttempt{attempt}, now)
+	if !status.Demonstrated || status.Stage != MasteryStageDemonstrated {
+		t.Fatalf("trusted host_llm evaluation must demonstrate: %+v", status)
+	}
+	untrusted := masteryStatusAssessment("host-raw", "a", models.ActivityMasteryChallenge, false, now)
+	status = AssessMasteryStatus("L1", "a", nil, nil, nil, []*models.AssessmentAttempt{untrusted}, now)
+	if status.Demonstrated {
+		t.Fatalf("a raw host_llm row without the trusted flag must not demonstrate: %+v", status)
+	}
+}

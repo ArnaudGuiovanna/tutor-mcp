@@ -53,12 +53,16 @@ Legacy or public interactions without this evidence remain historical/routing
 observations but cannot establish `retained`, `demonstrated` or `transferred`,
 even when a successful retrieval is more than 24 hours after an earlier event.
 
-The public MCP evaluator path is deliberately untrusted: it records
-`host_llm` provenance but cannot set `trusted_evaluation`. Trusted
-`deterministic`, `external_service`, or `human_review` evidence can only enter
-through a server-controlled evaluator boundary. Until such a boundary is
-configured, a deployment can report estimated and retained stages but cannot
-manufacture a demonstrated claim.
+The public MCP evaluator path records `host_llm` provenance and never writes
+`trusted_evaluation` itself. Trust is derived when evidence is read. By default
+(`ASSESSMENT_HOST_LLM_DEMONSTRATES=on`) a host evaluation counts as trusted
+when it is bound to a pedagogical decision, so the task and rubric were frozen
+before the learner answered and the outcome was derived server-side, and the
+domain is not high-stakes. Standalone attempts without a decision remain
+untrusted. Setting the variable to `off` restores the stricter mode in which
+only `deterministic`, `external_service` or `human_review` evidence entering
+through a server-controlled evaluator boundary can demonstrate; without such a
+boundary a deployment then reports estimated and retained stages only.
 
 Decision-bound attempts use the shared `assessment` package at both MCP and
 storage boundaries. Rubric/scoring JSON must have unique object keys, canonical
@@ -155,7 +159,8 @@ In those domains, a trusted passed assessment counts as `demonstrated` only when
 its persisted evaluation method is `human_review`. Intrusive proactive
 suggestions are also blocked until a trusted human-reviewed evaluation exists.
 `host_llm`, `deterministic`, and `external_service` labels do not satisfy this
-gate, and the runtime does not claim that any external review service exists.
+gate, whatever `ASSESSMENT_HOST_LLM_DEMONSTRATES` says, and the runtime does not
+claim that any external review service exists.
 
 ## Release gates
 

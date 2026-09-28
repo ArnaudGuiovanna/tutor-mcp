@@ -54,6 +54,10 @@ type Store struct {
 	secretKeyring           *IntegrationSecretKeyring
 	tenantScope             *models.TenantScope
 	integrationAllowedHosts map[string]struct{}
+	// hostLLMDemonstrates lets a decision-bound host_llm evaluation count as
+	// trusted evidence outside high-stakes domains. See
+	// SetHostLLMDemonstrationPolicy.
+	hostLLMDemonstrates bool
 }
 
 type tenantTransactionContext struct {
@@ -84,12 +88,23 @@ func (s *Store) VerifySchemaCurrent(ctx context.Context) error {
 }
 
 func NewStore(database *sql.DB) *Store {
-	return &Store{db: database, root: database, dialect: DialectSQLite}
+	return &Store{db: database, root: database, dialect: DialectSQLite, hostLLMDemonstrates: true}
 }
 
 // NewStoreWithDialect builds a Store targeting the given SQL dialect.
 func NewStoreWithDialect(database *sql.DB, d Dialect) *Store {
-	return &Store{db: database, root: database, dialect: d}
+	return &Store{db: database, root: database, dialect: d, hostLLMDemonstrates: true}
+}
+
+// SetHostLLMDemonstrationPolicy decides whether a host_llm evaluation bound to
+// a pedagogical decision (rubric frozen before the response, outcome derived
+// server-side) counts as trusted evidence for the demonstrated and transferred
+// stages. It defaults to enabled: without an external certifier no
+// deployment could otherwise report demonstrated progress. High-stakes
+// domains keep requiring human_review regardless of this policy, and the raw
+// trusted_evaluation column is never rewritten: trust is derived at read time.
+func (s *Store) SetHostLLMDemonstrationPolicy(enabled bool) {
+	s.hostLLMDemonstrates = enabled
 }
 
 // Ping verifies a live connection to the database.
@@ -239,7 +254,7 @@ func (s *Store) WithTx(ctx context.Context, fn func(s store.Store) error) error 
 	if scoped, ok := ctx.Value(tenantTransactionContextKey{}).(*tenantTransactionContext); ok &&
 		s.root != nil && scoped.root == s.root {
 		copyScope := scoped.scope
-		return fn(&Store{db: scoped.tx, root: nil, dialect: s.dialect, secretKeyring: s.secretKeyring, tenantScope: &copyScope})
+		return fn(&Store{db: scoped.tx, root: nil, dialect: s.dialect, secretKeyring: s.secretKeyring, hostLLMDemonstrates: s.hostLLMDemonstrates, tenantScope: &copyScope})
 	}
 	// Isolation differs by dialect on purpose:
 	//   SQLite   — SERIALIZABLE maps to BEGIN IMMEDIATE (DSN _txlock=immediate):
@@ -263,7 +278,7 @@ func (s *Store) WithTx(ctx context.Context, fn func(s store.Store) error) error 
 	// connection and any locks are released even when fn panics. Rollback is
 	// harmless after a successful Commit (it returns sql.ErrTxDone).
 	defer func() { _ = tx.Rollback() }()
-	if err := fn(&Store{db: tx, root: nil, dialect: s.dialect, secretKeyring: s.secretKeyring, tenantScope: s.tenantScope}); err != nil {
+	if err := fn(&Store{db: tx, root: nil, dialect: s.dialect, secretKeyring: s.secretKeyring, hostLLMDemonstrates: s.hostLLMDemonstrates, tenantScope: s.tenantScope}); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -282,7 +297,7 @@ func (s *Store) WithTenantTx(ctx context.Context, scope models.TenantScope, fn f
 			return fmt.Errorf("tenant transaction: nested scope mismatch")
 		}
 		copyScope := scope
-		return fn(ctx, &Store{db: scoped.tx, root: nil, dialect: s.dialect, secretKeyring: s.secretKeyring, tenantScope: &copyScope})
+		return fn(ctx, &Store{db: scoped.tx, root: nil, dialect: s.dialect, secretKeyring: s.secretKeyring, hostLLMDemonstrates: s.hostLLMDemonstrates, tenantScope: &copyScope})
 	}
 	if s.root == nil {
 		if s.tenantScope == nil || *s.tenantScope != scope {
@@ -311,7 +326,7 @@ func (s *Store) WithTenantTx(ctx context.Context, scope models.TenantScope, fn f
 		}
 	}
 	copyScope := scope
-	txStore := &Store{db: tx, root: nil, dialect: s.dialect, secretKeyring: s.secretKeyring, tenantScope: &copyScope}
+	txStore := &Store{db: tx, root: nil, dialect: s.dialect, secretKeyring: s.secretKeyring, hostLLMDemonstrates: s.hostLLMDemonstrates, tenantScope: &copyScope}
 	txCtx := context.WithValue(ctx, tenantTransactionContextKey{}, &tenantTransactionContext{root: s.root, tx: tx, scope: scope})
 	if err := fn(txCtx, txStore); err != nil {
 		return err
@@ -333,7 +348,7 @@ func (s *Store) inTx(ctx context.Context, opts *sql.TxOptions, fn func(txs *Stor
 	if scoped, ok := ctx.Value(tenantTransactionContextKey{}).(*tenantTransactionContext); ok &&
 		s.root != nil && scoped.root == s.root {
 		copyScope := scoped.scope
-		return fn(&Store{db: scoped.tx, root: nil, dialect: s.dialect, secretKeyring: s.secretKeyring, tenantScope: &copyScope})
+		return fn(&Store{db: scoped.tx, root: nil, dialect: s.dialect, secretKeyring: s.secretKeyring, hostLLMDemonstrates: s.hostLLMDemonstrates, tenantScope: &copyScope})
 	}
 	if s.root == nil {
 		return fn(s)
@@ -345,7 +360,7 @@ func (s *Store) inTx(ctx context.Context, opts *sql.TxOptions, fn func(txs *Stor
 	// Keep the transaction cleanup panic-safe for every internal transaction,
 	// just as WithTx does for caller-provided callbacks.
 	defer func() { _ = tx.Rollback() }()
-	txs := &Store{db: tx, dialect: s.dialect, secretKeyring: s.secretKeyring, tenantScope: s.tenantScope}
+	txs := &Store{db: tx, dialect: s.dialect, secretKeyring: s.secretKeyring, hostLLMDemonstrates: s.hostLLMDemonstrates, tenantScope: s.tenantScope}
 	if err := fn(txs); err != nil {
 		return err
 	}

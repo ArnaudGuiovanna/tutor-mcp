@@ -218,6 +218,8 @@ func main() {
 		logger.Error("unknown DB_DRIVER (want sqlite|postgres)", "driver", dbDriver)
 		os.Exit(1)
 	}
+	store.SetHostLLMDemonstrationPolicy(cfg.AssessmentHostLLMDemonstrates)
+	logger.Info("assessment evidence policy", "host_llm_demonstrates", cfg.AssessmentHostLLMDemonstrates)
 	installationProfile := "legacy"
 	if cfg.DeploymentProfile == "production" {
 		installationProfile = "institution"

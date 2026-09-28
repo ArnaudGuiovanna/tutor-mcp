@@ -84,7 +84,7 @@ func (s *Store) GetEvaluatedAssessmentAttemptsBatchInDomain(ctx context.Context,
 	args = append(args, limitPerConcept)
 
 	rows, err := s.query(ctx, `WITH ranked_evidence AS (
-       SELECT `+assessmentEvidenceColumns+`,
+       SELECT `+s.assessmentEvidenceColumns()+`,
               ROW_NUMBER() OVER (
                   PARTITION BY a.concept_id ORDER BY COALESCE(j.created_at, a.evaluated_at) DESC
               ) AS evidence_rank

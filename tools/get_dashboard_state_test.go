@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"tutor-mcp/db"
 	"tutor-mcp/engine"
 	"tutor-mcp/models"
 )
@@ -153,4 +154,109 @@ func TestGetDashboardState_DoesNotLabelHighEstimateAsMasteredProgress(t *testing
 			t.Fatalf("concept a status=%v, want estimated", concept["status"])
 		}
 	}
+}
+
+// seedDecisionBoundHostEvaluation runs the full prepare -> submit ->
+// record_interaction protocol against a frozen pedagogical decision so the
+// host evaluation is decision-bound, exactly as production records it.
+func seedDecisionBoundHostEvaluation(t *testing.T, store *db.Store, deps *Deps, domain *models.Domain, decisionID string) {
+	t.Helper()
+	ctx := context.Background()
+	curriculum, err := store.EnsureCurriculumBaseline(ctx, "L_owner", domain.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	session, err := store.OpenLearningSession(ctx, "L_owner", domain.ID, "", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := &models.PedagogicalDecision{
+		ID: decisionID, LearnerID: "L_owner", DomainID: domain.ID, SessionID: session.ID,
+		CurriculumVersion: curriculum.Version, PolicyVersion: models.PedagogicalPolicyVersion, CreatedAt: now,
+		Contract: models.PedagogicalContract{DecisionID: decisionID, CurriculumVersion: curriculum.Version, PolicyVersion: models.PedagogicalPolicyVersion, TargetConcept: "a", RecommendedActivityType: models.ActivityMasteryChallenge, Competency: curriculumCompetency(curriculum, "a")},
+	}
+	if err := store.CreatePedagogicalDecision(ctx, models.LegacyPrincipal("L_owner").TenantScope(), decision); err != nil {
+		t.Fatal(err)
+	}
+	prepared := callTool(t, deps, registerPrepareAssessmentAttempt, "L_owner", "prepare_assessment_attempt", map[string]any{
+		"domain_id": domain.ID, "session_id": session.ID, "decision_id": decision.ID,
+		"concept": "a", "activity_type": "MASTERY_CHALLENGE", "observable": "Apply the competency.",
+		"task_text":   "Generated task.",
+		"rubric_json": `{"criteria":[{"id":"x","description":"Defined criterion.","max_score":1}],"passing_score":0.6}`,
+	})
+	if prepared.IsError {
+		t.Fatalf("prepare: %s", resultText(prepared))
+	}
+	attemptID := decodeResult(t, prepared)["attempt_id"].(string)
+	submitted := callTool(t, deps, registerSubmitAssessmentAttempt, "L_owner", "submit_assessment_attempt", map[string]any{"attempt_id": attemptID, "learner_response": "Committed response."})
+	if submitted.IsError {
+		t.Fatalf("submit: %s", resultText(submitted))
+	}
+	args := assessmentEvaluationArgs(domain.ID, session.ID, attemptID, true)
+	// Only assessment activity types can demonstrate; routine practice cannot.
+	args["activity_type"] = "MASTERY_CHALLENGE"
+	args["rubric_score_json"] = `{"criteria_scores":[{"id":"x","score":1,"evidence":"Observed."}]}`
+	accepted := callTool(t, deps, registerRecordInteraction, "L_owner", "record_interaction", args)
+	if accepted.IsError {
+		t.Fatalf("evaluate: %s", resultText(accepted))
+	}
+}
+
+func dashboardDemonstrated(t *testing.T, deps *Deps) (float64, float64) {
+	t.Helper()
+	res := callTool(t, deps, registerGetDashboardState, "L_owner", "get_dashboard_state", map[string]any{})
+	if res.IsError {
+		t.Fatalf("dashboard: %s", resultText(res))
+	}
+	out := decodeResult(t, res)
+	return out["total_demonstrated"].(float64), out["global_progress_percent"].(float64)
+}
+
+func TestGetDashboardState_DecisionBoundHostEvaluationCountsAsDemonstrated(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	domain := makeOwnerDomain(t, store, "L_owner", "math")
+	seedDecisionBoundHostEvaluation(t, store, deps, domain, "decision-demonstrated")
+
+	demonstrated, progress := dashboardDemonstrated(t, deps)
+	if demonstrated != 1 || progress <= 0 {
+		t.Fatalf("decision-bound host evaluation must demonstrate the concept: demonstrated=%v progress=%v", demonstrated, progress)
+	}
+
+	// The raw row stays untrusted: trust is derived at read time only.
+	var raw int
+	if err := store.RawDB().QueryRow(`SELECT trusted_evaluation FROM assessment_attempts WHERE decision_id = ?`, "decision-demonstrated").Scan(&raw); err != nil || raw != 0 {
+		t.Fatalf("raw trusted_evaluation must remain 0, got %d err=%v", raw, err)
+	}
+}
+
+func TestGetDashboardState_HostEvaluationNotDemonstratedWhenPolicyOffOrHighStakes(t *testing.T) {
+	t.Run("policy off", func(t *testing.T) {
+		store, deps := setupToolsTest(t)
+		store.SetHostLLMDemonstrationPolicy(false)
+		domain := makeOwnerDomain(t, store, "L_owner", "math")
+		seedDecisionBoundHostEvaluation(t, store, deps, domain, "decision-policy-off")
+		if demonstrated, progress := dashboardDemonstrated(t, deps); demonstrated != 0 || progress != 0 {
+			t.Fatalf("policy off must keep host evaluations untrusted: demonstrated=%v progress=%v", demonstrated, progress)
+		}
+	})
+	t.Run("high stakes", func(t *testing.T) {
+		store, deps := setupToolsTest(t)
+		domain := makeOwnerDomain(t, store, "L_owner", "math")
+		if err := store.MarkDomainHighStakes(context.Background(), domain.ID, "L_owner"); err != nil {
+			t.Fatal(err)
+		}
+		seedDecisionBoundHostEvaluation(t, store, deps, domain, "decision-high-stakes")
+		if demonstrated, progress := dashboardDemonstrated(t, deps); demonstrated != 0 || progress != 0 {
+			t.Fatalf("high-stakes domains require human review: demonstrated=%v progress=%v", demonstrated, progress)
+		}
+	})
+	t.Run("standalone attempt without decision", func(t *testing.T) {
+		store, deps := setupToolsTest(t)
+		domain := makeOwnerDomain(t, store, "L_owner", "math")
+		seedEvaluatedAssessmentFixture(t, store, "L_owner", domain.ID, "a", models.ActivityMasteryChallenge, true, time.Now().UTC(), "")
+		if demonstrated, _ := dashboardDemonstrated(t, deps); demonstrated != 0 {
+			t.Fatalf("a host evaluation without a frozen decision must stay untrusted: demonstrated=%v", demonstrated)
+		}
+	})
 }
