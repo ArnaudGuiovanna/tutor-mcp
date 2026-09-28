@@ -1926,9 +1926,11 @@ func (s *Store) GetInteractionsSinceInDomain(ctx context.Context, learnerID, dom
 
 func (s *Store) GetSessionStart(ctx context.Context, learnerID string) (time.Time, error) {
 	var startedAt time.Time
+	// An open session idle beyond the timeout is abandoned, not ongoing: its
+	// age must not feed the OVERLOAD alert.
 	err := s.queryRow(ctx,
-		`SELECT started_at FROM learning_sessions WHERE learner_id = ? AND status = ? LIMIT 1`,
-		learnerID, models.LearningSessionStatusOpen,
+		`SELECT started_at FROM learning_sessions WHERE learner_id = ? AND status = ? AND last_active_at >= ? LIMIT 1`,
+		learnerID, models.LearningSessionStatusOpen, learningSessionIdleCutoff(time.Now().UTC()),
 	).Scan(&startedAt)
 	if err == nil {
 		return startedAt, nil

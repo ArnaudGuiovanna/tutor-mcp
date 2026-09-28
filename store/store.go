@@ -57,6 +57,12 @@ var ErrInvalidOAuthScope = errors.New("invalid oauth scope")
 // particular SQL driver.
 var ErrNotFound = errors.New("store item not found")
 
+// ErrLearningSessionClosed marks an attempt to resume a learning session that
+// is already closed, including one closed automatically after
+// models.LearningSessionIdleTimeout of inactivity. Callers should open a new
+// session instead of retrying the same ID.
+var ErrLearningSessionClosed = errors.New("learning session is closed")
+
 type notFoundError struct {
 	cause error
 }

@@ -86,6 +86,12 @@ func (s *Store) OpenLearningSession(ctx context.Context, learnerID, domainID, re
 
 	var result *models.LearningSession
 	err := s.inTx(ctx, nil, func(txs *Store) error {
+		// An abandoned session must not be resumed as if the learner never
+		// left: close it first so the partial unique index accepts a fresh
+		// open session and OVERLOAD reasons about the new one.
+		if err := txs.closeStaleLearningSessions(ctx, learnerID, now); err != nil {
+			return err
+		}
 		scope, err := txs.resolveLearningScope(ctx, learnerID, domainID, "")
 		if err != nil {
 			return fmt.Errorf("resolve session enrollment: %w", err)
@@ -110,7 +116,7 @@ func (s *Store) OpenLearningSession(ctx context.Context, learnerID, domainID, re
 		))
 		if err == nil {
 			if requested.Status != models.LearningSessionStatusOpen {
-				return fmt.Errorf("learning session is already closed")
+				return storeport.ErrLearningSessionClosed
 			}
 			if _, err := txs.exec(ctx,
 				`UPDATE learning_sessions
@@ -187,10 +193,12 @@ func (s *Store) GetLearningSession(ctx context.Context, learnerID, sessionID str
 }
 
 func (s *Store) GetActiveLearningSession(ctx context.Context, learnerID string) (*models.LearningSession, error) {
+	// A session idle beyond the timeout is reported as absent even before
+	// the next OpenLearningSession closes it durably.
 	session, err := scanLearningSession(s.queryRow(ctx,
 		`SELECT `+learningSessionCols+` FROM learning_sessions
-		 WHERE learner_id = ? AND status = ? LIMIT 1`,
-		learnerID, models.LearningSessionStatusOpen,
+		 WHERE learner_id = ? AND status = ? AND last_active_at >= ? LIMIT 1`,
+		learnerID, models.LearningSessionStatusOpen, learningSessionIdleCutoff(time.Now().UTC()),
 	))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -251,4 +259,27 @@ func (s *Store) CloseLearningSession(ctx context.Context, learnerID, sessionID s
 		return nil, fmt.Errorf("learning session could not be closed")
 	}
 	return session, nil
+}
+
+// learningSessionIdleCutoff is the last_active_at floor below which an open
+// session counts as abandoned.
+func learningSessionIdleCutoff(now time.Time) time.Time {
+	return now.UTC().Add(-models.LearningSessionIdleTimeout)
+}
+
+// closeStaleLearningSessions closes every open session of the learner that has
+// been idle for longer than models.LearningSessionIdleTimeout. closed_at is the
+// last activity, not now: the session ended when the learner stopped, and
+// session-length statistics must not absorb the idle gap.
+func (s *Store) closeStaleLearningSessions(ctx context.Context, learnerID string, now time.Time) error {
+	if _, err := s.exec(ctx,
+		`UPDATE learning_sessions
+		 SET status = ?, closed_at = last_active_at
+		 WHERE learner_id = ? AND status = ? AND last_active_at < ?`,
+		models.LearningSessionStatusClosed, learnerID, models.LearningSessionStatusOpen,
+		learningSessionIdleCutoff(now),
+	); err != nil {
+		return fmt.Errorf("close stale learning sessions: %w", err)
+	}
+	return nil
 }

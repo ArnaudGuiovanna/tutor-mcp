@@ -426,6 +426,42 @@ func TestGetNextActivity_OverloadUsesRealSessionStart(t *testing.T) {
 	}
 }
 
+func TestGetNextActivity_IdleSessionExpiresWithoutOverload(t *testing.T) {
+	// A session abandoned overnight must not make every later call an
+	// OVERLOAD escape: it is closed at the next open and a fresh session
+	// carries the new activity.
+	store, deps := setupToolsTest(t)
+	d := makeOwnerDomain(t, store, "L_owner", "math")
+	cs := models.NewConceptState("L_owner", "a")
+	cs.PMastery = 0.5
+	if err := store.UpsertConceptState(context.Background(), cs); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	lastNight := time.Now().UTC().Add(-models.LearningSessionIdleTimeout - time.Hour)
+	if _, err := store.OpenLearningSession(context.Background(), "L_owner", d.ID, "sess_idle", lastNight); err != nil {
+		t.Fatalf("open idle session: %v", err)
+	}
+
+	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{
+		"domain_id": d.ID,
+	})
+	if res.IsError {
+		t.Fatalf("got %q", resultText(res))
+	}
+	out := decodeResult(t, res)
+	if out["session_id"] == "sess_idle" {
+		t.Fatalf("idle session was resumed: %v", out["session_id"])
+	}
+	activity, _ := out["activity"].(map[string]any)
+	if got := activity["type"]; got == string(models.ActivityCloseSession) {
+		t.Fatalf("expired session still produced an OVERLOAD escape: %v", activity)
+	}
+	closed, err := store.GetLearningSession(context.Background(), "L_owner", "sess_idle")
+	if err != nil || closed.Status != models.LearningSessionStatusClosed {
+		t.Fatalf("idle session not closed: %+v err=%v", closed, err)
+	}
+}
+
 func TestBuildGoalRelevanceStatus(t *testing.T) {
 	base := func() *models.Domain {
 		return &models.Domain{

@@ -34,6 +34,10 @@ func learningSessionResolutionErrorResult(deps *Deps, err error) *mcp.CallToolRe
 	return result
 }
 
+// closedLearningSessionMessage tells the host what to do with a session that
+// was closed explicitly or expired after models.LearningSessionIdleTimeout.
+const closedLearningSessionMessage = "learning session is closed or expired after inactivity; call start_learning_session without session_id to open a new one"
+
 type StartLearningSessionParams struct {
 	IdempotentMutationParams
 	SessionID string `json:"session_id,omitempty" jsonschema:"optional stable session identifier; omit to generate a secure session ID"`
@@ -70,6 +74,10 @@ func registerStartLearningSession(server *mcp.Server, deps *Deps) {
 		}
 		session, err := deps.Store.OpenLearningSession(ctx, learnerID, params.DomainID, params.SessionID, time.Now().UTC())
 		if err != nil {
+			if errors.Is(err, storeport.ErrLearningSessionClosed) {
+				r, _ := errorResult(closedLearningSessionMessage)
+				return r, nil, nil
+			}
 			r, _ := safeErrorResult(deps.Logger, "failed to start learning session", err)
 			return r, nil, nil
 		}
@@ -93,14 +101,17 @@ func resolveOpenLearningSession(ctx context.Context, deps *Deps, learnerID, doma
 			}
 			return nil, fmt.Errorf("load learning session: %w", err)
 		}
-		if session.Status != models.LearningSessionStatusOpen {
-			return nil, &learningSessionRequestError{message: "learning session is closed"}
+		if session.Status != models.LearningSessionStatusOpen || now.Sub(session.LastActiveAt) > models.LearningSessionIdleTimeout {
+			return nil, &learningSessionRequestError{message: closedLearningSessionMessage}
 		}
 		// DomainID is the current active domain, not an immutable scope: one
 		// explicit session may intentionally switch subjects while all events
 		// remain correlated by the same session ID.
 		resumed, err := deps.Store.OpenLearningSession(ctx, learnerID, domainID, sessionID, now)
 		if err != nil {
+			if errors.Is(err, storeport.ErrLearningSessionClosed) {
+				return nil, &learningSessionRequestError{message: closedLearningSessionMessage}
+			}
 			return nil, fmt.Errorf("resume learning session: %w", err)
 		}
 		return resumed, nil
