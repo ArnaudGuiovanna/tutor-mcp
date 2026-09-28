@@ -447,6 +447,42 @@ func TestOrchestrate_Maintenance_RetentionLowRecallsWithoutPhaseChange(t *testin
 	}
 }
 
+func TestOrchestrate_Maintenance_SingleSlipDoesNotReturnToInstruction(t *testing.T) {
+	// A and B were mastered; one failure on B dropped its estimate to 0.80,
+	// inside the hysteresis band. The domain stays in MAINTENANCE and B still
+	// receives practice there. A drop below the exit floor does return to
+	// INSTRUCTION.
+	for _, tc := range []struct {
+		name      string
+		mastery   float64
+		wantPhase models.Phase
+	}{
+		{"inside band", 0.80, models.PhaseMaintenance},
+		{"below exit floor", 0.60, models.PhaseInstruction},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := setupOrchStore(t)
+			domainID := seedOrchDomain(t, store, []string{"A", "B"}, nil, models.PhaseMaintenance)
+			setGoalRelevance(t, store, domainID, map[string]float64{"A": 1.0, "B": 1.0})
+			setReviewState(t, store, "A", 0.95, 30, 1)
+			// B's card is older, so it is the more urgent maintenance
+			// candidate while its retention stays above the recall floor.
+			setReviewState(t, store, "B", tc.mastery, 30, 20)
+
+			activity, phase, err := OrchestrateWithPhase(context.Background(), store, defaultInput(domainID))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if phase != tc.wantPhase {
+				t.Fatalf("phase=%q, want %q (activity=%+v)", phase, tc.wantPhase, activity)
+			}
+			if tc.wantPhase == models.PhaseMaintenance && (activity.Concept != "B" || activity.Type != models.ActivityPractice) {
+				t.Fatalf("the slipped concept should receive practice inside MAINTENANCE, got %+v", activity)
+			}
+		})
+	}
+}
+
 func TestOrchestrate_AntiRepeatNeverStarvesAcquisition(t *testing.T) {
 	for _, chain := range []bool{true, false} {
 		t.Run(fmt.Sprintf("prerequisite_chain=%t", chain), func(t *testing.T) {

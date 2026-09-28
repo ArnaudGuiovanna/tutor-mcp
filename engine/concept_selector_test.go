@@ -641,3 +641,21 @@ func TestSelectConcept_RespectsMasteryBKTAccessor(t *testing.T) {
 		t.Errorf("expected A in fringe at 0.84 under legacy, got %+v", sel)
 	}
 }
+
+func TestSelectConceptAtWithContext_MaintenanceFloorAdmitsSlippedConcept(t *testing.T) {
+	graph := graphFlat("A", "B")
+	a := reviewedCS("A", 0.95)
+	b := reviewedCS("B", 0.78) // below routing threshold, above the hysteresis floor
+	setConceptCardAge(b, 20)   // decayed: the most urgent card
+	states := []*models.ConceptState{a, b}
+	now := time.Now().UTC()
+
+	legacy, _ := SelectConceptAt(models.PhaseMaintenance, states, graph, nil, now)
+	if legacy.Concept != "A" {
+		t.Fatalf("legacy pool must exclude the slipped concept, got %+v", legacy)
+	}
+	withFloor, _ := SelectConceptAtWithContext(models.PhaseMaintenance, states, graph, nil, now, SelectionContext{MaintenanceMasteryFloor: DefaultMasteryExitThreshold})
+	if withFloor.Concept != "B" {
+		t.Fatalf("hysteresis floor must admit the slipped concept, got %+v", withFloor)
+	}
+}

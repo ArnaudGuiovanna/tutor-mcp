@@ -47,7 +47,7 @@ flowchart LR
 | Component | Responsibility | Source |
 |---|---|---|
 | **Goal relevance** | The LLM decomposes the learner's goal into relevance weights; the engine uses them when ranking concepts. | [Goal tools](../tools/goal_relevance.go) |
-| **Phase controller** | Chooses between diagnosis, instruction and maintenance using current observations. Review needs can stay within maintenance without restarting acquisition. | [Phase FSM](../engine/phase_fsm.go), [configuration](../engine/phase_config.go) |
+| **Phase controller** | Chooses between diagnosis, instruction and maintenance using current observations. Review needs can stay within maintenance without restarting acquisition. Maintenance uses a hysteresis band: entry requires every goal-relevant estimate at 0.85 or above, exit requires one estimate below 0.70; concepts in between keep receiving practice within maintenance. | [Phase FSM](../engine/phase_fsm.go), [configuration](../engine/phase_config.go) |
 | **Gate** | Applies constraints before selecting an activity, including session conditions and candidate eligibility. | [Gate](../engine/gate.go) |
 | **Concept selector** | Balances diagnostic uncertainty, goal relevance, prerequisites and review urgency according to the phase. Diversity preferences can relax when they would block all available work. | [Concept selection](../engine/concept_selector.go) |
 | **Action selector** | Chooses the kind of task: introduction, practice, recall, misconception work, explanation, mastery challenge or transfer probe. Supplies a generation difficulty target. | [Action selection](../engine/action_selector.go) |

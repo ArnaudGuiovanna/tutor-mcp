@@ -343,7 +343,9 @@ func buildObservables(domain *models.Domain, pf *pipelineFixtures, cfg PhaseConf
 	meanH := MeanBinaryEntropyOverGraph(domain.Graph, pf.StatesByConcept)
 
 	bkt := algorithms.MasteryBKT()
+	exit := cfg.EffectiveMasteryExitThreshold()
 	estimated := 0
+	belowExit := 0
 	totalGoalRelevant := 0
 	belowRetention := false
 
@@ -366,13 +368,17 @@ func buildObservables(domain *models.Domain, pf *pipelineFixtures, cfg PhaseConf
 
 		cs := pf.StatesByConcept[c]
 		if cs == nil {
-			// No state ≡ never practised ≡ not estimated, not
-			// "below retention" (nothing to forget).
+			// No state ≡ never practised ≡ not estimated, below the exit
+			// floor, and not "below retention" (nothing to forget).
+			belowExit++
 			continue
 		}
 		if cs.PMastery >= bkt {
 			estimated++
 			// High estimates and recall needs are separate signals.
+		}
+		if cs.PMastery < exit {
+			belowExit++
 		}
 		if cs.CardState != "new" {
 			retention := algorithms.CurrentRetrievability(now, cs.LastReview, cs.Stability)
@@ -389,6 +395,7 @@ func buildObservables(domain *models.Domain, pf *pipelineFixtures, cfg PhaseConf
 		DiagnosticCoverageTarget:   min(len(domain.Graph.Concepts), cfg.NDiagnosticMax),
 		EstimatedGoalRelevant:      estimated,
 		TotalGoalRelevant:          totalGoalRelevant,
+		BelowExitGoalRelevant:      belowExit,
 		GoalRelevantBelowRetention: belowRetention,
 	}
 }
@@ -478,7 +485,9 @@ func runPipeline(
 	if input.ReviewOnly {
 		selection = SelectReviewConceptAt(gateResult.AllowedConcepts, pf.StatesByConcept, pf.RecentInteractions, pf.ActiveMisc, input.Now)
 	} else {
-		selection, err = SelectConceptAt(phase, pf.StatesList, filteredGraph, pf.GoalRelevance, input.Now)
+		selection, err = SelectConceptAtWithContext(phase, pf.StatesList, filteredGraph, pf.GoalRelevance, input.Now, SelectionContext{
+			MaintenanceMasteryFloor: input.Config.EffectiveMasteryExitThreshold(),
+		})
 		if err != nil {
 			return models.Activity{}, pipelineSignal{}, fmt.Errorf("concept_selector: %w", err)
 		}

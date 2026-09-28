@@ -8,6 +8,7 @@ import (
 	"math"
 	"testing"
 	"time"
+	"tutor-mcp/algorithms"
 
 	"tutor-mcp/models"
 )
@@ -185,9 +186,33 @@ func TestEvaluatePhase_MaintenanceToInstruction_AcquisitionGap(t *testing.T) {
 	got := EvaluatePhase(models.PhaseMaintenance, PhaseObservables{
 		EstimatedGoalRelevant: 1,
 		TotalGoalRelevant:     2,
+		BelowExitGoalRelevant: 1,
 	}, defaultCfg())
 	if !got.Transitioned || got.To != models.PhaseInstruction {
 		t.Fatalf("a new acquisition gap should return to instruction, got %+v", got)
+	}
+}
+
+func TestEvaluatePhase_Maintenance_SlipBetweenThresholdsStays(t *testing.T) {
+	// One concept dropped below the routing threshold but not below the
+	// exit floor: hysteresis keeps MAINTENANCE, where it receives practice.
+	got := EvaluatePhase(models.PhaseMaintenance, PhaseObservables{
+		EstimatedGoalRelevant: 1,
+		TotalGoalRelevant:     2,
+		BelowExitGoalRelevant: 0,
+	}, defaultCfg())
+	if got.Transitioned || got.To != models.PhaseMaintenance {
+		t.Fatalf("a slip inside the hysteresis band must not leave MAINTENANCE, got %+v", got)
+	}
+}
+
+func TestEvaluatePhase_Maintenance_NoHysteresisConfigFallsBackToRoutingThreshold(t *testing.T) {
+	cfg := PhaseConfig{} // ad-hoc config without a floor
+	if cfg.EffectiveMasteryExitThreshold() != algorithms.MasteryBKT() {
+		t.Fatalf("unset floor must fall back to the routing threshold, got %v", cfg.EffectiveMasteryExitThreshold())
+	}
+	if defaultCfg().EffectiveMasteryExitThreshold() != DefaultMasteryExitThreshold {
+		t.Fatalf("default config must carry the hysteresis floor")
 	}
 }
 

@@ -49,6 +49,12 @@ type PhaseObservables struct {
 	// transition.
 	TotalGoalRelevant int
 
+	// BelowExitGoalRelevant counts goal-relevant concepts whose estimate is
+	// below cfg.MasteryExitThreshold (never-practised concepts included).
+	// Any such concept fires MAINTENANCE → INSTRUCTION; concepts between
+	// the exit and routing thresholds keep MAINTENANCE (hysteresis).
+	BelowExitGoalRelevant int
+
 	// GoalRelevantBelowRetention is true when at least one
 	// goal-relevant concept has FSRS retrievability strictly below
 	// cfg.RetentionRecallThreshold. Retained as an audit signal; forgetting
@@ -145,15 +151,19 @@ func EvaluatePhase(current models.Phase, obs PhaseObservables, cfg PhaseConfig) 
 		}
 
 	case models.PhaseMaintenance:
-		if obs.TotalGoalRelevant > 0 && obs.EstimatedGoalRelevant < obs.TotalGoalRelevant {
+		if obs.TotalGoalRelevant > 0 && obs.BelowExitGoalRelevant > 0 {
 			return PhaseEvaluation{
 				From: current, To: models.PhaseInstruction, Transitioned: true,
-				Rationale: "MAINTENANCE→INSTRUCTION: a goal-relevant concept needs acquisition practice",
+				Rationale: fmt.Sprintf(
+					"MAINTENANCE→INSTRUCTION: %d goal-relevant concept(s) estimated below the exit threshold %.2f",
+					obs.BelowExitGoalRelevant, cfg.EffectiveMasteryExitThreshold()),
 			}
 		}
 		return PhaseEvaluation{
 			From: current, To: current, Transitioned: false,
-			Rationale: "MAINTENANCE: no acquisition gap; any recall needs are selected within this phase",
+			Rationale: fmt.Sprintf(
+				"MAINTENANCE: %d/%d goal-relevant concepts above routing threshold, none below exit threshold %.2f (hysteresis); recall needs are selected within this phase",
+				obs.EstimatedGoalRelevant, obs.TotalGoalRelevant, cfg.EffectiveMasteryExitThreshold()),
 		}
 
 	default:
