@@ -201,6 +201,11 @@ to start otherwise. Reapply step 2 after every upgrade. Integration and
 narrative secrets are re-encrypted with the current key by the API process at
 startup; the worker only decrypts them.
 
+`bash scripts/smoke-institution.sh` replays this whole sequence in a
+disposable directory (TLS PostgreSQL, grants, provisioned tenant, OAuth, admin
+catalog and MCP calls). CI runs it on every change; operators can run it to
+check a toolchain before an upgrade.
+
 For native systemd, create separate `tutor-api`, `tutor-worker` and
 `tutor-migrator` system users. Place role-specific environment files under
 `/etc/tutor-mcp/{api,worker,migrator}.env`, readable only by root and the matching
