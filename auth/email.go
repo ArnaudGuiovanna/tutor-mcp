@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"mime"
 	"net"
 	"net/mail"
 	"net/smtp"
@@ -31,6 +32,14 @@ type EmailSender interface {
 // compatibility with custom verification/reset senders until they opt in.
 type LoginChallengeEmailSender interface {
 	SendLoginChallenge(ctx context.Context, to, link string) error
+}
+
+// InstitutionEmailSender is an optional extension for institution accounts:
+// member invitations and institution signup verification. Without it the
+// console still shows invitation links for manual delivery.
+type InstitutionEmailSender interface {
+	SendInvitation(ctx context.Context, to, link string) error
+	SendInstitutionSignup(ctx context.Context, to, link string) error
 }
 
 type SMTPConfig struct {
@@ -109,6 +118,23 @@ func (s *SMTPEmailSender) SendLoginChallenge(ctx context.Context, to, link strin
 	return s.send(ctx, to, "Confirm a tutor/mcp sign-in", "A correct password was entered after unusual failed sign-in activity. Confirm this device only if it was you:\n\n"+link+"\n\nThe link expires shortly and can be used only once. If this was not you, reset your password.\n")
 }
 
+// Institution names are chosen by whoever signs up. They are shown on the
+// linked pages, never in the message, so the service cannot be used to send
+// arbitrary text to arbitrary addresses.
+func (s *SMTPEmailSender) SendInvitation(ctx context.Context, to, link string) error {
+	if err := validateEmailLink(link); err != nil {
+		return err
+	}
+	return s.send(ctx, to, "Your tutor/mcp invitation", "You are invited to join an institution on tutor/mcp.\n\nOpen this link to see the institution, accept and choose your password:\n\n"+link+"\n\nThe link expires in 7 days and can be used only once. If you did not expect it, ignore this email.\n")
+}
+
+func (s *SMTPEmailSender) SendInstitutionSignup(ctx context.Context, to, link string) error {
+	if err := validateEmailLink(link); err != nil {
+		return err
+	}
+	return s.send(ctx, to, "Confirm your tutor/mcp institution", "Confirm your email to create your institution on tutor/mcp:\n\n"+link+"\n\nThis link expires in 30 minutes and can be used only once. If you did not request it, ignore this email.\n")
+}
+
 func validateEmailLink(link string) error {
 	if link == "" || len(link) > emailLinkMaxLen || strings.TrimSpace(link) != link ||
 		strings.ContainsAny(link, "\r\n\x00") || strings.Contains(link, "#") {
@@ -175,7 +201,7 @@ func (s *SMTPEmailSender) send(ctx context.Context, to, subject, body string) er
 		// headers. Keeping this header constant prevents untrusted account data
 		// from ever becoming email content while retaining a valid RFC 5322 To.
 		"To: undisclosed-recipients:;\r\n" +
-		"Subject: " + subject + "\r\n" +
+		"Subject: " + mime.QEncoding.Encode("utf-8", subject) + "\r\n" +
 		"MIME-Version: 1.0\r\n" +
 		"Content-Type: text/plain; charset=UTF-8\r\n" +
 		"Content-Transfer-Encoding: 8bit\r\n\r\n" +
