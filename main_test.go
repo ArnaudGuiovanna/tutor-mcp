@@ -1134,3 +1134,11 @@ func TestStatelessMCPProtocolsWorkAcrossIndependentRoundRobinNodes(t *testing.T)
 		}
 	})
 }
+
+func TestRotatesSecretsAtStartupOnlyOutsideTheWorker(t *testing.T) {
+	for role, want := range map[string]bool{"api": true, "all": true, "worker": false} {
+		if got := rotatesSecretsAtStartup(role); got != want {
+			t.Fatalf("rotatesSecretsAtStartup(%q) = %v, want %v", role, got, want)
+		}
+	}
+}

@@ -1,7 +1,11 @@
 \set ON_ERROR_STOP on
 
--- Run as the database owner after creating login roles in the secret manager.
--- Login roles should be granted exactly one of these group roles.
+-- Run as the database owner (the migrator's login) after every migration.
+-- The owner needs CREATEROLE the first time, to create the three NOLOGIN group
+-- roles below; alternatively a superuser can create them beforehand. Then run
+-- postgres-roles-superuser.sql once as a superuser (managed PostgreSQL: the
+-- provider's administrative role). Login roles should be granted exactly one of
+-- these group roles.
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tutor_api') THEN
@@ -79,7 +83,8 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO tutor_worker;
 -- restores origin mode and validates every tenant FK before commit.
 GRANT SELECT, INSERT ON ALL TABLES IN SCHEMA public TO tutor_restore;
 GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO tutor_restore;
-GRANT SET ON PARAMETER session_replication_role TO tutor_restore;
+-- The session_replication_role parameter grant needs a superuser; it lives in
+-- postgres-roles-superuser.sql so that this owner script runs to completion.
 
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO tutor_api;
