@@ -204,3 +204,60 @@ func TestCountSessionsOnConcept_UsesExplicitIDsWithinSameDay(t *testing.T) {
 		t.Fatalf("same-day explicit sessions counted as %d, want 2", count)
 	}
 }
+
+func TestLearningSession_IdleSessionIsClosedBeforeNewOpen(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	lastNight := now.Add(-models.LearningSessionIdleTimeout - time.Hour)
+
+	stale, err := s.OpenLearningSession(ctx, "L1", "", "sess_stale", lastNight)
+	if err != nil {
+		t.Fatalf("open stale session: %v", err)
+	}
+
+	// Read paths already treat the abandoned session as absent.
+	if _, err := s.GetActiveLearningSession(ctx, "L1"); !errors.Is(err, storeport.ErrNotFound) {
+		t.Fatalf("idle session still reported active: %v", err)
+	}
+	start, err := s.GetSessionStart(ctx, "L1")
+	if err != nil {
+		t.Fatalf("session start: %v", err)
+	}
+	if start.Before(now.Add(-time.Minute)) {
+		t.Fatalf("session start %v still derives from the idle session %v", start, stale.StartedAt)
+	}
+
+	// Resuming the stale ID explicitly is refused with the sentinel.
+	if _, err := s.OpenLearningSession(ctx, "L1", "", "sess_stale", now); !errors.Is(err, storeport.ErrLearningSessionClosed) {
+		t.Fatalf("resuming an idle session must report it closed, got %v", err)
+	}
+
+	// Opening without an ID yields a fresh session and durably closes the old one.
+	fresh, err := s.OpenLearningSession(ctx, "L1", "", "", now)
+	if err != nil {
+		t.Fatalf("open fresh session: %v", err)
+	}
+	if fresh.ID == stale.ID {
+		t.Fatalf("idle session was resumed instead of replaced: %+v", fresh)
+	}
+	closed, err := s.GetLearningSession(ctx, "L1", stale.ID)
+	if err != nil {
+		t.Fatalf("read stale session: %v", err)
+	}
+	if closed.Status != models.LearningSessionStatusClosed || closed.ClosedAt == nil {
+		t.Fatalf("stale session not closed: %+v", closed)
+	}
+	if !closed.ClosedAt.Equal(stale.LastActiveAt) {
+		t.Fatalf("closed_at %v should equal the last activity %v, not the reopening time", closed.ClosedAt, stale.LastActiveAt)
+	}
+
+	// A session idle for less than the timeout is still resumed.
+	recent, err := s.OpenLearningSession(ctx, "L1", "", "", now.Add(models.LearningSessionIdleTimeout-time.Minute))
+	if err != nil {
+		t.Fatalf("resume recent session: %v", err)
+	}
+	if recent.ID != fresh.ID {
+		t.Fatalf("recent session replaced instead of resumed: %s vs %s", recent.ID, fresh.ID)
+	}
+}

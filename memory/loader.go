@@ -17,6 +17,17 @@ import (
 
 const contextBudgetBytes = 40 * 1024
 
+// Per-field ceilings applied before the shared budget. A single oversized
+// narrative (files may reach the 1 MiB write limit) must not consume the whole
+// context and shed every session; the head of the text is kept because these
+// files are curated top-down.
+const (
+	learnerMemoryContextCap = 12 * 1024
+	pendingMemoryContextCap = 8 * 1024
+	conceptNotesContextCap  = 8 * 1024
+	truncationMarker        = "\n[truncated to fit the context budget]"
+)
+
 type EpisodicContext struct {
 	LearnerMemory      string             `json:"learner_memory"`
 	PendingMemory      string             `json:"pending_memory,omitempty"`
@@ -61,9 +72,12 @@ func LoadContext(learnerID, focusConcept string, olmSnapshot *OLMView, alerts []
 
 // LoadContextForDomain is the runtime-safe context loader. Domain-scoped calls
 // include only sessions whose frontmatter names that exact domain and concept
-// notes stored under that domain. Learner-global legacy narratives and archives
-// remain available through LoadContext for maintenance/export, but are not fed
-// into activity generation where homonymous concepts could contaminate it.
+// notes stored under that domain, so homonymous concepts from other subjects
+// cannot contaminate activity generation. The learner-level narrative (stable
+// memory, pending observations and consolidated archives) is not tied to a
+// concept and is always included: it is where goals, preferences and
+// recurring patterns live, and activity generation is its main consumer.
+// The context budget bounds every field.
 func LoadContextForDomain(learnerID, domainID, focusConcept string, olmSnapshot *OLMView, alerts []models.Alert) (*EpisodicContext, error) {
 	return LoadContextForDomainContext(context.Background(), learnerID, domainID, focusConcept, olmSnapshot, alerts)
 }
@@ -82,19 +96,17 @@ func LoadContextForDomainContext(ctx context.Context, learnerID, domainID, focus
 	}
 
 	var err error
-	if domainID == "" {
-		ec.LearnerMemory, err = ReadContext(ctx, learnerID, ScopeMemory, "")
-		if err != nil {
-			return nil, err
-		}
-		ec.memoryModifiedAt = modifiedAt(ctx, learnerID, ScopeMemory, "")
-
-		ec.PendingMemory, err = ReadContext(ctx, learnerID, ScopeMemoryPending, "")
-		if err != nil {
-			return nil, err
-		}
-		ec.pendingModifiedAt = modifiedAt(ctx, learnerID, ScopeMemoryPending, "")
+	ec.LearnerMemory, err = ReadContext(ctx, learnerID, ScopeMemory, "")
+	if err != nil {
+		return nil, err
 	}
+	ec.memoryModifiedAt = modifiedAt(ctx, learnerID, ScopeMemory, "")
+
+	ec.PendingMemory, err = ReadContext(ctx, learnerID, ScopeMemoryPending, "")
+	if err != nil {
+		return nil, err
+	}
+	ec.pendingModifiedAt = modifiedAt(ctx, learnerID, ScopeMemoryPending, "")
 
 	if focusConcept != "" {
 		if domainID == "" {
@@ -129,21 +141,19 @@ func LoadContextForDomainContext(ctx context.Context, learnerID, domainID, focus
 		}
 	}
 
-	if domainID == "" {
-		archives, err := ListArchivesContext(ctx, learnerID)
+	archives, err := ListArchivesContext(ctx, learnerID)
+	if err != nil {
+		return nil, err
+	}
+	if len(archives) > 2 {
+		archives = archives[:2]
+	}
+	for _, period := range archives {
+		body, err := ReadContext(ctx, learnerID, ScopeArchive, period)
 		if err != nil {
 			return nil, err
 		}
-		if len(archives) > 2 {
-			archives = archives[:2]
-		}
-		for _, period := range archives {
-			body, err := ReadContext(ctx, learnerID, ScopeArchive, period)
-			if err != nil {
-				return nil, err
-			}
-			ec.RecentArchives = append(ec.RecentArchives, ArchivePayload{Period: period, Body: body})
-		}
+		ec.RecentArchives = append(ec.RecentArchives, ArchivePayload{Period: period, Body: body})
 	}
 
 	ec.OLMInconsistencies = DetectOLMInconsistencies(olmSnapshot, alerts)
@@ -281,6 +291,9 @@ func enforceContextBudget(ec *EpisodicContext, budget int) {
 	if ec == nil || budget <= 0 {
 		return
 	}
+	ec.LearnerMemory = truncateNarrative(ec.LearnerMemory, learnerMemoryContextCap)
+	ec.PendingMemory = truncateNarrative(ec.PendingMemory, pendingMemoryContextCap)
+	ec.ConceptNotes = truncateNarrative(ec.ConceptNotes, conceptNotesContextCap)
 	size := contextSize(ec)
 	// Drop the oldest whole sessions first, but keep a floor of one: the most
 	// recent session always survives so the learner never loses their latest
@@ -323,9 +336,41 @@ func enforceContextBudget(ec *EpisodicContext, budget int) {
 			}
 		}
 		if !cleared {
-			return
+			break
 		}
 	}
+	// Last resort once every session payload is gone: trim the pending
+	// observations, then the concept notes. The stable learner memory is
+	// never evicted here (documented policy); its per-field cap above keeps
+	// the combined narrative under the production budget.
+	for _, field := range []*string{&ec.PendingMemory, &ec.ConceptNotes} {
+		if size <= budget {
+			return
+		}
+		excess := size - budget
+		if len(*field) <= excess {
+			*field = ""
+		} else {
+			*field = truncateNarrative(*field, len(*field)-excess-len(truncationMarker))
+		}
+		size = contextSize(ec)
+	}
+}
+
+// truncateNarrative keeps the head of a narrative within limit bytes,
+// appending a marker so the reader knows the text continues.
+func truncateNarrative(text string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	if len(text) <= limit {
+		return text
+	}
+	keep := limit - len(truncationMarker)
+	if keep <= 0 {
+		return truncationMarker[:limit]
+	}
+	return text[:keep] + truncationMarker
 }
 
 func contextSize(ec *EpisodicContext) int {

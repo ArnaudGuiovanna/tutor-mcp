@@ -50,6 +50,10 @@ type startupConfig struct {
 	// expansion can be deployed across the fleet before behavior changes.
 	// main passes this value to the OAuth and MCP configuration boundaries.
 	OAuthGranularScopes bool
+	// AssessmentHostLLMDemonstrates lets decision-bound host_llm evaluations
+	// count as demonstrated evidence outside high-stakes domains
+	// (ASSESSMENT_HOST_LLM_DEMONSTRATES, default on).
+	AssessmentHostLLMDemonstrates bool
 }
 
 func loadStartupConfig(port string) (startupConfig, error) {
@@ -83,6 +87,11 @@ func loadStartupConfig(port string) (startupConfig, error) {
 		return startupConfig{}, err
 	}
 	cfg.OAuthGranularScopes = oauthGranularScopes
+	hostLLMDemonstrates, err := onOffEnv("ASSESSMENT_HOST_LLM_DEMONSTRATES", true)
+	if err != nil {
+		return startupConfig{}, err
+	}
+	cfg.AssessmentHostLLMDemonstrates = hostLLMDemonstrates
 	var dcrMode string
 	var dcrTokenHash [sha256.Size]byte
 	if cfg.ProcessRole == "api" || cfg.ProcessRole == "all" {

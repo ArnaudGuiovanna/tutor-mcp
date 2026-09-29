@@ -353,6 +353,12 @@ func isTrustedEvaluatedAssessment(attempt *models.AssessmentAttempt, concept str
 	switch attempt.EvaluationMethod {
 	case models.EvaluationMethodExternal, models.EvaluationMethodHumanReview, models.EvaluationMethodDeterministic:
 		return true
+	case models.EvaluationMethodHostLLM:
+		// The persistence read projection grants TrustedEvaluation to a
+		// host evaluation only when the deployment policy allows it, the
+		// attempt is bound to a pedagogical decision and the domain is not
+		// high-stakes. A raw host_llm row never carries the flag.
+		return true
 	default:
 		return false
 	}

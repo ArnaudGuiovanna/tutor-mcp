@@ -76,6 +76,42 @@ func TestApplyInteraction_CorrectAnswer_MasteryUp(t *testing.T) {
 	}
 }
 
+// A failed cold diagnostic measures prior knowledge and must not create a
+// memory card; a successful one does, since the learner already knows it.
+func TestApplyInteraction_FailedColdDiagnosticCreatesNoCard(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	domain := makeOwnerDomain(t, store, "L_owner", "math") // concepts: ["a","b"]
+	now := time.Now().UTC()
+
+	failed, meta, err := applyInteraction(context.Background(), deps, "L_owner", interactionInput{
+		Concept: "a", ActivityType: string(models.ActivityDiagnosticAssessment), Success: false,
+		ResponseTimeSeconds: 20, Confidence: 0.3, DomainID: domain.ID,
+	}, now)
+	if err != nil {
+		t.Fatalf("applyInteraction: %v", err)
+	}
+	if failed.CardState != "new" || failed.Reps != 0 || failed.LastReview != nil {
+		t.Fatalf("failed cold diagnostic created a memory card: %+v", failed)
+	}
+	if failed.PMastery >= 0.1 {
+		t.Fatalf("the diagnostic must still lower the estimate: %f", failed.PMastery)
+	}
+	if meta["fsrs_update_applied"] != false || meta["fsrs_skip_reason"] != "failed_cold_diagnostic_creates_no_card" {
+		t.Fatalf("audit must record the skipped FSRS update: %v", meta)
+	}
+
+	passed, _, err := applyInteraction(context.Background(), deps, "L_owner", interactionInput{
+		Concept: "b", ActivityType: string(models.ActivityDiagnosticAssessment), Success: true,
+		ResponseTimeSeconds: 8, Confidence: 0.8, DomainID: domain.ID,
+	}, now)
+	if err != nil {
+		t.Fatalf("applyInteraction: %v", err)
+	}
+	if passed.CardState != "review" || passed.Reps != 1 {
+		t.Fatalf("a passed cold diagnostic must schedule a review card: %+v", passed)
+	}
+}
+
 // An incorrect answer on an already-mastered concept must drop mastery and
 // register the failure (an FSRS Again rating lapses the card).
 func TestApplyInteraction_IncorrectAnswer_MasteryDown(t *testing.T) {

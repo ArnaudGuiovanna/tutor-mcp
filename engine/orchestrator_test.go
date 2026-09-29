@@ -294,6 +294,43 @@ func TestOrchestrate_Diagnostic_NMaxReached_TransitionsToInstruction(t *testing.
 	}
 }
 
+func TestOrchestrate_DiagnosticCoversDistinctConceptsBeforeRetesting(t *testing.T) {
+	// Five concepts, diagnostic phase. Each qualified diagnostic raises the
+	// tested concept to P=0.33, whose information gain beats an untested
+	// concept at P=0.10. Coverage must still visit every concept once
+	// before any concept is re-tested.
+	store := setupOrchStore(t)
+	concepts := []string{"A", "B", "C", "D", "E"}
+	domainID := seedOrchDomain(t, store, concepts, nil, models.PhaseDiagnostic)
+	now := time.Now().UTC()
+	if err := store.UpdateDomainPhase(context.Background(), domainID, models.PhaseDiagnostic, 0.469, now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for call := range len(concepts) {
+		input := defaultInput(domainID)
+		input.Now = now.Add(time.Duration(call) * time.Minute)
+		activity, phase, err := OrchestrateWithPhase(context.Background(), store, input)
+		if err != nil {
+			t.Fatalf("call %d: %v", call, err)
+		}
+		if phase != models.PhaseDiagnostic || activity.Type != models.ActivityDiagnosticAssessment {
+			t.Fatalf("call %d: expected a diagnostic, got phase=%s activity=%+v", call, phase, activity)
+		}
+		if seen[activity.Concept] {
+			t.Fatalf("call %d re-tested %s before covering %v", call, activity.Concept, concepts)
+		}
+		seen[activity.Concept] = true
+		if _, err := recordSyntheticInteraction(t, store, domainID, activity.Concept, string(models.ActivityDiagnosticAssessment), true, input.Now); err != nil {
+			t.Fatal(err)
+		}
+		setMastery(t, store, activity.Concept, 0.33)
+	}
+	if len(seen) != len(concepts) {
+		t.Fatalf("coverage incomplete: %v", seen)
+	}
+}
+
 func TestOrchestrate_DiagnosticRequiresAttemptLinkedHintFreeDistinctCoverage(t *testing.T) {
 	store := setupOrchStore(t)
 	domainID := seedOrchDomain(t, store, []string{"A", "B", "C"}, nil, models.PhaseDiagnostic)
@@ -447,6 +484,42 @@ func TestOrchestrate_Maintenance_RetentionLowRecallsWithoutPhaseChange(t *testin
 	}
 }
 
+func TestOrchestrate_Maintenance_SingleSlipDoesNotReturnToInstruction(t *testing.T) {
+	// A and B were mastered; one failure on B dropped its estimate to 0.80,
+	// inside the hysteresis band. The domain stays in MAINTENANCE and B still
+	// receives practice there. A drop below the exit floor does return to
+	// INSTRUCTION.
+	for _, tc := range []struct {
+		name      string
+		mastery   float64
+		wantPhase models.Phase
+	}{
+		{"inside band", 0.80, models.PhaseMaintenance},
+		{"below exit floor", 0.60, models.PhaseInstruction},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := setupOrchStore(t)
+			domainID := seedOrchDomain(t, store, []string{"A", "B"}, nil, models.PhaseMaintenance)
+			setGoalRelevance(t, store, domainID, map[string]float64{"A": 1.0, "B": 1.0})
+			setReviewState(t, store, "A", 0.95, 30, 1)
+			// B's card is older, so it is the more urgent maintenance
+			// candidate while its retention stays above the recall floor.
+			setReviewState(t, store, "B", tc.mastery, 30, 20)
+
+			activity, phase, err := OrchestrateWithPhase(context.Background(), store, defaultInput(domainID))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if phase != tc.wantPhase {
+				t.Fatalf("phase=%q, want %q (activity=%+v)", phase, tc.wantPhase, activity)
+			}
+			if tc.wantPhase == models.PhaseMaintenance && (activity.Concept != "B" || activity.Type != models.ActivityPractice) {
+				t.Fatalf("the slipped concept should receive practice inside MAINTENANCE, got %+v", activity)
+			}
+		})
+	}
+}
+
 func TestOrchestrate_AntiRepeatNeverStarvesAcquisition(t *testing.T) {
 	for _, chain := range []bool{true, false} {
 		t.Run(fmt.Sprintf("prerequisite_chain=%t", chain), func(t *testing.T) {
@@ -525,6 +598,43 @@ func TestOrchestrate_RecallNeedIndependentOfAcquisitionPhase(t *testing.T) {
 	}
 }
 
+func TestOrchestrate_NoRecallOnConceptNeverAcquired(t *testing.T) {
+	// "target" failed a cold diagnostic a week ago: its card is still in the
+	// learning state with a decayed retention, and its prerequisite is not
+	// mastered. Recall selection must leave it alone and let instruction
+	// work on the prerequisite.
+	store := setupOrchStore(t)
+	domainID := seedOrchDomain(t, store,
+		[]string{"pre", "target"},
+		map[string][]string{"target": {"pre"}},
+		models.PhaseInstruction,
+	)
+	cs, err := store.GetConceptState(context.Background(), "L1", "target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lastReview := time.Now().UTC().Add(-7 * 24 * time.Hour)
+	cs.PMastery = 0.05
+	cs.CardState = "learning"
+	cs.Stability = 0.4
+	cs.Reps = 1
+	cs.LastReview = &lastReview
+	if err := store.UpsertConceptState(context.Background(), cs); err != nil {
+		t.Fatal(err)
+	}
+
+	activity, err := Orchestrate(context.Background(), store, defaultInput(domainID))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if activity.Concept == "target" {
+		t.Fatalf("a never-acquired concept was routed to recall: %+v", activity)
+	}
+	if activity.Concept != "pre" {
+		t.Fatalf("expected instruction on the prerequisite, got %+v", activity)
+	}
+}
+
 // ─── OQ-2.7 : Goal-relevant cutoff (uncovered exclusion) ───────────────────
 
 func TestOrchestrate_GoalRelevant_RestrictiveGoal_FastMaintenance(t *testing.T) {
@@ -561,6 +671,35 @@ func TestOrchestrate_GoalRelevant_BroadGoal_StaysInstruction(t *testing.T) {
 	d, _ := store.GetDomainByID(context.Background(), domainID)
 	if d.Phase == models.PhaseMaintenance {
 		t.Errorf("expected stay INSTRUCTION (4/5 not mastered), got %q", d.Phase)
+	}
+}
+
+// ─── Concepts added after the relevance vector was set ─────────────────────
+
+func TestOrchestrate_GoalRelevant_StaleVector_NewConceptStaysRoutable(t *testing.T) {
+	// A vector set against graph version 1 covers A and B. The graph then
+	// gains C (version 2) and the host forgets to call set_goal_relevance.
+	// C must still be selectable instead of leaving the learner with no
+	// fringe once A and B are mastered.
+	store := setupOrchStore(t)
+	domainID := seedOrchDomain(t, store, []string{"A", "B", "C"}, nil, models.PhaseInstruction)
+	setGoalRelevance(t, store, domainID, map[string]float64{"A": 0.9, "B": 0.9})
+	if _, err := store.RawDB().Exec(`UPDATE domains SET graph_version = graph_version + 1 WHERE id = ?`, domainID); err != nil {
+		t.Fatal(err)
+	}
+	setMastery(t, store, "A", 0.95)
+	setMastery(t, store, "B", 0.95)
+
+	activity, err := Orchestrate(context.Background(), store, defaultInput(domainID))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if activity.Concept != "C" {
+		t.Fatalf("expected the concept added after the vector to be routable, got %+v", activity)
+	}
+	d, _ := store.GetDomainByID(context.Background(), domainID)
+	if d.Phase != models.PhaseInstruction {
+		t.Errorf("C is not estimated yet: expected INSTRUCTION, got %q", d.Phase)
 	}
 }
 

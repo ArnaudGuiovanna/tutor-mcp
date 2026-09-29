@@ -91,13 +91,50 @@ func SelectConceptAt(
 	goalRelevance map[string]float64,
 	now time.Time,
 ) (Selection, error) {
+	return SelectConceptAtWithContext(phase, states, graph, goalRelevance, now, SelectionContext{})
+}
+
+// SelectionContext carries the per-call policy the orchestrator resolves
+// from its PhaseConfig and fixtures. The zero value keeps the historical
+// behaviour of SelectConceptAt.
+type SelectionContext struct {
+	// MaintenanceMasteryFloor is the lowest estimate admitted into the
+	// MAINTENANCE pool. Zero means algorithms.MasteryBKT(). The orchestrator
+	// passes the phase hysteresis floor so a concept that slipped below the
+	// routing threshold keeps receiving practice without leaving MAINTENANCE.
+	MaintenanceMasteryFloor float64
+
+	// DiagnosedConcepts lists the concepts already covered by a qualified
+	// diagnostic since the phase started. DIAGNOSTIC selection prefers the
+	// remaining concepts: a concept answered once carries more information
+	// gain than an untested one, so pure argmax re-tested the same items
+	// instead of covering the curriculum.
+	DiagnosedConcepts map[string]bool
+}
+
+func (c SelectionContext) maintenanceFloor() float64 {
+	if c.MaintenanceMasteryFloor > 0 {
+		return c.MaintenanceMasteryFloor
+	}
+	return algorithms.MasteryBKT()
+}
+
+// SelectConceptAtWithContext is SelectConceptAt with an explicit policy.
+func SelectConceptAtWithContext(
+	phase models.Phase,
+	states []*models.ConceptState,
+	graph models.KnowledgeSpace,
+	goalRelevance map[string]float64,
+	now time.Time,
+	sctx SelectionContext,
+) (Selection, error) {
 	switch phase {
 	case models.PhaseInstruction:
 		return selectInstruction(states, graph, goalRelevance), nil
 	case models.PhaseMaintenance:
-		return selectMaintenance(states, graph, goalRelevance, now), nil
+		return selectMaintenance(states, graph, goalRelevance, now, sctx.maintenanceFloor()), nil
 	case models.PhaseDiagnostic:
-		return selectDiagnostic(states, graph), nil
+		return selectDiagnostic(states, graph, sctx.DiagnosedConcepts), nil
 	default:
 		slog.Error("concept_selector: unknown phase",
 			"phase", string(phase))
@@ -250,9 +287,9 @@ func selectInstruction(
 //	urgency = 1 - retention      (OQ-4.5 = A)
 //	score   = urgency × goal_relevance
 //
-// over the high-estimate set (PMastery >= MasteryBKT()). Cards in
-// CardState=="new" get urgency=0 — they are above the BKT routing threshold but
-// have no FSRS history yet.
+// over the high-estimate set (PMastery >= masteryFloor, the phase hysteresis
+// floor or MasteryBKT() by default). Cards in CardState=="new" get urgency=0 —
+// they are above the floor but have no FSRS history yet.
 //
 // v2 note: the dervative form "elapsed_days/stability" would be more
 // sensitive near the decay knee; revisit if eval shows MAINTENANCE
@@ -262,8 +299,9 @@ func selectMaintenance(
 	graph models.KnowledgeSpace,
 	goalRelevance map[string]float64,
 	now time.Time,
+	masteryFloor float64,
 ) Selection {
-	bktThreshold := algorithms.MasteryBKT()
+	bktThreshold := masteryFloor
 
 	// Domain filter: states whose concept is absent from graph.Concepts
 	// are excluded. pf.StatesList is learner-wide, so without this guard
@@ -372,7 +410,7 @@ func selectMaintenance(
 // treated as "no filter" to preserve existing call sites that pass
 // models.KnowledgeSpace{}; the orchestrator always supplies a non-empty
 // graph for the active domain.
-func selectDiagnostic(states []*models.ConceptState, graph models.KnowledgeSpace) Selection {
+func selectDiagnostic(states []*models.ConceptState, graph models.KnowledgeSpace, diagnosed map[string]bool) Selection {
 	var domainSet map[string]struct{}
 	if len(graph.Concepts) > 0 {
 		domainSet = make(map[string]struct{}, len(graph.Concepts))
@@ -407,8 +445,32 @@ func selectDiagnostic(states []*models.ConceptState, graph models.KnowledgeSpace
 		return candidates[i].Concept < candidates[j].Concept
 	})
 
+	// First pass: concepts not yet covered by a qualified diagnostic. Only
+	// when every candidate has been diagnosed does the argmax run over all
+	// of them (coverage is then complete and the FSM exits on its own).
 	bestConcept := ""
 	bestScore := math.Inf(-1)
+	untested := 0
+	for _, cs := range candidates {
+		if diagnosed[cs.Concept] {
+			continue
+		}
+		untested++
+		ig := algorithms.BKTInfoGain(cs)
+		if ig > bestScore {
+			bestScore = ig
+			bestConcept = cs.Concept
+		}
+	}
+	if bestConcept != "" {
+		return Selection{
+			Concept: bestConcept,
+			Score:   bestScore,
+			Phase:   models.PhaseDiagnostic,
+			Rationale: fmt.Sprintf("max info-gain=%.3f sur %d candidats non encore diagnostiques (%d non satures)",
+				bestScore, untested, len(candidates)),
+		}
+	}
 	for _, cs := range candidates {
 		ig := algorithms.BKTInfoGain(cs)
 		if ig > bestScore {
@@ -420,7 +482,7 @@ func selectDiagnostic(states []*models.ConceptState, graph models.KnowledgeSpace
 		Concept: bestConcept,
 		Score:   bestScore,
 		Phase:   models.PhaseDiagnostic,
-		Rationale: fmt.Sprintf("max info-gain=%.3f sur %d candidats non satures",
+		Rationale: fmt.Sprintf("max info-gain=%.3f sur %d candidats non satures (tous deja diagnostiques)",
 			bestScore, len(candidates)),
 	}
 }

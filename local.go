@@ -36,6 +36,11 @@ func runLocal(options commandOptions, logger *slog.Logger) error {
 		return err
 	}
 	defer store.Close()
+	hostLLMDemonstrates, err := onOffEnv("ASSESSMENT_HOST_LLM_DEMONSTRATES", true)
+	if err != nil {
+		return err
+	}
+	store.SetHostLLMDemonstrationPolicy(hostLLMDemonstrates)
 	id, err := store.EnsureLocalIdentity(ctx)
 	if err != nil {
 		return err

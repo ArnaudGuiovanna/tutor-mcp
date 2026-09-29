@@ -75,6 +75,18 @@ func TestLoadContextForDomainExcludesHomonymousLegacyAndForeignNarratives(t *tes
 		}
 	}
 
+	// The learner-level narrative is not concept-bound and must reach
+	// activity generation in every domain.
+	if err := Write(WriteRequest{LearnerID: "L1", Scope: ScopeMemory, Operation: OpReplaceFile, Content: "prefers worked examples"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(WriteRequest{LearnerID: "L1", Scope: ScopeMemoryPending, Operation: OpAppend, Content: "- pending observation"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Write(WriteRequest{LearnerID: "L1", Scope: ScopeArchive, Period: "2026-04", Operation: OpReplaceFile, Content: "# April archive"}); err != nil {
+		t.Fatal(err)
+	}
+
 	ec, err := LoadContextForDomain("L1", "D1", "loops", nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -85,8 +97,43 @@ func TestLoadContextForDomainExcludesHomonymousLegacyAndForeignNarratives(t *tes
 	if len(ec.RecentSessions) != 1 || !strings.Contains(ec.RecentSessions[0].Body, "matching session") {
 		t.Fatalf("domain sessions leaked or were lost: %+v", ec.RecentSessions)
 	}
-	if ec.LearnerMemory != "" || ec.PendingMemory != "" || len(ec.RecentArchives) != 0 {
-		t.Fatalf("learner-global narrative leaked into scoped context: %+v", ec)
+	if ec.LearnerMemory != "prefers worked examples" || !strings.Contains(ec.PendingMemory, "pending observation") {
+		t.Fatalf("learner-level memory missing from the domain context: %+v", ec)
+	}
+	if len(ec.RecentArchives) != 1 || ec.RecentArchives[0].Body != "# April archive" {
+		t.Fatalf("consolidated archives missing from the domain context: %+v", ec.RecentArchives)
+	}
+}
+
+func TestContextBudgetTruncatesOversizedNarrativeFields(t *testing.T) {
+	ec := &EpisodicContext{
+		LearnerMemory:  strings.Repeat("m", 200*1024),
+		PendingMemory:  strings.Repeat("p", 50*1024),
+		ConceptNotes:   strings.Repeat("c", 50*1024),
+		RecentSessions: []SessionPayload{{Body: strings.Repeat("s", 4*1024)}},
+	}
+	enforceContextBudget(ec, contextBudgetBytes)
+	if contextSize(ec) > contextBudgetBytes {
+		t.Fatalf("size %d exceeds budget %d", contextSize(ec), contextBudgetBytes)
+	}
+	if len(ec.LearnerMemory) > learnerMemoryContextCap || !strings.HasSuffix(ec.LearnerMemory, truncationMarker) {
+		t.Fatalf("learner memory not capped with a marker: len=%d", len(ec.LearnerMemory))
+	}
+	if !strings.HasPrefix(ec.LearnerMemory, "mmmm") {
+		t.Fatalf("truncation must keep the head of the narrative")
+	}
+	if len(ec.PendingMemory) > pendingMemoryContextCap || len(ec.ConceptNotes) > conceptNotesContextCap {
+		t.Fatalf("pending/concept fields not capped: %d / %d", len(ec.PendingMemory), len(ec.ConceptNotes))
+	}
+	if ec.RecentSessions[0].Body == "" {
+		t.Fatalf("capped narrative fields must leave room for the latest session")
+	}
+
+	// Even with every session shed, the narrative is trimmed to the budget.
+	tiny := &EpisodicContext{LearnerMemory: strings.Repeat("m", 500), PendingMemory: strings.Repeat("p", 500)}
+	enforceContextBudget(tiny, 600)
+	if contextSize(tiny) > 600 || len(tiny.PendingMemory) >= 500 || len(tiny.LearnerMemory) != 500 {
+		t.Fatalf("last-resort trim must shorten pending memory before touching stable memory: %d pending=%d memory=%d", contextSize(tiny), len(tiny.PendingMemory), len(tiny.LearnerMemory))
 	}
 }
 

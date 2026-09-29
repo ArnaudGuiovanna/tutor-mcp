@@ -240,6 +240,35 @@ func TestGetNextActivity_IncludesEpisodicContextAndReasoningRequest(t *testing.T
 	}
 }
 
+func TestGetNextActivity_InjectsStableLearnerMemoryInDomainContext(t *testing.T) {
+	// The stable learner memory is learner-level: it must reach the
+	// domain-scoped context that get_next_activity builds, not only the
+	// learner-global maintenance loader.
+	t.Setenv("TUTOR_MCP_MEMORY_ROOT", t.TempDir())
+	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
+	store, deps := setupToolsTest(t)
+	d := makeOwnerDomain(t, store, "L_owner", "math")
+	if err := memory.Write(memory.WriteRequest{
+		LearnerID: "L_owner", Scope: memory.ScopeMemory, Operation: memory.OpReplaceFile,
+		Content: "## Stable\nPrefers worked examples before abstract rules.",
+	}); err != nil {
+		t.Fatalf("write stable memory: %v", err)
+	}
+
+	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{"domain_id": d.ID})
+	if res.IsError {
+		t.Fatalf("got %q", resultText(res))
+	}
+	out := decodeResult(t, res)
+	ec, ok := out["episodic_context"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected episodic_context, got %v", out)
+	}
+	if learnerMemory, _ := ec["learner_memory"].(string); !strings.Contains(learnerMemory, "worked examples") {
+		t.Fatalf("stable learner memory missing from the domain context: %v", ec)
+	}
+}
+
 func TestGetNextActivity_AttachesClientInitiatedConsolidationRequest(t *testing.T) {
 	t.Setenv("TUTOR_MCP_MEMORY_ROOT", t.TempDir())
 	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
@@ -423,6 +452,73 @@ func TestGetNextActivity_OverloadUsesRealSessionStart(t *testing.T) {
 	}
 	if got := activity["type"]; got != string(models.ActivityCloseSession) {
 		t.Fatalf("expected CLOSE_SESSION from overloaded session, got %v", activity)
+	}
+}
+
+func TestGetNextActivity_IdleSessionExpiresWithoutOverload(t *testing.T) {
+	// A session abandoned overnight must not make every later call an
+	// OVERLOAD escape: it is closed at the next open and a fresh session
+	// carries the new activity.
+	store, deps := setupToolsTest(t)
+	d := makeOwnerDomain(t, store, "L_owner", "math")
+	cs := models.NewConceptState("L_owner", "a")
+	cs.PMastery = 0.5
+	if err := store.UpsertConceptState(context.Background(), cs); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	lastNight := time.Now().UTC().Add(-models.LearningSessionIdleTimeout - time.Hour)
+	if _, err := store.OpenLearningSession(context.Background(), "L_owner", d.ID, "sess_idle", lastNight); err != nil {
+		t.Fatalf("open idle session: %v", err)
+	}
+
+	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{
+		"domain_id": d.ID,
+	})
+	if res.IsError {
+		t.Fatalf("got %q", resultText(res))
+	}
+	out := decodeResult(t, res)
+	if out["session_id"] == "sess_idle" {
+		t.Fatalf("idle session was resumed: %v", out["session_id"])
+	}
+	activity, _ := out["activity"].(map[string]any)
+	if got := activity["type"]; got == string(models.ActivityCloseSession) {
+		t.Fatalf("expired session still produced an OVERLOAD escape: %v", activity)
+	}
+	closed, err := store.GetLearningSession(context.Background(), "L_owner", "sess_idle")
+	if err != nil || closed.Status != models.LearningSessionStatusClosed {
+		t.Fatalf("idle session not closed: %+v err=%v", closed, err)
+	}
+}
+
+func TestGetNextActivity_MaintenanceRecallSurvivesEvidenceController(t *testing.T) {
+	// A mastered concept whose memory decayed must get its recall exercise,
+	// not a transfer probe: the evidence controller used to replace every
+	// activity on a high estimate whenever transfer was unobserved.
+	store, deps := setupToolsTest(t)
+	d := makeOwnerDomain(t, store, "L_owner", "math")
+	cs := models.NewConceptStateInDomain("L_owner", d.ID, "a")
+	cs.PMastery = 0.95
+	cs.CardState = "review"
+	cs.Stability = 1
+	cs.Reps = 3
+	lastReview := time.Now().UTC().Add(-24 * 24 * time.Hour)
+	cs.LastReview = &lastReview
+	if err := store.UpsertConceptState(context.Background(), cs); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	if err := store.UpdateDomainPhase(context.Background(), d.ID, models.PhaseMaintenance, 0, time.Now().UTC()); err != nil {
+		t.Fatalf("set phase: %v", err)
+	}
+
+	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{"domain_id": d.ID})
+	if res.IsError {
+		t.Fatalf("got %q", resultText(res))
+	}
+	out := decodeResult(t, res)
+	activity, _ := out["activity"].(map[string]any)
+	if activity["type"] != string(models.ActivityRecall) || activity["concept"] != "a" {
+		t.Fatalf("expected RECALL_EXERCISE on the decayed concept, got %v (adjustment=%v)", activity, out["evidence_adjustment"])
 	}
 }
 

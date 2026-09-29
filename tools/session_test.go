@@ -142,3 +142,21 @@ func TestImplementationIntentionTools_LifecycleAndOwnership(t *testing.T) {
 		t.Fatalf("unexpected resolved intention: %v", intention)
 	}
 }
+
+func TestStartLearningSession_ExpiredExplicitIDExplainsHowToRecover(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	lastNight := time.Now().UTC().Add(-models.LearningSessionIdleTimeout - time.Hour)
+	if _, err := store.OpenLearningSession(context.Background(), "L_owner", "", "sess_expired", lastNight); err != nil {
+		t.Fatalf("open idle session: %v", err)
+	}
+	res := callTool(t, deps, registerStartLearningSession, "L_owner", "start_learning_session", map[string]any{
+		"session_id": "sess_expired",
+	})
+	if !res.IsError || !strings.Contains(resultText(res), "expired after inactivity") {
+		t.Fatalf("expected an explicit expiry message, got error=%v %q", res.IsError, resultText(res))
+	}
+	fresh := callTool(t, deps, registerStartLearningSession, "L_owner", "start_learning_session", map[string]any{})
+	if fresh.IsError || decodeResult(t, fresh)["session_id"] == "sess_expired" {
+		t.Fatalf("fresh start failed or reused the expired session: %q", resultText(fresh))
+	}
+}

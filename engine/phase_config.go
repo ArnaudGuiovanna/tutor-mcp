@@ -52,6 +52,30 @@ type PhaseConfig struct {
 	// DefaultAntiRepeatWindow=3. Test scenarios with small domains
 	// can lower it to avoid excluding the entire eligible pool.
 	AntiRepeatWindow int
+
+	// MasteryExitThreshold is the hysteresis floor of MAINTENANCE. Entering
+	// MAINTENANCE still requires every goal-relevant estimate to reach
+	// algorithms.MasteryBKT(); leaving it requires one estimate to fall
+	// below this lower value. With the per-transition forgetting term a
+	// single failure drops an estimate from ~0.94 to ~0.68, so a single
+	// threshold made the phase oscillate on every slip. Concepts between
+	// the two thresholds stay in the MAINTENANCE pool and receive guided
+	// practice. Zero or negative means "no hysteresis" (legacy behaviour).
+	MasteryExitThreshold float64
+}
+
+// DefaultMasteryExitThreshold is the MAINTENANCE hysteresis floor. It reuses
+// the historical KST prerequisite value so the two thresholds that already
+// existed in the legacy profile (0.70 / 0.85) now describe one hysteresis band.
+const DefaultMasteryExitThreshold = 0.70
+
+// EffectiveMasteryExitThreshold resolves the configured floor, falling back
+// to the routing threshold when unset so ad-hoc configs keep the strict rule.
+func (cfg PhaseConfig) EffectiveMasteryExitThreshold() float64 {
+	if cfg.MasteryExitThreshold > 0 {
+		return cfg.MasteryExitThreshold
+	}
+	return algorithms.MasteryBKT()
 }
 
 // NewDefaultPhaseConfig returns the canonical Phase 1 configuration.
@@ -69,5 +93,6 @@ func NewDefaultPhaseConfig() PhaseConfig {
 		RetentionRecallThreshold: algorithms.RetentionRecallRoutingThreshold,
 		GoalRelevantCutoff:       0.0,
 		AntiRepeatWindow:         DefaultAntiRepeatWindow,
+		MasteryExitThreshold:     DefaultMasteryExitThreshold,
 	}
 }

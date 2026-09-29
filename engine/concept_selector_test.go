@@ -9,6 +9,7 @@ import (
 	"math"
 	"testing"
 	"time"
+	"tutor-mcp/algorithms"
 
 	"tutor-mcp/models"
 )
@@ -639,5 +640,47 @@ func TestSelectConcept_RespectsMasteryBKTAccessor(t *testing.T) {
 	sel, _ := SelectConcept(models.PhaseInstruction, states, graph, gr)
 	if sel.Concept != "A" {
 		t.Errorf("expected A in fringe at 0.84 under legacy, got %+v", sel)
+	}
+}
+
+func TestSelectConceptAtWithContext_MaintenanceFloorAdmitsSlippedConcept(t *testing.T) {
+	graph := graphFlat("A", "B")
+	a := reviewedCS("A", 0.95)
+	b := reviewedCS("B", 0.78) // below routing threshold, above the hysteresis floor
+	setConceptCardAge(b, 20)   // decayed: the most urgent card
+	states := []*models.ConceptState{a, b}
+	now := time.Now().UTC()
+
+	legacy, _ := SelectConceptAt(models.PhaseMaintenance, states, graph, nil, now)
+	if legacy.Concept != "A" {
+		t.Fatalf("legacy pool must exclude the slipped concept, got %+v", legacy)
+	}
+	withFloor, _ := SelectConceptAtWithContext(models.PhaseMaintenance, states, graph, nil, now, SelectionContext{MaintenanceMasteryFloor: DefaultMasteryExitThreshold})
+	if withFloor.Concept != "B" {
+		t.Fatalf("hysteresis floor must admit the slipped concept, got %+v", withFloor)
+	}
+}
+
+func TestSelectConceptAtWithContext_DiagnosticPrefersUndiagnosedConcepts(t *testing.T) {
+	// A was answered once (P=0.33, higher info gain); B was never tested
+	// (P=0.10). Coverage requires B next, whatever the raw information gain.
+	a := reviewedCS("A", 0.33)
+	b := reviewedCS("B", 0.10)
+	graph := graphFlat("A", "B")
+	now := time.Now().UTC()
+	if algorithms.BKTInfoGain(a) <= algorithms.BKTInfoGain(b) {
+		t.Fatalf("fixture invalid: expected IG(A) > IG(B)")
+	}
+	sel, _ := SelectConceptAtWithContext(models.PhaseDiagnostic, []*models.ConceptState{a, b}, graph, nil, now, SelectionContext{
+		DiagnosedConcepts: map[string]bool{"A": true},
+	})
+	if sel.Concept != "B" {
+		t.Fatalf("expected the undiagnosed concept B, got %+v", sel)
+	}
+	all, _ := SelectConceptAtWithContext(models.PhaseDiagnostic, []*models.ConceptState{a, b}, graph, nil, now, SelectionContext{
+		DiagnosedConcepts: map[string]bool{"A": true, "B": true},
+	})
+	if all.Concept != "A" {
+		t.Fatalf("once everything is diagnosed the plain argmax applies, got %+v", all)
 	}
 }

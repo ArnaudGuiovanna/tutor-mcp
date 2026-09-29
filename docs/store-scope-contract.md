@@ -40,3 +40,9 @@ None of these methods is an MCP tool. After authentication, both new profiles
 use the existing learner principal's transactions and permissions. The test
 fingerprint explicitly includes these exceptions; business methods remain
 subject to the general rule.
+
+`SetHostLLMDemonstrationPolicy` is a process-level configuration setter like
+`SetIntegrationSecretKeyring`: it is called once at startup from the parsed
+configuration, touches no tenant data and only changes the SQL projection that
+derives effective evaluation trust. It is part of the fingerprint for the same
+reason.

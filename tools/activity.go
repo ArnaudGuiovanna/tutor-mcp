@@ -468,7 +468,12 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 				masteryUncertainty = uncertainty
 			}
 			conceptEvidence := evidenceSnapshot.ForConcept(activity.Concept)
-			typedTransferProfile = engine.BuildTransferProfile(activity.Concept, conceptEvidence.Transfers)
+			// The same trusted read model as check_mastery and MASTERY_READY:
+			// only attempt-linked transfer evidence with temporal failure
+			// repair, so the controller and the alerts never disagree.
+			typedTransferProfile = engine.BuildTrustedTransferProfileFromEvidence(
+				activity.Concept, conceptEvidence.Transfers, conceptEvidence.Assessments, now,
+			)
 			transferProfile = typedTransferProfile
 		}
 		if decision := engine.ApplyEvidenceController(engine.EvidenceControllerInput{
@@ -478,8 +483,8 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 			MasteryUncertainty: uncertainty,
 			TransferProfile:    typedTransferProfile,
 		}); decision.Adjusted {
+			extra["evidence_adjustment"] = fmt.Sprintf("%s (replaced %s)", decision.Rationale, activity.Type)
 			activity = decision.Activity
-			extra["evidence_adjustment"] = decision.Rationale
 			if active, err := deps.Store.GetActiveMisconceptionsInDomain(ctx, learnerID, domain.ID, activity.Concept); err != nil {
 				markDegraded("adjusted_activity_misconceptions", err)
 			} else if len(active) > 0 {

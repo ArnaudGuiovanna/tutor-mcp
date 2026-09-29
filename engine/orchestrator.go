@@ -244,7 +244,8 @@ type pipelineFixtures struct {
 	RecentConcepts     []string
 	RecentInteractions []*models.Interaction
 	Alerts             []models.Alert
-	DiagnosticItems    int // count since phase_changed_at
+	DiagnosticItems    int             // count since phase_changed_at
+	DiagnosedConcepts  map[string]bool // qualified diagnostic coverage since phase_changed_at
 }
 
 func fetchPipelineFixtures(ctx context.Context, store storeport.Store, domain *models.Domain, input OrchestratorInput) (*pipelineFixtures, error) {
@@ -266,10 +267,10 @@ func fetchPipelineFixtures(ctx context.Context, store storeport.Store, domain *m
 		stateMap[cs.Concept] = cs
 	}
 
-	var goalRelevance map[string]float64
-	if gr := domain.ParseGoalRelevance(); gr != nil {
-		goalRelevance = gr.Relevance
-	}
+	// A stale vector grants a default weight to concepts added since it was
+	// set, so add_concepts never hides a concept from routing. A current
+	// vector keeps omission as "not goal-relevant".
+	goalRelevance := domain.EffectiveGoalRelevance()
 
 	activeMisc, err := store.GetActiveMisconceptionsBatchInDomain(ctx, input.LearnerID, domain.ID, domain.Graph.Concepts)
 	if err != nil {
@@ -285,6 +286,7 @@ func fetchPipelineFixtures(ctx context.Context, store storeport.Store, domain *m
 	// when current phase is DIAGNOSTIC, but cheap enough to always
 	// fetch.
 	var diagItems int
+	diagnosed := map[string]bool{}
 	if !domain.PhaseChangedAt.IsZero() {
 		qualifiedConcepts, queryErr := store.GetQualifiedDiagnosticConceptsSinceInDomain(ctx, input.LearnerID, domain.ID, domain.PhaseChangedAt)
 		err = queryErr
@@ -294,6 +296,7 @@ func fetchPipelineFixtures(ctx context.Context, store storeport.Store, domain *m
 		for _, concept := range qualifiedConcepts {
 			if domainConcepts[concept] {
 				diagItems++
+				diagnosed[concept] = true
 			}
 		}
 	}
@@ -336,6 +339,7 @@ func fetchPipelineFixtures(ctx context.Context, store storeport.Store, domain *m
 		RecentInteractions: domainInteractions,
 		Alerts:             alerts,
 		DiagnosticItems:    diagItems,
+		DiagnosedConcepts:  diagnosed,
 	}, nil
 }
 
@@ -343,7 +347,9 @@ func buildObservables(domain *models.Domain, pf *pipelineFixtures, cfg PhaseConf
 	meanH := MeanBinaryEntropyOverGraph(domain.Graph, pf.StatesByConcept)
 
 	bkt := algorithms.MasteryBKT()
+	exit := cfg.EffectiveMasteryExitThreshold()
 	estimated := 0
+	belowExit := 0
 	totalGoalRelevant := 0
 	belowRetention := false
 
@@ -366,13 +372,17 @@ func buildObservables(domain *models.Domain, pf *pipelineFixtures, cfg PhaseConf
 
 		cs := pf.StatesByConcept[c]
 		if cs == nil {
-			// No state ≡ never practised ≡ not estimated, not
-			// "below retention" (nothing to forget).
+			// No state ≡ never practised ≡ not estimated, below the exit
+			// floor, and not "below retention" (nothing to forget).
+			belowExit++
 			continue
 		}
 		if cs.PMastery >= bkt {
 			estimated++
 			// High estimates and recall needs are separate signals.
+		}
+		if cs.PMastery < exit {
+			belowExit++
 		}
 		if cs.CardState != "new" {
 			retention := algorithms.CurrentRetrievability(now, cs.LastReview, cs.Stability)
@@ -389,6 +399,7 @@ func buildObservables(domain *models.Domain, pf *pipelineFixtures, cfg PhaseConf
 		DiagnosticCoverageTarget:   min(len(domain.Graph.Concepts), cfg.NDiagnosticMax),
 		EstimatedGoalRelevant:      estimated,
 		TotalGoalRelevant:          totalGoalRelevant,
+		BelowExitGoalRelevant:      belowExit,
 		GoalRelevantBelowRetention: belowRetention,
 	}
 }
@@ -478,7 +489,10 @@ func runPipeline(
 	if input.ReviewOnly {
 		selection = SelectReviewConceptAt(gateResult.AllowedConcepts, pf.StatesByConcept, pf.RecentInteractions, pf.ActiveMisc, input.Now)
 	} else {
-		selection, err = SelectConceptAt(phase, pf.StatesList, filteredGraph, pf.GoalRelevance, input.Now)
+		selection, err = SelectConceptAtWithContext(phase, pf.StatesList, filteredGraph, pf.GoalRelevance, input.Now, SelectionContext{
+			MaintenanceMasteryFloor: input.Config.EffectiveMasteryExitThreshold(),
+			DiagnosedConcepts:       pf.DiagnosedConcepts,
+		})
 		if err != nil {
 			return models.Activity{}, pipelineSignal{}, fmt.Errorf("concept_selector: %w", err)
 		}
@@ -534,7 +548,7 @@ func recallNeedSelection(domain *models.Domain, pf *pipelineFixtures, phase mode
 			continue
 		}
 		cs := pf.StatesByConcept[concept]
-		if cs == nil || cs.CardState == "new" || cs.LastReview == nil || cs.LastReview.IsZero() {
+		if !RecallEligible(cs) {
 			continue
 		}
 		retention := algorithms.CurrentRetrievability(input.Now, cs.LastReview, cs.Stability)

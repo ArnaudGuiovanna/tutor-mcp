@@ -68,9 +68,15 @@ func TestRecordInteraction_BKTObservationPolicyAndAudit(t *testing.T) {
 				if math.Abs(cs.PMastery-wantAfter) > 1e-12 || cs.PLearn != 0.15 || cs.PForget != 0.05 {
 					t.Fatalf("wrong persisted mastery or erased base parameters: %+v; want %.15f", cs, wantAfter)
 				}
-				// This policy changes BKT only; FSRS still records response exposure.
-				if cs.Reps != 1 {
-					t.Fatalf("FSRS exposure behavior changed: reps=%d", cs.Reps)
+				// This policy changes BKT only; FSRS still records response
+				// exposure, except that a failed cold diagnostic creates no
+				// memory card (nothing was acquired, so nothing is scheduled).
+				wantReps := 1
+				if activity == models.ActivityDiagnosticAssessment && !success {
+					wantReps = 0
+				}
+				if cs.Reps != wantReps {
+					t.Fatalf("FSRS exposure behavior changed: reps=%d want %d", cs.Reps, wantReps)
 				}
 				snapshots, err := store.GetPedagogicalSnapshots(context.Background(), "L_owner", domain.ID, "a", 5)
 				if err != nil || len(snapshots) != 1 {

@@ -30,13 +30,34 @@ const assessmentColumns = `id, learner_id, domain_id, concept_id, session_id,
 // boundary. Both the single-concept and batched evidence paths use this exact
 // projection so batching cannot weaken the supported-evaluator or high-stakes
 // policies.
-const assessmentEffectiveTrust = `CASE
+const assessmentEffectiveTrustBase = `CASE
  WHEN j.verdict = 'accept' AND d.high_stakes = 0 THEN 1
  WHEN j.id IS NOT NULL THEN 0
  WHEN a.trusted_evaluation = 1
   AND a.evaluation_method IN ('external_service','human_review','deterministic')
-  AND (d.high_stakes = 0 OR a.evaluation_method = 'human_review') THEN 1
+  AND (d.high_stakes = 0 OR a.evaluation_method = 'human_review') THEN 1`
+
+// assessmentHostLLMDecisionBoundTrust is appended under
+// SetHostLLMDemonstrationPolicy(true): a host evaluation whose rubric was
+// frozen against a pedagogical decision before the response counts as
+// trusted outside high-stakes domains. Standalone attempts (no decision)
+// and adjudicated attempts are unaffected.
+const assessmentHostLLMDecisionBoundTrust = `
+ WHEN a.evaluation_method = 'host_llm'
+  AND a.decision_id IS NOT NULL AND a.decision_id <> ''
+  AND d.high_stakes = 0 THEN 1`
+
+const assessmentEffectiveTrustTail = `
  ELSE 0 END`
+
+// assessmentEffectiveTrust returns the effective-trust projection for this
+// store's policy.
+func (s *Store) assessmentEffectiveTrust() string {
+	if s.hostLLMDemonstrates {
+		return assessmentEffectiveTrustBase + assessmentHostLLMDecisionBoundTrust + assessmentEffectiveTrustTail
+	}
+	return assessmentEffectiveTrustBase + assessmentEffectiveTrustTail
+}
 
 const assessmentEffectivePassed = `CASE WHEN j.verdict = 'accept' THEN r.passed ELSE a.passed END`
 
@@ -48,7 +69,11 @@ const assessmentEvidenceFrom = `assessment_attempts a
   AND j.revision = (SELECT MAX(j2.revision) FROM assessment_adjudications j2 WHERE j2.tenant_id = a.tenant_id AND j2.attempt_id = a.id)
  LEFT JOIN assessment_reviews r ON r.tenant_id = j.tenant_id AND r.id = j.review_id`
 
-const assessmentEvidenceColumns = `a.id, a.learner_id, a.domain_id, a.concept_id, a.session_id,
+func (s *Store) assessmentEvidenceColumns() string {
+	return assessmentEvidenceColumnsPrefix + s.assessmentEffectiveTrust() + assessmentEvidenceColumnsSuffix
+}
+
+const assessmentEvidenceColumnsPrefix = `a.id, a.learner_id, a.domain_id, a.concept_id, a.session_id,
        a.activity_id, a.activity_version, a.activity_type, a.observable,
        a.task_text, a.task_content_hash, a.response_text, a.response_content_hash,
        a.rubric_json, a.passing_score, a.status,
@@ -58,7 +83,9 @@ const assessmentEvidenceColumns = `a.id, a.learner_id, a.domain_id, a.concept_id
        CASE WHEN j.verdict = 'accept' THEN j.authority_id ELSE a.evaluator_id END AS evaluator_id,
        CASE WHEN j.verdict = 'accept' THEN 'external_service' ELSE a.evaluation_method END AS evaluation_method,
        CASE WHEN j.id IS NOT NULL THEN '{"adjudication_id":"' || j.id || '"}' ELSE a.evaluation_provenance_json END AS evaluation_provenance_json,
-       ` + assessmentEffectiveTrust + ` AS trusted_evaluation,
+       `
+
+const assessmentEvidenceColumnsSuffix = ` AS trusted_evaluation,
        a.created_at, a.submitted_at, COALESCE(j.created_at, a.evaluated_at) AS evaluated_at, a.cancelled_at,
        a.decision_id, a.curriculum_version, a.curriculum_concept_json, a.outcome_ids_json, a.curriculum_invalidated_version,
        a.event_protocol, a.prior_exposure_at`
@@ -405,7 +432,7 @@ func (s *Store) GetEvaluatedAssessmentAttemptsInDomain(ctx context.Context, lear
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := s.query(ctx, `SELECT `+assessmentEvidenceColumns+` FROM `+assessmentEvidenceFrom+`
+	rows, err := s.query(ctx, `SELECT `+s.assessmentEvidenceColumns()+` FROM `+assessmentEvidenceFrom+`
 		WHERE a.learner_id = ? AND a.domain_id = ? AND a.concept_id = ?
 		  AND a.status = 'evaluated' AND a.curriculum_invalidated_version = 0
 		  AND a.submitted_at IS NOT NULL AND a.evaluated_at IS NOT NULL
@@ -443,10 +470,10 @@ func (s *Store) GetTrustedPassedAssessmentAttemptsInDomain(ctx context.Context, 
 	if limit <= 0 {
 		limit = 20
 	}
-	rows, err := s.query(ctx, `SELECT `+assessmentEvidenceColumns+` FROM `+assessmentEvidenceFrom+`
+	rows, err := s.query(ctx, `SELECT `+s.assessmentEvidenceColumns()+` FROM `+assessmentEvidenceFrom+`
 		WHERE a.learner_id = ? AND a.domain_id = ? AND a.concept_id = ?
 		  AND a.status = 'evaluated' AND (`+assessmentEffectivePassed+`) = 1
-		  AND (`+assessmentEffectiveTrust+`) = 1 AND a.curriculum_invalidated_version = 0
+		  AND (`+s.assessmentEffectiveTrust()+`) = 1 AND a.curriculum_invalidated_version = 0
 		ORDER BY COALESCE(j.created_at, a.evaluated_at) DESC LIMIT ?`, learnerID, domainID, conceptID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("get trusted assessment attempts: %w", err)

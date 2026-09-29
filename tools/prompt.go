@@ -108,7 +108,7 @@ PROTOCOL
 
 A. SESSION START
    - Call get_learner_context().
-   - Call start_learning_session(domain_id?) and reuse its returned session_id for every event in this learning episode. Never invent or rotate a second ID while the session is open.
+   - Call start_learning_session(domain_id?) and reuse its returned session_id for every event in this learning episode. Never invent or rotate a second ID while the session is open. A session idle for more than four hours expires: if a tool answers that the session is closed or expired, call start_learning_session again without session_id and continue with the new ID.
    - Call record_affect(session_id, energy, confidence) for the start check-in.
    - If needs_domain_setup: analyze the goal, decompose into concepts, call init_domain().
    - If init_domain/add_concepts returns graph_quality_report with warnings, use graph_quality_guidance.prompt to propose concise graph repairs; ask before mutating the domain.

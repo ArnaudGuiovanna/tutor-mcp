@@ -553,3 +553,17 @@ func TestComputeAlertsTransferBlocked(t *testing.T) {
 		t.Error("expected TRANSFER_BLOCKED alert")
 	}
 }
+
+func TestComputeAlertsForgettingIgnoresNeverAcquiredCards(t *testing.T) {
+	// A failed cold diagnostic leaves an FSRS card in the learning state:
+	// the learner never acquired the concept, so nothing was forgotten.
+	states := []*models.ConceptState{
+		{Concept: "never-learned", Stability: 0.2, ElapsedDays: 5, PMastery: 0.05, CardState: "learning",
+			LastReview: ptrTime(time.Now().AddDate(0, 0, -5))},
+	}
+	for _, a := range ComputeAlerts(states, nil, time.Time{}) {
+		if a.Type == models.AlertForgetting {
+			t.Fatalf("FORGETTING must not fire on a concept that was never acquired: %+v", a)
+		}
+	}
+}

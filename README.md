@@ -47,7 +47,7 @@ A real first session, running locally over stdio in Claude Code. Tutor maps Go b
 into an 18-concept skill graph, diagnoses what transfers from the learner's Python background, then
 refuses the Feynman and transfer probes because the mastery estimate sits at 0.33 against a routing
 threshold of 0.85. Two practice reps later the estimate clears the threshold, the transfer probe runs
-on an unseen debugging scenario, and mastery is recorded as transfer-verified rather than asserted.
+on an unseen debugging scenario, and the outcome is recorded against the frozen rubric rather than asserted.
 
 ## Installation
 
