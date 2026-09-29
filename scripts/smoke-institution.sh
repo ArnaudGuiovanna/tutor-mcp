@@ -157,8 +157,9 @@ tenant="$("$work/tutor-control-plane" -action=provision -slug=acme -name='Acme A
     -plan=smoke -reason=smoke -request-id=S2 | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["ID"])')"
 unset DATABASE_URL
 super postgres -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+member_secret="$(openssl rand -hex 16)"
 hash="$(PGPASSWORD=smoke-superuser psql "host=localhost port=$port user=postgres dbname=postgres sslmode=verify-full sslrootcert=$work/tls/ca.pem" \
-    -Atc "select crypt('Smoke-pass-2026', gen_salt('bf', 10))")"
+    -Atc "select crypt('$member_secret', gen_salt('bf', 10))")"
 # Until invitations exist, accounts are seeded through the identity triggers.
 super tutor <<SQL
 INSERT INTO learners (id,email,password_hash,objective,profile_json,created_at,email_verified_at,tenant_id,user_id,membership_id) VALUES
@@ -168,4 +169,4 @@ UPDATE tenant_memberships SET roles_json='["pedagogy_manager","learner"]'::jsonb
 SQL
 
 SMOKE_BASE_URL=https://tutor.localhost SMOKE_CONNECT="127.0.0.1:$api_port" SMOKE_TENANT="$tenant" \
-    SMOKE_PASSWORD=Smoke-pass-2026 python3 scripts/smoke-institution.py || fail "institution journey"
+    SMOKE_PASSWORD="$member_secret" python3 scripts/smoke-institution.py || fail "institution journey"
