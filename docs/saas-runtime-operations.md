@@ -24,8 +24,11 @@ N+1 sont ignorées par N : une version précédente reste donc amorçable tant q
 la migration n'a supprimé ni renommé son contrat.
 
 Appliquer [`postgres-roles.sql`](../deploy/postgres-roles.sql) avec le
-propriétaire après les migrations, puis accorder à chaque login exactement un
-groupe `tutor_api`, `tutor_worker` ou `tutor_restore`. Le migrateur conserve un
+propriétaire après les migrations. La première fois, le propriétaire doit avoir
+`CREATEROLE`, et [`postgres-roles-superuser.sql`](../deploy/postgres-roles-superuser.sql)
+doit être appliqué une fois en superutilisateur (voir
+[l'installation](installation.md#institutional-deployment)). Accorder ensuite à
+chaque login exactement un groupe `tutor_api`, `tutor_worker` ou `tutor_restore`. Le migrateur conserve un
 login propriétaire séparé. En production, le runtime vérifie qu'il n'est ni
 superuser, ni `BYPASSRLS`, ni propriétaire d'une table RLS et qu'il ne possède
 pas `CREATE` sur le schéma. `tutor_restore` n'est activé que pendant une

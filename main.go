@@ -249,20 +249,24 @@ func main() {
 		}
 		store.SetIntegrationSecretKeyring(keyring)
 		integrationEncryptionEnabled = true
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		rotated, err := store.RotateIntegrationSecrets(ctx)
-		cancel()
-		if err != nil {
-			logger.Error("failed to rotate integration secrets", "err", err)
-			os.Exit(1)
-		}
-		logger.Info("integration secret encryption enabled", "rotated_records", rotated)
-		narrativeRotateCtx, narrativeRotateCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		narrativeSecretsRotated, err = store.RotateNarrativeSecrets(narrativeRotateCtx)
-		narrativeRotateCancel()
-		if err != nil {
-			logger.Error("failed to authenticate or rotate narrative objects", "err", err)
-			os.Exit(1)
+		if rotatesSecretsAtStartup(cfg.ProcessRole) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			rotated, err := store.RotateIntegrationSecrets(ctx)
+			cancel()
+			if err != nil {
+				logger.Error("failed to rotate integration secrets", "err", err)
+				os.Exit(1)
+			}
+			logger.Info("integration secret encryption enabled", "rotated_records", rotated)
+			narrativeRotateCtx, narrativeRotateCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			narrativeSecretsRotated, err = store.RotateNarrativeSecrets(narrativeRotateCtx)
+			narrativeRotateCancel()
+			if err != nil {
+				logger.Error("failed to authenticate or rotate narrative objects", "err", err)
+				os.Exit(1)
+			}
+		} else {
+			logger.Info("integration secret encryption enabled", "rotation", "delegated to the api process")
 		}
 	} else {
 		logger.Warn("integration secret encryption disabled; webhook credentials remain plaintext")
@@ -537,6 +541,17 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("server stopped cleanly")
+}
+
+// rotatesSecretsAtStartup reports whether this process re-encrypts stored
+// integration, DCR replay and narrative secrets with the current key. Only the
+// API (or the single development process) does: the institutional worker's
+// least-privilege role can read what it delivers but deliberately cannot
+// select OAuth client secrets or rewrite narrative objects
+// (deploy/postgres-roles.sql). Rotation is idempotent and compare-and-swap, so
+// several API instances may run it concurrently.
+func rotatesSecretsAtStartup(processRole string) bool {
+	return processRole != "worker"
 }
 
 func startSchedulerOrExit(store *db.Store, logger *slog.Logger, mode string) *engine.Scheduler {

@@ -1039,7 +1039,7 @@ func (s *OAuthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *htt
 	// Resolve the currently active tenant membership immediately before signing.
 	// A suspended membership or stale authorization state cannot be converted
 	// into a bearer, even if its short-lived code has not expired yet.
-	principal, err := s.store.GetPrincipalForLearner(ctx, authCode.LearnerID, strings.Fields(authCode.Scope))
+	principal, err := s.grantPrincipal(ctx, authCode.TenantID, authCode.UserID, authCode.MembershipID, authCode.LearnerID, authCode.Scope)
 	if err != nil {
 		s.logger.Debug("token exchange: tenant membership inactive", "err", err)
 		writeTokenError(w, "invalid_grant", http.StatusBadRequest)
@@ -1132,7 +1132,7 @@ func (s *OAuthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Req
 			writeTokenError(w, "invalid_grant", http.StatusBadRequest)
 			return
 		}
-		principal, err = s.store.GetPrincipalForLearner(ctx, currentRT.LearnerID, strings.Fields(currentRT.Scope))
+		principal, err = s.grantPrincipal(ctx, currentRT.TenantID, currentRT.UserID, currentRT.MembershipID, currentRT.LearnerID, currentRT.Scope)
 		if err != nil {
 			s.logger.Debug("refresh grant: tenant membership inactive", "err", err)
 			writeTokenError(w, "invalid_grant", http.StatusBadRequest)
@@ -1551,4 +1551,20 @@ func generateCSRFToken() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// grantPrincipal resolves the exact, currently active membership bound to an
+// authorization code or refresh token. Both credentials persist the tenant,
+// user and membership chosen at /authorize; rebuilding a tenant_legacy
+// principal from the learner id alone made every member of a provisioned
+// tenant fail with invalid_grant. Credentials minted before those columns
+// existed carry no membership and keep the legacy resolution.
+func (s *OAuthServer) grantPrincipal(ctx context.Context, tenantID, userID, membershipID, learnerID, scope string) (models.Principal, error) {
+	scopes := strings.Fields(scope)
+	if tenantID == "" || userID == "" || membershipID == "" {
+		return s.store.GetPrincipalForLearner(ctx, learnerID, scopes)
+	}
+	return s.store.GetPrincipal(ctx, models.TenantScope{
+		TenantID: tenantID, UserID: userID, MembershipID: membershipID, LearnerID: learnerID,
+	}, scopes)
 }

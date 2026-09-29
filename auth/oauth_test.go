@@ -1204,3 +1204,131 @@ func TestTokenEndpoint_ConfidentialClientWithBadSecret_NoPKCE_Rejected(t *testin
 		t.Fatalf("rejection body must not echo client_secret material: %q", body)
 	}
 }
+
+// seedInstitutionLearner creates a verified learner whose membership belongs
+// to a provisioned tenant rather than tenant_legacy, as an institution invite
+// would. The identity triggers derive the users and tenant_memberships rows.
+func seedInstitutionLearner(t *testing.T, store *db.Store, tenantID, email, password string) (learnerID, membershipID string) {
+	t.Helper()
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
+	if err != nil {
+		t.Fatalf("bcrypt: %v", err)
+	}
+	now := time.Now().UTC()
+	raw := store.RawDB()
+	if _, err := raw.Exec(`INSERT OR IGNORE INTO tenants (id, slug, name, status, region, policy_json, created_at, updated_at)
+		VALUES (?, ?, ?, 'active', 'default', '{}', ?, ?)`, tenantID, tenantID, tenantID, now, now); err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	suffix := strings.NewReplacer("@", "_", ".", "_").Replace(email)
+	learnerID, membershipID = "lrn_"+suffix, "mem_"+suffix
+	if _, err := raw.Exec(`INSERT INTO learners
+		(id, email, password_hash, objective, profile_json, created_at, email_verified_at, tenant_id, user_id, membership_id)
+		VALUES (?, ?, ?, '', '{}', ?, ?, ?, ?, ?)`,
+		learnerID, email, string(hash), now, now, tenantID, "usr_"+suffix, membershipID); err != nil {
+		t.Fatalf("seed institution learner: %v", err)
+	}
+	return learnerID, membershipID
+}
+
+func exchangeToken(t *testing.T, s *OAuthServer, form url.Values) (int, map[string]any) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	s.HandleToken(rec, req)
+	var body map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	return rec.Code, body
+}
+
+// TestInstitutionMemberCompletesTokenExchangeAndRefresh locks down the
+// multi-tenant grant: a member of a provisioned tenant used to receive
+// invalid_grant because the token endpoint rebuilt a tenant_legacy principal
+// from the learner id instead of the membership bound to the code.
+func TestInstitutionMemberCompletesTokenExchangeAndRefresh(t *testing.T) {
+	setTestSecret(t)
+	s, store := newTestServer(t)
+	const (
+		tenantID    = "tenant_acme_test"
+		clientID    = "cid-institution"
+		redirectURI = "https://institution.example/callback"
+		email       = "alice@acme.test"
+		password    = "institution-password"
+		verifier    = "institution-verifier-institution-verifier"
+	)
+	seedClient(t, store, clientID, redirectURI)
+	learnerID, membershipID := seedInstitutionLearner(t, store, tenantID, email, password)
+	hash := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(hash[:])
+
+	code := driveAuthorizePost(t, s, clientID, redirectURI, challenge, "S256", email, password)
+	status, body := exchangeToken(t, s, url.Values{
+		"grant_type": {"authorization_code"}, "resource": {testOAuthResource}, "code": {code},
+		"code_verifier": {verifier}, "client_id": {clientID}, "redirect_uri": {redirectURI},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("institution member token exchange = %d %v, want 200", status, body)
+	}
+	claims, err := VerifyJWTClaims(body["access_token"].(string), "https://test.example")
+	if err != nil {
+		t.Fatalf("verify access token: %v", err)
+	}
+	principal, err := claims.Principal()
+	if err != nil {
+		t.Fatalf("token principal: %v", err)
+	}
+	if principal.TenantID != tenantID || principal.MembershipID != membershipID || principal.LearnerID != learnerID {
+		t.Fatalf("token bound to the wrong membership: %+v", principal)
+	}
+
+	status, refreshed := exchangeToken(t, s, url.Values{
+		"grant_type": {"refresh_token"}, "refresh_token": {body["refresh_token"].(string)},
+		"client_id": {clientID}, "resource": {testOAuthResource},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("institution member refresh = %d %v, want 200", status, refreshed)
+	}
+	claims, err = VerifyJWTClaims(refreshed["access_token"].(string), "https://test.example")
+	if err != nil {
+		t.Fatalf("verify refreshed token: %v", err)
+	}
+	if refreshedPrincipal, _ := claims.Principal(); refreshedPrincipal.TenantID != tenantID {
+		t.Fatalf("refreshed token left the institution: %+v", refreshedPrincipal)
+	}
+}
+
+// A suspended institution membership must still fail closed at both grants.
+func TestInstitutionMemberSuspendedIsRejectedAtRefresh(t *testing.T) {
+	setTestSecret(t)
+	s, store := newTestServer(t)
+	const (
+		tenantID    = "tenant_acme_suspend"
+		clientID    = "cid-institution-suspend"
+		redirectURI = "https://institution.example/callback"
+		email       = "bob@acme.test"
+		password    = "institution-password"
+		verifier    = "institution-verifier-suspended-member-x"
+	)
+	seedClient(t, store, clientID, redirectURI)
+	_, membershipID := seedInstitutionLearner(t, store, tenantID, email, password)
+	hash := sha256.Sum256([]byte(verifier))
+	code := driveAuthorizePost(t, s, clientID, redirectURI, base64.RawURLEncoding.EncodeToString(hash[:]), "S256", email, password)
+	status, body := exchangeToken(t, s, url.Values{
+		"grant_type": {"authorization_code"}, "resource": {testOAuthResource}, "code": {code},
+		"code_verifier": {verifier}, "client_id": {clientID}, "redirect_uri": {redirectURI},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("token exchange = %d %v", status, body)
+	}
+	if _, err := store.RawDB().Exec(`UPDATE tenant_memberships SET status = 'suspended', version = version + 1 WHERE id = ?`, membershipID); err != nil {
+		t.Fatal(err)
+	}
+	status, refreshed := exchangeToken(t, s, url.Values{
+		"grant_type": {"refresh_token"}, "refresh_token": {body["refresh_token"].(string)},
+		"client_id": {clientID}, "resource": {testOAuthResource},
+	})
+	if status != http.StatusBadRequest || refreshed["error"] != "invalid_grant" {
+		t.Fatalf("suspended membership refresh = %d %v, want 400 invalid_grant", status, refreshed)
+	}
+}
