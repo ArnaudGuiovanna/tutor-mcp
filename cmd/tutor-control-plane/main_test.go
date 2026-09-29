@@ -14,6 +14,9 @@ func TestOptionsValidationRequiresAuditedBoundedActions(t *testing.T) {
 	}{
 		{name: "provision", opts: merge(base, options{action: "provision", slug: "acme", name: "Acme", region: "eu", planID: "plan"}), ok: true},
 		{name: "plan", opts: merge(base, options{action: "plan-upsert", planID: "plan", name: "Plan", status: "active", entitlements: `{"mcp_calls_month":10}`}), ok: true},
+		{name: "invite owner", opts: merge(base, options{action: "invite-owner", tenantID: "tenant_x", email: "head@school.test", baseURL: "https://tutor.example"}), ok: true},
+		{name: "invite owner without url", opts: merge(base, options{action: "invite-owner", tenantID: "tenant_x", email: "head@school.test"})},
+		{name: "invite owner relative url", opts: merge(base, options{action: "invite-owner", tenantID: "tenant_x", email: "head@school.test", baseURL: "tutor.example"})},
 		{name: "missing audit", opts: options{action: "status", tenantID: "tenant", status: "active"}},
 		{name: "unknown", opts: merge(base, options{action: "delete-everything"})},
 	}

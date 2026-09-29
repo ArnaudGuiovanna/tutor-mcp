@@ -192,7 +192,7 @@ func (s *Store) listMembershipsForUser(ctx context.Context, userID string, activ
 	}
 	query := `SELECT tm.id, tm.tenant_id, t.name, tm.user_id,
                COALESCE(tm.learner_id, ''), tm.roles_json, tm.status,
-               tm.version, tm.created_at, tm.updated_at
+               tm.version, tm.mfa_required, tm.created_at, tm.updated_at
         FROM tenant_memberships tm
         JOIN tenants t ON t.id = tm.tenant_id AND t.status = 'active'
 		WHERE tm.user_id = ? AND tm.status <> 'revoked'`
@@ -209,11 +209,13 @@ func (s *Store) listMembershipsForUser(ctx context.Context, userID string, activ
 	for rows.Next() {
 		var membership models.TenantMembership
 		var rolesJSON string
+		var mfaRequired int
 		if err := rows.Scan(&membership.ID, &membership.TenantID, &membership.TenantName, &membership.UserID,
-			&membership.LearnerID, &rolesJSON, &membership.Status, &membership.Version,
+			&membership.LearnerID, &rolesJSON, &membership.Status, &membership.Version, &mfaRequired,
 			&membership.CreatedAt, &membership.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan membership: %w", err)
 		}
+		membership.MFARequired = mfaRequired == 1
 		if err := json.Unmarshal([]byte(rolesJSON), &membership.Roles); err != nil {
 			return nil, fmt.Errorf("scan membership roles: %w", err)
 		}
@@ -287,7 +289,7 @@ func (s *Store) SetMembershipAuthorization(ctx context.Context, scope models.Ten
 	}
 	now := time.Now().UTC()
 	mfaRequired := 0
-	if slices.Contains(roles, models.RoleOwner) || slices.Contains(roles, models.RoleAdmin) {
+	if models.RolesRequireMFA(roles) {
 		mfaRequired = 1
 	}
 	var version int64

@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -44,31 +43,8 @@ func (s *Store) ProvisionTenant(ctx context.Context, actor models.ControlPlanePr
 		if current.ID != id || current.Name != name || current.Region != region {
 			return fmt.Errorf("provision tenant: idempotency conflict")
 		}
-		var entitlementsJSON string
-		if err := txs.queryRow(ctx, `SELECT entitlements_json FROM plans
-			WHERE id = ? AND status = 'active'`, planID).Scan(&entitlementsJSON); err != nil {
-			return fmt.Errorf("provision tenant plan: %w", err)
-		}
-		periodEnd := now.AddDate(0, 1, 0)
-		if _, err := txs.exec(ctx, `INSERT INTO tenant_subscriptions
-			(tenant_id, plan_id, status, current_period_start, current_period_end, updated_at)
-			VALUES (?, ?, 'active', ?, ?, ?)
-			ON CONFLICT (tenant_id) DO NOTHING`, id, planID, now, periodEnd, now); err != nil {
+		if err := txs.attachTenantPlan(ctx, id, planID, now); err != nil {
 			return err
-		}
-		var entitlements map[string]int64
-		if err := json.Unmarshal([]byte(entitlementsJSON), &entitlements); err != nil {
-			return fmt.Errorf("provision tenant entitlements: %w", err)
-		}
-		for key, limit := range entitlements {
-			if _, err := txs.exec(ctx, `INSERT INTO tenant_entitlements
-				(tenant_id, entitlement_key, hard_limit, used_value, reserved_value,
-				 period_start, period_end, version, updated_at)
-				VALUES (?, ?, ?, 0, 0, ?, ?, 1, ?)
-				ON CONFLICT (tenant_id, entitlement_key) DO NOTHING`,
-				id, key, limit, now, periodEnd, now); err != nil {
-				return err
-			}
 		}
 		if err := txs.appendControlPlaneAudit(ctx, id, actor, "tenant.provision", "tenant", id); err != nil {
 			return err

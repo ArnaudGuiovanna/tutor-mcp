@@ -351,6 +351,30 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	if options.Profile == "institution" && (cfg.ProcessRole == "api" || cfg.ProcessRole == "all") {
+		institutionCfg, err := loadInstitutionAccountConfig()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if institutionCfg.SignupMode == institutionSignupOpen {
+			planCtx, cancelPlan := context.WithTimeout(context.Background(), 10*time.Second)
+			active, err := store.PlanIsActive(planCtx, institutionCfg.SignupPlan)
+			cancelPlan()
+			if err != nil || !active {
+				logger.Error("SIGNUP_PLAN must name an active plan", "plan", institutionCfg.SignupPlan, "err", err)
+				os.Exit(1)
+			}
+		}
+		if err := oauthServer.EnableInstitutionAccounts(auth.InstitutionAccountOptions{
+			SignupOpen: institutionCfg.SignupMode == institutionSignupOpen,
+			SignupPlan: institutionCfg.SignupPlan,
+		}); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		logger.Info("institution accounts enabled", "signup", institutionCfg.SignupMode)
+	}
 	oauthServer.SetGranularScopesEnabled(cfg.OAuthGranularScopes)
 	if err := oauthServer.ConfigureDynamicClientRegistration(cfg.OAuthDCRMode, cfg.OAuthDCRInitialTokenHash); err != nil {
 		logger.Error("configure dynamic client registration", "err", err)
@@ -394,6 +418,7 @@ func main() {
 	tokenLimiter := auth.NewRateLimiterWithNamespace("oauth_token", 20.0/60, 10)         // code exchange and refresh
 	registerLimiter := auth.NewRateLimiterWithNamespace("oauth_register", 5.0/60, 5)     // dynamic client registration
 	accountLimiter := auth.NewRateLimiterWithNamespace("oauth_account", 5.0/60, 5)       // verification and recovery
+	consoleLimiter := auth.NewRateLimiterWithNamespace("console", 60.0/60, 20)           // signed-in console actions
 	mcpRatePerMinute := envFloat("MCP_RATE_LIMIT_PER_MIN", 60)
 	mcpBurst := envInt("MCP_RATE_LIMIT_BURST", 60)
 	mcpIPLimiter := auth.NewRateLimiterWithNamespace("mcp_ip", mcpRatePerMinute/60, mcpBurst)
@@ -412,6 +437,7 @@ func main() {
 		tokenLimiter.SetBackend(rlBackend)
 		registerLimiter.SetBackend(rlBackend)
 		accountLimiter.SetBackend(rlBackend)
+		consoleLimiter.SetBackend(rlBackend)
 		mcpIPLimiter.SetBackend(rlBackend)
 		mcpLearnerLimiter.SetBackend(rlBackend)
 		oauthServer.SetLoginFailureBackend(db.NewLoginFailureBackend(store))
@@ -425,6 +451,7 @@ func main() {
 	defer tokenLimiter.Stop()
 	defer registerLimiter.Stop()
 	defer accountLimiter.Stop()
+	defer consoleLimiter.Stop()
 	defer mcpIPLimiter.Stop()
 	defer mcpLearnerLimiter.Stop()
 
@@ -450,6 +477,10 @@ func main() {
 		mux.Handle("POST /reset-password", auth.RateLimitMiddleware(accountLimiter, http.HandlerFunc(oauthServer.HandleResetPasswordPost)))
 		mux.Handle("GET /login-challenge", auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleLoginChallengeGet)))
 		mux.Handle("POST /login-challenge", auth.RateLimitMiddleware(accountLimiter, http.HandlerFunc(oauthServer.HandleLoginChallengePost)))
+	}
+
+	if oauthServer.InstitutionAccountsEnabled() {
+		mountInstitutionAccounts(mux, oauthServer, authorizeLimiter, loginLimiter, accountLimiter, consoleLimiter)
 	}
 
 	// MCP route: per-IP shield before auth, then per-learner limiting after auth.
@@ -584,6 +615,37 @@ func runWorkerUntilSignal(store *db.Store, logger *slog.Logger, mode string) {
 	logger.Info("worker drain requested", "signal", sig.String())
 	scheduler.Stop()
 	logger.Info("worker drained")
+}
+
+// mountInstitutionAccounts serves the browser console, invitation links and,
+// when enabled, self-service institution signup. Password and code checks
+// share the sign-in limiter; signed-in console actions have their own.
+func mountInstitutionAccounts(mux *http.ServeMux, oauthServer *auth.OAuthServer, pageLimiter, loginLimiter, accountLimiter, consoleLimiter *auth.RateLimiter) {
+	page := func(handler http.HandlerFunc) http.Handler { return auth.RateLimitMiddleware(pageLimiter, handler) }
+	login := func(handler http.HandlerFunc) http.Handler { return auth.RateLimitMiddleware(loginLimiter, handler) }
+	console := func(handler http.HandlerFunc) http.Handler { return auth.RateLimitMiddleware(consoleLimiter, handler) }
+	account := func(handler http.HandlerFunc) http.Handler { return auth.RateLimitMiddleware(accountLimiter, handler) }
+
+	mux.Handle("GET /console", console(oauthServer.HandleConsoleHome))
+	mux.Handle("GET /console/members", console(oauthServer.HandleConsoleHome))
+	mux.Handle("GET /console/login", page(oauthServer.HandleConsoleLoginGet))
+	mux.Handle("POST /console/login", login(oauthServer.HandleConsoleLoginPost))
+	mux.Handle("POST /console/logout", console(oauthServer.HandleConsoleLogoutPost))
+	mux.Handle("GET /console/mfa", console(oauthServer.HandleConsoleMFAGet))
+	mux.Handle("POST /console/mfa", login(oauthServer.HandleConsoleMFAPost))
+	mux.Handle("GET /console/mfa/setup", console(oauthServer.HandleConsoleMFASetupGet))
+	mux.Handle("POST /console/mfa/setup", login(oauthServer.HandleConsoleMFASetupPost))
+	mux.Handle("POST /console/members/invite", console(oauthServer.HandleConsoleInvitePost))
+	mux.Handle("POST /console/members/update", console(oauthServer.HandleConsoleMemberUpdatePost))
+	mux.Handle("POST /console/invitations/revoke", console(oauthServer.HandleConsoleInvitationRevokePost))
+	mux.Handle("GET /invite", page(oauthServer.HandleInvitationGet))
+	mux.Handle("POST /invite", login(oauthServer.HandleInvitationPost))
+	if oauthServer.SignupOpen() {
+		mux.Handle("GET /signup", page(oauthServer.HandleSignupGet))
+		mux.Handle("POST /signup", account(oauthServer.HandleSignupPost))
+		mux.Handle("GET /signup/complete", page(oauthServer.HandleSignupCompleteGet))
+		mux.Handle("POST /signup/complete", login(oauthServer.HandleSignupCompletePost))
+	}
 }
 
 func mountDynamicClientRegistration(mux *http.ServeMux, mode string, oauthServer *auth.OAuthServer, limiter *auth.RateLimiter) {

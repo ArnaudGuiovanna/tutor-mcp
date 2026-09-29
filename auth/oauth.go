@@ -178,6 +178,9 @@ type oauthCSRFConsumer interface {
 // OAuthServer implements the OAuth 2.1 authorization server.
 type OAuthServer struct {
 	hobbyAccounts        bool
+	accounts             storeport.InstitutionAccountStore
+	signupOpen           bool
+	signupPlan           string
 	store                oauthStore
 	baseURL              string
 	logger               *slog.Logger
@@ -407,6 +410,8 @@ func (s *OAuthServer) HandleAuthorizeGet(w http.ResponseWriter, r *http.Request)
 
 	data := authPageData{
 		Hobby:               s.hobbyAccounts,
+		Institution:         s.accounts != nil,
+		SignupOpen:          s.SignupOpen(),
 		ClientID:            clientID,
 		ClientName:          client.ClientName,
 		RedirectURI:         redirectURI,
@@ -527,6 +532,8 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 
 	data := authPageData{
 		Hobby:               s.hobbyAccounts,
+		Institution:         s.accounts != nil,
+		SignupOpen:          s.SignupOpen(),
 		ClientID:            clientID,
 		ClientName:          client.ClientName,
 		RedirectURI:         redirectURI,
@@ -541,6 +548,10 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 
 	if s.hobbyAccounts && mode == "register" {
 		renderAuthPage(w, data, "Ask the server operator for an invitation.", "login")
+		return
+	}
+	if s.accounts != nil && mode == "register" {
+		renderAuthPage(w, data, "Accounts are created by invitation. Ask your institution for an invitation link.", "login")
 		return
 	}
 	if email == "" {
@@ -751,6 +762,13 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 		tenantScope := models.TenantScope{
 			TenantID: selected.TenantID, UserID: selected.UserID,
 			MembershipID: selected.ID, LearnerID: selected.LearnerID,
+		}
+		if selected.MFARequired && s.accounts != nil {
+			version, ok := s.verifyAuthorizeSecondFactor(w, r, data, tenantScope)
+			if !ok {
+				return
+			}
+			selected.Version = version
 		}
 		// R001: if the learner has already approved this client+redirect_uri,
 		// the approval screen is no longer meaningful — skip it. Re-prompting

@@ -44,6 +44,22 @@ type testEmailSender struct {
 	resetLinks        []string
 	challengeTo       []string
 	challengeLinks    []string
+	invitationTo      []string
+	invitationLinks   []string
+	signupTo          []string
+	signupLinks       []string
+}
+
+func (s *testEmailSender) SendInvitation(_ context.Context, to, link string) error {
+	s.invitationTo = append(s.invitationTo, to)
+	s.invitationLinks = append(s.invitationLinks, link)
+	return nil
+}
+
+func (s *testEmailSender) SendInstitutionSignup(_ context.Context, to, link string) error {
+	s.signupTo = append(s.signupTo, to)
+	s.signupLinks = append(s.signupLinks, link)
+	return nil
 }
 
 func (s *testEmailSender) SendVerification(_ context.Context, to, link string) error {

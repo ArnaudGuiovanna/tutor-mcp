@@ -2,8 +2,10 @@
 # Disposable end-to-end acceptance of the institution profile with real
 # production constraints: PostgreSQL over verify-full TLS, separate migrator,
 # API and worker processes, least-privilege runtime logins applied with the
-# repository's own grant scripts, a provisioned tenant, DCR in token mode, and
-# the OAuth + MCP + admin catalog journey driven over HTTP.
+# repository's own grant scripts, DCR in token mode, a local STARTTLS mail sink,
+# and the account journeys driven over HTTP: operator-provisioned and
+# self-service institutions, console with TOTP, invitations, OAuth, the admin
+# catalog and MCP.
 #
 # Requirements: Go, openssl, python3 and PostgreSQL server binaries
 # (initdb/pg_ctl). Nothing outside a temporary directory is modified.
@@ -33,8 +35,9 @@ if [[ "$(id -u)" -eq 0 ]]; then
     pg_user=postgres
     as_pg() { runuser -u postgres -- "$@"; }
 fi
-api_pid="" worker_pid=""
+api_pid="" worker_pid="" sink_pid=""
 cleanup() {
+    [[ -n "$sink_pid" ]] && kill "$sink_pid" 2>/dev/null || true
     [[ -n "$api_pid" ]] && kill "$api_pid" 2>/dev/null || true
     [[ -n "$worker_pid" ]] && kill "$worker_pid" 2>/dev/null || true
     as_pg "$pg_bin/pg_ctl" -D "$work/pg" -m fast stop >/dev/null 2>&1 || true
@@ -125,13 +128,108 @@ source "$work/keys.env"
 export RATELIMIT_BACKEND=postgres SCHEDULER_MODE=distributed \
     TENANT_INTEGRATION_ALLOWED_HOSTS=discord.com TUTOR_MCP_MEMORY_ROOT="$work/memory"
 
+# ── Mail sink: STARTTLS with the smoke CA, one file per message ─────────────
+mkdir -p "$work/mailsink" "$work/mail"
+cat > "$work/mailsink/main.go" <<'EOF_SINK'
+package main
+
+import (
+	"bufio"
+	"crypto/tls"
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+)
+
+var count atomic.Int64
+
+func main() {
+	cert, err := tls.LoadX509KeyPair(os.Args[2], os.Args[3])
+	if err != nil {
+		panic(err)
+	}
+	listener, err := net.Listen("tcp", os.Args[1])
+	if err != nil {
+		panic(err)
+	}
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		go serve(conn, &tls.Config{Certificates: []tls.Certificate{cert}}, os.Args[4])
+	}
+}
+
+func serve(conn net.Conn, config *tls.Config, dir string) {
+	defer conn.Close()
+	reader, writer := bufio.NewReader(conn), bufio.NewWriter(conn)
+	reply := func(line string) { writer.WriteString(line + "\r\n"); writer.Flush() }
+	reply("220 smoke ESMTP")
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		command := strings.ToUpper(strings.TrimSpace(line))
+		switch {
+		case strings.HasPrefix(command, "EHLO"), strings.HasPrefix(command, "HELO"):
+			reply("250-smoke")
+			reply("250 STARTTLS")
+		case command == "STARTTLS":
+			reply("220 ready")
+			tlsConn := tls.Server(conn, config)
+			if tlsConn.Handshake() != nil {
+				return
+			}
+			conn = tlsConn
+			reader, writer = bufio.NewReader(conn), bufio.NewWriter(conn)
+		case command == "DATA":
+			reply("354 end with .")
+			var message strings.Builder
+			for {
+				data, err := reader.ReadString('\n')
+				if err != nil {
+					return
+				}
+				if data == ".\r\n" {
+					break
+				}
+				message.WriteString(data)
+			}
+			name := filepath.Join(dir, fmt.Sprintf("%03d.eml", count.Add(1)))
+			os.WriteFile(name+".tmp", []byte(message.String()), 0o644)
+			os.Rename(name+".tmp", name)
+			reply("250 queued")
+		case command == "QUIT":
+			reply("221 bye")
+			return
+		default:
+			reply("250 ok")
+		}
+	}
+}
+EOF_SINK
+(cd "$work/mailsink" && printf 'module mailsink\n\ngo 1.26\n' > go.mod && go build -o "$work/mailsink-bin" .)
+"$work/mailsink-bin" 127.0.0.1:2525 "$work/tls/server.crt" "$work/tls/server.key" "$work/mail" &
+sink_pid=$!
+
+# The signup plan must exist before the API validates SIGNUP_PLAN.
+DATABASE_URL="$owner_dsn" "$work/tutor-control-plane" -action=plan-upsert -plan=smoke -name=Smoke -status=active \
+    -entitlements='{"active_learners":50,"mcp_calls_month":100000}' -reason=smoke -request-id=S1 >/dev/null
+
 # ── Worker then API with least-privilege logins ─────────────────────────────
 PROCESS_ROLE=worker DATABASE_URL="postgres://worker_login:worker-pw@localhost:$port/tutor?$tls" \
     "$work/tutor-mcp" --profile institution >"$work/worker.log" 2>&1 &
 worker_pid=$!
 PROCESS_ROLE=api DATABASE_URL="postgres://api_login:api-pw@localhost:$port/tutor?$tls" \
     BASE_URL=https://tutor.localhost PORT="$api_port" OAUTH_DCR_MODE=token \
-    SMTP_ADDR=127.0.0.1:2525 SMTP_FROM=tutor@tutor.localhost TRUSTED_PROXY_CIDRS=127.0.0.1/32 \
+    SMTP_ADDR=127.0.0.1:2525 SMTP_SERVER_NAME=localhost SMTP_FROM=tutor@tutor.localhost \
+    SSL_CERT_FILE="$work/tls/ca.pem" TRUSTED_PROXY_CIDRS=127.0.0.1/32 \
+    INSTITUTION_SIGNUP=open SIGNUP_PLAN=smoke \
     "$work/tutor-mcp" --profile institution >"$work/api.log" 2>&1 &
 api_pid=$!
 for _ in $(seq 1 60); do
@@ -149,24 +247,14 @@ sleep 3
 kill -0 "$worker_pid" 2>/dev/null || fail "worker exited during startup with the documented grants"
 echo "PASS: migrator, documented grants, least-privilege API and worker"
 
-# ── Tenant provisioning and accounts ────────────────────────────────────────
+# ── Operator-provisioned tenant and its owner invitation ────────────────────
 export DATABASE_URL="$owner_dsn"
-"$work/tutor-control-plane" -action=plan-upsert -plan=smoke -name=Smoke -status=active \
-    -entitlements='{"active_learners":50,"mcp_calls_month":100000}' -reason=smoke -request-id=S1 >/dev/null
 tenant="$("$work/tutor-control-plane" -action=provision -slug=acme -name='Acme Academy' -region=local \
     -plan=smoke -reason=smoke -request-id=S2 | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["ID"])')"
+owner_link="$("$work/tutor-control-plane" -action=invite-owner -tenant="$tenant" -email=owner@acme.test \
+    -base-url=https://tutor.localhost -reason=smoke -request-id=S3 | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["invitation_url"])')"
 unset DATABASE_URL
-super postgres -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
-member_secret="$(openssl rand -hex 16)"
-hash="$(PGPASSWORD=smoke-superuser psql "host=localhost port=$port user=postgres dbname=postgres sslmode=verify-full sslrootcert=$work/tls/ca.pem" \
-    -Atc "select crypt('$member_secret', gen_salt('bf', 10))")"
-# Until invitations exist, accounts are seeded through the identity triggers.
-super tutor <<SQL
-INSERT INTO learners (id,email,password_hash,objective,profile_json,created_at,email_verified_at,tenant_id,user_id,membership_id) VALUES
- ('lrn_manager','manager@acme.test','$hash','','{}',now(),now(),'$tenant','usr_manager','mem_manager'),
- ('lrn_alice','alice@acme.test','$hash','','{}',now(),now(),'$tenant','usr_alice','mem_alice');
-UPDATE tenant_memberships SET roles_json='["pedagogy_manager","learner"]'::jsonb, version=version+1 WHERE id='mem_manager';
-SQL
 
 SMOKE_BASE_URL=https://tutor.localhost SMOKE_CONNECT="127.0.0.1:$api_port" SMOKE_TENANT="$tenant" \
-    SMOKE_PASSWORD="$member_secret" python3 scripts/smoke-institution.py || fail "institution journey"
+    SMOKE_OWNER_LINK="$owner_link" SMOKE_MAIL_DIR="$work/mail" \
+    python3 scripts/smoke-institution.py || fail "institution journey"

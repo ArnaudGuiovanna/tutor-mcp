@@ -202,9 +202,47 @@ narrative secrets are re-encrypted with the current key by the API process at
 startup; the worker only decrypts them.
 
 `bash scripts/smoke-institution.sh` replays this whole sequence in a
-disposable directory (TLS PostgreSQL, grants, provisioned tenant, OAuth, admin
-catalog and MCP calls). CI runs it on every change; operators can run it to
-check a toolchain before an upgrade.
+disposable directory: TLS PostgreSQL, grants, a local mail sink, an
+operator-provisioned and a self-service institution, console sign-in with
+TOTP, invitations, OAuth, admin catalog and MCP calls. CI runs it on every
+change; operators can run it to check a toolchain before an upgrade.
+
+### Institution accounts
+
+The API serves a browser console at `/console` for owners, admins, pedagogy
+managers and trainers. These roles must enroll an authenticator app (TOTP) on
+their first console sign-in and receive ten single-use recovery codes. They
+enter a code again at every console sign-in and when they connect an AI
+client. Learners never use the console: they connect their AI client to
+`https://tutor.example.org/mcp` and sign in with the email of their
+invitation. Accounts are created only by invitation; self-registration into
+the shared legacy tenant is closed with `--profile institution`.
+
+Set `INSTITUTION_SIGNUP` on the API; startup fails without it:
+
+- `operator`: institutions are created with `tutor-control-plane` only.
+  Provision the tenant, then create the first owner's invitation link:
+
+  ```sh
+  tutor-control-plane -action=provision -slug=acme -name='Acme Academy' \
+      -region=eu -plan=PLAN_ID -reason='new customer' -request-id=TICKET
+  tutor-control-plane -action=invite-owner -tenant=TENANT_ID -email=head@acme.example \
+      -base-url=https://tutor.example.org -reason='owner bootstrap' -request-id=TICKET
+  ```
+
+  Send the printed `invitation_url` to the owner. It works once, for 7 days.
+- `open`: anyone can create an institution at `/signup`. Nothing is created
+  until the requester confirms their email; they then become its owner. Set
+  `SIGNUP_PLAN` to the active plan given to new institutions (create it first
+  with `tutor-control-plane -action=plan-upsert`). Opening signup requires
+  working email delivery.
+
+Owners and admins invite members from the console, one address per line,
+with their roles. Invitation links are only emailed, never shown to the
+inviter: opening one proves the invitee owns the address. Emails never
+contain the institution name, which is chosen by whoever signs up; the linked
+page shows it. "Forgot your password?" resets the account password for every
+institution member, staff included, and ends their existing sign-ins.
 
 For native systemd, create separate `tutor-api`, `tutor-worker` and
 `tutor-migrator` system users. Place role-specific environment files under

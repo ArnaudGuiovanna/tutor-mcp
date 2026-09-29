@@ -21,7 +21,7 @@ import (
 // force an explicit review and fingerprint update. Contract/control-plane
 // exceptions (migrations, health and test-only RawDB) are intentionally part
 // of the frozen set and documented in docs/store-scope-contract.md.
-const legacyUnscopedStoreMethodSetSHA256 = "557731d70852731d96c10dd808ccf4f46d84ea4ca54d72bfb6ec50db5a09bfd9"
+const legacyUnscopedStoreMethodSetSHA256 = "2a2c8a3ed8e3814edd596f81ecd9813fb2239554e8ef991fe99873b3e3686b3e"
 
 func TestNoNewUnscopedStoreMethods(t *testing.T) {
 	fset := token.NewFileSet()
@@ -98,6 +98,10 @@ func hasTypedTenantBoundary(fields *ast.FieldList) bool {
 			selector.Sel.Name == "VerifiedFederatedIdentityAssertion" ||
 			selector.Sel.Name == "SupportAccessCredential" ||
 			selector.Sel.Name == "OAuthCSRFCredential" ||
+			selector.Sel.Name == "ConsoleSessionCredential" ||
+			selector.Sel.Name == "InvitationCredential" ||
+			selector.Sel.Name == "SignupCredential" ||
+			selector.Sel.Name == "PasswordResetCredential" ||
 			selector.Sel.Name == "WorkerPrincipal") {
 			return true
 		}

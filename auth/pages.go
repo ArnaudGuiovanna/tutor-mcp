@@ -36,6 +36,8 @@ func formActionOriginFromRedirectURI(redirectURI string) string {
 
 type authPageData struct {
 	Hobby               bool
+	Institution         bool
+	SignupOpen          bool
 	ClientID            string
 	ClientName          string
 	RedirectURI         string
@@ -397,6 +399,11 @@ var authTmpl = template.Must(template.New("auth").Parse(`<!DOCTYPE html>
           <label for="login-password">Password</label>
           <input id="login-password" type="password" name="password" placeholder="••••••••" required autocomplete="current-password" />
 
+          {{if .Data.Institution}}
+          <label for="login-totp">Authentication code</label>
+          <input id="login-totp" type="text" name="totp_code" inputmode="text" maxlength="16" autocomplete="one-time-code" placeholder="Required for staff roles" />
+          {{end}}
+
           {{if .Data.TenantOptions}}
           <label for="login-tenant">Organization</label>
           <select id="login-tenant" name="tenant_id" required>
@@ -419,13 +426,16 @@ var authTmpl = template.Must(template.New("auth").Parse(`<!DOCTYPE html>
         </form>
         {{if .Data.Hobby}}
         <p class="toggle">For an invitation or password reset, contact the server operator.</p>
+        {{else if .Data.Institution}}
+        <p class="toggle"><a href="/recover">Forgot your password?</a></p>
+        <p class="toggle">No account? Ask your institution for an invitation.{{if .Data.SignupOpen}} <a href="/signup">Create an institution</a>{{end}}</p>
         {{else}}
         <p class="toggle"><a href="/recover">Forgot your password?</a></p>
         <p class="toggle">No account? <a href="#" class="toggle-link">Create one</a></p>
         {{end}}
       </div>
 
-      {{if not .Data.Hobby}}
+      {{if not (or .Data.Hobby .Data.Institution)}}
       <!-- Register form -->
       <div id="register-view" class="hidden">
         <p class="subtitle">Enter your email. You will choose your password and approve the client from the verification link.</p>

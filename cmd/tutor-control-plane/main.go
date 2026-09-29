@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -19,6 +20,7 @@ import (
 type options struct {
 	action, tenantID, slug, name, region, planID, status string
 	flagKey, hostname, verificationToken, entitlements   string
+	email, baseURL                                       string
 	periodStart, periodEnd, graceUntil                   string
 	enabled                                              bool
 	reason, requestID                                    string
@@ -26,7 +28,7 @@ type options struct {
 
 func main() {
 	var opts options
-	flag.StringVar(&opts.action, "action", "", "provision, status, flag, domain-begin, domain-complete, plan-upsert, or plan-assign")
+	flag.StringVar(&opts.action, "action", "", "provision, invite-owner, status, flag, domain-begin, domain-complete, plan-upsert, or plan-assign")
 	flag.StringVar(&opts.tenantID, "tenant", "", "exact tenant ID")
 	flag.StringVar(&opts.slug, "slug", "", "tenant slug")
 	flag.StringVar(&opts.name, "name", "", "tenant or plan name")
@@ -41,6 +43,8 @@ func main() {
 	flag.StringVar(&opts.periodStart, "period-start", "", "subscription period start RFC3339")
 	flag.StringVar(&opts.periodEnd, "period-end", "", "subscription period end RFC3339")
 	flag.StringVar(&opts.graceUntil, "grace-until", "", "optional grace deadline RFC3339")
+	flag.StringVar(&opts.email, "email", "", "owner email for invite-owner")
+	flag.StringVar(&opts.baseURL, "base-url", os.Getenv("BASE_URL"), "public server URL for invite-owner links (default BASE_URL)")
 	flag.StringVar(&opts.reason, "reason", "", "operator-approved reason")
 	flag.StringVar(&opts.requestID, "request-id", "", "change/ticket identifier")
 	flag.Parse()
@@ -68,6 +72,12 @@ func main() {
 	switch opts.action {
 	case "provision":
 		output, err = store.ProvisionTenant(ctx, actor, opts.slug, opts.name, opts.region, opts.planID)
+	case "invite-owner":
+		var token string
+		token, err = store.CreateOwnerInvitation(ctx, actor, opts.tenantID, opts.email, time.Now().Add(7*24*time.Hour))
+		output = map[string]any{"tenant_id": opts.tenantID, "email": strings.ToLower(strings.TrimSpace(opts.email)),
+			"invitation_url":  strings.TrimRight(opts.baseURL, "/") + "/invite?token=" + url.QueryEscape(token),
+			"expires_in_days": 7}
 	case "status":
 		err = store.SetTenantStatus(ctx, actor, opts.tenantID, opts.status)
 		output = map[string]any{"tenant_id": opts.tenantID, "status": opts.status}
@@ -123,6 +133,13 @@ func (opts options) validate() error {
 	case "provision":
 		if !require(opts.slug, opts.name, opts.region, opts.planID) {
 			return fmt.Errorf("provision requires -slug, -name, -region and -plan")
+		}
+	case "invite-owner":
+		if !require(opts.tenantID, opts.email, opts.baseURL) {
+			return fmt.Errorf("invite-owner requires -tenant, -email and -base-url (or BASE_URL)")
+		}
+		if parsed, err := url.Parse(opts.baseURL); err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
+			return fmt.Errorf("-base-url must be an absolute http(s) URL")
 		}
 	case "status":
 		if !require(opts.tenantID, opts.status) {

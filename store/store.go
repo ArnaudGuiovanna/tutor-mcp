@@ -37,6 +37,16 @@ var ErrInvalidLoginChallenge = errors.New("invalid login challenge")
 var ErrInvalidPrincipal = errors.New("invalid tenant principal")
 var ErrAmbiguousIdentity = errors.New("ambiguous global identity")
 
+// ErrAccountExists reports that an address already has a local account, whose
+// holder must sign in instead of creating a second one.
+var ErrAccountExists = errors.New("an account already exists for this email")
+
+// ErrAlreadyMember reports that the user already belongs to the tenant.
+var ErrAlreadyMember = errors.New("already a member of this institution")
+
+// ErrTenantSlugTaken reports that another institution already uses the slug.
+var ErrTenantSlugTaken = errors.New("institution identifier already taken")
+
 // ErrInvalidAuthCode deliberately collapses unknown, expired, client-bound and
 // already-consumed authorization codes into OAuth's invalid_grant response.
 var ErrInvalidAuthCode = errors.New("invalid authorization code")
@@ -187,6 +197,43 @@ type IdentityStore interface {
 	AcceptTenantInvitation(ctx context.Context, rawToken, userID string) (*models.TenantMembership, error)
 	LinkExternalIdentity(ctx context.Context, userID string, identity models.ExternalIdentityInput) (*models.ExternalIdentity, error)
 	AppendAuditEvent(ctx context.Context, actor models.Principal, event models.AuditEvent) error
+}
+
+// InstitutionAccountStore backs the browser console: its sessions, the TOTP
+// ceremony, member administration, invitations and self-service institution
+// signup. It is separate from IdentityStore so OAuth-only stores need not
+// implement it.
+type InstitutionAccountStore interface {
+	BeginTOTPEnrollment(ctx context.Context, actor models.Principal, label string) (string, string, error)
+	ConfirmTOTPEnrollment(ctx context.Context, actor models.Principal, credentialID, code string, at time.Time) ([]string, error)
+	HasConfirmedTOTP(ctx context.Context, scope models.TenantScope) (bool, error)
+	VerifySecondFactor(ctx context.Context, scope models.TenantScope, code string, at time.Time) error
+	EnsureMembershipMFAVerified(ctx context.Context, scope models.TenantScope, at time.Time) (int64, error)
+
+	CreateConsoleSession(ctx context.Context, credential models.ConsoleSessionCredential, scope models.TenantScope, membershipVersion int64, mfaVerifiedAt *time.Time, expiresAt time.Time) error
+	GetConsoleSession(ctx context.Context, credential models.ConsoleSessionCredential) (*models.ConsoleSession, error)
+	UpdateConsoleSession(ctx context.Context, credential models.ConsoleSessionCredential, seenAt time.Time, membershipVersion int64, mfaVerifiedAt *time.Time) error
+	DeleteConsoleSession(ctx context.Context, credential models.ConsoleSessionCredential) error
+	GetConsoleMembership(ctx context.Context, scope models.TenantScope) (*models.ConsoleMembership, error)
+
+	ListTenantMembers(ctx context.Context, actor models.Principal) ([]models.TenantMember, error)
+	ListTenantInvitations(ctx context.Context, actor models.Principal) ([]models.TenantInvitation, error)
+	RevokeTenantInvitation(ctx context.Context, actor models.Principal, invitationID string) error
+	UpdateTenantMember(ctx context.Context, actor models.Principal, membershipID, status string, roles []string) error
+
+	PreviewTenantInvitation(ctx context.Context, credential models.InvitationCredential) (*models.InvitationPreview, error)
+	AcceptTenantInvitationWithNewUser(ctx context.Context, credential models.InvitationCredential, passwordHash string) (*models.TenantMembership, error)
+	CreateOwnerInvitation(ctx context.Context, actor models.ControlPlanePrincipal, tenantID, email string, expiresAt time.Time) (string, error)
+
+	TenantSlugAvailable(ctx context.Context, slug string) (bool, error)
+	PlanIsActive(ctx context.Context, planID string) (bool, error)
+	CreatePendingSignup(ctx context.Context, credential models.SignupCredential, email, tenantName, slug string, expiresAt time.Time) error
+	GetPendingSignup(ctx context.Context, credential models.SignupCredential) (*models.PendingSignup, error)
+	CompleteSignup(ctx context.Context, credential models.SignupCredential, planID, existingUserID, newPasswordHash string) (*models.TenantMembership, error)
+
+	CreateUserPasswordReset(ctx context.Context, credential models.PasswordResetCredential, email string) (bool, error)
+	UserPasswordResetValid(ctx context.Context, credential models.PasswordResetCredential) bool
+	ResetUserPassword(ctx context.Context, credential models.PasswordResetCredential, passwordHash string) error
 }
 
 // IntegrationSecretStore keeps credential access out of the general learner
