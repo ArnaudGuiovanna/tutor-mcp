@@ -6,6 +6,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+
+- Institution console at `/console` for owners, admins, pedagogy managers and
+  trainers, with a server-side session, TOTP enrollment (QR code) and ten
+  single-use recovery codes. Owners and admins list members, invite people by
+  email with their roles, change roles, suspend or remove members, and revoke
+  pending invitations. The last active owner cannot be removed.
+- Invitation acceptance at `/invite`: new invitees choose a password; existing
+  accounts accept with theirs.
+- Self-service institution signup at `/signup` with `INSTITUTION_SIGNUP=open`
+  and `SIGNUP_PLAN`. The tenant and its owner are created only after email
+  confirmation.
+- `tutor-control-plane -action=invite-owner` prints the first owner's
+  invitation link for an operator-provisioned institution.
+
+### Changed
+
+- `--profile institution` requires `INSTITUTION_SIGNUP` (`operator` or `open`)
+  on the API and closes self-registration into the shared legacy tenant.
+- Pedagogy managers and trainers now require two-factor authentication, like
+  owners and admins. Staff roles enter a TOTP or recovery code at `/authorize`
+  when they connect an AI client. Existing staff memberships must enroll in
+  the console before their next AI-client sign-in.
+- A new TOTP authenticator is usable only after it confirms a code, and a code
+  is accepted once per time step.
+
 ## [0.6.1] — 2026-09-18
 
 ### Fixed
