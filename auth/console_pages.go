@@ -28,7 +28,6 @@ type consoleInvitationRow struct {
 
 type consoleInviteLink struct {
 	Email  string
-	URL    string
 	Mailed bool
 	Error  string
 }
@@ -175,11 +174,10 @@ var consoleTmpl = template.Must(template.New("console").Parse(`<!doctype html>
   <p>Learners and trainers connect their AI client (Claude, ChatGPT…) to <span class="mono">{{.MCPURL}}</span> and sign in with the email of their invitation.</p>
   {{if .CanManage}}
   {{if .InviteLinks}}
-  <h2>Invitation links</h2>
-  <p>Links are valid for 7 days and work once. Send them yourself if no email was sent.</p>
+  <h2>Invitations sent</h2>
   <table>
-    <tr><th>Email</th><th>Link</th><th>Email sent</th></tr>
-    {{range .InviteLinks}}<tr><td>{{.Email}}</td><td class="mono">{{if .URL}}{{.URL}}{{else}}{{.Error}}{{end}}</td><td>{{if .Mailed}}yes{{else}}no{{end}}</td></tr>{{end}}
+    <tr><th>Email</th><th>Status</th></tr>
+    {{range .InviteLinks}}<tr><td>{{.Email}}</td><td>{{if .Mailed}}emailed, valid 7 days{{else}}{{.Error}}{{end}}</td></tr>{{end}}
   </table>
   {{end}}
   <h2>Invite people</h2>

@@ -31,6 +31,9 @@ func (s *Store) CreateTenantInvitation(ctx context.Context, actor models.Princip
 	if err != nil {
 		return nil, "", fmt.Errorf("create invitation: %w", err)
 	}
+	if containsRole(roles, models.RoleOwner) && !containsRole(actor.Roles, models.RoleOwner) {
+		return nil, "", fmt.Errorf("create invitation: %w", storeport.ErrInvalidPrincipal)
+	}
 	now := time.Now().UTC()
 	invitation := &models.TenantInvitation{
 		TenantID: actor.TenantID, Email: normalizedEmail,
@@ -79,9 +82,15 @@ func (s *Store) AcceptTenantInvitation(ctx context.Context, rawToken, userID str
 func (s *Store) acceptInvitationTx(ctx context.Context, tokenHash, tenantID, userID string) (*models.TenantMembership, error) {
 	var invitationID, normalizedEmail, rolesJSON, createdBy string
 	var expiresAt time.Time
+	lock := ""
+	if s.dialect == DialectPostgres {
+		// Concurrent acceptances of one link queue here; the second then sees
+		// the invitation accepted.
+		lock = " FOR UPDATE"
+	}
 	if err := s.queryRow(ctx, `SELECT id, normalized_email, roles_json, created_by, expires_at
         FROM tenant_invitations
-        WHERE token_hash = ? AND tenant_id = ? AND status = 'pending' AND expires_at > ?`,
+        WHERE token_hash = ? AND tenant_id = ? AND status = 'pending' AND expires_at > ?`+lock,
 		tokenHash, tenantID, time.Now().UTC()).Scan(
 		&invitationID, &normalizedEmail, &rolesJSON, &createdBy, &expiresAt); err != nil {
 		return nil, fmt.Errorf("accept invitation: invalid invitation")
@@ -137,10 +146,14 @@ func (s *Store) acceptInvitationTx(ctx context.Context, tokenHash, tenantID, use
 			return nil, err
 		}
 	}
-	if _, err := s.exec(ctx, `UPDATE tenant_invitations
+	accepted, err := s.exec(ctx, `UPDATE tenant_invitations
         SET status = 'accepted', accepted_at = ?, accepted_user_id = ?, accepted_membership_id = ?
-        WHERE id = ? AND status = 'pending'`, now, userID, membershipID, invitationID); err != nil {
+        WHERE id = ? AND status = 'pending'`, now, userID, membershipID, invitationID)
+	if err != nil {
 		return nil, err
+	}
+	if count, _ := accepted.RowsAffected(); count != 1 {
+		return nil, fmt.Errorf("accept invitation: invalid invitation")
 	}
 	if _, err := s.exec(ctx, `DELETE FROM invitation_tenant_routes WHERE token_hash = ?`, tokenHash); err != nil {
 		return nil, err

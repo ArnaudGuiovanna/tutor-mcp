@@ -49,8 +49,8 @@ reason.
 
 Institution accounts (browser console, invitations and self-service signup)
 resolve their tenant from a typed secret, like the credentials above:
-`ConsoleSessionCredential`, `InvitationCredential` and `SignupCredential`
-carry the raw link or cookie token and the store keeps only its digest. Two
+`ConsoleSessionCredential`, `InvitationCredential`, `SignupCredential` and
+`PasswordResetCredential` carry the raw link or cookie token and the store keeps only its digest. Two
 global catalog reads are added to the fingerprint: `TenantSlugAvailable`
 checks whether an institution identifier is free before a signup email is
 sent, and `PlanIsActive` validates the configured signup plan at startup.

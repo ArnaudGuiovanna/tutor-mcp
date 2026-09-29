@@ -101,6 +101,7 @@ func hasTypedTenantBoundary(fields *ast.FieldList) bool {
 			selector.Sel.Name == "ConsoleSessionCredential" ||
 			selector.Sel.Name == "InvitationCredential" ||
 			selector.Sel.Name == "SignupCredential" ||
+			selector.Sel.Name == "PasswordResetCredential" ||
 			selector.Sel.Name == "WorkerPrincipal") {
 			return true
 		}

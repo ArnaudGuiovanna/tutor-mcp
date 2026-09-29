@@ -323,6 +323,13 @@ func (s *Store) UpdateTenantMember(ctx context.Context, actor models.Principal, 
 	}
 	return s.WithTenantTx(ctx, actor.TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {
 		txs := scoped.(*Store)
+		if txs.dialect == DialectPostgres {
+			// Membership changes of one tenant run one at a time, so two
+			// concurrent demotions cannot both see the other owner.
+			if _, err := txs.exec(txCtx, `SELECT id FROM tenants WHERE id = ? FOR UPDATE`, actor.TenantID); err != nil {
+				return err
+			}
+		}
 		var userID, learnerID, currentRolesJSON, currentStatus string
 		err := txs.queryRow(txCtx, `SELECT user_id, COALESCE(learner_id, ''), roles_json, status
 			FROM tenant_memberships WHERE tenant_id = ? AND id = ? AND status <> 'revoked'`,
@@ -518,6 +525,13 @@ func (s *Store) AcceptTenantInvitationWithNewUser(ctx context.Context, credentia
 // second account for an address that already has one.
 func (s *Store) insertLocalUser(ctx context.Context, userID, email, passwordHash string, now time.Time) error {
 	normalized := strings.ToLower(strings.TrimSpace(email))
+	if s.dialect == DialectPostgres {
+		// Serialize account creation per address: there is no unique index on
+		// users.normalized_email, and two concurrent flows must not both insert.
+		if _, err := s.exec(ctx, `SELECT pg_advisory_xact_lock(hashtext(?))`, "users.email:"+normalized); err != nil {
+			return err
+		}
+	}
 	var existing int
 	if err := s.queryRow(ctx, `SELECT COUNT(*) FROM users
 		WHERE normalized_email = ? AND identity_mode = 'email'`, normalized).Scan(&existing); err != nil {
@@ -778,4 +792,113 @@ func nullableTime(value *time.Time) any {
 		return nil
 	}
 	return value.UTC()
+}
+
+// ---------------------------------------------------------------------------
+// Password reset for global email identities
+// ---------------------------------------------------------------------------
+
+const passwordResetTTL = 15 * time.Minute
+
+// CreateUserPasswordReset stores a reset link for the active email identity
+// at email. It returns false, without error, when no such identity exists so
+// callers can answer identically either way.
+func (s *Store) CreateUserPasswordReset(ctx context.Context, credential models.PasswordResetCredential, email string) (bool, error) {
+	normalized := strings.ToLower(strings.TrimSpace(email))
+	if credential.Token == "" || normalized == "" {
+		return false, fmt.Errorf("create password reset: invalid input")
+	}
+	now := time.Now().UTC()
+	created := false
+	err := s.inTx(ctx, nil, func(txs *Store) error {
+		if _, err := txs.exec(ctx, `DELETE FROM user_password_resets WHERE expires_at <= ?`, now); err != nil {
+			return err
+		}
+		result, err := txs.exec(ctx, `INSERT INTO user_password_resets (token_hash, user_id, created_at, expires_at)
+			SELECT ?, id, ?, ? FROM users
+			WHERE normalized_email = ? AND identity_mode = 'email' AND status = 'active'
+			  AND email_verified_at IS NOT NULL`, opaqueTokenHash(credential.Token), now,
+			now.Add(passwordResetTTL), normalized)
+		if err != nil {
+			return err
+		}
+		count, _ := result.RowsAffected()
+		created = count == 1
+		if count > 1 {
+			return storeport.ErrAmbiguousIdentity
+		}
+		return nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("create password reset: %w", err)
+	}
+	return created, nil
+}
+
+func (s *Store) UserPasswordResetValid(ctx context.Context, credential models.PasswordResetCredential) bool {
+	var count int
+	err := s.queryRow(ctx, `SELECT COUNT(*) FROM user_password_resets
+		WHERE token_hash = ? AND consumed_at IS NULL AND expires_at > ?`,
+		opaqueTokenHash(credential.Token), time.Now().UTC()).Scan(&count)
+	return err == nil && count == 1
+}
+
+// ResetUserPassword consumes a reset link, replaces the password and revokes
+// every existing sign-in: membership versions are bumped in each tenant and
+// console sessions are deleted.
+func (s *Store) ResetUserPassword(ctx context.Context, credential models.PasswordResetCredential, passwordHash string) error {
+	if credential.Token == "" || strings.TrimSpace(passwordHash) == "" {
+		return fmt.Errorf("reset password: %w", storeport.ErrInvalidAccountToken)
+	}
+	now := time.Now().UTC()
+	return s.inTx(ctx, nil, func(txs *Store) error {
+		var userID string
+		err := txs.queryRow(ctx, `UPDATE user_password_resets SET consumed_at = ?
+			WHERE token_hash = ? AND consumed_at IS NULL AND expires_at > ?
+			RETURNING user_id`, now, opaqueTokenHash(credential.Token), now).Scan(&userID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("reset password: %w", storeport.ErrInvalidAccountToken)
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := txs.exec(ctx, `UPDATE users SET password_hash = ?, token_version = token_version + 1, updated_at = ?
+			WHERE id = ? AND status = 'active'`, passwordHash, now, userID); err != nil {
+			return err
+		}
+		if txs.dialect == DialectPostgres {
+			if _, err := txs.exec(ctx, `SELECT set_config('app.identity_user', ?, true)`, userID); err != nil {
+				return err
+			}
+		}
+		rows, err := txs.query(ctx, `SELECT DISTINCT tenant_id FROM tenant_memberships WHERE user_id = ?`, userID)
+		if err != nil {
+			return err
+		}
+		var tenants []string
+		for rows.Next() {
+			var tenantID string
+			if err := rows.Scan(&tenantID); err != nil {
+				rows.Close()
+				return err
+			}
+			tenants = append(tenants, tenantID)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, tenantID := range tenants {
+			if txs.dialect == DialectPostgres {
+				if _, err := txs.exec(ctx, `SELECT set_config('app.current_tenant', ?, true)`, tenantID); err != nil {
+					return err
+				}
+			}
+			if _, err := txs.exec(ctx, `UPDATE tenant_memberships SET version = version + 1, updated_at = ?
+				WHERE tenant_id = ? AND user_id = ? AND status IN ('invited','active')`, now, tenantID, userID); err != nil {
+				return err
+			}
+		}
+		_, err = txs.exec(ctx, `DELETE FROM console_sessions WHERE user_id = ?`, userID)
+		return err
+	})
 }

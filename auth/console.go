@@ -395,23 +395,21 @@ func (s *OAuthServer) HandleConsoleMFAPost(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	ctx := r.Context()
-	scope := c.session.TenantScope()
-	failureKey := "mfa:" + scope.UserID
 	now := time.Now().UTC()
-	if err := s.accounts.VerifySecondFactor(ctx, scope, r.FormValue("code"), now); err != nil {
-		count := s.loginFailures.RecordContext(ctx, failureKey)
-		if s.loginFailures.RetryAfter(count) > 0 {
-			// Repeated wrong codes end the session: the password must be
-			// entered again before any further guess.
-			_ = s.accounts.DeleteConsoleSession(ctx, c.credential)
-			setConsoleSessionCookie(w, "", -1)
-			s.renderConsoleLogin(w, http.StatusTooManyRequests, consolePageData{Error: "Too many invalid codes. Sign in again in a few minutes."})
-			return
-		}
+	ok, throttled := s.checkSecondFactor(ctx, c.session.TenantScope(), r.FormValue("code"), now)
+	if throttled {
+		// The attempt budget is spent: end the session without checking the
+		// code. The password must be entered again once the window passes.
+		_ = s.accounts.DeleteConsoleSession(ctx, c.credential)
+		setConsoleSessionCookie(w, "", -1)
+		w.Header().Set("Retry-After", s.secondFactorRetryAfter())
+		s.renderConsoleLogin(w, http.StatusTooManyRequests, consolePageData{Error: "Too many invalid codes. Sign in again in a few minutes."})
+		return
+	}
+	if !ok {
 		s.renderConsoleMFA(w, http.StatusUnauthorized, c, "Invalid or already used code.")
 		return
 	}
-	s.loginFailures.ResetContext(ctx, failureKey)
 	if err := s.completeConsoleMFA(ctx, c, now); err != nil {
 		s.logger.Error("record console MFA failed", "error_type", authLogErrorType(err))
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -419,6 +417,32 @@ func (s *OAuthServer) HandleConsoleMFAPost(w http.ResponseWriter, r *http.Reques
 	}
 	setAccountCSRFCookie(w, "", consoleCookiePath, -1)
 	http.Redirect(w, r, "/console", http.StatusSeeOther)
+}
+
+func secondFactorFailureKey(userID string) string { return "mfa:" + userID }
+
+// checkSecondFactor verifies a TOTP or recovery code within a per-user attempt
+// budget. A correct password never resets that budget, and a spent budget
+// refuses before the code is checked.
+func (s *OAuthServer) checkSecondFactor(ctx context.Context, scope models.TenantScope, code string, at time.Time) (ok, throttled bool) {
+	key := secondFactorFailureKey(scope.UserID)
+	if !s.loginFailures.AllowContext(ctx, key) {
+		return false, true
+	}
+	if err := s.accounts.VerifySecondFactor(ctx, scope, strings.TrimSpace(code), at); err != nil {
+		count := s.loginFailures.RecordContext(ctx, key)
+		return false, s.loginFailures.RetryAfter(count) > 0
+	}
+	s.loginFailures.ResetContext(ctx, key)
+	return true, false
+}
+
+func (s *OAuthServer) secondFactorRetryAfter() string {
+	retry := s.loginFailures.RetryAfter(s.loginFailures.Threshold())
+	if retry <= 0 {
+		retry = time.Minute
+	}
+	return fmt.Sprintf("%d", int(retry/time.Second))
 }
 
 func (s *OAuthServer) completeConsoleMFA(ctx context.Context, c *consoleContext, at time.Time) error {
@@ -656,25 +680,30 @@ func (s *OAuthServer) HandleConsoleInvitePost(w http.ResponseWriter, r *http.Req
 		s.renderConsoleMembers(w, ctx, http.StatusBadRequest, c, "", "Invitation not sent: "+err.Error()+".", nil)
 		return
 	}
+	// Invitation links go to the invitee's mailbox only. Holding one stands
+	// for owning the address, so the inviter never sees it.
 	mailer, canMail := s.emailSender.(InstitutionEmailSender)
+	if !canMail {
+		s.renderConsoleMembers(w, ctx, http.StatusServiceUnavailable, c, "", "Invitation not sent: email delivery is not configured on this server.", nil)
+		return
+	}
 	expiresAt := time.Now().UTC().Add(invitationTTL)
 	links := make([]consoleInviteLink, 0, len(emails))
 	for _, email := range emails {
-		_, rawToken, err := s.store.CreateTenantInvitation(ctx, c.principal, email, roles, expiresAt)
+		invitation, rawToken, err := s.store.CreateTenantInvitation(ctx, c.principal, email, roles, expiresAt)
 		if err != nil {
 			s.logger.Error("create invitation failed", "error_type", authLogErrorType(err))
-			links = append(links, consoleInviteLink{Email: email, Error: "Could not create the invitation."})
+			links = append(links, consoleInviteLink{Email: email, Error: "could not create the invitation"})
 			continue
 		}
-		link := consoleInviteLink{Email: email, URL: s.baseURL + "/invite?token=" + url.QueryEscape(rawToken)}
-		if canMail {
-			if err := mailer.SendInvitation(ctx, email, link.URL); err != nil {
-				s.logger.Warn("invitation email failed", "error_type", authLogErrorType(err))
-			} else {
-				link.Mailed = true
-			}
+		link := s.baseURL + "/invite?token=" + url.QueryEscape(rawToken)
+		if err := mailer.SendInvitation(ctx, email, link); err != nil {
+			s.logger.Warn("invitation email failed", "error_type", authLogErrorType(err))
+			_ = s.accounts.RevokeTenantInvitation(ctx, c.principal, invitation.ID)
+			links = append(links, consoleInviteLink{Email: email, Error: "the email could not be sent; try again later"})
+			continue
 		}
-		links = append(links, link)
+		links = append(links, consoleInviteLink{Email: email, Mailed: true})
 	}
 	s.renderConsoleMembers(w, ctx, http.StatusOK, c, fmt.Sprintf("%d invitation(s) created.", len(emails)), "", links)
 }
@@ -740,7 +769,7 @@ func (s *OAuthServer) HandleConsoleInvitationRevokePost(w http.ResponseWriter, r
 // verifyAuthorizeSecondFactor requires a second factor at /authorize for a
 // membership whose roles need one. It writes the response on failure and
 // returns the membership version to bind into the authorization code.
-func (s *OAuthServer) verifyAuthorizeSecondFactor(w http.ResponseWriter, r *http.Request, data authPageData, scope models.TenantScope, email string) (int64, bool) {
+func (s *OAuthServer) verifyAuthorizeSecondFactor(w http.ResponseWriter, r *http.Request, data authPageData, scope models.TenantScope) (int64, bool) {
 	ctx := r.Context()
 	enrolled, err := s.accounts.HasConfirmedTOTP(ctx, scope)
 	if err != nil {
@@ -758,14 +787,14 @@ func (s *OAuthServer) verifyAuthorizeSecondFactor(w http.ResponseWriter, r *http
 		return 0, false
 	}
 	now := time.Now().UTC()
-	if err := s.accounts.VerifySecondFactor(ctx, scope, code, now); err != nil {
-		count := s.loginFailures.RecordContext(ctx, email)
-		status := http.StatusUnauthorized
-		if retryAfter := s.loginFailures.RetryAfter(count); retryAfter > 0 {
-			status = http.StatusTooManyRequests
-			w.Header().Set("Retry-After", fmt.Sprintf("%d", int(retryAfter/time.Second)))
-		}
-		renderAuthPageStatus(w, status, data, "Invalid or already used authentication code.", "login")
+	ok, throttled := s.checkSecondFactor(ctx, scope, code, now)
+	if throttled {
+		w.Header().Set("Retry-After", s.secondFactorRetryAfter())
+		renderAuthPageStatus(w, http.StatusTooManyRequests, data, "Too many invalid authentication codes. Try again in a few minutes.", "login")
+		return 0, false
+	}
+	if !ok {
+		renderAuthPageStatus(w, http.StatusUnauthorized, data, "Invalid or already used authentication code.", "login")
 		return 0, false
 	}
 	version, err := s.accounts.EnsureMembershipMFAVerified(ctx, scope, now)

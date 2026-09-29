@@ -238,9 +238,11 @@ Set `INSTITUTION_SIGNUP` on the API; startup fails without it:
   working email delivery.
 
 Owners and admins invite members from the console, one address per line,
-with their roles. The console always shows the invitation links and also
-emails them when SMTP is configured. Emails never contain the institution
-name, which is chosen by whoever signs up; the linked page shows it.
+with their roles. Invitation links are only emailed, never shown to the
+inviter: opening one proves the invitee owns the address. Emails never
+contain the institution name, which is chosen by whoever signs up; the linked
+page shows it. "Forgot your password?" resets the account password for every
+institution member, staff included, and ends their existing sign-ins.
 
 For native systemd, create separate `tutor-api`, `tutor-worker` and
 `tutor-migrator` system users. Place role-specific environment files under

@@ -764,7 +764,7 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 			MembershipID: selected.ID, LearnerID: selected.LearnerID,
 		}
 		if selected.MFARequired && s.accounts != nil {
-			version, ok := s.verifyAuthorizeSecondFactor(w, r, data, tenantScope, email)
+			version, ok := s.verifyAuthorizeSecondFactor(w, r, data, tenantScope)
 			if !ok {
 				return
 			}

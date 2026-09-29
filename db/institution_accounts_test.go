@@ -440,3 +440,62 @@ func TestSignupCreatesTenantOwnerAndRejectsReuse(t *testing.T) {
 		t.Fatalf("second institution membership = %+v", owned)
 	}
 }
+
+func TestUserPasswordResetRevokesEverySignIn(t *testing.T) {
+	s := institutionTestStore(t)
+	ctx := context.Background()
+	ownerScope := seedInstitutionOwner(t, s, "acme", "owner@acme.test")
+	owner, _ := verifiedOwner(t, s, ownerScope)
+	session := models.ConsoleSessionCredential{Token: "owner-session"}
+	if err := s.CreateConsoleSession(ctx, session, ownerScope, owner.TokenVersion, nil, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if created, err := s.CreateUserPasswordReset(ctx, models.PasswordResetCredential{Token: "unknown"}, "nobody@acme.test"); err != nil || created {
+		t.Fatalf("reset for an unknown address = %v, %v", created, err)
+	}
+	credential := models.PasswordResetCredential{Token: "reset-owner"}
+	if created, err := s.CreateUserPasswordReset(ctx, credential, "Owner@Acme.test"); err != nil || !created {
+		t.Fatalf("reset for the owner = %v, %v", created, err)
+	}
+	if !s.UserPasswordResetValid(ctx, credential) {
+		t.Fatal("fresh reset link invalid")
+	}
+	if err := s.ResetUserPassword(ctx, credential, "new-hash"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ResetUserPassword(ctx, credential, "other-hash"); err == nil {
+		t.Fatal("reset link reused")
+	}
+	user, err := s.GetLocalUserByEmail(ctx, "owner@acme.test")
+	if err != nil || user.PasswordHash != "new-hash" {
+		t.Fatalf("password after reset = %+v, %v", user, err)
+	}
+	if _, err := s.GetConsoleSession(ctx, session); !errors.Is(err, storeport.ErrNotFound) {
+		t.Fatalf("console session survived the reset: %v", err)
+	}
+	if err := s.ValidatePrincipal(ctx, owner); err == nil {
+		t.Fatal("pre-reset principal still valid")
+	}
+}
+
+func TestInvitationOwnerRoleAndSingleUse(t *testing.T) {
+	s := institutionTestStore(t)
+	ctx := context.Background()
+	ownerScope := seedInstitutionOwner(t, s, "acme", "owner@acme.test")
+	owner, _ := verifiedOwner(t, s, ownerScope)
+	_, raw, err := s.CreateTenantInvitation(ctx, owner, "admin@acme.test", []string{models.RoleAdmin}, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminMembership, err := s.AcceptTenantInvitationWithNewUser(ctx, models.InvitationCredential{Token: raw}, "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, _ := verifiedOwner(t, s, models.TenantScope{TenantID: owner.TenantID, UserID: adminMembership.UserID, MembershipID: adminMembership.ID})
+	if _, _, err := s.CreateTenantInvitation(ctx, admin, "boss@acme.test", []string{models.RoleOwner}, time.Now().Add(time.Hour)); err == nil {
+		t.Fatal("an admin invited an owner")
+	}
+	if _, err := s.AcceptTenantInvitation(ctx, raw, adminMembership.UserID); err == nil {
+		t.Fatal("an accepted invitation was accepted again")
+	}
+}

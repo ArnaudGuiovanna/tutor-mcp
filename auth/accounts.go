@@ -182,6 +182,35 @@ func (s *OAuthServer) sendPasswordReset(ctx context.Context, learner *models.Lea
 	return nil
 }
 
+func (s *OAuthServer) passwordResetValid(r *http.Request, raw string) bool {
+	if s.accounts != nil {
+		return s.accounts.UserPasswordResetValid(r.Context(), models.PasswordResetCredential{Token: raw})
+	}
+	_, err := s.store.GetAccountToken(r.Context(), accountTokenHash(raw), accountTokenPasswordReset)
+	return err == nil
+}
+
+// sendUserPasswordReset mails a reset link to an institution email identity.
+// An unknown address sends nothing and returns no error.
+func (s *OAuthServer) sendUserPasswordReset(ctx context.Context, email string) error {
+	if s.emailSender == nil {
+		return fmt.Errorf("email delivery is not configured")
+	}
+	raw, err := newOpaqueToken()
+	if err != nil {
+		return err
+	}
+	created, err := s.accounts.CreateUserPasswordReset(ctx, models.PasswordResetCredential{Token: raw}, email)
+	if err != nil || !created {
+		return err
+	}
+	link := s.baseURL + "/reset-password?" + url.Values{"token": []string{raw}}.Encode()
+	if err := s.emailSender.SendPasswordReset(ctx, email, link); err != nil {
+		return fmt.Errorf("send password reset email: %w", err)
+	}
+	return nil
+}
+
 func (s *OAuthServer) sendLoginChallenge(ctx context.Context, learner *models.Learner, data authPageData) (bool, error) {
 	sender, ok := s.emailSender.(LoginChallengeEmailSender)
 	if !ok || sender == nil {
@@ -409,7 +438,15 @@ func (s *OAuthServer) HandleRecoverPost(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	email := NormalizeEmail(r.FormValue("email"))
-	if validateEmail(email) == nil {
+	if s.accounts != nil {
+		// Institution accounts authenticate against users, and staff or invited
+		// members may have no learner row carrying their address.
+		if validateEmail(email) == nil {
+			if err := s.sendUserPasswordReset(r.Context(), email); err != nil {
+				s.logger.Error("password reset delivery failed", "error_type", authLogErrorType(err))
+			}
+		}
+	} else if validateEmail(email) == nil {
 		learner, err := s.store.GetLearnerByEmail(r.Context(), email)
 		if err == nil && learner != nil {
 			if sendErr := s.sendPasswordReset(r.Context(), learner); sendErr != nil {
@@ -434,7 +471,7 @@ func (s *OAuthServer) HandleResetPasswordGet(w http.ResponseWriter, r *http.Requ
 		renderAccountPage(w, http.StatusBadRequest, accountPageData{Title: "Invalid link", Message: "This reset link is invalid or expired."})
 		return
 	}
-	if _, err := s.store.GetAccountToken(r.Context(), accountTokenHash(raw), accountTokenPasswordReset); err != nil {
+	if !s.passwordResetValid(r, raw) {
 		renderAccountPage(w, http.StatusBadRequest, accountPageData{Title: "Invalid link", Message: "This reset link is invalid or expired."})
 		return
 	}
@@ -476,7 +513,12 @@ func (s *OAuthServer) HandleResetPasswordPost(w http.ResponseWriter, r *http.Req
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	if _, err := s.store.ResetPasswordWithToken(r.Context(), accountTokenHash(raw), string(hash)); err != nil {
+	if s.accounts != nil {
+		err = s.accounts.ResetUserPassword(r.Context(), models.PasswordResetCredential{Token: raw}, string(hash))
+	} else {
+		_, err = s.store.ResetPasswordWithToken(r.Context(), accountTokenHash(raw), string(hash))
+	}
+	if err != nil {
 		if !errors.Is(err, storeport.ErrInvalidAccountToken) {
 			s.logger.Error("password reset failed", "err", err)
 		}

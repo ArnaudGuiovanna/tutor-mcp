@@ -109,3 +109,9 @@ type InvitationCredential struct {
 type SignupCredential struct {
 	Token string
 }
+
+// PasswordResetCredential is the secret carried by a password reset link for a
+// global email identity.
+type PasswordResetCredential struct {
+	Token string
+}

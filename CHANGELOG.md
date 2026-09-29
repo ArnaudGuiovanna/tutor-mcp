@@ -14,7 +14,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   email with their roles, change roles, suspend or remove members, and revoke
   pending invitations. The last active owner cannot be removed.
 - Invitation acceptance at `/invite`: new invitees choose a password; existing
-  accounts accept with theirs.
+  accounts accept with theirs. Invitation links are only emailed to the
+  invitee.
+- Password recovery for institution accounts resets the global account
+  password, including staff without a learner profile, and revokes their
+  sign-ins in every institution.
 - Self-service institution signup at `/signup` with `INSTITUTION_SIGNUP=open`
   and `SIGNUP_PLAN`. The tenant and its owner are created only after email
   confirmation.
@@ -30,7 +34,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   when they connect an AI client. Existing staff memberships must enroll in
   the console before their next AI-client sign-in.
 - A new TOTP authenticator is usable only after it confirms a code, and a code
-  is accepted once per time step.
+  is accepted once per time step. Five wrong second-factor codes block further
+  attempts for that account, whatever passwords are entered meanwhile.
 
 ## [0.6.1] — 2026-09-18
 

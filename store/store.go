@@ -230,6 +230,10 @@ type InstitutionAccountStore interface {
 	CreatePendingSignup(ctx context.Context, credential models.SignupCredential, email, tenantName, slug string, expiresAt time.Time) error
 	GetPendingSignup(ctx context.Context, credential models.SignupCredential) (*models.PendingSignup, error)
 	CompleteSignup(ctx context.Context, credential models.SignupCredential, planID, existingUserID, newPasswordHash string) (*models.TenantMembership, error)
+
+	CreateUserPasswordReset(ctx context.Context, credential models.PasswordResetCredential, email string) (bool, error)
+	UserPasswordResetValid(ctx context.Context, credential models.PasswordResetCredential) bool
+	ResetUserPassword(ctx context.Context, credential models.PasswordResetCredential, passwordHash string) error
 }
 
 // IntegrationSecretStore keeps credential access out of the general learner

@@ -6,7 +6,8 @@ package db
 // Institution accounts add the browser console, a two-step TOTP ceremony with
 // single-use recovery codes, and self-service institution signup.
 //
-// console_sessions and pending_signups are global lookup tables, like
+// console_sessions, pending_signups and user_password_resets are global
+// lookup tables, like
 // credential_tenant_routes: a browser presents only an opaque token, so the
 // row must be found before a tenant is known. They hold hashes and
 // identifiers, never tenant business data. MFA material stays user-global
@@ -49,6 +50,14 @@ CREATE TABLE pending_signups (
     consumed_at      DATETIME
 );
 CREATE INDEX idx_pending_signups_expiry ON pending_signups(expires_at);
+CREATE TABLE user_password_resets (
+    token_hash  TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at  DATETIME NOT NULL,
+    expires_at  DATETIME NOT NULL,
+    consumed_at DATETIME
+);
+CREATE INDEX idx_user_password_resets_expiry ON user_password_resets(expires_at);
 UPDATE tenant_memberships SET mfa_required = 1
 WHERE EXISTS (SELECT 1 FROM json_each(roles_json) WHERE value IN ('pedagogy_manager','trainer'));
 `
@@ -88,6 +97,14 @@ CREATE TABLE IF NOT EXISTS pending_signups (
     consumed_at      TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_pending_signups_expiry ON pending_signups(expires_at);
+CREATE TABLE IF NOT EXISTS user_password_resets (
+    token_hash  TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at  TIMESTAMPTZ NOT NULL,
+    expires_at  TIMESTAMPTZ NOT NULL,
+    consumed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_user_password_resets_expiry ON user_password_resets(expires_at);
 DO $$
 DECLARE tenant_row RECORD;
 BEGIN

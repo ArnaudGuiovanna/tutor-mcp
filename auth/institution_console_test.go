@@ -126,7 +126,6 @@ var (
 	tokenFieldPattern = regexp.MustCompile(`name="token" value="([^"]+)"`)
 	secretPattern     = regexp.MustCompile(`<span class="mono">([A-Z2-7]{32})</span>`)
 	credentialPattern = regexp.MustCompile(`name="credential_id" value="([^"]+)"`)
-	inviteLinkPattern = regexp.MustCompile(`https://test\.example/invite\?token=[A-Za-z0-9_-]+`)
 	recoveryPattern   = regexp.MustCompile(`<li>([a-z2-7]{5}-[a-z2-7]{5})</li>`)
 )
 
@@ -222,7 +221,10 @@ func TestInstitutionSignupConsoleInvitationsAndAuthorize(t *testing.T) {
 		"csrf_token": {field(t, csrfPattern, page)}, "emails": {"manager@acme.test"},
 		"roles": {"pedagogy_manager", "learner"},
 	})
-	managerLink := field(t, inviteLinkPattern, page)
+	if strings.Contains(page, "/invite?token=") || len(sender.invitationLinks) != 1 {
+		t.Fatalf("invitation link exposed to the inviter or not emailed: %v", sender.invitationTo)
+	}
+	managerLink := sender.invitationLinks[0]
 	_, page = owner.post("/console/members/invite", url.Values{
 		"csrf_token": {field(t, csrfPattern, page)}, "emails": {"alice@acme.test, not-an-email"},
 		"roles": {"learner"},
@@ -230,10 +232,12 @@ func TestInstitutionSignupConsoleInvitationsAndAuthorize(t *testing.T) {
 	if !strings.Contains(page, "invalid email address") {
 		t.Fatalf("invalid invitation list accepted: %.400s", page)
 	}
-	_, page = owner.post("/console/members/invite", url.Values{
+	if resp, _ := owner.post("/console/members/invite", url.Values{
 		"csrf_token": {field(t, csrfPattern, page)}, "emails": {"alice@acme.test"}, "roles": {"learner"},
-	})
-	aliceLink := field(t, inviteLinkPattern, page)
+	}); resp.StatusCode != http.StatusOK {
+		t.Fatalf("invite learner = %d", resp.StatusCode)
+	}
+	aliceLink := sender.invitationLinks[1]
 	if len(sender.invitationLinks) != 2 {
 		t.Fatalf("invitation emails = %v", sender.invitationTo)
 	}
@@ -335,7 +339,34 @@ func TestInstitutionSignupConsoleInvitationsAndAuthorize(t *testing.T) {
 	}
 	_ = ownerSecret
 
+	// Five wrong codes spend the manager's second-factor budget: even a correct
+	// code is then refused at /authorize, whatever the password resets.
+	for i := 0; i < 5; i++ {
+		authorize(manager, "manager@acme.test", "manager-password-2026", "000000")
+	}
+	resp, _ = authorize(manager, "manager@acme.test", "manager-password-2026", testTOTP(t, managerSecret, time.Now().Add(30*time.Second)))
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("second factor after exhausted budget = %d", resp.StatusCode)
+	}
+
+	// The owner has no learner profile; password recovery still works.
+	resetBrowser := newTestBrowser(t, server)
+	recoverAndReset(t, s, sender, "owner@acme.test", "owner-password-2027")
+	_, page = resetBrowser.get("/console/login")
+	resp, _ = resetBrowser.post("/console/login", url.Values{"csrf_token": {field(t, csrfPattern, page)},
+		"email": {"owner@acme.test"}, "password": {"owner-password-2027"}})
+	if resp.Request.URL.Path != "/console/mfa" {
+		t.Fatalf("login with the reset password landed on %s", resp.Request.URL.Path)
+	}
+
 	// Suspending the manager ends the manager's console session.
+	_, page = owner.get("/console/login")
+	_, page = owner.post("/console/login", url.Values{"csrf_token": {field(t, csrfPattern, page)},
+		"email": {"owner@acme.test"}, "password": {"owner-password-2027"}})
+	resp, page = owner.post("/console/mfa", url.Values{"csrf_token": {field(t, csrfPattern, page)}, "code": {codes[1]}})
+	if resp.Request.URL.Path != "/console" {
+		t.Fatalf("owner sign-in after reset landed on %s", resp.Request.URL.Path)
+	}
 	membershipID := regexp.MustCompile(`manager@acme\.test</td>\s*<td><form[^>]*>\s*<input[^>]*>\s*<input type="hidden" name="membership_id" value="([^"]+)"`).FindStringSubmatch(page)
 	if membershipID == nil {
 		t.Fatalf("manager row not found: %.2000s", page)
@@ -367,5 +398,33 @@ func TestInvitationLinkRejectsForgedToken(t *testing.T) {
 	resp, body := browser.get("/invite?token=forged")
 	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(body, "invalid or expired") {
 		t.Fatalf("forged invitation = %d %.200s", resp.StatusCode, body)
+	}
+}
+
+func recoverAndReset(t *testing.T, s *OAuthServer, sender *testEmailSender, email, password string) {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /recover", s.HandleRecoverGet)
+	mux.HandleFunc("POST /recover", s.HandleRecoverPost)
+	mux.HandleFunc("GET /reset-password", s.HandleResetPasswordGet)
+	mux.HandleFunc("POST /reset-password", s.HandleResetPasswordPost)
+	server := httptest.NewTLSServer(mux)
+	defer server.Close()
+	recovery := newTestBrowser(t, server)
+	_, page := recovery.get("/recover")
+	before := len(sender.resetLinks)
+	resp, _ := recovery.post("/recover", url.Values{"csrf_token": {field(t, csrfPattern, page)}, "email": {email}})
+	if resp.StatusCode != http.StatusAccepted || len(sender.resetLinks) != before+1 {
+		t.Fatalf("recover %s = %d, links=%d", email, resp.StatusCode, len(sender.resetLinks))
+	}
+	link := sender.resetLinks[before]
+	_, page = recovery.get(link)
+	resp, page = recovery.post("/reset-password", url.Values{"csrf_token": {field(t, csrfPattern, page)},
+		"token": {field(t, tokenFieldPattern, page)}, "password": {password}, "password_confirm": {password}})
+	if resp.StatusCode != http.StatusOK || !strings.Contains(page, "Password updated") {
+		t.Fatalf("reset password = %d %.300s", resp.StatusCode, page)
+	}
+	if resp, _ := recovery.get(link); resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("reset link reused = %d", resp.StatusCode)
 	}
 }
