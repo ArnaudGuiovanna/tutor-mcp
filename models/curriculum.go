@@ -56,15 +56,16 @@ type CurriculumCriterion struct {
 // evolve in later snapshots. Key is the legacy engine-facing graph token; this
 // indirection lets a rename preserve concept_state and historical evidence.
 type CurriculumConcept struct {
-	ID          string                  `json:"id"`
-	Key         string                  `json:"key"`
-	Label       string                  `json:"label"`
-	Description string                  `json:"description,omitempty"`
-	Level       CurriculumLevel         `json:"level"`
-	Outcomes    []CurriculumOutcome     `json:"outcomes"`
-	Criteria    []CurriculumCriterion   `json:"criteria"`
-	Status      CurriculumConceptStatus `json:"status"`
-	ReplacedBy  []string                `json:"replaced_by,omitempty"`
+	FormationConceptID string                  `json:"formation_concept_id,omitempty"`
+	ID                 string                  `json:"id"`
+	Key                string                  `json:"key"`
+	Label              string                  `json:"label"`
+	Description        string                  `json:"description,omitempty"`
+	Level              CurriculumLevel         `json:"level"`
+	Outcomes           []CurriculumOutcome     `json:"outcomes"`
+	Criteria           []CurriculumCriterion   `json:"criteria"`
+	Status             CurriculumConceptStatus `json:"status"`
+	ReplacedBy         []string                `json:"replaced_by,omitempty"`
 }
 
 // CurriculumProvenance records where a curriculum revision came from and why

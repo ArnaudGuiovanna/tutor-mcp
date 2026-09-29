@@ -287,6 +287,9 @@ func (s *OAuthServer) HandleAuthServerMetadata(w http.ResponseWriter, r *http.Re
 			models.OAuthScopeLearnerWrite,
 		}
 	}
+	if s.InstitutionAccountsEnabled() {
+		scopesSupported = append(scopesSupported, models.OAuthScopeFormationRead, models.OAuthScopeFormationWrite)
+	}
 	meta := map[string]interface{}{
 		"issuer":                                s.baseURL,
 		"authorization_endpoint":                s.baseURL + "/authorize",
@@ -703,13 +706,16 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 				renderAuthPage(w, data, "Choose an organization after signing in.", "login")
 				return
 			}
-			trusted, trustErr := s.isTrustedLoginDevice(ctx, r, memberships[0].LearnerID)
+			trusted, trustErr := false, error(nil)
+			if memberships[0].LearnerID != "" {
+				trusted, trustErr = s.isTrustedLoginDevice(ctx, r, memberships[0].LearnerID)
+			}
 			if trustErr != nil {
 				s.logger.Error("trusted login device lookup failed", "error_type", fmt.Sprintf("%T", trustErr))
 				renderAuthPage(w, data, "Internal error. Please try again.", "login")
 				return
 			}
-			if !trusted {
+			if !trusted && !(s.accounts != nil && memberships[0].MFARequired && memberships[0].LearnerID == "") {
 				adaptiveScope := models.TenantScope{
 					TenantID: memberships[0].TenantID, UserID: memberships[0].UserID,
 					MembershipID: memberships[0].ID, LearnerID: memberships[0].LearnerID,
@@ -755,7 +761,7 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 				break
 			}
 		}
-		if selected.ID == "" || selected.LearnerID == "" {
+		if selected.ID == "" || (selected.LearnerID == "" && (s.accounts == nil || !models.RolesAllowConsole(selected.Roles))) {
 			renderAuthPage(w, data, "The selected organization is not available.", "login")
 			return
 		}
@@ -777,7 +783,7 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 		// registration. The approval is scoped to redirect_uri so a phishing
 		// client cannot reuse a previously-granted consent at a different URL.
 		approved := false
-		if !isCIMDClientID(clientID) {
+		if selected.LearnerID != "" && !isCIMDClientID(clientID) {
 			err = s.store.WithTenantTx(ctx, tenantScope, func(txCtx context.Context, scoped storeport.Store) error {
 				var approvalErr error
 				approved, approvalErr = scoped.IsClientApprovedForScope(txCtx, selected.LearnerID, clientID, redirectURI, scope)
@@ -793,7 +799,7 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 			renderAuthPage(w, data, "Please confirm that you recognize and approve this OAuth client before continuing.", "login")
 			return
 		}
-		if !approved && !isCIMDClientID(clientID) {
+		if !approved && selected.LearnerID != "" && !isCIMDClientID(clientID) {
 			if err := s.store.WithTenantTx(ctx, tenantScope, func(txCtx context.Context, scoped storeport.Store) error {
 				return scoped.ApproveClientForScope(txCtx, selected.LearnerID, clientID, redirectURI, scope)
 			}); err != nil {
@@ -806,6 +812,11 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 			Roles: append([]string(nil), selected.Roles...), Scopes: strings.Fields(scope),
 			TokenVersion: selected.Version,
 		}
+		if hasFormationScope(scope) && (s.accounts == nil || !selectedPrincipal.Authorize(models.PermissionFormationWrite, models.AuthorizationResource{TenantID: selected.TenantID})) {
+			renderAuthPageStatus(w, http.StatusForbidden, data, "Your membership cannot grant formation authoring access.", "login")
+			return
+		}
+
 		if err := selectedPrincipal.Validate(); err != nil {
 			renderAuthPage(w, data, "The selected organization is not available.", "login")
 			return
@@ -1151,7 +1162,7 @@ func (s *OAuthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Req
 			return
 		}
 		principal, err = s.grantPrincipal(ctx, currentRT.TenantID, currentRT.UserID, currentRT.MembershipID, currentRT.LearnerID, currentRT.Scope)
-		if err != nil {
+		if err != nil || principal.TokenVersion != currentRT.MembershipVersion {
 			s.logger.Debug("refresh grant: tenant membership inactive", "err", err)
 			writeTokenError(w, "invalid_grant", http.StatusBadRequest)
 			return

@@ -13,7 +13,8 @@ import (
 func TestCatalogAdminMutationsAreIdempotentAndConflictSafe(t *testing.T) {
 	s := setupTestDB(t)
 	ctx := context.Background()
-	owner := ownerPrincipal(t, s)
+	owner := ownerLearnerPrincipal(t, s)
+
 	formation, version, replayed, err := s.CreateFormationDraftIdempotent(ctx, owner,
 		"request-create-1", "Idempotent formation", "description")
 	if err != nil || replayed {
@@ -68,7 +69,8 @@ func TestCatalogAdminMutationsAreIdempotentAndConflictSafe(t *testing.T) {
 func TestCatalogAdminPaginationEnrollmentAndReport(t *testing.T) {
 	s := setupTestDB(t)
 	ctx := context.Background()
-	owner := ownerPrincipal(t, s)
+	owner := ownerLearnerPrincipal(t, s)
+
 	for i, name := range []string{"One", "Two", "Three"} {
 		if _, _, _, err := s.CreateFormationDraftIdempotent(ctx, owner,
 			"page-formation-"+name, name, ""); err != nil {

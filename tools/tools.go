@@ -24,6 +24,7 @@ import (
 
 // Deps holds shared dependencies for all MCP tool handlers.
 type Deps struct {
+	Institution         bool
 	LocalStdio          bool
 	Store               storeport.Store
 	Logger              *slog.Logger
@@ -36,6 +37,7 @@ var toolRegistrationLocalModes sync.Map
 var toolRegistrationOAuthModes sync.Map // map[*mcp.Server]bool; populated only during RegisterTools
 
 var readOnlyTools = map[string]bool{
+	"get_formation_version":          true,
 	"get_pending_alerts":             true,
 	"check_mastery":                  true,
 	"get_learner_context":            true,
@@ -66,6 +68,9 @@ var readWriteTools = map[string]bool{
 }
 
 var writeTools = map[string]bool{
+	"draft_formation":                 true,
+	"add_formation_concepts":          true,
+	"publish_formation":               true,
 	"add_concepts":                    true,
 	"archive_domain":                  true,
 	"calibration_check":               true,
@@ -99,6 +104,7 @@ var writeTools = map[string]bool{
 // destructive conservatively so hosts can put an approval boundary around
 // overwrites, lifecycle transitions, and deletions.
 var additiveWriteTools = map[string]bool{
+	"draft_formation":            true,
 	"start_learning_session":     true,
 	"get_next_activity":          true,
 	"get_curriculum_snapshot":    true,
@@ -128,6 +134,12 @@ var openWorldTools = map[string]bool{
 func boolHint(v bool) *bool { return &v }
 
 func requiredOAuthScopesForTool(name string) ([]string, bool) {
+	if formationTool(name) {
+		if name == "get_formation_version" {
+			return []string{models.OAuthScopeFormationRead}, true
+		}
+		return []string{models.OAuthScopeFormationWrite}, true
+	}
 	if readWriteTools[name] {
 		return []string{models.OAuthScopeLearnerRead, models.OAuthScopeLearnerWrite}, true
 	}
@@ -223,7 +235,7 @@ func addTool[In, Out any](server *mcp.Server, tool *mcp.Tool, handler mcp.ToolHa
 	granularScopes, _ := toolRegistrationOAuthModes.Load(server)
 	granular, _ := granularScopes.(bool)
 	advertisedScopes := requiredScopes
-	if !granular {
+	if !granular && !formationTool(tool.Name) {
 		advertisedScopes = []string{models.OAuthScopeLearner}
 	}
 	destructive := !readOnly && !additiveWriteTools[tool.Name]
@@ -261,7 +273,7 @@ func addTool[In, Out any](server *mcp.Server, tool *mcp.Tool, handler mcp.ToolHa
 		// but fail closed when a principal exists without the capability required
 		// by this exact tool. The bounded legacy learner grant is accepted by
 		// OAuthScopeAllows and cannot silently cover future scope families.
-		if auth.GetLearnerID(ctx) != "" && !hasRequiredOAuthScopes(ctx, requiredScopes) {
+		if (principal.UserID != "" || auth.GetLearnerID(ctx) != "") && !hasRequiredOAuthScopes(ctx, requiredScopes) {
 			outcome = "denied"
 			result := insufficientOAuthScopeResult(ctx, "", requiredScopes, granular)
 			return result, zero, nil
@@ -283,7 +295,7 @@ func addTool[In, Out any](server *mcp.Server, tool *mcp.Tool, handler mcp.ToolHa
 func toolOAuthScopeMiddleware(baseURL string, granular bool) mcp.Middleware {
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
-			if method != "tools/call" || auth.GetLearnerID(ctx) == "" {
+			if method != "tools/call" {
 				return next(ctx, method, req)
 			}
 			call, ok := req.(*mcp.CallToolRequest)
@@ -404,6 +416,9 @@ func RegisterTools(server *mcp.Server, deps *Deps) {
 	toolRegistrationOAuthModes.Store(server, granularScopes)
 	defer toolRegistrationOAuthModes.Delete(server)
 	addIdempotencyMiddleware(server, deps)
+	if deps != nil && deps.Institution {
+		registerFormationTools(server, deps)
+	}
 	registerStartLearningSession(server, deps)
 	registerGetPendingAlerts(server, deps)
 	registerGetNextActivity(server, deps)
@@ -477,10 +492,12 @@ func toolTenantTransactionMiddleware(deps *Deps) mcp.Middleware {
 				result, _ := errorResult("authenticated tenant principal is required")
 				return result, nil
 			}
-			if !principal.Authorize(models.PermissionLearningSelf, models.AuthorizationResource{
-				TenantID: principal.TenantID, OwnerUserID: principal.UserID,
-			}) {
-				result, _ := errorResult("tenant principal is not authorized for learner tools")
+			permission := models.PermissionLearningSelf
+			if formationTool(toolNameFromRequest(req)) {
+				permission = models.PermissionFormationWrite
+			}
+			if !principal.Authorize(permission, models.AuthorizationResource{TenantID: principal.TenantID, OwnerUserID: principal.UserID}) {
+				result, _ := errorResult("tenant principal is not authorized for this tool")
 				return result, nil
 			}
 			var result mcp.Result

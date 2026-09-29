@@ -309,6 +309,9 @@ func RateLimitMiddleware(limiter *RateLimiter, next http.Handler) http.Handler {
 func LearnerRateLimitMiddleware(limiter *RateLimiter, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		learnerID := GetLearnerID(r.Context())
+		if principal, ok := GetPrincipal(r.Context()); ok {
+			learnerID = principal.SessionBindingID()
+		}
 		if learnerID == "" {
 			slog.Warn("learner rate limiter missing learner_id in context")
 			http.Error(w, "unauthorized", http.StatusUnauthorized)

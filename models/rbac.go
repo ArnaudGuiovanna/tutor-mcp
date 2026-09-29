@@ -11,6 +11,7 @@ const (
 	PermissionTenantManage     Permission = "tenant:manage"
 	PermissionMembershipManage Permission = "membership:manage"
 	PermissionFormationWrite   Permission = "formation:write"
+	PermissionFormationDelete  Permission = "formation:delete"
 	PermissionCohortManage     Permission = "cohort:manage"
 	PermissionProgressRead     Permission = "progress:read"
 	// Reading raw assessment material is distinct from aggregate progression.
@@ -29,10 +30,13 @@ const (
 // route and persistence layer. SuppliedTenantID must never originate from a
 // free-form client header.
 type AuthorizationResource struct {
-	TenantID          string
-	OwnerUserID       string
-	CohortID          string
-	AssignedCohortIDs []string
+	FormationID          string
+	OwnerMembershipID    string
+	AssignedFormationIDs []string
+	TenantID             string
+	OwnerUserID          string
+	CohortID             string
+	AssignedCohortIDs    []string
 }
 
 var rolePermissions = map[string]map[Permission]bool{
@@ -40,7 +44,7 @@ var rolePermissions = map[string]map[Permission]bool{
 		PermissionCurriculumReview:     true,
 		PermissionAssessmentAdjudicate: true,
 		PermissionTenantManage:         true, PermissionMembershipManage: true,
-		PermissionFormationWrite: true, PermissionCohortManage: true,
+		PermissionFormationWrite: true, PermissionFormationDelete: true, PermissionCohortManage: true,
 		PermissionProgressRead: true, PermissionBillingManage: true,
 		PermissionAuditRead: true, PermissionIntegrationManage: true,
 		PermissionUsageRead:        true,
@@ -50,7 +54,7 @@ var rolePermissions = map[string]map[Permission]bool{
 		PermissionCurriculumReview:     true,
 		PermissionAssessmentAdjudicate: true,
 		PermissionTenantManage:         true, PermissionMembershipManage: true,
-		PermissionFormationWrite: true, PermissionCohortManage: true,
+		PermissionFormationWrite: true, PermissionFormationDelete: true, PermissionCohortManage: true,
 		PermissionProgressRead: true, PermissionAuditRead: true,
 		PermissionIntegrationManage: true, PermissionUsageRead: true,
 		PermissionAssessmentReview: true,
@@ -58,7 +62,7 @@ var rolePermissions = map[string]map[Permission]bool{
 	RolePedagogyManager: {
 		PermissionCurriculumReview:     true,
 		PermissionAssessmentAdjudicate: true,
-		PermissionFormationWrite:       true, PermissionCohortManage: true,
+		PermissionFormationWrite:       true, PermissionFormationDelete: true, PermissionCohortManage: true,
 		PermissionProgressRead: true, PermissionUsageRead: true,
 		PermissionAssessmentReview: true,
 	},
@@ -94,6 +98,11 @@ func (p Principal) Authorize(permission Permission, resource AuthorizationResour
 			continue
 		}
 		switch {
+		case role == RolePedagogyManager && resource.FormationID != "":
+			if resource.OwnerMembershipID == p.MembershipID || slices.Contains(resource.AssignedFormationIDs, resource.FormationID) {
+				return true
+			}
+			continue
 		case permission == PermissionLearningSelf:
 			return resource.OwnerUserID != "" && resource.OwnerUserID == p.UserID
 		case role == RoleTrainer && (permission == PermissionProgressRead || permission == PermissionAssessmentReview || permission == PermissionCurriculumReview):
@@ -111,7 +120,7 @@ func (p Principal) Authorize(permission Permission, resource AuthorizationResour
 
 func KnownPermissions() []Permission {
 	return []Permission{
-		PermissionTenantManage, PermissionMembershipManage, PermissionFormationWrite,
+		PermissionTenantManage, PermissionMembershipManage, PermissionFormationWrite, PermissionFormationDelete,
 		PermissionCohortManage, PermissionProgressRead, PermissionLearningSelf,
 		PermissionBillingManage, PermissionAuditRead, PermissionIntegrationManage,
 		PermissionUsageRead,

@@ -2,12 +2,12 @@
 """Institution journeys over the real HTTP boundary (driven by smoke-institution.sh).
 
 1. The owner of an operator-provisioned institution accepts the owner
-   invitation, enrolls TOTP and invites a pedagogy manager and a learner from
-   the console. Both accept by email link; the manager enrolls TOTP.
-2. Both sign in to an MCP client through /authorize (the manager with a TOTP
-   code), exchange and refresh tenant-bound tokens. The manager publishes a
-   formation and enrolls the learner through the admin API; the learner uses
-   the MCP tutor.
+   invitation, enrolls TOTP and invites a staff-only pedagogy manager and two
+   learners from the console. They accept by email link; the manager enrolls TOTP.
+2. All sign in through /authorize (the manager with TOTP), exchange and refresh
+   tenant-bound tokens. The manager authors and publishes through MCP and enrolls
+   both learners through the console API. Their tutor domains share concept IDs.
+   Clone, migrate and archive exercise the formation lifecycle.
 3. A second institution is created through self-service signup.
 
 Standard library only.
@@ -168,10 +168,10 @@ def claims(token):
     return json.loads(base64.urlsafe_b64decode(payload + '=' * (-len(payload) % 4)))
 
 
-def sign_in(email_address, password, client_id, code=None):
+def sign_in(email_address, password, client_id, code=None, scope="learner"):
     browser = Browser()
     verifier = secrets.token_urlsafe(48)
-    params = {'response_type': 'code', 'client_id': client_id, 'redirect_uri': REDIRECT, 'scope': 'learner',
+    params = {'response_type': 'code', 'client_id': client_id, 'redirect_uri': REDIRECT, 'scope': scope,
               'resource': BASE + '/mcp', 'state': 'smoke', 'code_challenge_method': 'S256',
               'code_challenge': base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip('=')}
     status, _, page = browser.request('GET', '/authorize?' + urlencode(params))
@@ -221,7 +221,7 @@ def main():
     status, _, page = owner.get('/console')
     check(status == 200 and 'owner@acme.test (you)' in page, f'owner console {status}')
     status, _, page = owner.post('/console/members/invite', {
-        'csrf_token': csrf(page), 'emails': 'manager@acme.test', 'roles': ['pedagogy_manager', 'learner']})
+        'csrf_token': csrf(page), 'emails': 'manager@acme.test', 'roles': ['pedagogy_manager']})
     check(status == 200 and 'invitation(s) created' in page, f'invite manager {status}')
     status, _, page = owner.post('/console/members/invite', {
         'csrf_token': csrf(page), 'emails': 'alice@acme.test', 'roles': ['learner']})
@@ -235,6 +235,12 @@ def main():
     used_steps[manager_secret] = {int(time.time() // 30)}
     _, path, page = accept_invitation(alice_link, 'alice-password-2026')
     check('/mcp' in page, 'learner was not sent to her AI client')
+    status, _, page = owner.get('/console')
+    status, _, page = owner.post('/console/members/invite', {
+        'csrf_token': csrf(page), 'emails': 'bob@acme.test', 'roles': ['learner']})
+    check(status == 200, f'invite Bob {status}')
+    _, _, page = accept_invitation(mail_link('/invite', seen_mail), 'bob-password-2026')
+    check('/mcp' in page, 'Bob invitation did not create a learner')
     print('PASS: owner invitation, console TOTP enrollment and member invitations by email')
 
     # 2. AI-client sign-in with tenant-bound tokens.
@@ -244,54 +250,115 @@ def main():
     check(status == 201, f'DCR registration {status}')
     client_id = json.loads(body)['client_id']
     manager_token = sign_in('manager@acme.test', 'manager-password-2026', client_id,
-                            fresh_totp(manager_secret, used_steps[manager_secret]))
+                            fresh_totp(manager_secret, used_steps[manager_secret]), "formation:read formation:write")
     learner_token = sign_in('alice@acme.test', 'alice-password-2026', client_id)
     print('PASS: members sign in (manager with TOTP), exchange and refresh tokens bound to their tenant')
 
-    status, formation = admin(manager_token, 'POST', '/admin/catalog/formations', {'name': 'Go backend', 'description': 'Smoke formation'}, 'f1')
-    check(status == 201, f'create formation {status}')
-    version = formation['version']['ID']
-    status, _ = admin(manager_token, 'POST', f'/admin/catalog/formation-versions/{version}/modules',
-                      {'StableKey': 'm1', 'Title': 'Foundations', 'Position': 0}, 'm1')
-    check(status == 201, f'create module {status}')
-    for position, (key, label, prerequisites) in enumerate([('variables', 'Variables', []), ('functions', 'Functions', ['variables'])]):
-        status, _ = admin(manager_token, 'POST', f'/admin/catalog/formation-versions/{version}/concepts',
-                          {'ModuleStableKey': 'm1', 'StableKey': key, 'Label': label, 'Position': position,
-                           'Prerequisites': prerequisites}, 'c-' + key)
-        check(status == 201, f'create concept {key} {status}')
-    status, _ = admin(manager_token, 'POST', f'/admin/catalog/formation-versions/{version}/publish', None, 'publish')
-    check(status == 200, f'publish {status}')
-    status, cohort = admin(manager_token, 'POST', '/admin/catalog/cohorts', {'formation_version_id': version, 'name': 'Smoke cohort', 'capacity': 10}, 'cohort')
-    check(status == 201, f'create cohort {status}')
-    alice_membership = claims(learner_token).get('membership_id')
-    check(bool(alice_membership), 'learner token carries no membership id')
-    status, _ = admin(manager_token, 'POST', f"/admin/catalog/cohorts/{cohort['cohort']['ID']}/enrollments",
-                      {'membership_id': alice_membership, 'objectives': {}}, 'enroll')
-    check(status == 201, f'enroll learner {status}')
-    status, body = admin(learner_token, 'POST', '/admin/catalog/formations', {'name': 'x', 'description': 'x'}, 'forbidden')
-    check(status == 403, f'learner reached the admin API: {status}')
-    print('PASS: pedagogy manager publishes a formation and enrolls the learner')
+    check(not claims(manager_token).get('learner_id'), 'staff OAuth unexpectedly requires a learner profile')
+    bob_token = sign_in('bob@acme.test', 'bob-password-2026', client_id)
+    for token in [manager_token, learner_token]:
+        status, _ = admin(token, 'POST', '/admin/catalog/formations', {'name': 'forbidden'}, 'old-admin')
+        check(status == 403, f'MCP bearer reached administrative API: {status}')
+    status, _, _ = Browser().request('GET', '/console/admin/catalog/formations', bearer=manager_token)
+    check(status == 303, f'MCP bearer opened the console API: {status}')
+    for token, forbidden_tool, arguments in [
+        (learner_token, 'draft_formation', {'name': 'Forbidden', 'idempotency_key': 'no-authority'}),
+        (manager_token, 'get_learner_context', {})]:
+        status, _, body = Browser().request('POST', '/mcp', json.dumps({
+            'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+            'params': {'name': forbidden_tool, 'arguments': arguments}}), 'application/json', token)
+        check(status == 403, f'wrong role/scope reached {forbidden_tool}: {status} {body[:160]}')
 
-    session, number = Browser(), 0
+    def console_api(browser, method, path, payload=None, key=None):
+        headers = {'Idempotency-Key': key} if key else {}
+        if method not in ('GET', 'HEAD'):
+            status, _, body = browser.get('/console/api-csrf')
+            check(status == 200, f'console CSRF {status}')
+            headers['X-CSRF-Token'] = json.loads(body)['csrf_token']
+        status, _, body = browser.request(method, '/console' + path,
+            json.dumps(payload) if payload is not None else None, 'application/json', headers=headers)
+        return status, (json.loads(body) if body.strip().startswith(('{', '[')) else body)
 
-    def mcp(method, params):
-        nonlocal number
-        number += 1
-        status, _, body = session.request('POST', '/mcp', json.dumps({'jsonrpc': '2.0', 'id': number, 'method': method, 'params': params}),
-                                          'application/json', learner_token)
-        check(status == 200, f'MCP {method} {status}')
-        result = parse(body)
-        check('error' not in result, f'MCP {method} error {result.get("error")}')
-        return result['result']
+    def mcp_client(token):
+        browser, number = Browser(), 0
+        def call(method, params):
+            nonlocal number
+            number += 1
+            status, _, body = browser.request('POST', '/mcp', json.dumps({
+                'jsonrpc': '2.0', 'id': number, 'method': method, 'params': params}), 'application/json', token)
+            check(status == 200, f'MCP {method} {status}: {body[:300]}')
+            result = parse(body)
+            check('error' not in result, f'MCP {method}: {result.get("error")}')
+            return result['result']
+        call('initialize', {'protocolVersion': '2025-11-25', 'capabilities': {}, 'clientInfo': {'name': 'smoke', 'version': '2'}})
+        return call
 
-    mcp('initialize', {'protocolVersion': '2025-11-25', 'capabilities': {}, 'clientInfo': {'name': 'smoke', 'version': '1'}})
-    check(len(mcp('tools/list', {})['tools']) > 0, 'no MCP tools')
-    result = mcp('tools/call', {'name': 'init_domain', 'arguments': {'name': 'Smoke domain', 'concepts': ['fractions'],
-                                                                     'prerequisites': {}, 'idempotency_key': 'smoke-domain'}})
-    check(not result.get('isError'), 'init_domain failed')
-    result = mcp('tools/call', {'name': 'get_next_activity', 'arguments': {}})
-    check(not result.get('isError'), 'get_next_activity failed')
-    print('PASS: institution learner uses the MCP tutor')
+    def tool(client, name, arguments):
+        result = client('tools/call', {'name': name, 'arguments': arguments})
+        check(not result.get('isError'), f'{name}: {result}')
+        return result.get('structuredContent') or json.loads(result['content'][0]['text'])
+
+    author = mcp_client(manager_token)
+    draft = tool(author, 'draft_formation', {'name': 'Go backend', 'description': 'Shared smoke formation', 'idempotency_key': 'f1'})
+    formation_id, version = draft['formation']['id'], draft['version']['id']
+    content = tool(author, 'add_formation_concepts', {'version_id': version, 'idempotency_key': 'content', 'concepts': [
+        {'stable_key': 'variables', 'label': 'Variables', 'position': 0, 'description': 'Read a variable'},
+        {'stable_key': 'functions', 'label': 'Functions', 'position': 1, 'prerequisites': ['variables'], 'description': 'Call a function'}]})
+    shared_ids = {c['stable_key']: c['id'] for c in content['concepts']}
+    review = tool(author, 'get_formation_version', {'version_id': version})
+    check(review['concepts'][0]['description'] == 'Read a variable', 'pedagogical metadata lost')
+    tool(author, 'publish_formation', {'version_id': version, 'idempotency_key': 'publish'})
+    status, cohort = console_api(manager, 'POST', '/admin/catalog/cohorts',
+        {'formation_version_id': version, 'name': 'Smoke cohort', 'capacity': 10}, 'cohort')
+    check(status == 201, f'create cohort {status}: {cohort}')
+    cohort_id = cohort['cohort']['id']
+    enrollments = []
+    for name, token in [('alice', learner_token), ('bob', bob_token)]:
+        status, enrollment = console_api(manager, 'POST', f'/admin/catalog/cohorts/{cohort_id}/enrollments',
+            {'membership_id': claims(token)['membership_id'], 'objectives': {}}, 'enroll-' + name)
+        check(status == 201, f'enroll {name} {status}: {enrollment}')
+        enrollment = enrollment['enrollment']
+        check(bool(enrollment.get('domain_id')), 'enrollment did not create a tutor domain')
+        enrollments.append(enrollment)
+        learner = mcp_client(token)
+        snapshot = tool(learner, 'get_curriculum_snapshot', {'domain_id': enrollment['domain_id']})
+        # The tutor returns an immutable curriculum snapshot.
+        curriculum = snapshot.get('curriculum') or snapshot.get('snapshot') or snapshot
+        check({c['key']: c['formation_concept_id'] for c in curriculum['concepts']} == shared_ids,
+              'learners do not share the published concept IDs')
+        denied = learner('tools/call', {'name': 'add_concepts', 'arguments': {
+            'domain_id': enrollment['domain_id'], 'concepts': ['invented'], 'prerequisites': {}, 'expected_version': 1}})
+        check(denied.get('isError'), 'learner rewrote the formation curriculum')
+        activity = tool(learner, 'get_next_activity', {'domain_id': enrollment['domain_id']})
+        check(activity['domain_id'] == enrollment['domain_id'], 'tutor selected an unrelated domain')
+        prepared = tool(learner, 'prepare_assessment_attempt', {
+            'domain_id': enrollment['domain_id'], 'concept': 'variables', 'activity_type': 'PRACTICE',
+            'observable': 'Read x', 'task_text': 'Given x = 3, what is x?',
+            'rubric_json': json.dumps({'criteria': [{'id': 'correct', 'description': 'Answer is 3', 'max_score': 1}], 'passing_score': 1})})
+        tool(learner, 'submit_assessment_attempt', {'attempt_id': prepared['attempt_id'], 'learner_response': '3'})
+        tool(learner, 'record_interaction', {'domain_id': enrollment['domain_id'], 'concept': 'variables',
+            'activity_type': 'PRACTICE', 'success': True, 'response_time_seconds': 5, 'confidence': 0.9,
+            'attempt_id': prepared['attempt_id'], 'evaluator_id': 'smoke-host', 'evaluation_method': 'host_llm',
+            'rubric_score_json': json.dumps({'criteria_scores': [{'id': 'correct', 'score': 1}], 'total': 1, 'max_total': 1})})
+    check(enrollments[0]['domain_id'] != enrollments[1]['domain_id'], 'learners share a private domain')
+    status, report = console_api(manager, 'GET', f'/admin/catalog/cohorts/{cohort_id}/report')
+    check(status == 200 and report['enrollment_count'] == 2 and report['active_count'] == 2,
+          f'cohort report counts concepts instead of learners: {report}')
+    check(report['average_mastery'] > 0.1001, f'answers did not advance cohort mastery beyond its initial value: {report}')
+    print('PASS: staff-only MCP authoring, console-only administration, shared concepts and two learners tutoring')
+
+    clone = tool(author, 'draft_formation', {'source_version_id': version, 'idempotency_key': 'clone'})
+    next_version = clone['version']['id']
+    tool(author, 'publish_formation', {'version_id': next_version, 'idempotency_key': 'publish-next'})
+    status, next_cohort = console_api(manager, 'POST', '/admin/catalog/cohorts',
+        {'formation_version_id': next_version, 'name': 'Next version', 'capacity': 10}, 'next-cohort')
+    check(status == 201, f'next cohort {status}')
+    status, migration = console_api(manager, 'POST', f"/admin/catalog/enrollments/{enrollments[0]['id']}/migrate",
+        {'cohort_id': next_cohort['cohort']['id']})
+    check(status == 200 and migration['enrollment']['formation_version_id'] == next_version, f'migration {status}: {migration}')
+    status, archived = console_api(manager, 'DELETE', f'/admin/catalog/formations/{formation_id}')
+    check(status == 200 and archived['status'] == 'archived', f'archive {status}: {archived}')
+    print('PASS: cloned version, explicit enrollment migration and non-destructive formation archive')
 
     # 3. Self-service signup of a second institution.
     founder = Browser()

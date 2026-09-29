@@ -745,7 +745,7 @@ func (s *Store) insertRefreshToken(ctx context.Context, rt *models.RefreshToken)
 		     client_id, resource, scope, family_id, expires_at, created_at, used_at, revoked_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		refreshTokenHash(rt.Token), rt.TenantID, rt.UserID, rt.MembershipID, rt.MembershipVersion,
-		rt.LearnerID, nullString(rt.ClientID), rt.Resource, rt.Scope, rt.FamilyID,
+		nullString(rt.LearnerID), nullString(rt.ClientID), rt.Resource, rt.Scope, rt.FamilyID,
 		rt.ExpiresAt, rt.CreatedAt, rt.UsedAt, rt.RevokedAt,
 	)
 	if err != nil {
@@ -832,10 +832,10 @@ func (s *Store) GetRefreshToken(ctx context.Context, token string) (*models.Refr
 	var clientID sql.NullString
 	var usedAt, revokedAt sql.NullTime
 	err := s.queryRow(ctx,
-		`SELECT user_id, tenant_id, membership_id, membership_version, learner_id,
+		`SELECT user_id, tenant_id, membership_id, membership_version, COALESCE(learner_id, ''),
 		        client_id, resource, scope, family_id, expires_at, created_at, used_at, revoked_at
 		 FROM refresh_tokens
-		 WHERE token = ? AND tenant_id = ? AND user_id = ? AND membership_id = ? AND learner_id = ?
+		 WHERE token = ? AND tenant_id = ? AND user_id = ? AND membership_id = ? AND COALESCE(learner_id, '') = ?
 		   AND expires_at > ? AND used_at IS NULL AND revoked_at IS NULL`,
 		refreshTokenHash(token), scope.TenantID, scope.UserID, scope.MembershipID, scope.LearnerID, time.Now().UTC(),
 	).Scan(&rt.UserID, &rt.TenantID, &rt.MembershipID, &rt.MembershipVersion, &rt.LearnerID,
@@ -948,7 +948,15 @@ func (s *Store) RotateRefreshTokenWithScope(ctx context.Context, token, clientID
 			   AND revoked_at IS NULL
 			   AND client_id = ?
 			   AND resource = ?
-			 RETURNING user_id, tenant_id, membership_id, membership_version, learner_id,
+			   AND EXISTS (SELECT 1 FROM tenant_memberships tm
+			     JOIN users u ON u.id = tm.user_id AND u.status = 'active'
+			     JOIN tenants t ON t.id = tm.tenant_id AND t.status = 'active'
+			     WHERE tm.tenant_id = refresh_tokens.tenant_id AND tm.id = refresh_tokens.membership_id
+			       AND tm.user_id = refresh_tokens.user_id AND tm.status = 'active'
+			       AND tm.version = refresh_tokens.membership_version
+			       AND COALESCE(tm.learner_id, '') = COALESCE(refresh_tokens.learner_id, '')
+			       AND (tm.mfa_required = 0 OR tm.mfa_verified_at IS NOT NULL))
+			 RETURNING user_id, tenant_id, membership_id, membership_version, COALESCE(learner_id, ''),
 			           client_id, resource, scope, family_id`,
 			now, successor.FamilyID, refreshTokenHash(token), now, clientID, resource,
 		).Scan(&successor.UserID, &successor.TenantID, &successor.MembershipID,
@@ -1075,6 +1083,9 @@ func (s *Store) CreateDomain(ctx context.Context, learnerID, name, personalGoal 
 // CreateDomainWithValueFramings creates a domain and optionally persists a JSON-encoded
 // set of value framings (4 axes: financial, employment, intellectual, innovation).
 func (s *Store) CreateDomainWithValueFramings(ctx context.Context, learnerID, name, personalGoal string, graph models.KnowledgeSpace, valueFramingsJSON string) (*models.Domain, error) {
+	if err := s.ensureFreeDomainAllowed(ctx, learnerID); err != nil {
+		return nil, err
+	}
 	id, err := generateID()
 	if err != nil {
 		return nil, err
@@ -1122,7 +1133,7 @@ func (s *Store) CreateDomainWithValueFramings(ctx context.Context, learnerID, na
 	return domain, nil
 }
 
-const domainCols = `id, learner_id, name, personal_goal, graph_json, value_framings_json, last_value_axis, archived, high_stakes, priority_rank, graph_version, goal_relevance_json, goal_relevance_version, phase, phase_changed_at, phase_entry_entropy, created_at, deleted_at`
+const domainCols = `id, learner_id, name, personal_goal, graph_json, value_framings_json, last_value_axis, archived, high_stakes, priority_rank, graph_version, goal_relevance_json, goal_relevance_version, phase, phase_changed_at, phase_entry_entropy, created_at, deleted_at, formation_enrollment_id, formation_version_id`
 
 // scanDomainFields is the shared row decoder for both *sql.Row and *sql.Rows
 // callers — Scan has the same signature on both so we factor through a small
@@ -1146,7 +1157,7 @@ func scanDomainFields(s domainScanner) (*models.Domain, error) {
 		&valueFramings, &lastAxis, &archived, &highStakes,
 		&priorityRank, &d.GraphVersion, &goalRelevanceJSON, &d.GoalRelevanceVersion,
 		&phase, &phaseChangedAt, &phaseEntryEntropy,
-		&d.CreatedAt, &deletedAt,
+		&d.CreatedAt, &deletedAt, &d.FormationEnrollmentID, &d.FormationVersionID,
 	)
 	if err != nil {
 		return nil, err
@@ -1379,6 +1390,13 @@ func (s *Store) ActiveDomainConceptSet(ctx context.Context, learnerID string) (m
 }
 
 func (s *Store) DeleteDomain(ctx context.Context, domainID, learnerID string) error {
+	domain, err := s.GetDomainByID(ctx, domainID)
+	if err != nil {
+		return err
+	}
+	if domain.FormationEnrollmentID != "" {
+		return store.ErrFormationDomainLocked
+	}
 	return s.inTx(ctx, nil, func(txs *Store) error {
 		// Upgraded installations can still contain a legacy domain that has
 		// never been read through the curriculum API. Materialize its immutable
@@ -2337,7 +2355,7 @@ func (s *Store) CreateAuthCodeForPrincipal(ctx context.Context, code string, pri
 		     code_challenge, code_challenge_method, client_id, redirect_uri, resource, scope, expires_at, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		code, principal.TenantID, principal.UserID, principal.MembershipID, principal.TokenVersion,
-		principal.LearnerID, codeChallenge, codeChallengeMethod, clientID, redirectURI,
+		nullString(principal.LearnerID), codeChallenge, codeChallengeMethod, clientID, redirectURI,
 		resource, canonicalScope, expiresAt, createdAt,
 	)
 	if err != nil {
@@ -2368,19 +2386,22 @@ func (s *Store) GetAuthCode(ctx context.Context, code, clientID string) (*models
 	}
 	ac := &models.AuthCode{}
 	err := s.queryRow(ctx,
-		`SELECT code, user_id, tenant_id, membership_id, membership_version, learner_id,
+		`SELECT code, user_id, tenant_id, membership_id, membership_version, COALESCE(learner_id, ''),
 		        code_challenge, code_challenge_method, client_id, redirect_uri, resource, scope, expires_at
 		 FROM oauth_codes
 		 WHERE code = ? AND tenant_id = ? AND user_id = ? AND membership_id = ?
-		   AND learner_id = ? AND client_id = ? AND expires_at > ?
+		   AND COALESCE(learner_id, '') = ? AND client_id = ? AND expires_at > ?
 		   AND EXISTS (
-		       SELECT 1 FROM learners l
-		       JOIN tenant_memberships tm
-		         ON tm.tenant_id = l.tenant_id AND tm.id = l.membership_id
-		        AND tm.user_id = l.user_id AND tm.status = 'active'
-		       WHERE l.tenant_id = oauth_codes.tenant_id
-		         AND l.id = oauth_codes.learner_id
-		         AND ((l.identity_mode = 'email' AND l.email_verified_at IS NOT NULL) OR l.identity_mode = 'username')
+		       SELECT 1 FROM tenant_memberships tm
+                   JOIN users u ON u.id = tm.user_id AND u.status = 'active'
+                   LEFT JOIN learners l ON l.id = tm.learner_id AND l.tenant_id = tm.tenant_id
+                     AND l.user_id = tm.user_id AND l.membership_id = tm.id
+                   WHERE tm.tenant_id = oauth_codes.tenant_id AND tm.id = oauth_codes.membership_id
+                     AND tm.user_id = oauth_codes.user_id AND tm.status = 'active'
+                     AND tm.version = oauth_codes.membership_version
+                     AND (tm.mfa_required = 0 OR tm.mfa_verified_at IS NOT NULL)
+                     AND ((oauth_codes.learner_id IS NULL AND tm.learner_id IS NULL AND u.email_verified_at IS NOT NULL)
+                       OR (l.id = oauth_codes.learner_id AND ((l.identity_mode = 'email' AND l.email_verified_at IS NOT NULL) OR l.identity_mode = 'username')))
 		   )`,
 		code, scope.TenantID, scope.UserID, scope.MembershipID, scope.LearnerID,
 		clientID, time.Now().UTC(),
@@ -2418,17 +2439,20 @@ func (s *Store) ConsumeAuthCode(ctx context.Context, code, clientID string) (*mo
 	err := s.queryRow(ctx,
 		`DELETE FROM oauth_codes
 		 WHERE code = ? AND tenant_id = ? AND user_id = ? AND membership_id = ?
-		   AND learner_id = ? AND client_id = ? AND expires_at > ?
+		   AND COALESCE(learner_id, '') = ? AND client_id = ? AND expires_at > ?
 		   AND EXISTS (
-		       SELECT 1 FROM learners l
-		       JOIN tenant_memberships tm
-		         ON tm.tenant_id = l.tenant_id AND tm.id = l.membership_id
-		        AND tm.user_id = l.user_id AND tm.status = 'active'
-		       WHERE l.tenant_id = oauth_codes.tenant_id
-		         AND l.id = oauth_codes.learner_id
-		         AND ((l.identity_mode = 'email' AND l.email_verified_at IS NOT NULL) OR l.identity_mode = 'username')
+		       SELECT 1 FROM tenant_memberships tm
+                   JOIN users u ON u.id = tm.user_id AND u.status = 'active'
+                   LEFT JOIN learners l ON l.id = tm.learner_id AND l.tenant_id = tm.tenant_id
+                     AND l.user_id = tm.user_id AND l.membership_id = tm.id
+                   WHERE tm.tenant_id = oauth_codes.tenant_id AND tm.id = oauth_codes.membership_id
+                     AND tm.user_id = oauth_codes.user_id AND tm.status = 'active'
+                     AND tm.version = oauth_codes.membership_version
+                     AND (tm.mfa_required = 0 OR tm.mfa_verified_at IS NOT NULL)
+                     AND ((oauth_codes.learner_id IS NULL AND tm.learner_id IS NULL AND u.email_verified_at IS NOT NULL)
+                       OR (l.id = oauth_codes.learner_id AND ((l.identity_mode = 'email' AND l.email_verified_at IS NOT NULL) OR l.identity_mode = 'username')))
 		   )
-		 RETURNING code, user_id, tenant_id, membership_id, membership_version, learner_id,
+		 RETURNING code, user_id, tenant_id, membership_id, membership_version, COALESCE(learner_id, ''),
 		           code_challenge, code_challenge_method, client_id, redirect_uri, resource, scope, expires_at`,
 		code, scope.TenantID, scope.UserID, scope.MembershipID, scope.LearnerID,
 		clientID, time.Now().UTC(),

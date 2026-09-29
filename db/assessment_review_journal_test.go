@@ -128,6 +128,9 @@ func TestAssessmentReviewJournalHTTPIsSeparateFromLearning(t *testing.T) {
 		t.Fatalf("own opinions filtered after pagination: %+v %v", page, err)
 	}
 	second := reviewWriter(reviewRoleForTest(t, s, "second", models.RolePedagogyManager))
+	if err := s.AssignFormationTrainer(ctx, owner, "domain_formation_"+f.domain.ID, second.MembershipID, true); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.GetOwnAssessmentReview(ctx, second, a.ID); !errors.Is(err, storeport.ErrNotFound) {
 		t.Fatalf("other opinion disclosed: %v", err)
 	}

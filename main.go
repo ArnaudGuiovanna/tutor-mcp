@@ -304,7 +304,7 @@ func main() {
 	// Both transports share tool registration and the same transaction,
 	// idempotency, scope and deadline boundaries.
 	mcpServer := newTutorServer(&tools.Deps{
-		Store: store, Logger: logger, BaseURL: baseURL,
+		Store: store, Logger: logger, BaseURL: baseURL, Institution: options.Profile == "institution",
 		OAuthGranularScopes: cfg.OAuthGranularScopes,
 	}, cfg.MCPToolCallTimeout)
 
@@ -505,10 +505,20 @@ func main() {
 	// this response's deadline through ResponseController; requestLogger's
 	// writer exposes Unwrap so the controller can reach net/http's writer.
 	mux.Handle("/mcp", withoutWriteTimeout(mcpProtectedHandler))
-	adminHandler := auth.BearerMiddlewareWithPrincipalValidator(
-		baseURL, initialOAuthScope, store, adminapi.New(store, logger).Handler(),
-	)
-	mux.Handle("/admin/catalog/", adminHandler)
+	mountAdmin := func(prefix string, handler http.Handler) {
+		if oauthServer.InstitutionAccountsEnabled() {
+			mux.Handle("/console"+prefix, oauthServer.ConsoleAPIHandler(http.StripPrefix("/console", handler)))
+			mux.Handle(prefix, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, "administrative API requires a console session", http.StatusForbidden)
+			}))
+		} else {
+			mux.Handle(prefix, auth.BearerMiddlewareWithPrincipalValidator(baseURL, initialOAuthScope, store, handler))
+		}
+	}
+	if oauthServer.InstitutionAccountsEnabled() {
+		mux.HandleFunc("GET /console/api-csrf", oauthServer.HandleConsoleAPICSRF)
+	}
+	mountAdmin("/admin/catalog/", adminapi.New(store, logger).Handler())
 	// Raw response review and opinion recording are separate administrative capabilities;
 	// the MCP handler never receives a trusted evaluation mutation port.
 	assessmentCertifiers, err := certification.New(strings.TrimRight(baseURL, "/")+"/admin/assessment-reviews", os.Getenv("ASSESSMENT_CERTIFIERS_JSON"))
@@ -516,14 +526,10 @@ func main() {
 		logger.Error("invalid independent assessment authority configuration")
 		os.Exit(1)
 	}
-	reviewHandler := auth.RateLimitMiddleware(mcpIPLimiter,
-		auth.BearerMiddlewareWithPrincipalValidator(baseURL, initialOAuthScope, store,
-			auth.LearnerRateLimitMiddleware(mcpLearnerLimiter,
-				adminapi.NewAssessmentReview(store, logger, db.NewAssessmentAdjudicator(store, assessmentCertifiers)).Handler())))
-	mux.Handle("/admin/assessment-reviews/", reviewHandler)
-	mux.Handle("/admin/curriculum-reviews/", auth.RateLimitMiddleware(mcpIPLimiter,
-		auth.BearerMiddlewareWithPrincipalValidator(baseURL, initialOAuthScope, store,
-			auth.LearnerRateLimitMiddleware(mcpLearnerLimiter, adminapi.NewCurriculumReview(store, logger).Handler()))))
+	mountAdmin("/admin/assessment-reviews/", auth.RateLimitMiddleware(mcpIPLimiter,
+		auth.LearnerRateLimitMiddleware(mcpLearnerLimiter, adminapi.NewAssessmentReview(store, logger, db.NewAssessmentAdjudicator(store, assessmentCertifiers)).Handler())))
+	mountAdmin("/admin/curriculum-reviews/", auth.RateLimitMiddleware(mcpIPLimiter,
+		auth.LearnerRateLimitMiddleware(mcpLearnerLimiter, adminapi.NewCurriculumReview(store, logger).Handler())))
 
 	if runsWorker {
 		// Development PROCESS_ROLE=all preserves the one-process experience.

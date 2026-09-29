@@ -165,14 +165,16 @@ type KnowledgeSpace struct {
 }
 
 type Domain struct {
-	ID                string
-	LearnerID         string
-	Name              string
-	PersonalGoal      string
-	Graph             KnowledgeSpace
-	ValueFramingsJSON string
-	LastValueAxis     string
-	Archived          bool
+	FormationEnrollmentID string `json:"formation_enrollment_id,omitempty"`
+	FormationVersionID    string `json:"formation_version_id,omitempty"`
+	ID                    string
+	LearnerID             string
+	Name                  string
+	PersonalGoal          string
+	Graph                 KnowledgeSpace
+	ValueFramingsJSON     string
+	LastValueAxis         string
+	Archived              bool
 	// HighStakes activates the conservative evidence and notification policy:
 	// demonstrated claims and intrusive pushes require a trusted human-reviewed
 	// assessment. The public MCP surface can mark this flag but cannot unset it.

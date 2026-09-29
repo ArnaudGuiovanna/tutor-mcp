@@ -53,7 +53,7 @@ func catalogRequestHash(request any) (string, error) {
 func runCatalogMutation[T any](ctx context.Context, s *Store, actor models.Principal, key, operation string, permission models.Permission, request any, mutate func(context.Context, *Store) (T, error)) (T, bool, error) {
 	var zero T
 	if !actor.Authorize(permission, models.AuthorizationResource{TenantID: actor.TenantID}) ||
-		!models.OAuthScopeAllows(strings.Join(actor.Scopes, " "), models.OAuthScopeLearnerWrite) {
+		(!models.OAuthScopeAllows(strings.Join(actor.Scopes, " "), models.OAuthScopeLearnerWrite) && !models.OAuthScopeAllows(strings.Join(actor.Scopes, " "), models.OAuthScopeFormationWrite)) {
 		return zero, false, storeport.ErrInvalidPrincipal
 	}
 	key = strings.TrimSpace(key)
@@ -71,6 +71,9 @@ func runCatalogMutation[T any](ctx context.Context, s *Store, actor models.Princ
 		if err := txs.ValidatePrincipal(txCtx, actor); err != nil {
 			return zero, false, err
 		}
+		if err := txs.authorizeCatalogReplay(txCtx, actor, operation, request, permission); err != nil {
+			return zero, false, err
+		}
 		var responseJSON, currentOperation, currentHash, currentActor string
 		err := txs.queryRow(txCtx, `SELECT operation, request_hash, response_json, actor_user_id
 			FROM catalog_admin_mutations WHERE tenant_id = ? AND idempotency_key = ?`,
@@ -85,7 +88,7 @@ func runCatalogMutation[T any](ctx context.Context, s *Store, actor models.Princ
 			return zero, false, fmt.Errorf("catalog mutation: idempotency key conflict")
 		}
 		var response T
-		if err := json.Unmarshal([]byte(responseJSON), &response); err != nil {
+		if err := decodeCatalogReplay(responseJSON, &response); err != nil {
 			return zero, false, err
 		}
 		return response, true, nil
@@ -250,8 +253,11 @@ func (s *Store) ListFormations(ctx context.Context, actor models.Principal, afte
 	}
 	page := models.FormationPage{}
 	err := s.WithTenantTx(ctx, actor.TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {
-		rows, err := scoped.(*Store).query(txCtx, `SELECT id, name, description, status, created_by, created_at, updated_at
-			FROM formations WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?`, actor.TenantID, after, limit+1)
+		if err := scoped.ValidatePrincipal(txCtx, actor); err != nil {
+			return err
+		}
+		rows, err := scoped.(*Store).query(txCtx, `SELECT id, name, description, status, created_by, created_at, updated_at, owner_membership_id, enrollment_policy
+            FROM formations WHERE tenant_id = ? AND id > ? AND `+formationVisibilitySQL(actor, "formations")+` ORDER BY id LIMIT ?`, actor.TenantID, after, formationGlobalAccess(actor), actor.MembershipID, actor.MembershipID, limit+1)
 		if err != nil {
 			return err
 		}
@@ -260,7 +266,7 @@ func (s *Store) ListFormations(ctx context.Context, actor models.Principal, afte
 			var item models.Formation
 			item.TenantID = actor.TenantID
 			if err := rows.Scan(&item.ID, &item.Name, &item.Description, &item.Status,
-				&item.CreatedBy, &item.CreatedAt, &item.UpdatedAt); err != nil {
+				&item.CreatedBy, &item.CreatedAt, &item.UpdatedAt, &item.OwnerMembershipID, &item.EnrollmentPolicy); err != nil {
 				return err
 			}
 			page.Items = append(page.Items, item)
@@ -280,9 +286,15 @@ func (s *Store) ListCohorts(ctx context.Context, actor models.Principal, after s
 	}
 	page := models.CohortPage{}
 	err := s.WithTenantTx(ctx, actor.TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {
+		if err := scoped.ValidatePrincipal(txCtx, actor); err != nil {
+			return err
+		}
 		rows, err := scoped.(*Store).query(txCtx, `SELECT id, formation_version_id, name, starts_at, ends_at,
 			capacity, reserved_seats, status, version, created_by, created_at, updated_at
-			FROM cohorts WHERE tenant_id = ? AND id > ? ORDER BY id LIMIT ?`, actor.TenantID, after, limit+1)
+			FROM cohorts WHERE tenant_id = ? AND id > ? AND EXISTS
+            (SELECT 1 FROM formation_versions v JOIN formations f ON f.tenant_id = v.tenant_id AND f.id = v.formation_id
+             WHERE v.tenant_id = cohorts.tenant_id AND v.id = cohorts.formation_version_id AND `+formationVisibilitySQL(actor, "f")+`)
+             ORDER BY id LIMIT ?`, actor.TenantID, after, formationGlobalAccess(actor), actor.MembershipID, actor.MembershipID, limit+1)
 		if err != nil {
 			return err
 		}
@@ -314,30 +326,18 @@ func (s *Store) ListCohorts(ctx context.Context, actor models.Principal, after s
 }
 
 func (s *Store) ListCohortEnrollments(ctx context.Context, actor models.Principal, cohortID, after string, limit int) (models.EnrollmentPage, error) {
-	resource := models.AuthorizationResource{TenantID: actor.TenantID, CohortID: cohortID}
-	if slicesContains(actor.Roles, models.RoleTrainer) {
-		resource.AssignedCohortIDs = []string{}
-	}
 	if validatePage(limit) != nil {
 		return models.EnrollmentPage{}, fmt.Errorf("list enrollments: invalid page")
 	}
 	page := models.EnrollmentPage{}
 	err := s.WithTenantTx(ctx, actor.TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {
 		txs := scoped.(*Store)
-		if slicesContains(actor.Roles, models.RoleTrainer) {
-			var assigned int
-			if err := txs.queryRow(txCtx, `SELECT COUNT(*) FROM cohort_trainers
-				WHERE tenant_id = ? AND cohort_id = ? AND membership_id = ?`, actor.TenantID,
-				cohortID, actor.MembershipID).Scan(&assigned); err != nil || assigned != 1 {
-				return storeport.ErrInvalidPrincipal
-			}
-			resource.AssignedCohortIDs = []string{cohortID}
-		}
-		if !actor.Authorize(models.PermissionProgressRead, resource) {
-			return storeport.ErrInvalidPrincipal
+		if _, err := txs.formationAccess(txCtx, actor, "cohort", cohortID, models.PermissionProgressRead, false); err != nil {
+			return err
 		}
 		rows, err := txs.query(txCtx, `SELECT id, formation_version_id, user_id, membership_id,
-			learner_id, status, objectives_json, seat_reserved, created_at, updated_at, completed_at
+			learner_id, status, objectives_json, seat_reserved, created_at, updated_at, completed_at,
+			COALESCE((SELECT d.id FROM domains d WHERE d.tenant_id = enrollments.tenant_id AND d.formation_enrollment_id = enrollments.id), '')
 			FROM enrollments WHERE tenant_id = ? AND cohort_id = ? AND id > ? ORDER BY id LIMIT ?`,
 			actor.TenantID, cohortID, after, limit+1)
 		if err != nil {
@@ -351,7 +351,7 @@ func (s *Store) ListCohortEnrollments(ctx context.Context, actor models.Principa
 			item.TenantID, item.CohortID = actor.TenantID, cohortID
 			if err := rows.Scan(&item.ID, &item.FormationVersionID, &item.UserID,
 				&item.MembershipID, &learnerID, &item.Status, &item.ObjectivesJSON,
-				&item.SeatReserved, &item.CreatedAt, &item.UpdatedAt, &completedAt); err != nil {
+				&item.SeatReserved, &item.CreatedAt, &item.UpdatedAt, &completedAt, &item.DomainID); err != nil {
 				return err
 			}
 			item.LearnerID = learnerID.String
@@ -379,16 +379,15 @@ func slicesContains(values []string, wanted string) bool {
 }
 
 func (s *Store) GetCohortReport(ctx context.Context, actor models.Principal, cohortID string) (models.CohortReport, error) {
-	page, err := s.ListCohortEnrollments(ctx, actor, cohortID, "", 1)
-	if err != nil {
-		return models.CohortReport{}, err
-	}
-	_ = page
 	report := models.CohortReport{TenantID: actor.TenantID, CohortID: cohortID}
-	err = s.WithTenantTx(ctx, actor.TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {
-		return scoped.(*Store).queryRow(txCtx, `SELECT COUNT(*),
-			COALESCE(SUM(CASE WHEN enrollment.status = 'active' THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN enrollment.status = 'completed' THEN 1 ELSE 0 END), 0),
+	err := s.WithTenantTx(ctx, actor.TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {
+		txs := scoped.(*Store)
+		if _, err := txs.formationAccess(txCtx, actor, "cohort", cohortID, models.PermissionProgressRead, false); err != nil {
+			return err
+		}
+		return txs.queryRow(txCtx, `SELECT COUNT(DISTINCT enrollment.id),
+            COUNT(DISTINCT CASE WHEN enrollment.status = 'active' THEN enrollment.id END),
+            COUNT(DISTINCT CASE WHEN enrollment.status = 'completed' THEN enrollment.id END),
 			COALESCE(AVG(state.p_mastery), 0)
 			FROM enrollments enrollment LEFT JOIN learner_concept_states state
 			 ON state.tenant_id = enrollment.tenant_id AND state.enrollment_id = enrollment.id

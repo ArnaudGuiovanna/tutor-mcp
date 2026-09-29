@@ -36,7 +36,7 @@ GRANT SELECT ON tenants, plans, schema_migrations, installation TO tutor_worker;
 -- encrypted webhook credential required at the final dispatch boundary; the
 -- worker cannot read global users, password/MFA/service/support credentials.
 GRANT SELECT ON
-    learners, availability, domains, concept_states, interactions,
+    learners, availability, domains, concept_states, interactions, enrollments, legacy_concept_mappings,
     affect_states, calibration_records, transfer_records, assessment_attempts,
     pedagogical_decisions, assessment_reviews, assessment_adjudications, learning_events, curriculum_review_opinions,
     narrative_objects, audit_events, retention_legal_holds,

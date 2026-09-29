@@ -27,7 +27,7 @@ const mcpWWWAuthenticateMetaKey = "mcp/www_authenticate"
 // reservation or tool execution.
 func insufficientOAuthScopeResult(ctx context.Context, baseURL string, required []string, granular bool) *mcp.CallToolResult {
 	requested := required
-	if !granular {
+	if !granular && !formationScopes(required) {
 		requested = []string{models.OAuthScopeLearner}
 	}
 	result, _ := errorResult("insufficient OAuth scope: " + strings.Join(requested, " "))
@@ -39,7 +39,7 @@ func insufficientOAuthScopeResult(ctx context.Context, baseURL string, required 
 
 func insufficientOAuthScopeChallenge(ctx context.Context, baseURL string, required []string, granular bool) string {
 	challengeScopes := []string{models.OAuthScopeLearner}
-	if granular {
+	if granular || formationScopes(required) {
 		challengeScopes = oauthScopeUnion(auth.GetOAuthScope(ctx), required)
 	}
 	parts := []string{
@@ -57,31 +57,31 @@ func insufficientOAuthScopeChallenge(ctx context.Context, baseURL string, requir
 // granular capabilities are retained so a client asking for the challenge's
 // complete scope set cannot accidentally exchange one permission for another.
 func oauthScopeUnion(granted string, required []string) []string {
-	read, write := false, false
-	switch granted {
-	case models.OAuthScopeLearner, models.OAuthScopeLearnerReadWrite:
-		read, write = true, true
-	case models.OAuthScopeLearnerRead:
-		read = true
-	case models.OAuthScopeLearnerWrite:
-		write = true
-	}
-	for _, scope := range required {
-		switch scope {
-		case models.OAuthScopeLearnerRead:
-			read = true
-		case models.OAuthScopeLearnerWrite:
-			write = true
+	seen := map[string]bool{}
+	for _, scope := range []string{models.OAuthScopeLearnerRead, models.OAuthScopeLearnerWrite, models.OAuthScopeFormationRead, models.OAuthScopeFormationWrite} {
+		if models.OAuthScopeAllows(granted, scope) {
+			seen[scope] = true
 		}
 	}
-	union := make([]string, 0, 2)
-	if read {
-		union = append(union, models.OAuthScopeLearnerRead)
+	for _, scope := range required {
+		seen[scope] = true
 	}
-	if write {
-		union = append(union, models.OAuthScopeLearnerWrite)
+	union := []string{}
+	for _, scope := range []string{models.OAuthScopeLearnerRead, models.OAuthScopeLearnerWrite, models.OAuthScopeFormationRead, models.OAuthScopeFormationWrite} {
+		if seen[scope] {
+			union = append(union, scope)
+		}
 	}
 	return union
+}
+
+func formationScopes(scopes []string) bool {
+	for _, scope := range scopes {
+		if scope == models.OAuthScopeFormationRead || scope == models.OAuthScopeFormationWrite {
+			return true
+		}
+	}
+	return false
 }
 
 type oauthScopeHTTPCall struct {
@@ -149,7 +149,7 @@ func OAuthScopeHTTPMiddleware(baseURL string, maxBodyBytes int64, granular bool,
 		var call oauthScopeHTTPCall
 		if err := json.Unmarshal(body, &call); err != nil ||
 			call.JSONRPC != "2.0" || call.Method != "tools/call" || call.Params.Name == "" ||
-			!validOAuthPreflightRequestID(call.ID) || auth.GetLearnerID(r.Context()) == "" ||
+			!validOAuthPreflightRequestID(call.ID) || !authenticatedOAuthPrincipal(r.Context()) ||
 			!validOAuthPreflightTransportHeaders(r, &call) {
 			next.ServeHTTP(w, r)
 			return
@@ -241,4 +241,9 @@ func validOAuthPreflightTransportHeaders(r *http.Request, call *oauthScopeHTTPCa
 			metaVersion != "" && metaVersion == protocolVersion
 	}
 	return true
+}
+
+func authenticatedOAuthPrincipal(ctx context.Context) bool {
+	_, ok := auth.GetPrincipal(ctx)
+	return ok || auth.GetLearnerID(ctx) != ""
 }

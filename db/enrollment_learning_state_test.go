@@ -47,7 +47,7 @@ func createPublishedEnrollmentConcept(t *testing.T, s *Store, owner models.Princ
 func TestEnrollmentConceptStateNeverMixesTwoEnrollments(t *testing.T) {
 	s := setupTestDB(t)
 	ctx := context.Background()
-	owner := ownerPrincipal(t, s)
+	owner := ownerLearnerPrincipal(t, s)
 	enrollmentA, conceptA := createPublishedEnrollmentConcept(t, s, owner, "Formation A")
 	enrollmentB, conceptB := createPublishedEnrollmentConcept(t, s, owner, "Formation B")
 

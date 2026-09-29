@@ -41,8 +41,15 @@ func (s *Store) assessmentReviewAccess(ctx context.Context, actor models.Princip
 		return "", nil, err
 	}
 	args := []any{actor.TenantID, actor.UserID}
-	if actor.Authorize(models.PermissionAssessmentReview, models.AuthorizationResource{TenantID: actor.TenantID}) {
+	if formationGlobalAccess(actor) == 1 {
 		return assessmentReviewFrom, args, nil
+	}
+	if slicesContains(actor.Roles, models.RolePedagogyManager) {
+		return assessmentReviewFrom + ` AND (EXISTS (
+ SELECT 1 FROM formation_versions fv JOIN formations f ON f.tenant_id = fv.tenant_id AND f.id = fv.formation_id
+ WHERE fv.tenant_id = e.tenant_id AND fv.id = e.formation_version_id AND ` + formationVisibilitySQL(actor, "f") + `)
+ OR EXISTS (SELECT 1 FROM cohort_trainers ct WHERE ct.tenant_id = e.tenant_id AND ct.cohort_id = e.cohort_id AND ct.membership_id = ?))`,
+			append(args, 0, actor.MembershipID, actor.MembershipID, actor.MembershipID), nil
 	}
 	if !slicesContains(actor.Roles, models.RoleTrainer) {
 		return "", nil, storeport.ErrInvalidPrincipal

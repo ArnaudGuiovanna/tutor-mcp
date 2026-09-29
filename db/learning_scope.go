@@ -173,6 +173,9 @@ func (s *Store) provisionDomainEnrollment(ctx context.Context, domain *models.Do
 }
 
 func (s *Store) resolveLearningScope(ctx context.Context, learnerID, domainID, concept string) (learningScopeIDs, error) {
+	if scope, found, err := s.formationLearningScope(ctx, learnerID, domainID, concept); found || err != nil {
+		return scope, err
+	}
 	out, err := s.queryLearningScope(ctx, learnerID, domainID, concept)
 	if err == nil {
 		return out, nil

@@ -93,7 +93,7 @@ func TestNarrativeStoreMutationReplayIsIdempotentAndConflictSafe(t *testing.T) {
 func TestNarrativeStoreCanonicalEnrollmentKeyIsolatesSameLearner(t *testing.T) {
 	store := narrativeTestStore(t)
 	ctx := context.Background()
-	owner := ownerPrincipal(t, store)
+	owner := ownerLearnerPrincipal(t, store)
 	_, version, err := store.CreateFormationDraft(ctx, owner, "Narrative isolation", "")
 	if err != nil {
 		t.Fatal(err)

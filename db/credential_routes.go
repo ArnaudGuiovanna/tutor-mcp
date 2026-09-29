@@ -85,14 +85,14 @@ func credentialRouteKey(raw string) string {
 }
 
 func (s *Store) insertCredentialRoute(ctx context.Context, kind, raw string, scope models.TenantScope, expiresAt, createdAt time.Time) error {
-	if err := scope.Validate(); err != nil || scope.LearnerID == "" {
+	if err := scope.Validate(); err != nil || (scope.LearnerID == "" && kind != credentialKindAuthorizationCode && kind != credentialKindRefreshToken) {
 		return fmt.Errorf("insert credential route: invalid tenant scope")
 	}
 	_, err := s.exec(ctx, `INSERT INTO credential_tenant_routes
         (kind, credential_key, tenant_id, user_id, membership_id, learner_id, expires_at, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		kind, credentialRouteKey(raw), scope.TenantID, scope.UserID,
-		scope.MembershipID, scope.LearnerID, expiresAt, createdAt)
+		scope.MembershipID, nullString(scope.LearnerID), expiresAt, createdAt)
 	if err != nil {
 		return fmt.Errorf("insert credential route: %w", err)
 	}
@@ -101,7 +101,7 @@ func (s *Store) insertCredentialRoute(ctx context.Context, kind, raw string, sco
 
 func (s *Store) credentialScope(ctx context.Context, kind, raw string) (models.TenantScope, error) {
 	var scope models.TenantScope
-	err := s.queryRow(ctx, `SELECT tenant_id, user_id, membership_id, learner_id
+	err := s.queryRow(ctx, `SELECT tenant_id, user_id, membership_id, COALESCE(learner_id, '')
         FROM credential_tenant_routes
 		WHERE kind = ? AND credential_key = ?`,
 		kind, credentialRouteKey(raw)).Scan(

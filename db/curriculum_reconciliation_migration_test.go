@@ -34,11 +34,19 @@ func TestCurriculumReconciliationMigrationPreservesReferencesAndForeignKeys(t *t
 				}
 			}
 			s := NewStore(raw)
-			f := newPedagogicalDecisionFixture(t, s, "L1", "upgrade")
+			// Seed the historical schema without invoking today's session writer,
+			// which requires the later formation-domain source columns.
+			f := pedagogicalDecisionFixtureWithSession(t, s, "L1", "upgrade", func(ctx context.Context, learnerID, domainID, _ string, now time.Time) (*models.LearningSession, error) {
+				_, err := raw.ExecContext(ctx, `INSERT INTO learning_sessions
+ (id, learner_id, domain_id, tenant_id, enrollment_id, status, started_at, last_active_at)
+ VALUES ('upgrade-session', ?, ?, 'tenant_legacy', ?, 'open', ?, ?)`, learnerID, domainID, "domain_enrollment_"+domainID, now, now)
+				return &models.LearningSession{ID: "upgrade-session"}, err
+			})
 			a := f.attempt(t, "pre-upgrade-attempt")
 			// Seed the pre-upgrade schema explicitly; the current writer requires
 			// later additive exposure columns that do not exist in this fixture.
-			scope, err := s.resolveLearningScope(ctx, "L1", f.domain.ID, "a")
+			var scope learningScopeIDs
+			err = raw.QueryRow(`SELECT tenant_id, enrollment_id, concept_id FROM legacy_concept_mappings WHERE tenant_id = 'tenant_legacy' AND domain_id = ? AND concept_label = 'a'`, f.domain.ID).Scan(&scope.TenantID, &scope.EnrollmentID, &scope.FormationConceptID)
 			if err != nil {
 				t.Fatal(err)
 			}

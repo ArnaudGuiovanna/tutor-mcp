@@ -273,6 +273,52 @@ initial access token policy. CIMD remains available. Email verification,
 tenant isolation, audit and separated roles stay enforced. This release adds
 no new SSO provider.
 
+### Formation authoring and enrollment (phase 2)
+
+In institution mode, a pedagogy manager can connect an AI client with the OAuth
+scopes `formation:read formation:write`, including when their membership has no
+learner role. The existing `learner` scope does not grant these capabilities.
+The manager creates a draft with `draft_formation`, supplies modules and concepts
+with `add_formation_concepts`, reviews it with `get_formation_version`, and calls
+`publish_formation` after deciding to publish. Mutation tools require a unique
+`idempotency_key`; reuse the same key only when retrying the same request.
+
+Administrative JSON calls use the browser's MFA-verified console session under
+`/console/admin/catalog/`. The old `/admin/catalog/`, assessment-review and
+curriculum-review routes reject OAuth bearers in institution mode; their new
+prefix is `/console/admin/`. Before each write, request `GET /console/api-csrf`
+using the console cookie and pass the returned `csrf_token` as `X-CSRF-Token`,
+with that same cookie jar. The token is consumed once. Existing catalogue POST
+mutations also require `Idempotency-Key`. JSON fields use `snake_case`.
+
+The catalogue API supports these additional operations (paths below are relative
+to `/console/admin/catalog`):
+
+| Method and path | Behavior |
+| --- | --- |
+| `GET /formation-versions/{id}` | Read the complete version and its concept IDs. |
+| `POST /formation-versions/{id}/clone` | Clone into a new draft; requires `Idempotency-Key`. |
+| `PUT /formation-versions/{id}/content` | Atomically replace draft modules and concepts; requires `Idempotency-Key`. |
+| `PUT /formations/{id}/enrollment-policy` | Set `policy` to `open`, `invitation` or `approval`. |
+| `PUT /formations/{id}/trainers/{membership_id}` | Admin assigns/removes a pedagogy manager with `assigned: true/false`. |
+| `DELETE /formations/{id}` | Delete an unpublished draft or archive a published formation. |
+| `POST /enrollments/{id}/migrate` | Migrate explicitly to the supplied `cohort_id`, on another version of the same formation. |
+| `PUT /learning-policy` | Admin sets `allow_free_domains: true/false`. |
+
+Owners/admins manage every formation; pedagogy managers access only their own or
+assigned formations, including cohort reports and pedagogical reviews. A cohort
+enrollment requires an active learner membership and returns a `domain_id` ready
+for tutoring. Concept IDs are shared by all learners on the same published
+version. Publishing another version does not migrate existing enrollments.
+Migration keeps the domain, closes its session, moves the seat and reconciles
+changed definitions; observations retain their original enrollment. Archiving
+blocks new enrollment while preserving the existing learning history.
+
+Free domains are disabled by default for new institutions; an admin may enable
+them. Local/hobby retain their existing behavior. Self-service learner enrollment,
+the `/learn` portal and trainer dashboards belong to subsequent phases. See the
+[phase 2 design and acceptance gates](institution-phase-2.md).
+
 ## Backups, restore and upgrades
 
 Local/hobby backups must include the database **and** `keys.json`. For a native

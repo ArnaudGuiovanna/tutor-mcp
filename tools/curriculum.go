@@ -150,6 +150,10 @@ func registerReviseCurriculum(server *mcp.Server, deps *Deps) {
 			r, _ := errorResult("domain not found")
 			return r, nil, nil
 		}
+		if domain.FormationEnrollmentID != "" {
+			r, _ := errorResult("this curriculum is managed by the formation author; learners cannot revise it")
+			return r, nil, nil
+		}
 		current, err := deps.Store.EnsureCurriculumBaseline(ctx, learnerID, domain.ID)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to initialize curriculum history", err)

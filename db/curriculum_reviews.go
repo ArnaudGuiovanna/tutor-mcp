@@ -28,7 +28,15 @@ func (s *Store) curriculumReviewDomain(ctx context.Context, actor models.Princip
 	query := `SELECT d.learner_id,d.graph_version FROM domains d JOIN learners l ON l.id = d.learner_id AND l.tenant_id = d.tenant_id
  WHERE d.id = ? AND d.tenant_id = ? AND l.user_id <> ?`
 	args := []any{domainID, actor.TenantID, actor.UserID}
-	if !actor.Authorize(models.PermissionCurriculumReview, models.AuthorizationResource{TenantID: actor.TenantID}) {
+	if formationGlobalAccess(actor) == 0 && slicesContains(actor.Roles, models.RolePedagogyManager) {
+		query += ` AND EXISTS (SELECT 1 FROM legacy_domain_enrollments de
+ JOIN enrollments e ON e.tenant_id = de.tenant_id AND e.id = de.enrollment_id
+ JOIN formation_versions fv ON fv.tenant_id = e.tenant_id AND fv.id = e.formation_version_id
+ JOIN formations f ON f.tenant_id = fv.tenant_id AND f.id = fv.formation_id
+ WHERE de.tenant_id = d.tenant_id AND de.domain_id = d.id AND (` + formationVisibilitySQL(actor, "f") + `
+ OR EXISTS (SELECT 1 FROM cohort_trainers ct WHERE ct.tenant_id = e.tenant_id AND ct.cohort_id = e.cohort_id AND ct.membership_id = ?)))`
+		args = append(args, 0, actor.MembershipID, actor.MembershipID, actor.MembershipID)
+	} else if formationGlobalAccess(actor) == 0 {
 		if !slicesContains(actor.Roles, models.RoleTrainer) {
 			return "", 0, storeport.ErrInvalidPrincipal
 		}

@@ -214,6 +214,10 @@ type pedagogicalDecisionFixture struct {
 }
 
 func newPedagogicalDecisionFixture(t *testing.T, s *Store, learnerID, suffix string) pedagogicalDecisionFixture {
+	return pedagogicalDecisionFixtureWithSession(t, s, learnerID, suffix, s.OpenLearningSession)
+}
+
+func pedagogicalDecisionFixtureWithSession(t *testing.T, s *Store, learnerID, suffix string, openSession func(context.Context, string, string, string, time.Time) (*models.LearningSession, error)) pedagogicalDecisionFixture {
 	t.Helper()
 	ctx := context.Background()
 	seedLearner(t, s, learnerID)
@@ -225,7 +229,7 @@ func newPedagogicalDecisionFixture(t *testing.T, s *Store, learnerID, suffix str
 	if err != nil {
 		t.Fatal(err)
 	}
-	session, err := s.OpenLearningSession(ctx, learnerID, domain.ID, "", time.Now().UTC())
+	session, err := openSession(ctx, learnerID, domain.ID, "", time.Now().UTC())
 	if err != nil {
 		t.Fatal(err)
 	}

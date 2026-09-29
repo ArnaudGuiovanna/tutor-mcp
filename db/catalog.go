@@ -20,8 +20,8 @@ func (s *Store) CreateFormationDraft(ctx context.Context, actor models.Principal
 		return nil, nil, fmt.Errorf("create formation: %w", storeport.ErrInvalidPrincipal)
 	}
 	name = strings.TrimSpace(name)
-	if name == "" {
-		return nil, nil, fmt.Errorf("create formation: name is required")
+	if name == "" || len(name) > 500 || len(description) > 16000 {
+		return nil, nil, fmt.Errorf("create formation: name is required (up to 500 bytes); description is limited to 16000 bytes")
 	}
 	formationID, err := generateID()
 	if err != nil {
@@ -34,7 +34,7 @@ func (s *Store) CreateFormationDraft(ctx context.Context, actor models.Principal
 	now := time.Now().UTC()
 	formation := &models.Formation{
 		ID: formationID, TenantID: actor.TenantID, Name: name, Description: description,
-		Status: "draft", CreatedBy: actor.UserID, CreatedAt: now, UpdatedAt: now,
+		Status: "draft", OwnerMembershipID: actor.MembershipID, EnrollmentPolicy: "invitation", CreatedBy: actor.UserID, CreatedAt: now, UpdatedAt: now,
 	}
 	version := &models.FormationVersion{
 		ID: versionID, TenantID: actor.TenantID, FormationID: formationID,
@@ -42,10 +42,13 @@ func (s *Store) CreateFormationDraft(ctx context.Context, actor models.Principal
 	}
 	err = s.WithTenantTx(ctx, actor.TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {
 		txs := scoped.(*Store)
+		if err := txs.ValidatePrincipal(txCtx, actor); err != nil {
+			return err
+		}
 		if _, err := txs.exec(txCtx, `INSERT INTO formations
-            (id, tenant_id, name, description, status, created_by, created_at, updated_at)
-            VALUES (?, ?, ?, ?, 'draft', ?, ?, ?)`, formationID, actor.TenantID,
-			name, description, actor.UserID, now, now); err != nil {
+            (id, tenant_id, name, description, status, created_by, created_at, updated_at, owner_membership_id)
+            VALUES (?, ?, ?, ?, 'draft', ?, ?, ?, ?)`, formationID, actor.TenantID,
+			name, description, actor.UserID, now, now, actor.MembershipID); err != nil {
 			return fmt.Errorf("insert formation: %w", err)
 		}
 		if _, err := txs.exec(txCtx, `INSERT INTO formation_versions
@@ -68,7 +71,7 @@ func (s *Store) AddFormationModule(ctx context.Context, actor models.Principal, 
 	if !actor.Authorize(models.PermissionFormationWrite, models.AuthorizationResource{TenantID: actor.TenantID}) {
 		return "", fmt.Errorf("add module: %w", storeport.ErrInvalidPrincipal)
 	}
-	if strings.TrimSpace(input.StableKey) == "" || strings.TrimSpace(input.Title) == "" || input.Position < 0 {
+	if strings.TrimSpace(input.StableKey) == "" || strings.TrimSpace(input.StableKey) != input.StableKey || len(input.StableKey) > 200 || strings.ContainsAny(input.StableKey, "\x00\r\n") || strings.TrimSpace(input.Title) == "" || len(input.Title) > 500 || len(input.MetadataJSON) > 65536 || input.Position < 0 {
 		return "", fmt.Errorf("add module: stable key, title and non-negative position are required")
 	}
 	if input.MetadataJSON == "" {
@@ -83,6 +86,20 @@ func (s *Store) AddFormationModule(ctx context.Context, actor models.Principal, 
 	}
 	err = s.WithTenantTx(ctx, actor.TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {
 		txs := scoped.(*Store)
+		f, accessErr := txs.formationAccess(txCtx, actor, "version", versionID, models.PermissionFormationWrite, true)
+		if accessErr != nil {
+			return accessErr
+		}
+		if f.Status == "archived" {
+			return storeport.ErrFormationVersionImmutable
+		}
+		var count int
+		if err := txs.queryRow(txCtx, `SELECT COUNT(*) FROM formation_modules WHERE tenant_id = ? AND formation_version_id = ?`, actor.TenantID, versionID).Scan(&count); err != nil {
+			return err
+		}
+		if count >= 100 {
+			return fmt.Errorf("a formation version supports at most 100 modules")
+		}
 		result, err := txs.exec(txCtx, `INSERT INTO formation_modules
             (id, tenant_id, formation_version_id, stable_key, title, position, metadata_json)
             SELECT ?, ?, id, ?, ?, ?, ? FROM formation_versions
@@ -112,12 +129,29 @@ func (s *Store) AddFormationConcept(ctx context.Context, actor models.Principal,
 	if !json.Valid([]byte(input.MetadataJSON)) {
 		return "", fmt.Errorf("add concept: metadata must be JSON")
 	}
+	if err := normalizeFormationConcept(&input); err != nil {
+		return "", err
+	}
 	id, err := generateID()
 	if err != nil {
 		return "", err
 	}
 	err = s.WithTenantTx(ctx, actor.TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {
 		txs := scoped.(*Store)
+		f, accessErr := txs.formationAccess(txCtx, actor, "version", versionID, models.PermissionFormationWrite, true)
+		if accessErr != nil {
+			return accessErr
+		}
+		if f.Status == "archived" {
+			return storeport.ErrFormationVersionImmutable
+		}
+		var count int
+		if err := txs.queryRow(txCtx, `SELECT COUNT(*) FROM formation_concepts WHERE tenant_id = ? AND formation_version_id = ?`, actor.TenantID, versionID).Scan(&count); err != nil {
+			return err
+		}
+		if count >= 500 {
+			return fmt.Errorf("a formation version supports at most 500 concepts")
+		}
 		var moduleID string
 		if err := txs.queryRow(txCtx, `SELECT m.id FROM formation_modules m
             JOIN formation_versions v ON v.tenant_id = m.tenant_id AND v.id = m.formation_version_id
@@ -156,6 +190,13 @@ func (s *Store) PublishFormationVersion(ctx context.Context, actor models.Princi
 	var published *models.FormationVersion
 	err := s.WithTenantTx(ctx, actor.TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {
 		txs := scoped.(*Store)
+		f, accessErr := txs.formationAccess(txCtx, actor, "version", versionID, models.PermissionFormationWrite, true)
+		if accessErr != nil {
+			return accessErr
+		}
+		if f.Status == "archived" {
+			return storeport.ErrFormationVersionImmutable
+		}
 		var formationID, metadata, createdBy string
 		var version int64
 		var createdAt time.Time
@@ -166,6 +207,13 @@ func (s *Store) PublishFormationVersion(ctx context.Context, actor models.Princi
               AND EXISTS (SELECT 1 FROM formation_concepts c WHERE c.tenant_id = v.tenant_id AND c.formation_version_id = v.id)`,
 			actor.TenantID, versionID).Scan(&formationID, &version, &metadata, &createdBy, &createdAt); err != nil {
 			return fmt.Errorf("publish formation: incomplete or immutable draft: %w", err)
+		}
+		detail, err := txs.loadFormationVersion(txCtx, actor.TenantID, versionID)
+		if err != nil {
+			return err
+		}
+		if _, err := formationCurriculum(detail, "validation", actor.UserID, time.Now().UTC()); err != nil {
+			return err
 		}
 		now := time.Now().UTC()
 		result, err := txs.exec(txCtx, `UPDATE formation_versions
@@ -220,6 +268,13 @@ func (s *Store) CreateCohort(ctx context.Context, actor models.Principal, format
 	}
 	err = s.WithTenantTx(ctx, actor.TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {
 		txs := scoped.(*Store)
+		f, accessErr := txs.formationAccess(txCtx, actor, "version", formationVersionID, models.PermissionCohortManage, true)
+		if accessErr != nil {
+			return accessErr
+		}
+		if f.Status == "archived" {
+			return storeport.ErrFormationVersionImmutable
+		}
 		result, err := txs.exec(txCtx, `INSERT INTO cohorts
             (id, tenant_id, formation_version_id, name, starts_at, ends_at, capacity,
              reserved_seats, status, version, created_by, created_at, updated_at)
@@ -245,6 +300,13 @@ func (s *Store) AssignCohortTrainer(ctx context.Context, actor models.Principal,
 	}
 	return s.WithTenantTx(ctx, actor.TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {
 		txs := scoped.(*Store)
+		f, accessErr := txs.formationAccess(txCtx, actor, "cohort", cohortID, models.PermissionCohortManage, true)
+		if accessErr != nil {
+			return accessErr
+		}
+		if f.Status == "archived" {
+			return storeport.ErrFormationVersionImmutable
+		}
 		rolePredicate := `EXISTS (SELECT 1 FROM json_each(tm.roles_json) WHERE value = 'trainer')`
 		if txs.dialect == DialectPostgres {
 			rolePredicate = `jsonb_exists(tm.roles_json, 'trainer')`
@@ -287,6 +349,13 @@ func (s *Store) EnrollMembership(ctx context.Context, actor models.Principal, co
 	var enrollment *models.Enrollment
 	err = s.WithTenantTx(ctx, actor.TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {
 		txs := scoped.(*Store)
+		f, accessErr := txs.formationAccess(txCtx, actor, "cohort", cohortID, models.PermissionCohortManage, true)
+		if accessErr != nil {
+			return accessErr
+		}
+		if f.Status == "archived" {
+			return storeport.ErrFormationVersionImmutable
+		}
 		var formationVersionID, userID string
 		var learnerID sql.NullString
 		if err := txs.queryRow(txCtx, `SELECT c.formation_version_id, tm.user_id, tm.learner_id
@@ -294,6 +363,26 @@ func (s *Store) EnrollMembership(ctx context.Context, actor models.Principal, co
             WHERE c.tenant_id = ? AND c.id = ? AND tm.id = ? AND tm.status = 'active'`,
 			actor.TenantID, cohortID, membershipID).Scan(&formationVersionID, &userID, &learnerID); err != nil {
 			return fmt.Errorf("enroll membership: cohort or membership not found: %w", err)
+		}
+		var rolesJSON string
+		if err := txs.queryRow(txCtx, `SELECT roles_json FROM tenant_memberships WHERE tenant_id = ? AND id = ?`, actor.TenantID, membershipID).Scan(&rolesJSON); err != nil {
+			return err
+		}
+		var roles []string
+		if err := json.Unmarshal([]byte(rolesJSON), &roles); err != nil {
+			return err
+		}
+		if !containsRole(roles, models.RoleLearner) {
+			return fmt.Errorf("enrollment requires a learner membership")
+		}
+		if !learnerID.Valid || learnerID.String == "" {
+			scope := models.TenantScope{TenantID: actor.TenantID, UserID: userID, MembershipID: membershipID}
+			if err := txs.createInvitedLearnerProfile(txCtx, scope, time.Now().UTC()); err != nil {
+				return err
+			}
+			if err := txs.queryRow(txCtx, `SELECT learner_id FROM tenant_memberships WHERE tenant_id = ? AND id = ?`, actor.TenantID, membershipID).Scan(&learnerID); err != nil {
+				return err
+			}
 		}
 		result, err := txs.exec(txCtx, `UPDATE cohorts
             SET reserved_seats = reserved_seats + 1, version = version + 1, updated_at = ?
@@ -319,6 +408,9 @@ func (s *Store) EnrollMembership(ctx context.Context, actor models.Principal, co
 			FormationVersionID: formationVersionID, UserID: userID,
 			MembershipID: membershipID, LearnerID: learnerID.String, Status: "active",
 			ObjectivesJSON: objectivesJSON, SeatReserved: true, CreatedAt: now, UpdatedAt: now,
+		}
+		if err := txs.createFormationDomain(txCtx, enrollment, actor); err != nil {
+			return err
 		}
 		return txs.AppendAuditEvent(txCtx, actor, models.AuditEvent{
 			Action: "enrollment.create", TargetType: "enrollment", TargetID: id,

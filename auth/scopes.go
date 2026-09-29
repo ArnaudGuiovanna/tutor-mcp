@@ -24,7 +24,7 @@ func normalizeAuthorizationScope(raw string, granularEnabled bool) (string, erro
 	}
 	canonical, err := models.CanonicalOAuthScope(raw)
 	if err == nil {
-		if !granularEnabled && canonical != models.OAuthScopeLearner {
+		if !granularEnabled && canonical != models.OAuthScopeLearner && !hasFormationScope(canonical) {
 			return "", fmt.Errorf("granular OAuth scopes are not enabled")
 		}
 		return canonical, nil
@@ -55,6 +55,10 @@ func normalizeAuthorizationScope(raw string, granularEnabled bool) (string, erro
 	return "", err
 }
 
+func hasFormationScope(scope string) bool {
+	return models.OAuthScopeAllows(scope, models.OAuthScopeFormationRead) || models.OAuthScopeAllows(scope, models.OAuthScopeFormationWrite)
+}
+
 // normalizeRefreshScope keeps an omitted refresh scope distinguishable from an
 // explicit request: omission preserves the stored grant, while a supplied
 // value is canonicalized and later checked as a non-widening subset.
@@ -66,7 +70,7 @@ func normalizeRefreshScope(raw string, granularEnabled bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !granularEnabled && canonical != models.OAuthScopeLearner {
+	if !granularEnabled && canonical != models.OAuthScopeLearner && !hasFormationScope(canonical) {
 		return "", fmt.Errorf("granular OAuth scopes are not enabled")
 	}
 	return canonical, nil
@@ -108,6 +112,22 @@ func oauthScopeDescription(scope string) string {
 	case models.OAuthScopeLearner, models.OAuthScopeLearnerReadWrite:
 		return "Read and modify your learner profile, domains, progress, sessions, and learning history."
 	default:
+		if hasFormationScope(canonical) {
+			text := ""
+			if models.OAuthScopeAllows(canonical, models.OAuthScopeFormationRead) {
+				text += "Read formations you own or are assigned to. "
+			}
+			if models.OAuthScopeAllows(canonical, models.OAuthScopeFormationWrite) {
+				text += "Create, edit and publish formations you own or are assigned to. "
+			}
+			if models.OAuthScopeAllows(canonical, models.OAuthScopeLearnerRead) {
+				text += "Read your learner data. "
+			}
+			if models.OAuthScopeAllows(canonical, models.OAuthScopeLearnerWrite) {
+				text += "Modify your learner data. "
+			}
+			return strings.TrimSpace(text)
+		}
 		return "Requested permissions could not be verified. Do not continue."
 	}
 }

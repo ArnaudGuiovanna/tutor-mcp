@@ -79,20 +79,16 @@ func (s *Store) GetPrincipal(ctx context.Context, scope models.TenantScope, scop
 	}
 	var principal models.Principal
 	var rolesJSON string
-	err := s.queryRow(ctx, `SELECT l.user_id, l.tenant_id, l.membership_id, l.id,
-               tm.roles_json, tm.version
-        FROM learners l
-        JOIN users u ON u.id = l.user_id AND u.status = 'active'
-        JOIN tenants t ON t.id = l.tenant_id AND t.status = 'active'
-        JOIN tenant_memberships tm
-          ON tm.id = l.membership_id
-         AND tm.tenant_id = l.tenant_id
-         AND tm.user_id = l.user_id
-         AND tm.learner_id = l.id
-         AND tm.status = 'active'
-		 AND (tm.mfa_required = 0 OR tm.mfa_verified_at IS NOT NULL)
-        WHERE l.tenant_id = ? AND l.user_id = ? AND l.membership_id = ? AND l.id = ?`,
-		scope.TenantID, scope.UserID, scope.MembershipID, scope.LearnerID).Scan(
+	err := s.queryRow(ctx, `SELECT tm.user_id, tm.tenant_id, tm.id, COALESCE(l.id, ''), tm.roles_json, tm.version
+        FROM tenant_memberships tm
+        JOIN users u ON u.id = tm.user_id AND u.status = 'active'
+        JOIN tenants t ON t.id = tm.tenant_id AND t.status = 'active'
+        LEFT JOIN learners l ON l.id = tm.learner_id AND l.tenant_id = tm.tenant_id
+          AND l.user_id = tm.user_id AND l.membership_id = tm.id
+        WHERE tm.tenant_id = ? AND tm.user_id = ? AND tm.id = ?
+          AND tm.status = 'active' AND (tm.mfa_required = 0 OR tm.mfa_verified_at IS NOT NULL)
+          AND ((tm.learner_id IS NULL AND ? = '') OR l.id = ?)`,
+		scope.TenantID, scope.UserID, scope.MembershipID, scope.LearnerID, scope.LearnerID).Scan(
 		&principal.UserID, &principal.TenantID, &principal.MembershipID,
 		&principal.LearnerID, &rolesJSON, &principal.TokenVersion,
 	)

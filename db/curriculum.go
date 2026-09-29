@@ -173,6 +173,18 @@ func (s *Store) ListCurriculumSnapshots(ctx context.Context, learnerID, domainID
 // updates domains.graph_json as its active compatibility projection. A stale
 // writer receives ErrCurriculumVersionConflict; it never overwrites the winner.
 func (s *Store) CompareAndSwapCurriculum(ctx context.Context, learnerID, domainID string, expectedVersion int, candidate *models.CurriculumSnapshot) error {
+	domain, err := s.GetDomainByID(ctx, domainID)
+	if err != nil {
+		return err
+	}
+	if domain.FormationEnrollmentID != "" {
+		return storeport.ErrFormationDomainLocked
+	}
+	return s.compareAndSwapCurriculum(ctx, learnerID, domainID, expectedVersion, candidate)
+}
+
+// Only the authorized catalogue migration path may revise a formation domain.
+func (s *Store) compareAndSwapCurriculum(ctx context.Context, learnerID, domainID string, expectedVersion int, candidate *models.CurriculumSnapshot) error {
 	if candidate == nil {
 		return fmt.Errorf("curriculum snapshot is required")
 	}

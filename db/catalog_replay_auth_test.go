@@ -22,7 +22,8 @@ import (
 func TestCatalogReplayRechecksPermissionsForEveryMutation(t *testing.T) {
 	s := setupTestDB(t)
 	ctx := context.Background()
-	owner := ownerPrincipal(t, s)
+	owner := ownerLearnerPrincipal(t, s)
+
 	var versionID, cohortID string
 	operations := []struct {
 		name string
@@ -96,7 +97,7 @@ func TestCatalogReplayRechecksPermissionsForEveryMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, op := range operations {
-		if replayed, err := op.call(other, op.name); replayed || err == nil || !strings.Contains(err.Error(), "idempotency key conflict") {
+		if replayed, err := op.call(other, op.name); replayed || err == nil || (!strings.Contains(err.Error(), "idempotency key conflict") && !errors.Is(err, storeport.ErrInvalidPrincipal)) {
 			t.Fatalf("different actor replay %s: replayed=%v err=%v", op.name, replayed, err)
 		}
 	}
@@ -121,7 +122,8 @@ func TestCatalogReplayRechecksPermissionsForEveryMutation(t *testing.T) {
 func TestCatalogHTTPReplayAfterRoleDowngradeIsForbidden(t *testing.T) {
 	s := setupTestDB(t)
 	ctx := context.Background()
-	owner := ownerPrincipal(t, s)
+	owner := ownerLearnerPrincipal(t, s)
+
 	if _, _, _, err := s.CreateFormationDraftIdempotent(ctx, owner, "known-key", "Course", "Description"); err != nil {
 		t.Fatal(err)
 	}

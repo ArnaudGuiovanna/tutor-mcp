@@ -34,6 +34,22 @@ func ownerPrincipal(t *testing.T, s *Store) models.Principal {
 	return owner
 }
 
+func ownerLearnerPrincipal(t *testing.T, s *Store) models.Principal {
+	t.Helper()
+	p := ownerPrincipal(t, s)
+	if _, err := s.SetMembershipAuthorization(t.Context(), p.TenantScope(), models.MembershipStatusActive, []string{models.RoleOwner, models.RoleLearner}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RecordMembershipMFAVerification(t.Context(), p.TenantScope(), time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	p, err := s.GetPrincipalForLearner(t.Context(), "L1", []string{models.OAuthScopeLearner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
 func TestPrivilegedMembershipRequiresMFAAndInvalidatesOldToken(t *testing.T) {
 	s := setupTestDB(t)
 	ctx := context.Background()

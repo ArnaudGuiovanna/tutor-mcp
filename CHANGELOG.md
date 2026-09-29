@@ -8,6 +8,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- Institution formation authoring through `draft_formation`,
+  `add_formation_concepts`, `get_formation_version` and `publish_formation`, with
+  explicit `formation:read` / `formation:write` OAuth grants. A formateur manages
+  their own or explicitly assigned formations. Versions include descriptions,
+  observable outcomes, assessment criteria and prerequisites.
+- Cohort enrollment atomically creates a tutor domain from the published
+  formation, with concept IDs shared across learners. Published curricula are
+  locked; cloning and explicit version migration preserve source history and
+  reconcile evidence. Published formations can be archived; unpublished drafts
+  can be deleted. Enrollment policy and optional free domains are configurable.
 - Institution console at `/console` for owners, admins, pedagogy managers and
   trainers, with a server-side session, TOTP enrollment (QR code) and ten
   single-use recovery codes. Owners and admins list members, invite people by
@@ -27,6 +37,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Changed
 
+- In institution mode, administrative JSON routes move from `/admin/` to
+  `/console/admin/` and require an MFA-verified console cookie. Writes also need
+  a single-use `X-CSRF-Token` obtained from `GET /console/api-csrf`. MCP OAuth
+  tokens cannot open these routes. Catalogue JSON fields now use `snake_case`.
+- Staff without learner profiles can complete OAuth and refresh tokens.
+  Refresh also rechecks the membership version, status and MFA. Cohort reports
+  count distinct enrollments when aggregating multiple concept states.
 - `--profile institution` requires `INSTITUTION_SIGNUP` (`operator` or `open`)
   on the API and closes self-registration into the shared legacy tenant.
 - Pedagogy managers and trainers now require two-factor authentication, like

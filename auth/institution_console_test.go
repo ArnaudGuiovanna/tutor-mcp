@@ -45,6 +45,14 @@ func institutionTestServer(t *testing.T, signupOpen bool) (*OAuthServer, *db.Sto
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /authorize", s.HandleAuthorizeGet)
 	mux.HandleFunc("POST /authorize", s.HandleAuthorizePost)
+	mux.HandleFunc("POST /token", s.HandleToken)
+	mux.HandleFunc("GET /console/api-csrf", s.HandleConsoleAPICSRF)
+	mux.Handle("/console/test-api", s.ConsoleAPIHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := GetPrincipal(r.Context()); !ok {
+			t.Error("console API has no principal")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})))
 	mux.HandleFunc("GET /console", s.HandleConsoleHome)
 	mux.HandleFunc("GET /console/login", s.HandleConsoleLoginGet)
 	mux.HandleFunc("POST /console/login", s.HandleConsoleLoginPost)

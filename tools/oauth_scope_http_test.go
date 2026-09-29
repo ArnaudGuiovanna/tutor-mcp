@@ -105,6 +105,39 @@ func TestOAuthScopeHTTPMiddleware_LegacyRolloutChallengesForBundle(t *testing.T)
 	}
 }
 
+func TestFormationScopesDoNotInheritLearnerBundle(t *testing.T) {
+	for _, tc := range []struct {
+		tool, grant string
+		allowed     bool
+	}{
+		{"draft_formation", "learner", false},
+		{"publish_formation", "formation:read", false},
+		{"draft_formation", "formation:write", true},
+		{"get_formation_version", "formation:read", true},
+		{"get_next_activity", "formation:read formation:write", false},
+	} {
+		t.Run(tc.tool+"/"+tc.grant, func(t *testing.T) {
+			called := false
+			h := OAuthScopeHTTPMiddleware("https://test.example", 4096, false, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { called = true; w.WriteHeader(204) }))
+			req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"`+tc.tool+`","arguments":{}}}`))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept", "application/json, text/event-stream")
+			p := models.LegacyPrincipal("staff")
+			p.LearnerID, p.Roles, p.Scopes = "", []string{models.RolePedagogyManager}, strings.Fields(tc.grant)
+			ctx, err := auth.WithPrincipal(req.Context(), p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req = req.WithContext(auth.WithOAuthScope(ctx, tc.grant))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if called != tc.allowed || (!tc.allowed && rec.Code != http.StatusForbidden) {
+				t.Fatalf("called=%v status=%d", called, rec.Code)
+			}
+		})
+	}
+}
+
 func TestOAuthScopeHTTPMiddleware_AllowsSufficientAndLegacyGrants(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

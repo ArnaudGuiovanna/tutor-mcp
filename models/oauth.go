@@ -17,6 +17,8 @@ const (
 	OAuthScopeLearnerRead      = "learner:read"
 	OAuthScopeLearnerWrite     = "learner:write"
 	OAuthScopeLearnerReadWrite = "learner:read learner:write"
+	OAuthScopeFormationRead    = "formation:read"
+	OAuthScopeFormationWrite   = "formation:write"
 )
 
 // CanonicalOAuthScope validates the complete supported scope vocabulary and
@@ -34,7 +36,7 @@ func CanonicalOAuthScope(raw string) (string, error) {
 		}
 		seen[scope] = true
 		switch scope {
-		case OAuthScopeLearner, OAuthScopeLearnerRead, OAuthScopeLearnerWrite:
+		case OAuthScopeLearner, OAuthScopeLearnerRead, OAuthScopeLearnerWrite, OAuthScopeFormationRead, OAuthScopeFormationWrite:
 		default:
 			return "", fmt.Errorf("unsupported scope %q", scope)
 		}
@@ -45,38 +47,37 @@ func CanonicalOAuthScope(raw string) (string, error) {
 		}
 		return OAuthScopeLearner, nil
 	}
-	switch {
-	case seen[OAuthScopeLearnerRead] && seen[OAuthScopeLearnerWrite]:
-		return OAuthScopeLearnerReadWrite, nil
-	case seen[OAuthScopeLearnerRead]:
-		return OAuthScopeLearnerRead, nil
-	case seen[OAuthScopeLearnerWrite]:
-		return OAuthScopeLearnerWrite, nil
-	default:
-		return "", fmt.Errorf("unsupported scope combination")
+	var ordered []string
+	for _, scope := range []string{OAuthScopeLearnerRead, OAuthScopeLearnerWrite, OAuthScopeFormationRead, OAuthScopeFormationWrite} {
+		if seen[scope] {
+			ordered = append(ordered, scope)
+		}
 	}
+	return strings.Join(ordered, " "), nil
 }
 
 // OAuthScopeAllows reports whether a granted canonical scope contains one
 // exact granular capability. The legacy bundle is deliberately bounded to the
 // two learner capabilities known when it was issued.
 func OAuthScopeAllows(granted, required string) bool {
-	if required != OAuthScopeLearnerRead && required != OAuthScopeLearnerWrite {
-		return false
-	}
-	switch granted {
-	case OAuthScopeLearner, OAuthScopeLearnerReadWrite:
-		return true
-	case OAuthScopeLearnerRead:
-		return required == OAuthScopeLearnerRead
-	case OAuthScopeLearnerWrite:
-		return required == OAuthScopeLearnerWrite
+	switch required {
+	case OAuthScopeLearnerRead, OAuthScopeLearnerWrite, OAuthScopeFormationRead, OAuthScopeFormationWrite:
 	default:
-		// Context and persistence boundaries canonicalize grants before use.
-		// Exact matching here both fails closed for malformed values and keeps
-		// the per-tool authorization hot path allocation-free.
 		return false
 	}
+	if granted == OAuthScopeLearner {
+		return required == OAuthScopeLearnerRead || required == OAuthScopeLearnerWrite
+	}
+	canonical, err := CanonicalOAuthScope(granted)
+	if err != nil || canonical != granted {
+		return false
+	}
+	for _, scope := range strings.Fields(granted) {
+		if scope == required {
+			return true
+		}
+	}
+	return false
 }
 
 // OAuthScopeCanNarrow allows refresh-time preservation or least-privilege

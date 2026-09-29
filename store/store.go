@@ -142,6 +142,7 @@ var ErrIdempotencyResponseExpired = errors.New("mutation already completed; cach
 var ErrAvailabilityVersionConflict = errors.New("availability version conflict")
 var ErrCohortCapacityReached = errors.New("cohort capacity reached")
 var ErrFormationVersionImmutable = errors.New("formation version is immutable")
+var ErrFormationDomainLocked = errors.New("formation curriculum is managed by its author")
 
 // RateLimitBackend is the optional shared, fleet-wide store the auth
 // RateLimiter delegates token accounting to (opt-in via RATELIMIT_BACKEND).

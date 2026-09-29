@@ -57,6 +57,9 @@ func (l *PrincipalConcurrencyLimiter) release(principal string) {
 func (l *PrincipalConcurrencyLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		principal := GetLearnerID(r.Context())
+		if identity, ok := GetPrincipal(r.Context()); ok {
+			principal = identity.SessionBindingID()
+		}
 		if principal == "" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return

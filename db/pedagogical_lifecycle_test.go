@@ -87,6 +87,9 @@ func testPedagogicalDecisionDSAR(t *testing.T, legacy bool) {
 		t.Fatal(err)
 	}
 	reviewer := reviewWriter(reviewRoleForTest(t, s, "lifecycle-reviewer", models.RolePedagogyManager))
+	if err := s.AssignFormationTrainer(ctx, owner, "domain_formation_"+decision.DomainID, reviewer.MembershipID, true); err != nil {
+		t.Fatal(err)
+	}
 	opinion := recordReviewForTest(t, s, reviewer, "attempt-"+decision.ID, "lifecycle-opinion")
 	if err := s.CompleteAssessmentEvaluation(ctx, owner.LearnerID, opinion.AttemptID, completeBoundScore, "host", models.EvaluationMethodHostLLM, "{}", 1, true, now); err != nil {
 		t.Fatal(err)
