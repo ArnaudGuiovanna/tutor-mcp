@@ -42,3 +42,23 @@ CREATE POLICY tenant_isolation ON enrollment_migrations
  USING (tenant_id = current_setting('app.current_tenant', true))
  WITH CHECK (tenant_id = current_setting('app.current_tenant', true));
 `
+
+// The catalogue and memberships already have FORCE RLS when phase 2 is
+// installed. A normal migrator therefore cannot backfill all tenants with an
+// unscoped UPDATE. Preserve published migration checksums and repair empty
+// ownership under each tenant's policy, without disabling isolation.
+const postgresFormationOwnerBackfill = `
+DO $$
+DECLARE tenant_key text;
+        previous_tenant text := current_setting('app.current_tenant', true);
+BEGIN
+ FOR tenant_key IN SELECT id FROM tenants LOOP
+  PERFORM set_config('app.current_tenant', tenant_key, true);
+  UPDATE formations f SET owner_membership_id = COALESCE((
+   SELECT MIN(tm.id) FROM tenant_memberships tm
+   WHERE tm.tenant_id = f.tenant_id AND tm.user_id = f.created_by), '')
+  WHERE f.tenant_id = tenant_key AND f.owner_membership_id = '';
+ END LOOP;
+ PERFORM set_config('app.current_tenant', COALESCE(previous_tenant, ''), true);
+END $$;
+`

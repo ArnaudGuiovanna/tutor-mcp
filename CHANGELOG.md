@@ -44,6 +44,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Staff without learner profiles can complete OAuth and refresh tokens.
   Refresh also rechecks the membership version, status and MFA. Cohort reports
   count distinct enrollments when aggregating multiple concept states.
+- PostgreSQL upgrades recover existing formation ownership one tenant at a
+  time, preserving forced row-level security for a non-superuser migrator.
 - `--profile institution` requires `INSTITUTION_SIGNUP` (`operator` or `open`)
   on the API and closes self-registration into the shared legacy tenant.
 - Pedagogy managers and trainers now require two-factor authentication, like
