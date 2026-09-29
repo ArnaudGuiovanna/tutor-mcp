@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"tutor-mcp/db"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 // TestPostgresOAuthAuthorizationCodeExchange exercises the HTTP OAuth layer,
@@ -86,7 +88,11 @@ func TestPostgresOAuthAuthorizationCodeExchange(t *testing.T) {
 
 func postgresAuthTestStore(t *testing.T, baseDSN string) (*sql.DB, *db.Store) {
 	t.Helper()
-	const schema = "p1_auth_http"
+	return postgresAuthTestStoreInSchema(t, baseDSN, "p1_auth_http")
+}
+
+func postgresAuthTestStoreInSchema(t *testing.T, baseDSN, schema string) (*sql.DB, *db.Store) {
+	t.Helper()
 	admin, err := sql.Open("pgx", baseDSN)
 	if err != nil {
 		t.Fatal(err)
@@ -114,4 +120,68 @@ func postgresAuthTestStore(t *testing.T, baseDSN string) (*sql.DB, *db.Store) {
 		_ = admin.Close()
 	})
 	return raw, db.NewStoreWithDialect(raw, db.DialectPostgres)
+}
+
+// TestPostgresOAuthInstitutionMemberExchangeAndRefresh drives the real
+// /authorize, /token and refresh handlers for a member of a provisioned tenant
+// on PostgreSQL, where forced row-level security scopes every lookup to the
+// tenant bound to the credential.
+func TestPostgresOAuthInstitutionMemberExchangeAndRefresh(t *testing.T) {
+	baseDSN := os.Getenv("TUTOR_TEST_PG_DSN")
+	if baseDSN == "" {
+		t.Skip("set TUTOR_TEST_PG_DSN to run the PostgreSQL auth gate")
+	}
+	raw, store := postgresAuthTestStoreInSchema(t, baseDSN, "p1_auth_institution")
+	setTestSecret(t)
+	server := NewOAuthServer(store, "https://test.example", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.SetEmailSender(&testEmailSender{})
+
+	const (
+		tenantID    = "tenant_pg_acme"
+		clientID    = "pg-institution-client"
+		redirectURI = "https://client.example/callback"
+		email       = "alice@pg-acme.test"
+		password    = "strong-institution-password"
+		verifier    = "postgres-institution-pkce-verifier"
+	)
+	seedClient(t, store, clientID, redirectURI)
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if _, err := raw.Exec(`INSERT INTO tenants (id, slug, name, status, region, policy_json, created_at, updated_at)
+		VALUES ($1, 'pg-acme', 'PG Acme', 'active', 'default', '{}', $2, $2)`, tenantID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`INSERT INTO learners
+		(id, email, password_hash, objective, profile_json, created_at, email_verified_at, tenant_id, user_id, membership_id)
+		VALUES ('lrn_pg_alice', $1, $2, '', '{}', $3, $3, $4, 'usr_pg_alice', 'mem_pg_alice')`,
+		email, string(hash), now, tenantID); err != nil {
+		t.Fatal(err)
+	}
+
+	digest := sha256.Sum256([]byte(verifier))
+	code := driveAuthorizePost(t, server, clientID, redirectURI, base64.RawURLEncoding.EncodeToString(digest[:]), "S256", email, password)
+	status, body := exchangeToken(t, server, url.Values{
+		"grant_type": {"authorization_code"}, "resource": {testOAuthResource}, "code": {code},
+		"code_verifier": {verifier}, "client_id": {clientID}, "redirect_uri": {redirectURI},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("PostgreSQL institution token exchange = %d %v", status, body)
+	}
+	claims, err := VerifyJWTClaims(body["access_token"].(string), "https://test.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if principal, _ := claims.Principal(); principal.TenantID != tenantID || principal.MembershipID != "mem_pg_alice" {
+		t.Fatalf("PostgreSQL token bound to the wrong membership: %+v", principal)
+	}
+	status, refreshed := exchangeToken(t, server, url.Values{
+		"grant_type": {"refresh_token"}, "refresh_token": {body["refresh_token"].(string)},
+		"client_id": {clientID}, "resource": {testOAuthResource},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("PostgreSQL institution refresh = %d %v", status, refreshed)
+	}
 }
