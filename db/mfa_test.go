@@ -38,6 +38,17 @@ func TestTOTPEnrollmentVerificationAndReplayGate(t *testing.T) {
 	if stored == secret || integrationSecretKeyID(stored) != "mfa" {
 		t.Fatal("TOTP seed was not encrypted")
 	}
+	enrolledAt := time.Date(2026, time.August, 12, 11, 59, 0, 0, time.UTC)
+	enrollCode, err := totpCode(secret, enrolledAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.VerifyTOTP(ctx, owner.TenantScope(), enrollCode, enrolledAt); err == nil {
+		t.Fatal("unconfirmed TOTP enrollment accepted a code")
+	}
+	if _, err := s.ConfirmTOTPEnrollment(ctx, owner, credentialID, enrollCode, enrolledAt); err != nil {
+		t.Fatal(err)
+	}
 	at := time.Date(2026, time.August, 12, 12, 0, 15, 0, time.UTC)
 	code, err := totpCode(secret, at)
 	if err != nil {

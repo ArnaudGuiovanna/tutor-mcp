@@ -5,13 +5,10 @@ package db
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -34,36 +31,20 @@ func (s *Store) CreateTenantInvitation(ctx context.Context, actor models.Princip
 	if err != nil {
 		return nil, "", fmt.Errorf("create invitation: %w", err)
 	}
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		return nil, "", err
-	}
-	rawToken := base64.RawURLEncoding.EncodeToString(raw)
-	tokenHash := opaqueTokenHash(rawToken)
-	id, err := generateID()
-	if err != nil {
-		return nil, "", err
-	}
 	now := time.Now().UTC()
 	invitation := &models.TenantInvitation{
-		ID: id, TenantID: actor.TenantID, Email: normalizedEmail,
+		TenantID: actor.TenantID, Email: normalizedEmail,
 		NormalizedEmail: normalizedEmail, Roles: append([]string(nil), roles...),
 		Status: "pending", CreatedBy: actor.UserID, CreatedAt: now, ExpiresAt: expiresAt.UTC(),
 	}
+	var rawToken string
 	err = s.WithTenantTx(ctx, actor.TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {
 		txs := scoped.(*Store)
-		if _, err := txs.exec(txCtx, `INSERT INTO tenant_invitations
-            (id, token_hash, tenant_id, email, normalized_email, roles_json, status,
-             created_by, created_at, expires_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
-			id, tokenHash, actor.TenantID, normalizedEmail, normalizedEmail, rolesJSON,
-			actor.UserID, now, expiresAt.UTC()); err != nil {
-			return fmt.Errorf("persist invitation: %w", err)
+		id, token, err := txs.insertInvitation(txCtx, actor.TenantID, normalizedEmail, rolesJSON, actor.UserID, expiresAt)
+		if err != nil {
+			return err
 		}
-		if _, err := txs.exec(txCtx, `INSERT INTO invitation_tenant_routes (token_hash, tenant_id, expires_at)
-            VALUES (?, ?, ?)`, tokenHash, actor.TenantID, expiresAt.UTC()); err != nil {
-			return fmt.Errorf("persist invitation route: %w", err)
-		}
+		invitation.ID, rawToken = id, token
 		return txs.AppendAuditEvent(txCtx, actor, models.AuditEvent{
 			Action: "membership.invite", TargetType: "invitation", TargetID: id,
 			DetailsJSON: `{"roles":` + rolesJSON + `}`,
@@ -77,103 +58,102 @@ func (s *Store) CreateTenantInvitation(ctx context.Context, actor models.Princip
 
 func (s *Store) AcceptTenantInvitation(ctx context.Context, rawToken, userID string) (*models.TenantMembership, error) {
 	tokenHash := opaqueTokenHash(rawToken)
-	var tenantID string
-	err := s.queryRow(ctx, `SELECT tenant_id FROM invitation_tenant_routes
-        WHERE token_hash = ? AND expires_at > ?`, tokenHash, time.Now().UTC()).Scan(&tenantID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("accept invitation: invalid invitation")
-	}
+	tenantID, err := s.invitationTenant(ctx, tokenHash)
 	if err != nil {
-		return nil, fmt.Errorf("accept invitation route: %w", err)
+		return nil, fmt.Errorf("accept invitation: invalid invitation")
 	}
 	var membership *models.TenantMembership
 	err = s.withTenantControlTx(ctx, tenantID, userID, func(txs *Store) error {
-		var invitationID, normalizedEmail, rolesJSON, createdBy string
-		var expiresAt time.Time
-		if err := txs.queryRow(ctx, `SELECT id, normalized_email, roles_json, created_by, expires_at
-            FROM tenant_invitations
-            WHERE token_hash = ? AND tenant_id = ? AND status = 'pending' AND expires_at > ?`,
-			tokenHash, tenantID, time.Now().UTC()).Scan(
-			&invitationID, &normalizedEmail, &rolesJSON, &createdBy, &expiresAt); err != nil {
-			return fmt.Errorf("accept invitation: invalid invitation")
-		}
-		var user models.User
-		var verified sql.NullTime
-		if err := txs.queryRow(ctx, `SELECT id, email, normalized_email, password_hash, status,
-                email_verified_at, token_version, created_at, updated_at
-            FROM users WHERE id = ?`, userID).Scan(
-			&user.ID, &user.Email, &user.NormalizedEmail, &user.PasswordHash, &user.Status,
-			&verified, &user.TokenVersion, &user.CreatedAt, &user.UpdatedAt); err != nil {
-			return fmt.Errorf("accept invitation: invalid user")
-		}
-		if user.Status != models.UserStatusActive || !verified.Valid || user.NormalizedEmail != normalizedEmail {
-			return fmt.Errorf("accept invitation: verified identity does not match invitation")
-		}
-		var roles []string
-		if err := json.Unmarshal([]byte(rolesJSON), &roles); err != nil {
-			return err
-		}
-		membershipID, err := generateID()
-		if err != nil {
-			return err
-		}
-		now := time.Now().UTC()
-		learnerIDString := ""
-		if containsRole(roles, models.RoleLearner) {
-			learnerIDString, err = generateID()
-			if err != nil {
-				return err
-			}
-		}
-		mfaRequired := 0
-		if containsRole(roles, models.RoleOwner) || containsRole(roles, models.RoleAdmin) {
-			mfaRequired = 1
-		}
-		if learnerIDString != "" {
-			syntheticEmail := tenantID + "+" + learnerIDString + "@profile.invalid"
-			if _, err := txs.exec(ctx, `INSERT INTO learners
-                (id, email, password_hash, objective, profile_json, created_at, email_verified_at,
-                 tenant_id, user_id, membership_id)
-                VALUES (?, ?, '', '', '{}', ?, ?, ?, ?, ?)`,
-				learnerIDString, syntheticEmail, now, verified.Time, tenantID, userID, membershipID); err != nil {
-				return fmt.Errorf("create invited learner profile: %w", err)
-			}
-			// The rolling-deployment learner trigger materializes the membership
-			// first to satisfy its learner FK. Replace its compatibility defaults
-			// with the exact invitation authorization in the same transaction.
-			if _, err := txs.exec(ctx, `UPDATE tenant_memberships
-				SET roles_json = ?, status = 'active', version = 1,
-				    mfa_required = ?, updated_at = ?
-				WHERE tenant_id = ? AND id = ? AND user_id = ? AND learner_id = ?`,
-				rolesJSON, mfaRequired, now, tenantID, membershipID, userID, learnerIDString); err != nil {
-				return fmt.Errorf("authorize invited membership: %w", err)
-			}
-		} else if _, err := txs.exec(ctx, `INSERT INTO tenant_memberships
-			(id, tenant_id, user_id, learner_id, roles_json, status, version,
-			 mfa_required, created_at, updated_at)
-			VALUES (?, ?, ?, NULL, ?, 'active', 1, ?, ?, ?)`,
-			membershipID, tenantID, userID, rolesJSON, mfaRequired, now, now); err != nil {
-			return fmt.Errorf("create invited membership: %w", err)
-		}
-		if _, err := txs.exec(ctx, `UPDATE tenant_invitations
-            SET status = 'accepted', accepted_at = ?, accepted_user_id = ?, accepted_membership_id = ?
-            WHERE id = ? AND status = 'pending'`, now, userID, membershipID, invitationID); err != nil {
-			return err
-		}
-		if _, err := txs.exec(ctx, `DELETE FROM invitation_tenant_routes WHERE token_hash = ?`, tokenHash); err != nil {
-			return err
-		}
-		membership = &models.TenantMembership{
-			ID: membershipID, TenantID: tenantID, UserID: userID, LearnerID: learnerIDString,
-			Roles: roles, Status: models.MembershipStatusActive, Version: 1,
-			CreatedAt: now, UpdatedAt: now,
-		}
-		return txs.AppendAuditEvent(ctx, models.Principal{
-			UserID: userID, TenantID: tenantID, MembershipID: membershipID,
-			LearnerID: learnerIDString, Roles: roles, Scopes: []string{models.OAuthScopeLearner}, TokenVersion: 1,
-		}, models.AuditEvent{Action: "membership.accept", TargetType: "membership", TargetID: membershipID})
+		var acceptErr error
+		membership, acceptErr = txs.acceptInvitationTx(ctx, tokenHash, tenantID, userID)
+		return acceptErr
 	})
 	if err != nil {
+		return nil, err
+	}
+	return membership, nil
+}
+
+// acceptInvitationTx binds a pending invitation to an existing verified user
+// whose address matches it. It runs inside a tenant control transaction.
+func (s *Store) acceptInvitationTx(ctx context.Context, tokenHash, tenantID, userID string) (*models.TenantMembership, error) {
+	var invitationID, normalizedEmail, rolesJSON, createdBy string
+	var expiresAt time.Time
+	if err := s.queryRow(ctx, `SELECT id, normalized_email, roles_json, created_by, expires_at
+        FROM tenant_invitations
+        WHERE token_hash = ? AND tenant_id = ? AND status = 'pending' AND expires_at > ?`,
+		tokenHash, tenantID, time.Now().UTC()).Scan(
+		&invitationID, &normalizedEmail, &rolesJSON, &createdBy, &expiresAt); err != nil {
+		return nil, fmt.Errorf("accept invitation: invalid invitation")
+	}
+	var user models.User
+	var verified sql.NullTime
+	if err := s.queryRow(ctx, `SELECT id, email, normalized_email, password_hash, status,
+            email_verified_at, token_version, created_at, updated_at
+        FROM users WHERE id = ?`, userID).Scan(
+		&user.ID, &user.Email, &user.NormalizedEmail, &user.PasswordHash, &user.Status,
+		&verified, &user.TokenVersion, &user.CreatedAt, &user.UpdatedAt); err != nil {
+		return nil, fmt.Errorf("accept invitation: invalid user")
+	}
+	if user.Status != models.UserStatusActive || !verified.Valid || user.NormalizedEmail != normalizedEmail {
+		return nil, fmt.Errorf("accept invitation: verified identity does not match invitation")
+	}
+	var existing int
+	if err := s.queryRow(ctx, `SELECT COUNT(*) FROM tenant_memberships
+		WHERE tenant_id = ? AND user_id = ?`, tenantID, userID).Scan(&existing); err != nil {
+		return nil, err
+	}
+	if existing > 0 {
+		return nil, storeport.ErrAlreadyMember
+	}
+	var roles []string
+	if err := json.Unmarshal([]byte(rolesJSON), &roles); err != nil {
+		return nil, err
+	}
+	membershipID, err := generateID()
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	mfaRequired := 0
+	if models.RolesRequireMFA(roles) {
+		mfaRequired = 1
+	}
+	if _, err := s.exec(ctx, `INSERT INTO tenant_memberships
+		(id, tenant_id, user_id, learner_id, roles_json, status, version,
+		 mfa_required, created_at, updated_at)
+		VALUES (?, ?, ?, NULL, ?, 'active', 1, ?, ?, ?)`,
+		membershipID, tenantID, userID, rolesJSON, mfaRequired, now, now); err != nil {
+		return nil, fmt.Errorf("create invited membership: %w", err)
+	}
+	scope := models.TenantScope{TenantID: tenantID, UserID: userID, MembershipID: membershipID}
+	learnerID := ""
+	if containsRole(roles, models.RoleLearner) {
+		if err := s.createInvitedLearnerProfile(ctx, scope, verified.Time); err != nil {
+			return nil, err
+		}
+		if err := s.queryRow(ctx, `SELECT COALESCE(learner_id, '') FROM tenant_memberships
+			WHERE tenant_id = ? AND id = ?`, tenantID, membershipID).Scan(&learnerID); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := s.exec(ctx, `UPDATE tenant_invitations
+        SET status = 'accepted', accepted_at = ?, accepted_user_id = ?, accepted_membership_id = ?
+        WHERE id = ? AND status = 'pending'`, now, userID, membershipID, invitationID); err != nil {
+		return nil, err
+	}
+	if _, err := s.exec(ctx, `DELETE FROM invitation_tenant_routes WHERE token_hash = ?`, tokenHash); err != nil {
+		return nil, err
+	}
+	membership := &models.TenantMembership{
+		ID: membershipID, TenantID: tenantID, UserID: userID, LearnerID: learnerID,
+		Roles: roles, Status: models.MembershipStatusActive, Version: 1,
+		MFARequired: mfaRequired == 1, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := s.AppendAuditEvent(ctx, models.Principal{
+		UserID: userID, TenantID: tenantID, MembershipID: membershipID,
+		LearnerID: learnerID, Roles: roles, Scopes: []string{models.OAuthScopeLearner}, TokenVersion: 1,
+	}, models.AuditEvent{Action: "membership.accept", TargetType: "membership", TargetID: membershipID}); err != nil {
 		return nil, err
 	}
 	return membership, nil

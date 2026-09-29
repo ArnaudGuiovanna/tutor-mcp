@@ -46,3 +46,13 @@ subject to the general rule.
 configuration, touches no tenant data and only changes the SQL projection that
 derives effective evaluation trust. It is part of the fingerprint for the same
 reason.
+
+Institution accounts (browser console, invitations and self-service signup)
+resolve their tenant from a typed secret, like the credentials above:
+`ConsoleSessionCredential`, `InvitationCredential` and `SignupCredential`
+carry the raw link or cookie token and the store keeps only its digest. Two
+global catalog reads are added to the fingerprint: `TenantSlugAvailable`
+checks whether an institution identifier is free before a signup email is
+sent, and `PlanIsActive` validates the configured signup plan at startup.
+Neither reads tenant-owned data. The MFA ceremony, console membership reads
+and member administration take a `models.TenantScope` or `models.Principal`.

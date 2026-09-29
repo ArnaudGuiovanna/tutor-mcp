@@ -28,6 +28,7 @@ import (
 // signature drifts from store.Store (or the interface was mis-transcribed), this
 // line fails to build — caught here, never at runtime.
 var _ store.Store = (*Store)(nil)
+var _ store.InstitutionAccountStore = (*Store)(nil)
 
 // sqlExecutor is implemented by both *sql.DB and *sql.Tx, so Store methods run
 // transparently on a connection or inside a WithTx transaction.
