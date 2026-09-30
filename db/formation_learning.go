@@ -117,9 +117,23 @@ func (s *Store) createFormationDomain(ctx context.Context, enrollment *models.En
 func (s *Store) formationLearningScope(ctx context.Context, learnerID, domainID, key string) (learningScopeIDs, bool, error) {
 	var out learningScopeIDs
 	var status string
-	err := s.queryRow(ctx, `SELECT d.tenant_id, d.formation_enrollment_id, e.status FROM domains d
+	if s.dialect == DialectPostgres {
+		// Learning events and version migration already lock the domain first.
+		// Serialize formation writes and leave on that same row, then read
+		// enrollment status in a fresh statement after any lock wait.
+		var id string
+		err := s.queryRow(ctx, `SELECT id FROM domains WHERE id = ? AND learner_id = ? AND formation_enrollment_id <> '' AND deleted_at IS NULL FOR UPDATE`, domainID, learnerID).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return out, false, nil
+		}
+		if err != nil {
+			return out, true, err
+		}
+	}
+	query := `SELECT d.tenant_id, d.formation_enrollment_id, e.status FROM domains d
 	 JOIN enrollments e ON e.tenant_id = d.tenant_id AND e.id = d.formation_enrollment_id
-	 WHERE d.id = ? AND d.learner_id = ? AND d.formation_enrollment_id <> '' AND d.deleted_at IS NULL`, domainID, learnerID).Scan(&out.TenantID, &out.EnrollmentID, &status)
+	 WHERE d.id = ? AND d.learner_id = ? AND d.formation_enrollment_id <> '' AND d.deleted_at IS NULL`
+	err := s.queryRow(ctx, query, domainID, learnerID).Scan(&out.TenantID, &out.EnrollmentID, &status)
 	if errors.Is(err, sql.ErrNoRows) {
 		return out, false, nil
 	}

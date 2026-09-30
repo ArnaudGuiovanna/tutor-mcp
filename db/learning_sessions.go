@@ -86,15 +86,17 @@ func (s *Store) OpenLearningSession(ctx context.Context, learnerID, domainID, re
 
 	var result *models.LearningSession
 	err := s.inTx(ctx, nil, func(txs *Store) error {
+		// Lock a formation domain before sessions, as leave does. Its
+		// enrollment must remain active until creation/resumption commits.
+		scope, err := txs.resolveLearningScope(ctx, learnerID, domainID, "")
+		if err != nil {
+			return fmt.Errorf("resolve session enrollment: %w", err)
+		}
 		// An abandoned session must not be resumed as if the learner never
 		// left: close it first so the partial unique index accepts a fresh
 		// open session and OVERLOAD reasons about the new one.
 		if err := txs.closeStaleLearningSessions(ctx, learnerID, now); err != nil {
 			return err
-		}
-		scope, err := txs.resolveLearningScope(ctx, learnerID, domainID, "")
-		if err != nil {
-			return fmt.Errorf("resolve session enrollment: %w", err)
 		}
 		if _, err := txs.exec(ctx,
 			`INSERT INTO learning_sessions

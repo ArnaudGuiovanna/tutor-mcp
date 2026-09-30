@@ -63,7 +63,7 @@ func registerFeynmanChallenge(server *mcp.Server, deps *Deps) {
 				return r, nil, nil
 			}
 			deps.Logger.Info("feynman_challenge: no active domain - needs setup", "learner", learnerID)
-			r, _ := noActiveDomainResult()
+			r, _ := noActiveDomainResult(deps)
 			return r, nil, nil
 		}
 		if err := validateConceptInDomain(domain, concept); err != nil {

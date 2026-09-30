@@ -86,7 +86,7 @@ func registerSetGoalRelevance(server *mcp.Server, deps *Deps) {
 				return r, nil, nil
 			}
 			deps.Logger.Info("set_goal_relevance: no active domain - needs setup", "learner", learnerID)
-			r, _ := noActiveDomainResult()
+			r, _ := noActiveDomainResult(deps)
 			return r, nil, nil
 		}
 
@@ -205,7 +205,7 @@ func registerGetGoalRelevance(server *mcp.Server, deps *Deps) {
 				return r, nil, nil
 			}
 			deps.Logger.Info("get_goal_relevance: no active domain - needs setup", "learner", learnerID)
-			r, _ := noActiveDomainResult()
+			r, _ := noActiveDomainResult(deps)
 			return r, nil, nil
 		}
 

@@ -27,6 +27,12 @@ func (s *Store) lockCurriculumForEvidence(ctx context.Context, learnerID, domain
 	if domainID == "" {
 		return 0, nil
 	} // legacy unscoped internal observations
+	// Formation evidence takes its exclusive lifecycle lock before the
+	// curriculum's shared lock, so concurrent writers cannot deadlock while
+	// upgrading and a cancelled enrollment cannot receive new evidence.
+	if _, _, err := s.formationLearningScope(ctx, learnerID, domainID, ""); err != nil {
+		return 0, err
+	}
 	query := `SELECT graph_version, graph_json FROM domains WHERE id = ? AND learner_id = ? AND deleted_at IS NULL`
 	if s.dialect == DialectPostgres {
 		query += ` FOR SHARE`

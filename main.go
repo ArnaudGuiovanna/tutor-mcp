@@ -631,8 +631,20 @@ func mountInstitutionAccounts(mux *http.ServeMux, oauthServer *auth.OAuthServer,
 	login := func(handler http.HandlerFunc) http.Handler { return auth.RateLimitMiddleware(loginLimiter, handler) }
 	console := func(handler http.HandlerFunc) http.Handler { return auth.RateLimitMiddleware(consoleLimiter, handler) }
 	account := func(handler http.HandlerFunc) http.Handler { return auth.RateLimitMiddleware(accountLimiter, handler) }
+	mux.Handle("GET /learn", console(oauthServer.HandleLearnerHome))
+	mux.Handle("GET /learn/formations/{cohortID}", console(oauthServer.HandleLearnerFormation))
+	mux.Handle("GET /learn/login", page(oauthServer.HandleLearnerLoginGet))
+	mux.Handle("POST /learn/login", login(oauthServer.HandleLearnerLoginPost))
+	mux.Handle("POST /learn/logout", console(oauthServer.HandleLearnerLogoutPost))
+	mux.Handle("POST /learn/enrollment", console(oauthServer.HandleLearnerEnrollmentPost))
+	mux.Handle("GET /learn/mfa", console(oauthServer.HandleLearnerMFA))
+	mux.Handle("POST /learn/mfa", login(oauthServer.HandleLearnerMFA))
+	mux.Handle("GET /learn/mfa/setup", console(oauthServer.HandleLearnerMFA))
+	mux.Handle("POST /learn/mfa/setup", login(oauthServer.HandleLearnerMFA))
 
 	mux.Handle("GET /console", console(oauthServer.HandleConsoleHome))
+	mux.Handle("GET /console/admissions", console(oauthServer.HandleConsoleAdmissions))
+	mux.Handle("POST /console/admissions", console(oauthServer.HandleConsoleAdmissions))
 	mux.Handle("GET /console/members", console(oauthServer.HandleConsoleHome))
 	mux.Handle("GET /console/login", page(oauthServer.HandleConsoleLoginGet))
 	mux.Handle("POST /console/login", login(oauthServer.HandleConsoleLoginPost))

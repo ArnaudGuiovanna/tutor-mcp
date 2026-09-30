@@ -1900,6 +1900,7 @@ END;`,
 	out = append(out, migration{Version: "0071_institution_accounts", Body: sqliteInstitutionAccountsMigration})
 	out = append(out, migration{Version: "0072_staff_oauth", Body: sqliteStaffOAuthMigration})
 	out = append(out, migration{Version: "0073_formation_bridge", Body: formationBridgeMigration})
+	out = append(out, migration{Version: "0074_learner_formations", Body: learnerFormationsMigration})
 	return out
 }
 

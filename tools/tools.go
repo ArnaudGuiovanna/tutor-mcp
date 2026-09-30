@@ -37,6 +37,9 @@ var toolRegistrationLocalModes sync.Map
 var toolRegistrationOAuthModes sync.Map // map[*mcp.Server]bool; populated only during RegisterTools
 
 var readOnlyTools = map[string]bool{
+	"list_available_formations":      true,
+	"get_my_formations":              true,
+	"get_learner_formation":          true,
 	"get_formation_version":          true,
 	"get_pending_alerts":             true,
 	"check_mastery":                  true,
@@ -68,6 +71,8 @@ var readWriteTools = map[string]bool{
 }
 
 var writeTools = map[string]bool{
+	"join_formation":                  true,
+	"leave_formation":                 true,
 	"draft_formation":                 true,
 	"add_formation_concepts":          true,
 	"publish_formation":               true,
@@ -398,14 +403,23 @@ func safeErrorResult(logger *slog.Logger, publicMsg string, err error) (*mcp.Cal
 // by issuing `init_domain`. For an explicit DomainID that does not match the
 // learner, callers should keep emitting errorResult("domain not found") —
 // that's a genuine dev-facing 404, not a setup precondition.
-func noActiveDomainResult() (*mcp.CallToolResult, any) {
+func noActiveDomainResult(deps *Deps) (*mcp.CallToolResult, any) {
 	payload := map[string]any{
 		"needs_domain_setup":  true,
 		"reason":              "no active domain for this learner",
-		"next_action_for_llm": "appelle init_domain(name, concepts, prerequisites)",
+		"next_action_for_llm": domainSetupInstruction(deps),
 	}
 	r, _ := jsonResult(payload)
 	return r, payload
+}
+
+// Institution learners choose an offered cohort instead of trying to create
+// a free domain, which their institution normally disables.
+func domainSetupInstruction(deps *Deps) string {
+	if deps != nil && deps.Institution {
+		return "Call get_my_formations or list_available_formations, help the learner choose a cohort, then call join_formation only with their agreement. Resume using the returned domain_id."
+	}
+	return "appelle init_domain(name, concepts, prerequisites)"
 }
 
 // RegisterTools registers all MCP tools and prompts on the given server.
@@ -418,6 +432,7 @@ func RegisterTools(server *mcp.Server, deps *Deps) {
 	addIdempotencyMiddleware(server, deps)
 	if deps != nil && deps.Institution {
 		registerFormationTools(server, deps)
+		registerLearnerFormationTools(server, deps)
 	}
 	registerStartLearningSession(server, deps)
 	registerGetPendingAlerts(server, deps)

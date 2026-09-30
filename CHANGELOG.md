@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- Institution learner portal at `/learn` and MCP tools
+  `list_available_formations`, `get_my_formations`, `get_learner_formation`,
+  `join_formation` and `leave_formation`. Learners select a published cohort,
+  join according to its admission policy and resume their tutor domain.
+- Formation invitations and approval decisions at `/console/admissions` and
+  the console catalog API. Pending requests and grants reserve no seat;
+  enrollment confirmation reserves capacity atomically. Leaving releases the
+  seat and preserves progress; rejoining the same cohort restores its domain
+  and history. Retry receipts prevent delayed requests from undoing a rejoin.
+- Learner browser sessions with independent cookie/credential namespaces,
+  institution selection, single-use CSRF and MFA when required. The institution
+  acceptance test now covers learner enrollment through both web and MCP,
+  approval decisions, seat release and preserved progress after rejoining.
 - Institution formation authoring through `draft_formation`,
   `add_formation_concepts`, `get_formation_version` and `publish_formation`, with
   explicit `formation:read` / `formation:write` OAuth grants. A formateur manages
@@ -37,6 +50,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Changed
 
+- Institution learners without an active domain are guided to the formation
+  catalog. Private compatibility formations are excluded from the shared
+  learner catalog, and cancelled enrollments cannot be resumed by unarchiving
+  their domain directly.
 - In institution mode, administrative JSON routes move from `/admin/` to
   `/console/admin/` and require an MFA-verified console cookie. Writes also need
   a single-use `X-CSRF-Token` obtained from `GET /console/api-csrf`. MCP OAuth

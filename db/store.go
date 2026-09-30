@@ -1358,7 +1358,9 @@ func (s *Store) ArchiveDomain(ctx context.Context, domainID, learnerID string) e
 
 func (s *Store) UnarchiveDomain(ctx context.Context, domainID, learnerID string) error {
 	result, err := s.exec(ctx,
-		`UPDATE domains SET archived = 0 WHERE id = ? AND learner_id = ? AND deleted_at IS NULL`,
+		`UPDATE domains SET archived = 0 WHERE id = ? AND learner_id = ? AND deleted_at IS NULL
+		 AND (formation_enrollment_id = '' OR EXISTS (SELECT 1 FROM enrollments e
+		 WHERE e.tenant_id = domains.tenant_id AND e.id = domains.formation_enrollment_id AND e.status = 'active'))`,
 		domainID, learnerID,
 	)
 	if err != nil {

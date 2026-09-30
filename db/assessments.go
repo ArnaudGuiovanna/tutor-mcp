@@ -304,6 +304,9 @@ func (s *Store) SubmitAssessmentAttempt(ctx context.Context, learnerID, attemptI
 		if err != nil {
 			return err
 		}
+		if _, _, err := txs.formationLearningScope(ctx, learnerID, discovered.DomainID, ""); err != nil {
+			return err
+		}
 		if discovered.EventProtocol == models.LearningEventProtocol {
 			if err := txs.lockLearningEventStream(ctx, learnerID, discovered.DomainID); err != nil {
 				return err

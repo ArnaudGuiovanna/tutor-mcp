@@ -54,7 +54,7 @@ func registerCheckMastery(server *mcp.Server, deps *Deps) {
 				r, _ := errorResult("domain not found")
 				return r, nil, nil
 			}
-			r, payload := noActiveDomainResult()
+			r, payload := noActiveDomainResult(deps)
 			return r, payload, nil
 		}
 		if err := validateConceptInDomain(domain, concept); err != nil {

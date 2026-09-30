@@ -48,7 +48,7 @@ func (s *Store) formationAccess(ctx context.Context, actor models.Principal, kin
 		}
 		return nil, err
 	}
-	resource := models.AuthorizationResource{TenantID: actor.TenantID, FormationID: f.ID, OwnerMembershipID: f.OwnerMembershipID}
+	resource := models.AuthorizationResource{TenantID: actor.TenantID, FormationID: f.ID, OwnerMembershipID: f.OwnerMembershipID, OwnerUserID: actor.UserID}
 	var assigned int
 	if err := s.queryRow(ctx, `SELECT COUNT(*) FROM formation_trainers WHERE tenant_id = ? AND formation_id = ? AND membership_id = ?`, actor.TenantID, f.ID, actor.MembershipID).Scan(&assigned); err != nil {
 		return nil, err

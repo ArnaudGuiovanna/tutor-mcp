@@ -115,6 +115,12 @@ func TestFormationScopesDoNotInheritLearnerBundle(t *testing.T) {
 		{"draft_formation", "formation:write", true},
 		{"get_formation_version", "formation:read", true},
 		{"get_next_activity", "formation:read formation:write", false},
+		{"join_formation", "learner:read", false},
+		{"leave_formation", "formation:write", false},
+		{"get_my_formations", "learner:write", false},
+		{"list_available_formations", "learner:read", true},
+		{"get_learner_formation", "learner:read", true},
+		{"join_formation", "learner:write", true},
 	} {
 		t.Run(tc.tool+"/"+tc.grant, func(t *testing.T) {
 			called := false

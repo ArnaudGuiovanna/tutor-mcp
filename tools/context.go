@@ -207,6 +207,9 @@ func registerGetLearnerContext(server *mcp.Server, deps *Deps) {
 			"archived_domains":   archivedList,
 			"progress_narrative": narrative,
 		}
+		if needsDomainSetup && deps.Institution {
+			payload["next_action_for_llm"] = domainSetupInstruction(deps)
+		}
 		// An interrupted client can resume the canonical durable session
 		// instead of inventing a second correlation ID.
 		activeSession, sessionErr := deps.Store.GetActiveLearningSession(ctx, learnerID)

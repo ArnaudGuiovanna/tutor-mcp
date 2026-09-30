@@ -48,7 +48,7 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 		Name: "get_next_activity",
 		Description: "Determine the next optimal activity for the learner and aggregate all routing context: metacognitive_mirror, tutor_mode, motivation_brief, active misconceptions. Accounts for the current session to avoid repeating the same concept. " +
 			"When to call: this is the main tool of the learning cycle; it already includes alert-aware routing, metacognitive_mirror, tutor_mode and motivation_brief. " +
-			"When NOT to call: if another tool just returned needs_domain_setup=true (call init_domain first); do not call get_pending_alerts or get_metacognitive_mirror in the same turn unless the learner explicitly asks for those raw views. " +
+			"When NOT to call: if another tool just returned needs_domain_setup=true (follow the returned setup guidance first); do not call get_pending_alerts or get_metacognitive_mirror in the same turn unless the learner explicitly asks for those raw views. " +
 			"Precondition: a domain must exist; otherwise needs_domain_setup=true is returned with a setup_domain activity. " +
 			"Returns: {needs_domain_setup, session_id, domain_id, domain_name, intent, intent_status, activity, pedagogical_contract, consolidation_request, goal_relevance_status, session_concepts_done, metacognitive_mirror, tutor_mode, active_misconceptions, known_misconception_types, motivation_brief, mastery_evidence, mastery_uncertainty, transfer_profile, degraded_components?}.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params GetNextActivityParams) (*mcp.CallToolResult, any, error) {
@@ -97,12 +97,16 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 				r, _ := errorResult("domain not found")
 				return r, nil, nil
 			}
+			setupPrompt := "The learner has no domain yet. Analyse their objective, break it down into concepts, and call init_domain()."
+			if deps.Institution {
+				setupPrompt = domainSetupInstruction(deps)
+			}
 			r, _ := jsonResult(map[string]interface{}{
 				"needs_domain_setup": true,
 				"activity": models.Activity{
 					Type:         models.ActivitySetupDomain,
 					Rationale:    "no domain configured",
-					PromptForLLM: "The learner has no domain yet. Analyse their objective, break it down into concepts, and call init_domain().",
+					PromptForLLM: setupPrompt,
 				},
 			})
 			return r, nil, nil

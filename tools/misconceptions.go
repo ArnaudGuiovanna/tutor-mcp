@@ -37,7 +37,7 @@ func registerGetMisconceptions(server *mcp.Server, deps *Deps) {
 				r, _ := errorResult(fmt.Sprintf("domain not found: %s", params.DomainID))
 				return r, nil, nil
 			}
-			r, payload := noActiveDomainResult()
+			r, payload := noActiveDomainResult(deps)
 			return r, payload, nil
 		}
 

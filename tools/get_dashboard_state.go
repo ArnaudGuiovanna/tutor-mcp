@@ -92,7 +92,7 @@ func registerGetDashboardState(server *mcp.Server, deps *Deps) {
 			if len(allDomains) == 0 {
 				// Issue #33/#90: emit the canonical needs_domain_setup payload
 				// so the LLM can branch consistently across chat-side tools.
-				r, _ := noActiveDomainResult()
+				r, _ := noActiveDomainResult(deps)
 				return r, nil, nil
 			}
 			domains = allDomains

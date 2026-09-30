@@ -312,15 +312,34 @@ def main():
         {'formation_version_id': version, 'name': 'Smoke cohort', 'capacity': 10}, 'cohort')
     check(status == 201, f'create cohort {status}: {cohort}')
     cohort_id = cohort['cohort']['id']
+    bob_browser = Browser()
+    _, _, page = bob_browser.get('/learn/login')
+    status, path, page = bob_browser.post('/learn/login', {
+        'csrf_token': csrf(page), 'email': 'bob@acme.test', 'password': 'bob-password-2026'})
+    check(status == 200 and path == '/learn' and 'Smoke cohort' in page, 'learner portal login/catalog')
     enrollments = []
     for name, token in [('alice', learner_token), ('bob', bob_token)]:
-        status, enrollment = console_api(manager, 'POST', f'/admin/catalog/cohorts/{cohort_id}/enrollments',
-            {'membership_id': claims(token)['membership_id'], 'objectives': {}}, 'enroll-' + name)
-        check(status == 201, f'enroll {name} {status}: {enrollment}')
-        enrollment = enrollment['enrollment']
+        learner = mcp_client(token)
+        catalog = tool(learner, 'list_available_formations', {})
+        check(any(f['cohort_id'] == cohort_id for f in catalog['items']), 'MCP catalog missing cohort')
+        check(not any(f['name'] == 'Legacy recovery' for f in catalog['items']), 'private recovery data leaked to catalog')
+        denied = learner('tools/call', {'name': 'join_formation', 'arguments': {
+            'cohort_id': cohort_id, 'idempotency_key': 'uninvited-' + name}})
+        check(denied.get('isError'), 'invitation policy bypassed')
+        status, admission = console_api(manager, 'POST', f'/admin/catalog/cohorts/{cohort_id}/admissions',
+            {'membership_id': claims(token)['membership_id'], 'decision': 'invited', 'expected_version': 0}, 'invite-' + name)
+        check(status == 201, f'formation invitation {status}: {admission}')
+        if name == 'alice':
+            enrollment = tool(learner, 'join_formation', {'cohort_id': cohort_id, 'idempotency_key': 'self-join-alice'})['enrollment']
+        else:
+            _, _, page = bob_browser.get('/learn')
+            status, _, page = bob_browser.post('/learn/enrollment', {
+                'csrf_token': csrf(page), 'cohort_id': cohort_id, 'action': 'join', 'idempotency_key': 'web-join-bob'})
+            check(status == 200 and 'Leave and keep my progress' in page, f'web enrollment {status}')
+            own = tool(learner, 'get_my_formations', {})
+            enrollment = next(f['enrollment'] for f in own['items'] if f['cohort_id'] == cohort_id)
         check(bool(enrollment.get('domain_id')), 'enrollment did not create a tutor domain')
         enrollments.append(enrollment)
-        learner = mcp_client(token)
         snapshot = tool(learner, 'get_curriculum_snapshot', {'domain_id': enrollment['domain_id']})
         # The tutor returns an immutable curriculum snapshot.
         curriculum = snapshot.get('curriculum') or snapshot.get('snapshot') or snapshot
@@ -346,6 +365,52 @@ def main():
           f'cohort report counts concepts instead of learners: {report}')
     check(report['average_mastery'] > 0.1001, f'answers did not advance cohort mastery beyond its initial value: {report}')
     print('PASS: staff-only MCP authoring, console-only administration, shared concepts and two learners tutoring')
+
+    # Leave/rejoin through both transports preserves the domain and evidence.
+    for name, token, enrollment in [('alice', learner_token, enrollments[0]), ('bob', bob_token, enrollments[1])]:
+        learner = mcp_client(token)
+        if name == 'alice':
+            tool(learner, 'leave_formation', {'cohort_id': cohort_id, 'idempotency_key': 'self-leave-alice'})
+        else:
+            _, _, page = bob_browser.get('/learn?mine=1')
+            status, _, _ = bob_browser.post('/learn/enrollment', {
+                'csrf_token': csrf(page), 'cohort_id': cohort_id, 'action': 'leave', 'idempotency_key': 'web-leave-bob'})
+            check(status == 200, 'web leave failed')
+        status, cohorts = console_api(manager, 'GET', '/admin/catalog/cohorts')
+        check(status == 200 and next(c['reserved_seats'] for c in cohorts['items'] if c['id'] == cohort_id) == 1,
+              'leave did not release exactly one seat')
+        denied = learner('tools/call', {'name': 'unarchive_domain', 'arguments': {'domain_id': enrollment['domain_id']}})
+        check(denied.get('isError'), 'unarchive bypassed cancelled enrollment')
+        resumed = tool(learner, 'join_formation', {'cohort_id': cohort_id, 'idempotency_key': 'rejoin-' + name})['enrollment']
+        check(resumed['id'] == enrollment['id'] and resumed['domain_id'] == enrollment['domain_id'], 'rejoin replaced learning history')
+    status, after_report = console_api(manager, 'GET', f'/admin/catalog/cohorts/{cohort_id}/report')
+    check(status == 200 and after_report == report, 'leave/rejoin changed shared progress report')
+    status, _, page = bob_browser.get('/learn/formations/' + cohort_id)
+    check(status == 200 and 'Read a variable' in page and 'Call a function' in page, 'published web program missing')
+    print('PASS: learner MCP and web catalog, invitation joins, released seats, preserved progress and rejoin')
+
+    # Approval requests reserve no seat and require an authorized staff decision.
+    status, _ = console_api(manager, 'PUT', f'/admin/catalog/formations/{formation_id}/enrollment-policy', {'policy': 'approval'})
+    check(status == 200, 'approval policy')
+    status, approval_cohort = console_api(manager, 'POST', '/admin/catalog/cohorts',
+        {'formation_version_id': version, 'name': 'Approval cohort', 'capacity': 1}, 'approval-cohort')
+    check(status == 201, 'approval cohort creation')
+    approval_id = approval_cohort['cohort']['id']
+    bob = mcp_client(bob_token)
+    pending = tool(bob, 'join_formation', {'cohort_id': approval_id, 'idempotency_key': 'approval-request'})
+    check(pending['status'] == 'pending' and not pending.get('enrollment'), 'request enrolled before approval')
+    status, admissions = console_api(manager, 'GET', f'/admin/catalog/cohorts/{approval_id}/admissions')
+    check(status == 200 and len(admissions['items']) == 1, 'pending request missing')
+    status, _, page = manager.get('/console/admissions?cohort_id=' + approval_id)
+    check(status == 200 and 'bob@acme.test' in page, 'console admission page missing request')
+    status, _, _ = manager.post('/console/admissions', {
+        'csrf_token': csrf(page), 'cohort_id': approval_id, 'membership_id': claims(bob_token)['membership_id'],
+        'decision': 'approved', 'expected_version': 1, 'idempotency_key': 'approve-bob'})
+    check(status == 200, 'console approval failed')
+    approved = tool(bob, 'join_formation', {'cohort_id': approval_id, 'idempotency_key': 'approval-confirm'})
+    check(approved['status'] == 'active', 'approved join failed')
+    tool(bob, 'leave_formation', {'cohort_id': approval_id, 'idempotency_key': 'approval-leave'})
+    print('PASS: approval request and console decision followed by learner confirmation')
 
     clone = tool(author, 'draft_formation', {'source_version_id': version, 'idempotency_key': 'clone'})
     next_version = clone['version']['id']

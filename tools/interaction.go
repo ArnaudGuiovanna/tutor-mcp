@@ -182,7 +182,7 @@ func registerRecordInteraction(server *mcp.Server, deps *Deps) {
 				return r, nil, nil
 			}
 			deps.Logger.Info("record_interaction: no active domain - needs setup", "learner", learnerID)
-			r, _ := noActiveDomainResult()
+			r, _ := noActiveDomainResult(deps)
 			return r, nil, nil
 		}
 		if err := validateConceptInDomain(domain, params.Concept); err != nil {

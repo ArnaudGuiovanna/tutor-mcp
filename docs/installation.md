@@ -315,9 +315,66 @@ changed definitions; observations retain their original enrollment. Archiving
 blocks new enrollment while preserving the existing learning history.
 
 Free domains are disabled by default for new institutions; an admin may enable
-them. Local/hobby retain their existing behavior. Self-service learner enrollment,
-the `/learn` portal and trainer dashboards belong to subsequent phases. See the
+them. Local/hobby retain their existing behavior. See the
 [phase 2 design and acceptance gates](institution-phase-2.md).
+
+### Learner portal and self-enrollment
+
+Institution learners sign in at `/learn` with the account used to accept their
+institution invitation. They choose an institution when they belong to several.
+The portal has its own `Secure`, `HttpOnly`, `SameSite=Strict` cookie scoped to
+`/learn`, with a 12-hour lifetime and 30-minute idle timeout. Session credentials
+are isolated from the console and OAuth. Membership changes invalidate the
+session; required MFA also applies to learners who hold staff roles.
+
+The catalog and program pages show published formation cohorts and only the
+current learner's enrollment/admission state. The same journey is available in
+an AI client:
+
+| Tool | Purpose |
+| --- | --- |
+| `list_available_formations` | Browse cohorts with `after` / `limit` pagination. |
+| `get_my_formations` | Read current and historical enrollments and requests. |
+| `get_learner_formation` | Read the published program for `cohort_id`. |
+| `join_formation` | Confirm a selected `cohort_id`, with `idempotency_key`. |
+| `leave_formation` | Leave a cohort or cancel a request, with `idempotency_key`. |
+
+Read tools use `learner:read`; join/leave use `learner:write`. The existing
+`learner` bundle includes both. Only the caller's live learner membership can
+use these tools. They are not registered in local/hobby mode.
+
+Admission policies behave as follows:
+
+- `open`: join immediately if a seat is available.
+- `invitation`: staff grant a cohort invitation to an existing learner, then the
+  learner joins. These grants appear in the learner portal; they are distinct
+  from the emailed invitations that create institution memberships.
+- `approval`: joining records a pending request. An authorized formation manager
+  approves or rejects it at `/console/admissions`. The learner then confirms
+  enrollment with a **new** retry key. Approval does not reserve a seat.
+
+The console API also provides `GET /cohorts/{id}/admissions` (paginated by
+membership ID) and `POST /cohorts/{id}/admissions`, relative to
+`/console/admin/catalog`. Decisions require console CSRF, `Idempotency-Key`,
+`membership_id`, `decision` (`invited`, `approved`, `rejected`, `revoked`) and
+`expected_version` (zero for a new invitation; otherwise the returned version).
+Formation owners/assigned managers and tenant owners/admins can act; unrelated
+managers and learners cannot read the requests or decide them.
+
+Enrollment returns the `domain_id` to use with the tutor. Leaving archives that
+domain, closes its open session and releases one seat without deleting learning evidence. Rejoining the
+same cohort restores the same enrollment, domain and progress, subject to current
+policy and capacity. Invitations/approvals remain valid until revoked. Another
+cohort starts its own enrollment; migration between published versions remains
+an explicit staff operation. Archived formations and closed/ended cohorts reject
+new joins. Completed/suspended or migrated-away enrollments cannot be reactivated
+by self-enrollment.
+
+Reuse a retry key only for the identical original request. An old receipt reports
+that original action; `get_my_formations` returns current state. The
+[phase 3 acceptance contract](institution-phase-3.md) and institution smoke cover
+the full institution journey M1. Trainer dashboards, badges, collective statistics
+and public deployment remain later phases.
 
 ## Backups, restore and upgrades
 

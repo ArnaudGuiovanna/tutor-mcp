@@ -52,7 +52,7 @@ func catalogRequestHash(request any) (string, error) {
 
 func runCatalogMutation[T any](ctx context.Context, s *Store, actor models.Principal, key, operation string, permission models.Permission, request any, mutate func(context.Context, *Store) (T, error)) (T, bool, error) {
 	var zero T
-	if !actor.Authorize(permission, models.AuthorizationResource{TenantID: actor.TenantID}) ||
+	if !actor.Authorize(permission, models.AuthorizationResource{TenantID: actor.TenantID, OwnerUserID: actor.UserID}) ||
 		(!models.OAuthScopeAllows(strings.Join(actor.Scopes, " "), models.OAuthScopeLearnerWrite) && !models.OAuthScopeAllows(strings.Join(actor.Scopes, " "), models.OAuthScopeFormationWrite)) {
 		return zero, false, storeport.ErrInvalidPrincipal
 	}
@@ -65,6 +65,11 @@ func runCatalogMutation[T any](ctx context.Context, s *Store, actor models.Princ
 		return zero, false, err
 	}
 	load := func(txCtx context.Context, txs *Store) (T, bool, error) {
+		if permission == models.PermissionLearningSelf {
+			if err := txs.learnerFormationActor(txCtx, actor, models.OAuthScopeLearnerWrite); err != nil {
+				return zero, false, err
+			}
+		}
 		// A replay is still an administrative request. Recheck current
 		// membership, roles, MFA and token version before reading any cached
 		// response, including the recovery read after a concurrent insert.
