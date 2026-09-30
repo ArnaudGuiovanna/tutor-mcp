@@ -171,7 +171,7 @@ var consoleTmpl = template.Must(template.New("console").Parse(`<!doctype html>
   {{end}}
 
   {{if eq .Page "members"}}
-  <p><a href="/console/admissions">Formation admissions</a> · <a href="/learn">Learner portal</a></p>
+  <p><a href="/console/progress">Learning progress</a> · <a href="/console/admissions">Formation admissions</a> · <a href="/learn">Learner portal</a></p>
   <p>Learners and trainers connect their AI client (Claude, ChatGPT…) to <span class="mono">{{.MCPURL}}</span> and sign in with the email of their invitation.</p>
   {{if .CanManage}}
   {{if .InviteLinks}}

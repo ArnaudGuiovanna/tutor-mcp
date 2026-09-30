@@ -288,7 +288,7 @@ func (s *OAuthServer) HandleAuthServerMetadata(w http.ResponseWriter, r *http.Re
 		}
 	}
 	if s.InstitutionAccountsEnabled() {
-		scopesSupported = append(scopesSupported, models.OAuthScopeFormationRead, models.OAuthScopeFormationWrite)
+		scopesSupported = append(scopesSupported, models.OAuthScopeFormationRead, models.OAuthScopeFormationWrite, models.OAuthScopeProgressRead)
 	}
 	meta := map[string]interface{}{
 		"issuer":                                s.baseURL,
@@ -814,6 +814,10 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 		}
 		if hasFormationScope(scope) && (s.accounts == nil || !selectedPrincipal.Authorize(models.PermissionFormationWrite, models.AuthorizationResource{TenantID: selected.TenantID})) {
 			renderAuthPageStatus(w, http.StatusForbidden, data, "Your membership cannot grant formation authoring access.", "login")
+			return
+		}
+		if models.OAuthScopeAllows(scope, models.OAuthScopeProgressRead) && (s.accounts == nil || !selectedPrincipal.CanReadInstitutionProgress()) {
+			renderAuthPageStatus(w, http.StatusForbidden, data, "Your membership cannot grant staff progression access.", "login")
 			return
 		}
 

@@ -4,10 +4,11 @@
 1. The owner of an operator-provisioned institution accepts the owner
    invitation, enrolls TOTP and invites a staff-only pedagogy manager and two
    learners from the console. They accept by email link; the manager enrolls TOTP.
-2. All sign in through /authorize (the manager with TOTP), exchange and refresh
-   tenant-bound tokens. The manager authors and publishes through MCP and enrolls
-   both learners through the console API. Their tutor domains share concept IDs.
-   Clone, migrate and archive exercise the formation lifecycle.
+2. Members sign in through /authorize, exchange and refresh tenant-bound tokens.
+   The manager authors and publishes through MCP; learners enroll through MCP
+   and /learn. Their tutor domains share concept IDs. Staff progression uses a
+   separate OAuth grant and live cohort assignments. Clone, migrate and archive
+   exercise the formation lifecycle and historical report isolation.
 3. A second institution is created through self-service signup.
 
 Standard library only.
@@ -241,6 +242,14 @@ def main():
     check(status == 200, f'invite Bob {status}')
     _, _, page = accept_invitation(mail_link('/invite', seen_mail), 'bob-password-2026')
     check('/mcp' in page, 'Bob invitation did not create a learner')
+    status, _, page = owner.get('/console')
+    status, _, page = owner.post('/console/members/invite', {
+        'csrf_token': csrf(page), 'emails': 'trainer@acme.test', 'roles': ['trainer']})
+    check(status == 200, f'invite trainer {status}')
+    trainer_browser, path, page = accept_invitation(mail_link('/invite', seen_mail), 'trainer-password-2026')
+    check(path == '/console/mfa/setup', 'trainer skipped MFA setup')
+    trainer_secret = enroll_totp(trainer_browser, page)
+    used_steps[trainer_secret] = {int(time.time() // 30)}
     print('PASS: owner invitation, console TOTP enrollment and member invitations by email')
 
     # 2. AI-client sign-in with tenant-bound tokens.
@@ -250,7 +259,10 @@ def main():
     check(status == 201, f'DCR registration {status}')
     client_id = json.loads(body)['client_id']
     manager_token = sign_in('manager@acme.test', 'manager-password-2026', client_id,
-                            fresh_totp(manager_secret, used_steps[manager_secret]), "formation:read formation:write")
+                            fresh_totp(manager_secret, used_steps[manager_secret]), "formation:read formation:write progress:read")
+    trainer_token = sign_in('trainer@acme.test', 'trainer-password-2026', client_id,
+                           fresh_totp(trainer_secret, used_steps[trainer_secret]), 'progress:read')
+    check(not claims(trainer_token).get('learner_id'), 'trainer received a learner identity')
     learner_token = sign_in('alice@acme.test', 'alice-password-2026', client_id)
     print('PASS: members sign in (manager with TOTP), exchange and refresh tokens bound to their tenant')
 
@@ -366,6 +378,42 @@ def main():
     check(report['average_mastery'] > 0.1001, f'answers did not advance cohort mastery beyond its initial value: {report}')
     print('PASS: staff-only MCP authoring, console-only administration, shared concepts and two learners tutoring')
 
+    # Phase 4: staff OAuth, named follow-up, browser dashboard and live revocation.
+    trainer = mcp_client(trainer_token)
+    check(tool(trainer, 'list_trainer_cohorts', {})['items'] == [], 'unassigned trainer listed cohorts')
+    denied = trainer('tools/call', {'name': 'get_cohort_insights', 'arguments': {'cohort_id': cohort_id}})
+    check(denied.get('isError'), 'unassigned trainer read cohort progress')
+    status, _, page = manager.get('/console/progress?cohort_id=' + cohort_id)
+    check(status == 200 and 'alice@acme.test' in page and 'bob@acme.test' in page, 'manager dashboard missing learners')
+    status, _, page = manager.post('/console/progress/trainers', {
+        'csrf_token': csrf(page), 'cohort_id': cohort_id, 'email': 'trainer@acme.test', 'assigned': 'true'})
+    check(status == 200 and 'trainer@acme.test' in page, 'trainer assignment failed')
+    accessible = tool(trainer, 'list_trainer_cohorts', {})
+    check(len(accessible['items']) == 1 and accessible['items'][0]['cohort_id'] == cohort_id, 'trainer assignment scope')
+    insights = tool(trainer, 'get_cohort_insights', {'cohort_id': cohort_id, 'limit': 1})
+    check(insights['cohort']['enrollment_count'] == 2 and len(insights['learners']) == 1 and insights['next_after'], 'progress roster pagination')
+    second = tool(trainer, 'get_cohort_insights', {'cohort_id': cohort_id, 'after': insights['next_after'], 'limit': 1})
+    check(len(second['learners']) == 1 and not second['next_after'] and
+          second['learners'][0]['enrollment_id'] != insights['learners'][0]['enrollment_id'], 'progress second page')
+    check(all(c['average_mastery'] is None for c in insights['concepts']), 'small cohort average exposed')
+    before_progress = tool(trainer, 'get_learner_progress', {'enrollment_id': enrollments[0]['id']})
+    check(before_progress['learner']['observed_concept_count'] >= 1 and before_progress['interaction_count'] == 1
+          and before_progress['evaluated_attempt_count'] == 1 and before_progress['trusted_evaluation_count'] == 0
+          and before_progress['synthesis_guidance'], 'individual evidence provenance')
+    status, _, page = trainer_browser.get('/console/progress?enrollment_id=' + enrollments[0]['id'])
+    check(status == 200 and 'alice@acme.test' in page and 'Concept progress' in page, 'trainer browser progress')
+    status, _, page = manager.get('/console/progress?cohort_id=' + cohort_id)
+    status, _, _ = manager.post('/console/progress/trainers', {
+        'csrf_token': csrf(page), 'cohort_id': cohort_id, 'email': 'trainer@acme.test', 'assigned': 'false'})
+    check(status == 200, 'trainer revocation failed')
+    denied = trainer('tools/call', {'name': 'get_learner_progress', 'arguments': {'enrollment_id': enrollments[0]['id']}})
+    check(denied.get('isError') and 'not_found' in json.dumps(denied), 'revoked trainer token retained progress access')
+    status, _, page = manager.get('/console/progress?cohort_id=' + cohort_id)
+    status, _, _ = manager.post('/console/progress/trainers', {
+        'csrf_token': csrf(page), 'cohort_id': cohort_id, 'email': 'trainer@acme.test', 'assigned': 'true'})
+    check(status == 200, 'trainer reassignment failed')
+    print('PASS: staff progress OAuth, cohort insights, individual evidence, console dashboard and assignment revocation')
+
     # Leave/rejoin through both transports preserves the domain and evidence.
     for name, token, enrollment in [('alice', learner_token, enrollments[0]), ('bob', bob_token, enrollments[1])]:
         learner = mcp_client(token)
@@ -421,6 +469,11 @@ def main():
     status, migration = console_api(manager, 'POST', f"/admin/catalog/enrollments/{enrollments[0]['id']}/migrate",
         {'cohort_id': next_cohort['cohort']['id']})
     check(status == 200 and migration['enrollment']['formation_version_id'] == next_version, f'migration {status}: {migration}')
+    historical = tool(trainer, 'get_learner_progress', {'enrollment_id': enrollments[0]['id']})
+    check(historical['cohort']['version_id'] == version and historical['learner']['status'] == 'cancelled'
+          and historical['learner']['average_mastery'] == before_progress['learner']['average_mastery'], 'historical progress changed after migration')
+    denied = trainer('tools/call', {'name': 'get_learner_progress', 'arguments': {'enrollment_id': migration['enrollment']['id']}})
+    check(denied.get('isError'), 'trainer followed a migrated domain into an unassigned cohort')
     status, archived = console_api(manager, 'DELETE', f'/admin/catalog/formations/{formation_id}')
     check(status == 200 and archived['status'] == 'archived', f'archive {status}: {archived}')
     print('PASS: cloned version, explicit enrollment migration and non-destructive formation archive')

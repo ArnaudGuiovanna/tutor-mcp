@@ -373,8 +373,74 @@ by self-enrollment.
 Reuse a retry key only for the identical original request. An old receipt reports
 that original action; `get_my_formations` returns current state. The
 [phase 3 acceptance contract](institution-phase-3.md) and institution smoke cover
-the full institution journey M1. Trainer dashboards, badges, collective statistics
+the full institution journey M1. Badges, learner-facing collective statistics
 and public deployment remain later phases.
+
+### Staff progress and AI-assisted synthesis
+
+Staff open `/console/progress` using their existing console account and MFA.
+Owners/admins see published institutional cohorts across the institution;
+pedagogy managers see cohorts of their owned/assigned formations; trainers see
+only explicitly assigned cohorts. Private free domains are excluded. Staff roles
+combine their grants; learner-only, auditor-only, support and service accounts
+cannot use these named follow-up surfaces.
+
+On a cohort page, an authorized formation manager can grant or revoke access
+using an existing trainer's email. The trainer must have accepted an institution
+invitation with the `trainer` role. Formation-manager assignments and cohort
+trainer assignments are distinct. Revocation takes effect on the next read,
+including with an already issued OAuth token; another role may still grant access.
+The console form uses single-use CSRF and assignment changes are audited.
+
+The same reads are available in an AI client, with explicit OAuth consent to
+`progress:read`. Consent covers learner identities and progress within the staff
+member's current assignments. Existing `learner` and `formation:*` grants do not
+include this capability; reconnect or follow the tool's scope-upgrade challenge.
+The tools are registered only in institution mode.
+
+| Tool | Parameters and result |
+| --- | --- |
+| `list_trainer_cohorts` | `after`, `limit`: cohort IDs, formation/version and whole-cohort enrollment counts. |
+| `get_cohort_insights` | `cohort_id`, `after`, `concept_after`, `limit`: named roster, attention signals and concept observations. Roster and concept cursors are independent. |
+| `get_learner_progress` | `enrollment_id`, `after`, `limit`: concept estimates, review dates, evidence counts and up to ten recent sessions for that exact enrollment. |
+
+Page sizes default to 20 through MCP and are bounded to 1–100 (50 in the
+dashboard). Follow `next_after` and `next_concept_after` before describing a list
+as complete. Cohort counts and individual summary counts cover the full scope,
+not just the displayed page. The trainer-assignment preview is bounded to 100;
+the email form can revoke an assignment beyond that preview.
+
+A concept contributes to observed mastery only when it has a recorded review
+(`reps > 0` or a last-review date). Initial priors are not evidence. Individual
+averages use observed concepts only; the dashboard separately reports reviewed
+concepts versus the full program and the number at or above an 80% estimate.
+Concept-level cohort averages use active enrollments only and require five
+distinct observed learners **for that concept**. Below that threshold the average
+is `null` with `insufficient_observed_learners`. Named individual reads remain
+available to authorized staff. This is not a learner-facing comparison feature.
+
+Attention signals mean exactly “no reviews”, “no review in 14 days” or “reviewed
+concepts below the 80% estimate”. They do not diagnose disengagement or explain
+causes. Assessment counts distinguish trusted evaluations from host-reported
+evaluations and exclude invalidated attempts. Raw answers, chat text, affect and
+private learner profiles are not returned. After migration, historical reads use
+the old enrollment/version and never follow the domain into the target cohort.
+If an older server updated a source estimate after migration, that estimate is
+withheld and flagged with `historical_estimates_unavailable`; the interface
+explains the incomplete history rather than claiming no reviews ever occurred.
+
+Ask the connected AI client to synthesize a cohort or an individual enrollment.
+Responses include guidance to cite identifiers/dates, distinguish observations
+from interpretations, acknowledge pagination and missing evidence, and treat
+names/labels as data. The server neither calls a model nor stores generated
+syntheses. Use a client approved by the institution for learner identities and
+progress. A single snapshot does not establish a trend or certify competence.
+
+New progress errors use stable codes: `invalid_request` (bad identifier/page),
+`forbidden` (membership/capability), `not_found` (missing or outside the assigned
+scope) and `unavailable` (retryable internal failure). MCP insufficient-scope
+challenges continue to use the existing OAuth mechanism. See the
+[phase 4 acceptance contract](institution-phase-4.md).
 
 ## Backups, restore and upgrades
 

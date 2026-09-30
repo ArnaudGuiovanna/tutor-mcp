@@ -24,7 +24,7 @@ func normalizeAuthorizationScope(raw string, granularEnabled bool) (string, erro
 	}
 	canonical, err := models.CanonicalOAuthScope(raw)
 	if err == nil {
-		if !granularEnabled && canonical != models.OAuthScopeLearner && !hasFormationScope(canonical) {
+		if !granularEnabled && canonical != models.OAuthScopeLearner && !hasInstitutionScope(canonical) {
 			return "", fmt.Errorf("granular OAuth scopes are not enabled")
 		}
 		return canonical, nil
@@ -59,6 +59,10 @@ func hasFormationScope(scope string) bool {
 	return models.OAuthScopeAllows(scope, models.OAuthScopeFormationRead) || models.OAuthScopeAllows(scope, models.OAuthScopeFormationWrite)
 }
 
+func hasInstitutionScope(scope string) bool {
+	return hasFormationScope(scope) || models.OAuthScopeAllows(scope, models.OAuthScopeProgressRead)
+}
+
 // normalizeRefreshScope keeps an omitted refresh scope distinguishable from an
 // explicit request: omission preserves the stored grant, while a supplied
 // value is canonicalized and later checked as a non-widening subset.
@@ -70,7 +74,7 @@ func normalizeRefreshScope(raw string, granularEnabled bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !granularEnabled && canonical != models.OAuthScopeLearner && !hasFormationScope(canonical) {
+	if !granularEnabled && canonical != models.OAuthScopeLearner && !hasInstitutionScope(canonical) {
 		return "", fmt.Errorf("granular OAuth scopes are not enabled")
 	}
 	return canonical, nil
@@ -112,8 +116,11 @@ func oauthScopeDescription(scope string) string {
 	case models.OAuthScopeLearner, models.OAuthScopeLearnerReadWrite:
 		return "Read and modify your learner profile, domains, progress, sessions, and learning history."
 	default:
-		if hasFormationScope(canonical) {
+		if hasInstitutionScope(canonical) {
 			text := ""
+			if models.OAuthScopeAllows(canonical, models.OAuthScopeProgressRead) {
+				text += "Read learner identities and learning progress in cohorts you are authorized to follow. "
+			}
 			if models.OAuthScopeAllows(canonical, models.OAuthScopeFormationRead) {
 				text += "Read formations you own or are assigned to. "
 			}

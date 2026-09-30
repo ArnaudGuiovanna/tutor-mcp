@@ -121,6 +121,12 @@ func TestFormationScopesDoNotInheritLearnerBundle(t *testing.T) {
 		{"list_available_formations", "learner:read", true},
 		{"get_learner_formation", "learner:read", true},
 		{"join_formation", "learner:write", true},
+		{"list_trainer_cohorts", "progress:read", true},
+		{"get_cohort_insights", "progress:read", true},
+		{"get_learner_progress", "progress:read", true},
+		{"get_learner_progress", "learner", false},
+		{"get_cohort_insights", "formation:read", false},
+		{"record_interaction", "progress:read", false},
 	} {
 		t.Run(tc.tool+"/"+tc.grant, func(t *testing.T) {
 			called := false
@@ -139,6 +145,9 @@ func TestFormationScopesDoNotInheritLearnerBundle(t *testing.T) {
 			h.ServeHTTP(rec, req)
 			if called != tc.allowed || (!tc.allowed && rec.Code != http.StatusForbidden) {
 				t.Fatalf("called=%v status=%d", called, rec.Code)
+			}
+			if progressTool(tc.tool) && !tc.allowed && !strings.Contains(rec.Header().Get("WWW-Authenticate"), "progress:read") {
+				t.Fatal("progress step-up challenge omitted its scope")
 			}
 		})
 	}

@@ -643,6 +643,8 @@ func mountInstitutionAccounts(mux *http.ServeMux, oauthServer *auth.OAuthServer,
 	mux.Handle("POST /learn/mfa/setup", login(oauthServer.HandleLearnerMFA))
 
 	mux.Handle("GET /console", console(oauthServer.HandleConsoleHome))
+	mux.Handle("GET /console/progress", console(oauthServer.HandleConsoleProgress))
+	mux.Handle("POST /console/progress/trainers", console(oauthServer.HandleConsoleProgressAssignment))
 	mux.Handle("GET /console/admissions", console(oauthServer.HandleConsoleAdmissions))
 	mux.Handle("POST /console/admissions", console(oauthServer.HandleConsoleAdmissions))
 	mux.Handle("GET /console/members", console(oauthServer.HandleConsoleHome))

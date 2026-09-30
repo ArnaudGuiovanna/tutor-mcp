@@ -16,6 +16,9 @@ func TestCanonicalOAuthScope(t *testing.T) {
 		{raw: "learner:write", want: OAuthScopeLearnerWrite, ok: true},
 		{raw: "learner:write learner:read", want: OAuthScopeLearnerReadWrite, ok: true},
 		{raw: "  learner:read   learner:write ", want: OAuthScopeLearnerReadWrite, ok: true},
+		{raw: "progress:read", want: OAuthScopeProgressRead, ok: true},
+		{raw: "progress:read formation:write learner:read", want: "learner:read formation:write progress:read", ok: true},
+		{raw: "learner progress:read"},
 		{raw: ""},
 		{raw: "admin"},
 		{raw: "learner learner:read"},
@@ -35,6 +38,12 @@ func TestCanonicalOAuthScope(t *testing.T) {
 }
 
 func TestOAuthScopeCapabilitiesAndNarrowing(t *testing.T) {
+	if OAuthScopeAllows(OAuthScopeLearner, OAuthScopeProgressRead) || OAuthScopeAllows(OAuthScopeFormationRead, OAuthScopeProgressRead) || OAuthScopeCanNarrow(OAuthScopeLearnerReadWrite, OAuthScopeProgressRead) {
+		t.Fatal("progress access inherited from an unrelated grant")
+	}
+	if !OAuthScopeCanNarrow("formation:read progress:read", OAuthScopeProgressRead) || OAuthScopeCanNarrow(OAuthScopeProgressRead, "formation:read progress:read") {
+		t.Fatal("progress scope refresh narrowing is incorrect")
+	}
 	if !OAuthScopeAllows(OAuthScopeLearner, OAuthScopeLearnerRead) ||
 		!OAuthScopeAllows(OAuthScopeLearner, OAuthScopeLearnerWrite) {
 		t.Fatal("legacy learner bundle must grant exactly learner read and write")

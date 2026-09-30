@@ -19,6 +19,7 @@ const (
 	OAuthScopeLearnerReadWrite = "learner:read learner:write"
 	OAuthScopeFormationRead    = "formation:read"
 	OAuthScopeFormationWrite   = "formation:write"
+	OAuthScopeProgressRead     = "progress:read"
 )
 
 // CanonicalOAuthScope validates the complete supported scope vocabulary and
@@ -36,7 +37,7 @@ func CanonicalOAuthScope(raw string) (string, error) {
 		}
 		seen[scope] = true
 		switch scope {
-		case OAuthScopeLearner, OAuthScopeLearnerRead, OAuthScopeLearnerWrite, OAuthScopeFormationRead, OAuthScopeFormationWrite:
+		case OAuthScopeLearner, OAuthScopeLearnerRead, OAuthScopeLearnerWrite, OAuthScopeFormationRead, OAuthScopeFormationWrite, OAuthScopeProgressRead:
 		default:
 			return "", fmt.Errorf("unsupported scope %q", scope)
 		}
@@ -48,7 +49,7 @@ func CanonicalOAuthScope(raw string) (string, error) {
 		return OAuthScopeLearner, nil
 	}
 	var ordered []string
-	for _, scope := range []string{OAuthScopeLearnerRead, OAuthScopeLearnerWrite, OAuthScopeFormationRead, OAuthScopeFormationWrite} {
+	for _, scope := range []string{OAuthScopeLearnerRead, OAuthScopeLearnerWrite, OAuthScopeFormationRead, OAuthScopeFormationWrite, OAuthScopeProgressRead} {
 		if seen[scope] {
 			ordered = append(ordered, scope)
 		}
@@ -61,7 +62,7 @@ func CanonicalOAuthScope(raw string) (string, error) {
 // two learner capabilities known when it was issued.
 func OAuthScopeAllows(granted, required string) bool {
 	switch required {
-	case OAuthScopeLearnerRead, OAuthScopeLearnerWrite, OAuthScopeFormationRead, OAuthScopeFormationWrite:
+	case OAuthScopeLearnerRead, OAuthScopeLearnerWrite, OAuthScopeFormationRead, OAuthScopeFormationWrite, OAuthScopeProgressRead:
 	default:
 		return false
 	}

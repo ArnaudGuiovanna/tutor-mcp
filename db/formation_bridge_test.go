@@ -196,6 +196,13 @@ func TestFormationMigrationPreservesHistoryAndReconcilesDefinitions(t *testing.T
 		if state.PMastery != want {
 			t.Fatalf("%s mastery = %v, want %v", key, state.PMastery, want)
 		}
+		var historical, current float64
+		if err := s.queryRow(ctx, `SELECT p_mastery FROM learner_concept_states WHERE tenant_id = ? AND enrollment_id = ? AND legacy_concept = ?`, owner.TenantID, source.ID, key).Scan(&historical); err != nil || historical != .9 {
+			t.Fatalf("source snapshot %s = %v %v", key, historical, err)
+		}
+		if err := s.queryRow(ctx, `SELECT p_mastery FROM learner_concept_states WHERE tenant_id = ? AND enrollment_id = ? AND legacy_concept = ?`, owner.TenantID, out.Enrollment.ID, key).Scan(&current); err != nil || current != want {
+			t.Fatalf("target state %s = %v %v", key, current, err)
+		}
 		var enrollmentID string
 		var invalidation int
 		if err := s.queryRow(ctx, `SELECT enrollment_id, curriculum_invalidated_version FROM interactions WHERE domain_id = ? AND concept = ?`, source.DomainID, key).Scan(&enrollmentID, &invalidation); err != nil {

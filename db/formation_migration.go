@@ -83,6 +83,18 @@ func (s *Store) MigrateFormationEnrollment(ctx context.Context, actor models.Pri
 		if err != nil {
 			return err
 		}
+		// Reconciliation changes the current domain's estimates. Preserve the
+		// source enrollment's pre-migration state for authorized historical reads.
+		previousStates, err := txs.formationEnrollmentStates(txCtx, source, domainID)
+		if err != nil {
+			return err
+		}
+		for _, state := range previousStates {
+			current := *state // Upsert updates UpdatedAt; retain the snapshot's date.
+			if err := txs.UpsertConceptState(txCtx, &current); err != nil {
+				return err
+			}
+		}
 		now := time.Now().UTC()
 		next, err := formationCurriculum(detail, domainID, actor.UserID, now)
 		if err != nil {
@@ -106,6 +118,17 @@ func (s *Store) MigrateFormationEnrollment(ctx context.Context, actor models.Pri
 		}
 		if err := s.compareAndSwapCurriculum(txCtx, source.LearnerID, domainID, previous.Version, next); err != nil {
 			return err
+		}
+		for _, state := range previousStates {
+			if _, err := txs.exec(txCtx, `UPDATE learner_concept_states SET
+ stability = ?, difficulty = ?, elapsed_days = ?, scheduled_days = ?, reps = ?, lapses = ?, card_state = ?,
+ last_review = ?, next_review = ?, p_mastery = ?, p_learn = ?, p_forget = ?, p_slip = ?, p_guess = ?, theta = ?, updated_at = ?
+ WHERE tenant_id = ? AND enrollment_id = ? AND formation_concept_id = ?`,
+				state.Stability, state.Difficulty, state.ElapsedDays, state.ScheduledDays, state.Reps, state.Lapses, state.CardState,
+				state.LastReview, state.NextReview, state.PMastery, state.PLearn, state.PForget, state.PSlip, state.PGuess, state.Theta, state.UpdatedAt,
+				actor.TenantID, sourceID, state.FormationConceptID); err != nil {
+				return err
+			}
 		}
 		res, err := txs.exec(txCtx, `UPDATE cohorts SET reserved_seats = reserved_seats + 1, version = version + 1, updated_at = ?
 		 WHERE tenant_id = ? AND id = ? AND status = 'open' AND reserved_seats < capacity`, now, actor.TenantID, targetCohortID)
@@ -166,4 +189,38 @@ func (s *Store) MigrateFormationEnrollment(ctx context.Context, actor models.Pri
 		return txs.AppendAuditEvent(txCtx, actor, models.AuditEvent{Action: "enrollment.migrate", TargetType: "enrollment", TargetID: sourceID, DetailsJSON: `{"target_enrollment_id":` + strconvQuote(targetID) + `,"target_version_id":` + strconvQuote(targetVersionID) + `}`})
 	})
 	return out, err
+}
+
+// Read the canonical enrollment snapshot before changing compatibility-domain
+// estimates. The published concept supplies the stable key, never a label from
+// another enrollment or a mutable domain mapping.
+func (s *Store) formationEnrollmentStates(ctx context.Context, enrollment models.Enrollment, domainID string) ([]*models.ConceptState, error) {
+	rows, err := s.query(ctx, `SELECT fc.id, fc.stable_key, s.stability, s.difficulty, s.elapsed_days,
+ s.scheduled_days, s.reps, s.lapses, s.card_state, s.last_review, s.next_review,
+ s.p_mastery, s.p_learn, s.p_forget, s.p_slip, s.p_guess, s.theta, s.updated_at
+ FROM learner_concept_states s JOIN formation_concepts fc ON fc.tenant_id = s.tenant_id
+ AND fc.id = s.formation_concept_id AND fc.formation_version_id = s.formation_version_id
+ WHERE s.tenant_id = ? AND s.enrollment_id = ? AND s.learner_id = ?`, enrollment.TenantID, enrollment.ID, enrollment.LearnerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	states := []*models.ConceptState{}
+	for rows.Next() {
+		state := &models.ConceptState{LearnerID: enrollment.LearnerID, DomainID: domainID}
+		var last, next sql.NullTime
+		if err := rows.Scan(&state.FormationConceptID, &state.Concept, &state.Stability, &state.Difficulty,
+			&state.ElapsedDays, &state.ScheduledDays, &state.Reps, &state.Lapses, &state.CardState, &last, &next,
+			&state.PMastery, &state.PLearn, &state.PForget, &state.PSlip, &state.PGuess, &state.Theta, &state.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if last.Valid {
+			state.LastReview = &last.Time
+		}
+		if next.Valid {
+			state.NextReview = &next.Time
+		}
+		states = append(states, state)
+	}
+	return states, rows.Err()
 }

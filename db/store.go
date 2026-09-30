@@ -1549,6 +1549,9 @@ func (s *Store) UpsertConceptState(ctx context.Context, cs *models.ConceptState)
 		     p_slip, p_guess, theta, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(learner_id, domain_id, concept) DO UPDATE SET
+		    tenant_id      = excluded.tenant_id,
+		    enrollment_id  = excluded.enrollment_id,
+		    formation_concept_id = excluded.formation_concept_id,
 		    stability      = excluded.stability,
 		    difficulty     = excluded.difficulty,
 		    elapsed_days   = excluded.elapsed_days,

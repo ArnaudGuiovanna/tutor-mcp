@@ -54,6 +54,8 @@ func institutionTestServer(t *testing.T, signupOpen bool) (*OAuthServer, *db.Sto
 	mux.HandleFunc("GET /learn/mfa/setup", s.HandleLearnerMFA)
 	mux.HandleFunc("POST /learn/mfa/setup", s.HandleLearnerMFA)
 	mux.HandleFunc("GET /console/admissions", s.HandleConsoleAdmissions)
+	mux.HandleFunc("GET /console/progress", s.HandleConsoleProgress)
+	mux.HandleFunc("POST /console/progress/trainers", s.HandleConsoleProgressAssignment)
 	mux.HandleFunc("POST /console/admissions", s.HandleConsoleAdmissions)
 	mux.HandleFunc("GET /authorize", s.HandleAuthorizeGet)
 	mux.HandleFunc("POST /authorize", s.HandleAuthorizePost)

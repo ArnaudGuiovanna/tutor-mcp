@@ -8,6 +8,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- Institution staff dashboard at `/console/progress`, with cohort discovery,
+  named learner follow-up, concept evidence and recent session summaries. MCP
+  tools `list_trainer_cohorts`, `get_cohort_insights` and `get_learner_progress`
+  require the separate `progress:read` OAuth grant and live staff assignments.
+  The client AI writes the synthesis from structured observations and explicit
+  limits; the server makes no inference call. Cohort concept averages require
+  five observed active learners. Missing reviews remain unknown, not failures.
+- Console cohort trainer assignment/revocation with CSRF and audit records.
+  Historical progression stays attached to its original enrollment/version;
+  migration now preserves source estimates and moves current state bindings to
+  the target. Historical states modified after an older migration are withheld.
 - Institution learner portal at `/learn` and MCP tools
   `list_available_formations`, `get_my_formations`, `get_learner_formation`,
   `join_formation` and `leave_formation`. Learners select a published cohort,

@@ -27,7 +27,7 @@ const mcpWWWAuthenticateMetaKey = "mcp/www_authenticate"
 // reservation or tool execution.
 func insufficientOAuthScopeResult(ctx context.Context, baseURL string, required []string, granular bool) *mcp.CallToolResult {
 	requested := required
-	if !granular && !formationScopes(required) {
+	if !granular && !institutionScopes(required) {
 		requested = []string{models.OAuthScopeLearner}
 	}
 	result, _ := errorResult("insufficient OAuth scope: " + strings.Join(requested, " "))
@@ -39,7 +39,7 @@ func insufficientOAuthScopeResult(ctx context.Context, baseURL string, required 
 
 func insufficientOAuthScopeChallenge(ctx context.Context, baseURL string, required []string, granular bool) string {
 	challengeScopes := []string{models.OAuthScopeLearner}
-	if granular || formationScopes(required) {
+	if granular || institutionScopes(required) {
 		challengeScopes = oauthScopeUnion(auth.GetOAuthScope(ctx), required)
 	}
 	parts := []string{
@@ -58,7 +58,7 @@ func insufficientOAuthScopeChallenge(ctx context.Context, baseURL string, requir
 // complete scope set cannot accidentally exchange one permission for another.
 func oauthScopeUnion(granted string, required []string) []string {
 	seen := map[string]bool{}
-	for _, scope := range []string{models.OAuthScopeLearnerRead, models.OAuthScopeLearnerWrite, models.OAuthScopeFormationRead, models.OAuthScopeFormationWrite} {
+	for _, scope := range []string{models.OAuthScopeLearnerRead, models.OAuthScopeLearnerWrite, models.OAuthScopeFormationRead, models.OAuthScopeFormationWrite, models.OAuthScopeProgressRead} {
 		if models.OAuthScopeAllows(granted, scope) {
 			seen[scope] = true
 		}
@@ -67,7 +67,7 @@ func oauthScopeUnion(granted string, required []string) []string {
 		seen[scope] = true
 	}
 	union := []string{}
-	for _, scope := range []string{models.OAuthScopeLearnerRead, models.OAuthScopeLearnerWrite, models.OAuthScopeFormationRead, models.OAuthScopeFormationWrite} {
+	for _, scope := range []string{models.OAuthScopeLearnerRead, models.OAuthScopeLearnerWrite, models.OAuthScopeFormationRead, models.OAuthScopeFormationWrite, models.OAuthScopeProgressRead} {
 		if seen[scope] {
 			union = append(union, scope)
 		}
@@ -75,9 +75,9 @@ func oauthScopeUnion(granted string, required []string) []string {
 	return union
 }
 
-func formationScopes(scopes []string) bool {
+func institutionScopes(scopes []string) bool {
 	for _, scope := range scopes {
-		if scope == models.OAuthScopeFormationRead || scope == models.OAuthScopeFormationWrite {
+		if scope == models.OAuthScopeFormationRead || scope == models.OAuthScopeFormationWrite || scope == models.OAuthScopeProgressRead {
 			return true
 		}
 	}

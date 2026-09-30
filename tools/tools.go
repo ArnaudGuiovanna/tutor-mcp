@@ -37,6 +37,9 @@ var toolRegistrationLocalModes sync.Map
 var toolRegistrationOAuthModes sync.Map // map[*mcp.Server]bool; populated only during RegisterTools
 
 var readOnlyTools = map[string]bool{
+	"list_trainer_cohorts":           true,
+	"get_cohort_insights":            true,
+	"get_learner_progress":           true,
 	"list_available_formations":      true,
 	"get_my_formations":              true,
 	"get_learner_formation":          true,
@@ -139,6 +142,9 @@ var openWorldTools = map[string]bool{
 func boolHint(v bool) *bool { return &v }
 
 func requiredOAuthScopesForTool(name string) ([]string, bool) {
+	if progressTool(name) {
+		return []string{models.OAuthScopeProgressRead}, true
+	}
 	if formationTool(name) {
 		if name == "get_formation_version" {
 			return []string{models.OAuthScopeFormationRead}, true
@@ -240,7 +246,7 @@ func addTool[In, Out any](server *mcp.Server, tool *mcp.Tool, handler mcp.ToolHa
 	granularScopes, _ := toolRegistrationOAuthModes.Load(server)
 	granular, _ := granularScopes.(bool)
 	advertisedScopes := requiredScopes
-	if !granular && !formationTool(tool.Name) {
+	if !granular && !formationTool(tool.Name) && !progressTool(tool.Name) {
 		advertisedScopes = []string{models.OAuthScopeLearner}
 	}
 	destructive := !readOnly && !additiveWriteTools[tool.Name]
@@ -432,6 +438,7 @@ func RegisterTools(server *mcp.Server, deps *Deps) {
 	addIdempotencyMiddleware(server, deps)
 	if deps != nil && deps.Institution {
 		registerFormationTools(server, deps)
+		registerProgressTools(server, deps)
 		registerLearnerFormationTools(server, deps)
 	}
 	registerStartLearningSession(server, deps)
@@ -511,7 +518,12 @@ func toolTenantTransactionMiddleware(deps *Deps) mcp.Middleware {
 			if formationTool(toolNameFromRequest(req)) {
 				permission = models.PermissionFormationWrite
 			}
-			if !principal.Authorize(permission, models.AuthorizationResource{TenantID: principal.TenantID, OwnerUserID: principal.UserID}) {
+			isProgress := progressTool(toolNameFromRequest(req))
+			if isProgress && !principal.CanReadInstitutionProgress() {
+				result, _, _ := progressToolResult(deps, nil, storeport.ErrInvalidPrincipal)
+				return result, nil
+			}
+			if !isProgress && !principal.Authorize(permission, models.AuthorizationResource{TenantID: principal.TenantID, OwnerUserID: principal.UserID}) {
 				result, _ := errorResult("tenant principal is not authorized for this tool")
 				return result, nil
 			}
