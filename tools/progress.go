@@ -11,7 +11,7 @@ import (
 )
 
 func progressTool(name string) bool {
-	return name == "list_trainer_cohorts" || name == "get_cohort_insights" || name == "get_learner_progress"
+	return name == "list_trainer_cohorts" || name == "get_cohort_insights" || name == "get_learner_progress" || name == "get_learner_badges"
 }
 
 type CohortInsightsParams struct {

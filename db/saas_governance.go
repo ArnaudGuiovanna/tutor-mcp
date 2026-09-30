@@ -193,6 +193,8 @@ func (s *Store) ListTenantRetentionPolicies(ctx context.Context, actor models.Pr
 type tenantChecksumSpec struct{ table, keyExpression string }
 
 var tenantChecksumSpecs = []tenantChecksumSpec{
+	{"learning_badges", "id"},
+	{"learning_badge_evidence", "badge_id || ':' || attempt_id"},
 	{"cohorts", "id"},
 	{"enrollments", "id"},
 	{"formation_versions", "id"},
@@ -390,7 +392,7 @@ func (s *Store) CompleteTenantDSARExport(ctx context.Context, scope models.Tenan
 			return err
 		}
 		counts := make(map[string]int64)
-		for _, table := range []string{"interactions", "learning_events", "concept_states", "narrative_objects", "pedagogical_decisions", "assessment_adjudications", "assessment_reviews", "curriculum_review_opinions", "audit_events"} {
+		for _, table := range []string{"learning_badges", "learning_badge_evidence", "interactions", "learning_events", "concept_states", "narrative_objects", "pedagogical_decisions", "assessment_adjudications", "assessment_reviews", "curriculum_review_opinions", "audit_events"} {
 			var count int64
 			predicate := "learner_id = ?"
 			args := []any{learnerID}
@@ -448,6 +450,7 @@ func (s *Store) ResumeTenantDSAR(ctx context.Context, actor models.Principal, re
 // the minimum relational identity skeleton are retained, while pedagogical
 // evidence, narrative content and direct learner profile data are removed.
 var dsarErasurePhases = []string{
+	"learning_badge_evidence", "learning_badges",
 	"webhook_delivery_transitions", "webhook_push_log", "webhook_message_queue",
 	"narrative_mutations", "narrative_objects", "pedagogical_snapshots",
 	"transfer_records", "interactions", "learning_events", "assessment_adjudications", "assessment_reviews", "curriculum_review_opinions", "assessment_attempts", "pedagogical_decisions", "affect_states",
@@ -456,6 +459,7 @@ var dsarErasurePhases = []string{
 }
 
 var dsarLearnerTables = map[string]string{
+	"learning_badges": "learner_id", "learning_badge_evidence": "learner_id",
 	"webhook_delivery_transitions": "learner_id", "webhook_push_log": "learner_id",
 	"webhook_message_queue": "learner_id", "narrative_mutations": "learner_id",
 	"narrative_objects": "learner_id", "pedagogical_snapshots": "learner_id",
@@ -501,7 +505,7 @@ func (s *Store) ProcessTenantDSARErasureBatch(ctx context.Context, scope models.
 		// Requests created before the journals existed must also erase their
 		// rows. Append checkpoints without rewriting existing positions;
 		// execution follows the current dependency order, not insertion order.
-		for _, phase := range []string{"pedagogical_decisions", "assessment_reviews", "assessment_adjudications", "learning_events", "curriculum_review_opinions"} {
+		for _, phase := range []string{"learning_badge_evidence", "learning_badges", "pedagogical_decisions", "assessment_reviews", "assessment_adjudications", "learning_events", "curriculum_review_opinions"} {
 			if _, err := txs.exec(txCtx, `INSERT INTO tenant_dsar_phases
 			(tenant_id, request_id, position, phase, status, affected_rows, updated_at)
 			SELECT ?, ?, COALESCE(MAX(position), -1) + 1, ?, 'pending', 0, ?

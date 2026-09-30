@@ -1678,6 +1678,7 @@ END $$;`,
 	{Version: "postgres_0064_formation_bridge", Body: postgresFormationBridgeMigration},
 	{Version: "postgres_0065_formation_owner_backfill", Body: postgresFormationOwnerBackfill},
 	{Version: "postgres_0066_learner_formations", Body: postgresLearnerFormationsMigration},
+	{Version: "postgres_0067_learning_badges", Body: postgresBadgesMigration},
 }
 
 // OpenPostgres opens a PostgreSQL-backed *sql.DB via the pgx database/sql

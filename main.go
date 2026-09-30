@@ -633,6 +633,8 @@ func mountInstitutionAccounts(mux *http.ServeMux, oauthServer *auth.OAuthServer,
 	account := func(handler http.HandlerFunc) http.Handler { return auth.RateLimitMiddleware(accountLimiter, handler) }
 	mux.Handle("GET /learn", console(oauthServer.HandleLearnerHome))
 	mux.Handle("GET /learn/formations/{cohortID}", console(oauthServer.HandleLearnerFormation))
+	mux.Handle("GET /learn/badges", console(oauthServer.HandleLearnerBadges))
+	mux.Handle("GET /console/progress/badges", console(oauthServer.HandleConsoleBadges))
 	mux.Handle("GET /learn/login", page(oauthServer.HandleLearnerLoginGet))
 	mux.Handle("POST /learn/login", login(oauthServer.HandleLearnerLoginPost))
 	mux.Handle("POST /learn/logout", console(oauthServer.HandleLearnerLogoutPost))

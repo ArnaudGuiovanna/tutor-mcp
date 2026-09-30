@@ -8,6 +8,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- Institution badges for successful mastery challenges, completion of every
+  concept in a published formation, and maintained FSRS recall at 7, 30 and
+  90 days. Awards are transactional and deduplicated, retain dated evidence
+  identifiers, and remain attached to their original enrollment/version.
+  Learners and authorized staff consult them in the web portal or through
+  `get_my_badges` / `get_learner_badges`; changed evidence is visibly flagged.
 - Institution staff dashboard at `/console/progress`, with cohort discovery,
   named learner follow-up, concept evidence and recent session summaries. MCP
   tools `list_trainer_cohorts`, `get_cohort_insights` and `get_learner_progress`

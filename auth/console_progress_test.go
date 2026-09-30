@@ -84,6 +84,9 @@ func TestInstitutionProgressConsoleSessionAndAssignments(t *testing.T) {
 	if !strings.Contains(page, "No estimate") || !strings.Contains(page, "No sessions recorded") {
 		t.Fatal("missing empty evidence guidance")
 	}
+	if resp, body := b.get("/console/progress/badges?enrollment_id=" + enrollment.ID); resp.StatusCode != 200 || !strings.Contains(body, "No badges earned") || resp.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("staff badges: %d %s", resp.StatusCode, body)
+	}
 	if resp, _ := b.post("/console/progress/trainers", url.Values{"cohort_id": {cohort.ID}, "email": {"trainer@progress.test"}, "assigned": {"true"}}); resp.StatusCode != http.StatusForbidden {
 		t.Fatal("assignment missing CSRF accepted")
 	}

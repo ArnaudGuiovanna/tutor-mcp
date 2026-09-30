@@ -37,6 +37,8 @@ var toolRegistrationLocalModes sync.Map
 var toolRegistrationOAuthModes sync.Map // map[*mcp.Server]bool; populated only during RegisterTools
 
 var readOnlyTools = map[string]bool{
+	"get_my_badges":                  true,
+	"get_learner_badges":             true,
 	"list_trainer_cohorts":           true,
 	"get_cohort_insights":            true,
 	"get_learner_progress":           true,
@@ -440,6 +442,7 @@ func RegisterTools(server *mcp.Server, deps *Deps) {
 		registerFormationTools(server, deps)
 		registerProgressTools(server, deps)
 		registerLearnerFormationTools(server, deps)
+		registerBadgeTools(server, deps)
 	}
 	registerStartLearningSession(server, deps)
 	registerGetPendingAlerts(server, deps)

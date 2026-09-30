@@ -378,6 +378,14 @@ def main():
     check(report['average_mastery'] > 0.1001, f'answers did not advance cohort mastery beyond its initial value: {report}')
     print('PASS: staff-only MCP authoring, console-only administration, shared concepts and two learners tutoring')
 
+    # Phase 5: ordinary practice must not mint mastery/completion/retention badges.
+    alice = mcp_client(learner_token)
+    check(tool(alice, 'get_my_badges', {'enrollment_id': enrollments[0]['id']})['items'] == [], 'practice minted a badge')
+    denied = alice('tools/call', {'name': 'get_my_badges', 'arguments': {'enrollment_id': enrollments[1]['id']}})
+    check(denied.get('isError') and 'not_found' in json.dumps(denied), 'other learner badge disclosure')
+    status, _, page = bob_browser.get('/learn/badges?enrollment_id=' + enrollments[1]['id'])
+    check(status == 200 and 'No badges earned' in page, 'learner badge browser read')
+
     # Phase 4: staff OAuth, named follow-up, browser dashboard and live revocation.
     trainer = mcp_client(trainer_token)
     check(tool(trainer, 'list_trainer_cohorts', {})['items'] == [], 'unassigned trainer listed cohorts')
@@ -397,6 +405,10 @@ def main():
           second['learners'][0]['enrollment_id'] != insights['learners'][0]['enrollment_id'], 'progress second page')
     check(all(c['average_mastery'] is None for c in insights['concepts']), 'small cohort average exposed')
     before_progress = tool(trainer, 'get_learner_progress', {'enrollment_id': enrollments[0]['id']})
+
+    check(tool(trainer, 'get_learner_badges', {'enrollment_id': enrollments[0]['id']})['items'] == [], 'staff badge evidence')
+    status, _, page = trainer_browser.get('/console/progress/badges?enrollment_id=' + enrollments[0]['id'])
+    check(status == 200 and 'No badges earned' in page, 'staff badge browser read')
     check(before_progress['learner']['observed_concept_count'] >= 1 and before_progress['interaction_count'] == 1
           and before_progress['evaluated_attempt_count'] == 1 and before_progress['trusted_evaluation_count'] == 0
           and before_progress['synthesis_guidance'], 'individual evidence provenance')
@@ -408,11 +420,14 @@ def main():
     check(status == 200, 'trainer revocation failed')
     denied = trainer('tools/call', {'name': 'get_learner_progress', 'arguments': {'enrollment_id': enrollments[0]['id']}})
     check(denied.get('isError') and 'not_found' in json.dumps(denied), 'revoked trainer token retained progress access')
+    denied = trainer('tools/call', {'name': 'get_learner_badges', 'arguments': {'enrollment_id': enrollments[0]['id']}})
+    check(denied.get('isError') and 'not_found' in json.dumps(denied), 'revoked trainer read badges')
     status, _, page = manager.get('/console/progress?cohort_id=' + cohort_id)
     status, _, _ = manager.post('/console/progress/trainers', {
         'csrf_token': csrf(page), 'cohort_id': cohort_id, 'email': 'trainer@acme.test', 'assigned': 'true'})
     check(status == 200, 'trainer reassignment failed')
     print('PASS: staff progress OAuth, cohort insights, individual evidence, console dashboard and assignment revocation')
+    print('PASS: learner and staff badge reads, no awards from practice, enrollment isolation and live revocation')
 
     # Leave/rejoin through both transports preserves the domain and evidence.
     for name, token, enrollment in [('alice', learner_token, enrollments[0]), ('bob', bob_token, enrollments[1])]:

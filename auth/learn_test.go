@@ -116,12 +116,22 @@ func TestLearnerPortalEnrollmentCSRFAndSessionIsolation(t *testing.T) {
 	if err != nil || after.Offering.Enrollment.DomainID != before.Offering.Enrollment.DomainID {
 		t.Fatalf("rejoin history: %+v %v", after, err)
 	}
+	resp, page = b.get("/learn/badges?enrollment_id=" + after.Offering.Enrollment.ID)
+	if resp.StatusCode != 200 || !strings.Contains(page, "No badges earned") || resp.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("badges page: %d %s", resp.StatusCode, page)
+	}
+	if resp, _ := b.get("/learn/badges?enrollment_id=missing"); resp.StatusCode != 404 {
+		t.Fatal("badge existence disclosure")
+	}
 	if _, err := store.SetMembershipAuthorization(ctx, student.TenantScope(), models.MembershipStatusSuspended, []string{models.RoleLearner}); err != nil {
 		t.Fatal(err)
 	}
 	resp, _ = b.get("/learn")
 	if resp.Request.URL.Path != "/learn/login" {
 		t.Fatalf("revoked session survived: %s", resp.Request.URL.Path)
+	}
+	if resp, _ := b.get("/learn/badges?enrollment_id=" + after.Offering.Enrollment.ID); resp.Request.URL.Path != "/learn/login" {
+		t.Fatal("revoked badge session survived")
 	}
 }
 

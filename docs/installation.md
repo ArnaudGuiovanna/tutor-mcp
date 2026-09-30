@@ -373,8 +373,8 @@ by self-enrollment.
 Reuse a retry key only for the identical original request. An old receipt reports
 that original action; `get_my_formations` returns current state. The
 [phase 3 acceptance contract](institution-phase-3.md) and institution smoke cover
-the full institution journey M1. Badges, learner-facing collective statistics
-and public deployment remain later phases.
+the full institution journey M1. Learner-facing collective statistics remain
+a later phase; badges are described below.
 
 ### Staff progress and AI-assisted synthesis
 
@@ -441,6 +441,43 @@ New progress errors use stable codes: `invalid_request` (bad identifier/page),
 scope) and `unavailable` (retryable internal failure). MCP insufficient-scope
 challenges continue to use the existing OAuth mechanism. See the
 [phase 4 acceptance contract](institution-phase-4.md).
+
+### Learning badges
+
+Institution learners select **My badges** on an enrolled formation in `/learn`.
+Staff select **Learning badges** in an individual enrollment's progress page.
+Both views include historical enrollments and use the current membership and
+assignment checks; there is no public badge-sharing endpoint.
+
+| Badge | Attribution rule |
+| --- | --- |
+| Mastery challenge passed | A passed `MASTERY_CHALLENGE` for the published concept, with frozen assessment evidence and effective trust under the demonstrated-mastery policy. |
+| Formation completed | Every concept in the enrollment's published version has a qualifying mastery challenge. The enrollment remains available for FSRS revision. |
+| Memory maintained — 7 / 30 / 90 days | At least three passed, unassisted, assessment-linked `RECALL` responses at or after their FSRS due dates, each at least 24 hours after the last exposure, spanning the milestone. A failed review restarts the qualifying run. |
+
+The server records awards alongside learning observations or assessment
+adjudication, with one award per enrollment/concept/milestone/policy. A model
+estimate, ordinary practice, elapsed time or an enrollment status cannot award
+a badge. FSRS milestones use committed response times, not the time a delayed
+grade arrives. The evaluator is the connected client under the configured
+assessment policy, or an independently attested evaluator when configured.
+
+`get_my_badges` requires `learner:read`; `get_learner_badges` requires
+`progress:read` and the same live cohort assignments as staff progress. Both
+accept `enrollment_id`, optional `after` and `limit` (default 20, maximum 100),
+and return `items` / `next_after`. The browser displays 30 badges per page.
+Evidence contains assessment/concept/snapshot identifiers and dates, never
+copies of the learner's answers. `evidence_status: changed_or_unavailable`
+flags historical awards whose evidence has since been invalidated, withdrawn,
+removed or is no longer trusted under the current policy.
+
+Badges attest dated achievements, not permanent memory or an external
+qualification. Leaving preserves them; a new enrollment/version earns its own.
+Learner erasure removes awards and their evidence references. No retroactive
+bulk backfill runs during migration; the next observation or adjudication
+evaluates eligible stored evidence. Retention evaluation examines a bounded
+suffix of 500 observations; truncation can delay an award but never invent one.
+See the [phase 5 acceptance contract](institution-phase-5.md).
 
 ## Backups, restore and upgrades
 

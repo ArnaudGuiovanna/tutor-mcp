@@ -17,7 +17,12 @@ import (
 const pedagogicalSnapshotCols = `id, interaction_id, learner_id, domain_id, concept, activity_type, before_json, observation_json, after_json, decision_json, interpretation_brief, created_at`
 
 func (s *Store) CreatePedagogicalSnapshot(ctx context.Context, snapshot *models.PedagogicalSnapshot) error {
-	return createPedagogicalSnapshotWithStore(ctx, s, snapshot)
+	return s.inTx(ctx, nil, func(txs *Store) error {
+		if err := createPedagogicalSnapshotWithStore(ctx, txs, snapshot); err != nil {
+			return err
+		}
+		return txs.awardInstitutionBadges(ctx, snapshot.LearnerID, snapshot.DomainID, snapshot.Concept, snapshot.CreatedAt)
+	})
 }
 
 func createPedagogicalSnapshotWithStore(ctx context.Context, s *Store, snapshot *models.PedagogicalSnapshot) error {

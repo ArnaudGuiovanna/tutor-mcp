@@ -122,7 +122,10 @@ func (a *AssessmentAdjudicator) AdjudicateAssessment(ctx context.Context, actor 
 			return err
 		}
 		result, err = s.readAdjudication(txCtx, actor.TenantID, ` AND j.id = ?`, id)
-		return err
+		if err != nil {
+			return err
+		}
+		return s.awardInstitutionBadges(txCtx, learnerID, attempt.DomainID, attempt.ConceptID, now)
 	})
 	return result, replayed, err
 }

@@ -45,6 +45,8 @@ func institutionTestServer(t *testing.T, signupOpen bool) (*OAuthServer, *db.Sto
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /learn", s.HandleLearnerHome)
 	mux.HandleFunc("GET /learn/formations/{cohortID}", s.HandleLearnerFormation)
+	mux.HandleFunc("GET /learn/badges", s.HandleLearnerBadges)
+	mux.HandleFunc("GET /console/progress/badges", s.HandleConsoleBadges)
 	mux.HandleFunc("GET /learn/login", s.HandleLearnerLoginGet)
 	mux.HandleFunc("POST /learn/login", s.HandleLearnerLoginPost)
 	mux.HandleFunc("POST /learn/logout", s.HandleLearnerLogoutPost)

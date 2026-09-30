@@ -36,6 +36,7 @@ GRANT SELECT ON tenants, plans, schema_migrations, installation TO tutor_worker;
 -- encrypted webhook credential required at the final dispatch boundary; the
 -- worker cannot read global users, password/MFA/service/support credentials.
 GRANT SELECT ON
+    learning_badges, learning_badge_evidence,
     learners, availability, domains, concept_states, interactions, enrollments, legacy_concept_mappings,
     affect_states, calibration_records, transfer_records, assessment_attempts,
     pedagogical_decisions, assessment_reviews, assessment_adjudications, learning_events, curriculum_review_opinions,
@@ -60,6 +61,7 @@ GRANT UPDATE ON learners TO tutor_worker;
 GRANT UPDATE (rubric_score_json) ON assessment_reviews TO tutor_worker;
 GRANT UPDATE (findings_json) ON curriculum_review_opinions TO tutor_worker;
 GRANT DELETE ON
+    learning_badges, learning_badge_evidence,
     webhook_delivery_transitions, webhook_push_log, webhook_message_queue,
     narrative_mutations, narrative_objects, pedagogical_snapshots,
     transfer_records, interactions, learning_events, assessment_adjudications, assessment_reviews, curriculum_review_opinions, assessment_attempts, pedagogical_decisions, affect_states,

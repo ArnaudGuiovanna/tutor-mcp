@@ -71,6 +71,22 @@ func TestInstitutionProgressMCPJourney(t *testing.T) {
 	}
 	reader := owner
 	reader.Scopes = []string{models.OAuthScopeProgressRead}
+	for _, tc := range []struct {
+		p    models.Principal
+		name string
+	}{{student, "get_my_badges"}, {reader, "get_learner_badges"}} {
+		r := call(tc.p, tc.name, LearnerProgressParams{EnrollmentID: e.ID})
+		var badges models.BadgePage
+		if r.IsError || json.Unmarshal([]byte(resultText(r)), &badges) != nil || len(badges.Items) != 0 {
+			t.Fatalf("badge discovery: %s", resultText(r))
+		}
+	}
+	if r := call(owner, "get_my_badges", LearnerProgressParams{EnrollmentID: e.ID}); !r.IsError {
+		t.Fatal("other learner badge read")
+	}
+	if r := call(owner, "get_learner_badges", LearnerProgressParams{EnrollmentID: e.ID}); !r.IsError || !strings.Contains(resultText(r), "progress:read") {
+		t.Fatal("badge scope bypass")
+	}
 	var page models.TrainerCohortPage
 	r := call(reader, "list_trainer_cohorts", LearnerFormationPageParams{})
 	if r.IsError || json.Unmarshal([]byte(resultText(r)), &page) != nil || len(page.Items) != 1 || page.Items[0].CohortID != c.ID {
