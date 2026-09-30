@@ -28,7 +28,7 @@ func TestInstitutionProgressConsoleSessionAndAssignments(t *testing.T) {
 	if resp.Request.URL.Path != "/console/login" {
 		t.Fatal("anonymous progress access")
 	}
-	resp, page = b.post("/console/login", url.Values{"csrf_token": {field(t, csrfPattern, page)}, "email": {"owner@progress.test"}, "password": {"owner-password-2026"}})
+	resp, _ = b.post("/console/login", url.Values{"csrf_token": {field(t, csrfPattern, page)}, "email": {"owner@progress.test"}, "password": {"owner-password-2026"}})
 	if resp.Request.URL.Path != "/console/mfa/setup" {
 		t.Fatalf("missing MFA gate: %s", resp.Request.URL)
 	}
