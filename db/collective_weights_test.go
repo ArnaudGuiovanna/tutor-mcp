@@ -16,7 +16,6 @@ import (
 
 type weightCohort struct {
 	*statisticsCohort
-	byLearner []string
 }
 
 func newWeightCohort(t *testing.T) *weightCohort {

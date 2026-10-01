@@ -57,11 +57,6 @@ func applyCollectiveWeight(state models.BKTParams, weight models.BKTParams, prio
 	return models.BKTParams{PLearn: blend(state.PLearn, weight.PLearn), PForget: blend(state.PForget, weight.PForget), PSlip: blend(state.PSlip, weight.PSlip), PGuess: blend(state.PGuess, weight.PGuess)}
 }
 
-type weightContribution struct {
-	version string
-	params  models.BKTParams
-}
-
 // RecomputeCollectiveWeights publishes new immutable weight versions. It reads
 // learner states but never writes them. All versions of a tenant are published
 // in one transaction; it returns how many.
