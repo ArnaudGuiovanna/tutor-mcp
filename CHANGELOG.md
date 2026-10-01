@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- Complete learner erasure. Requests now also remove the canonical enrollment
+  learning state, calibration records, queued work, cached tool responses and
+  every credential and grant of the learner; their domains and enrollments are
+  scrubbed or cancelled, and cohort statistics are recomputed at once. A test
+  guarantees every table holding a learner identifier is erased or justified.
+  Re-apply `deploy/postgres-roles.sql` for the new worker privileges.
+- Restore verification now checksums the learning record, curriculum and
+  institution structure (about 25 more tables), and a test requires every tenant
+  table to be verified or explicitly exempt.
 - Institution collective BKT weights. For concepts with at least thirty learners
   holding five reviews each, a worker publishes immutable, bounded, versioned
   median parameters. They reach each learner once per version at their next

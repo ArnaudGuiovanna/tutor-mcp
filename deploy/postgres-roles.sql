@@ -35,7 +35,13 @@ GRANT SELECT ON tenants, plans, schema_migrations, installation TO tutor_worker;
 -- Read models used by the pedagogical scheduler. learners contains the
 -- encrypted webhook credential required at the final dispatch boundary; the
 -- worker cannot read global users, password/MFA/service/support credentials.
+-- Erasure (DSAR) reaches the learner's credentials by identifier only: column
+-- grants expose no token or secret value, only what a DELETE needs to match.
+GRANT SELECT (tenant_id, learner_id) ON
+    refresh_tokens, oauth_codes, login_challenges, account_tokens, learner_approved_clients, tool_call_idempotency
+TO tutor_worker;
 GRANT SELECT ON
+    learner_concept_states,
     learning_badges, learning_badge_evidence,
     learners, availability, domains, concept_states, interactions, enrollments, legacy_concept_mappings,
     affect_states, calibration_records, transfer_records, assessment_attempts,
@@ -73,7 +79,13 @@ GRANT INSERT ON tenant_dsar_phases TO tutor_worker;
 GRANT UPDATE ON learners TO tutor_worker;
 GRANT UPDATE (rubric_score_json) ON assessment_reviews TO tutor_worker;
 GRANT UPDATE (findings_json) ON curriculum_review_opinions TO tutor_worker;
+-- Erasure scrubs learner-authored text and cancels the erased learner's enrollments.
+GRANT UPDATE (name, personal_goal, graph_json, value_framings_json, goal_relevance_json, archived, deleted_at)
+    ON domains TO tutor_worker;
+GRANT UPDATE (status, seat_reserved, objectives_json, updated_at) ON enrollments TO tutor_worker;
 GRANT DELETE ON
+    learner_concept_states, calibration_records,
+    tool_call_idempotency, login_challenges, learner_approved_clients,
     collective_weight_applications, learning_badges, learning_badge_evidence,
     webhook_delivery_transitions, webhook_push_log, webhook_message_queue,
     narrative_mutations, narrative_objects, pedagogical_snapshots,

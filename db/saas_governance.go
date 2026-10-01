@@ -197,6 +197,29 @@ var tenantChecksumSpecs = []tenantChecksumSpec{
 	{"collective_weight_applications", "enrollment_id || ':' || formation_concept_id"},
 	{"learning_badges", "id"},
 	{"learning_badge_evidence", "badge_id || ':' || attempt_id"},
+	// Learning record: what a restore must bring back for the tutor to continue.
+	{"interactions", "CAST(id AS TEXT)"},
+	{"concept_states", "learner_id || ':' || domain_id || ':' || concept"},
+	{"assessment_attempts", "id"},
+	{"assessment_reviews", "CAST(id AS TEXT)"},
+	{"assessment_adjudications", "CAST(id AS TEXT)"},
+	{"learning_events", "CAST(id AS TEXT)"},
+	{"learning_sessions", "CAST(id AS TEXT)"},
+	{"pedagogical_decisions", "id"},
+	{"transfer_records", "CAST(id AS TEXT)"},
+	{"affect_states", "CAST(id AS TEXT)"},
+	{"calibration_records", "prediction_id"},
+	{"domains", "id"},
+	{"curriculum_versions", "domain_id || ':' || CAST(version AS TEXT)"},
+	// Institution structure and access.
+	{"formation_modules", "id"},
+	{"formation_concepts", "id"},
+	{"concept_prerequisites", "formation_version_id || ':' || concept_id || ':' || prerequisite_id"},
+	{"formation_trainers", "formation_id || ':' || membership_id"},
+	{"cohort_trainers", "cohort_id || ':' || membership_id"},
+	{"formation_admissions", "cohort_id || ':' || membership_id"},
+	{"enrollment_migrations", "source_enrollment_id"},
+	{"tenant_memberships", "id"},
 	{"cohorts", "id"},
 	{"enrollments", "id"},
 	{"formation_versions", "id"},
@@ -394,7 +417,7 @@ func (s *Store) CompleteTenantDSARExport(ctx context.Context, scope models.Tenan
 			return err
 		}
 		counts := make(map[string]int64)
-		for _, table := range []string{"collective_weight_applications", "learning_badges", "learning_badge_evidence", "interactions", "learning_events", "concept_states", "narrative_objects", "pedagogical_decisions", "assessment_adjudications", "assessment_reviews", "curriculum_review_opinions", "audit_events"} {
+		for _, table := range []string{"collective_weight_applications", "learner_concept_states", "calibration_records", "learning_badges", "learning_badge_evidence", "interactions", "learning_events", "concept_states", "narrative_objects", "pedagogical_decisions", "assessment_adjudications", "assessment_reviews", "curriculum_review_opinions", "audit_events"} {
 			var count int64
 			predicate := "learner_id = ?"
 			args := []any{learnerID}
@@ -452,11 +475,14 @@ func (s *Store) ResumeTenantDSAR(ctx context.Context, actor models.Principal, re
 // the minimum relational identity skeleton are retained, while pedagogical
 // evidence, narrative content and direct learner profile data are removed.
 var dsarErasurePhases = []string{
+	// Credentials first: an erasure request ends every session and grant at once.
+	"refresh_tokens", "oauth_codes", "login_challenges", "account_tokens", "learner_approved_clients",
 	"collective_weight_applications", "learning_badge_evidence", "learning_badges",
 	"webhook_delivery_transitions", "webhook_push_log", "webhook_message_queue",
 	"narrative_mutations", "narrative_objects", "pedagogical_snapshots",
 	"transfer_records", "interactions", "learning_events", "assessment_adjudications", "assessment_reviews", "curriculum_review_opinions", "assessment_attempts", "pedagogical_decisions", "affect_states",
-	"implementation_intentions", "learning_sessions", "concept_states",
+	"implementation_intentions", "learning_sessions", "concept_states", "learner_concept_states",
+	"calibration_records", "pending_consolidations", "tool_call_idempotency",
 	"scheduled_alerts", "availability", "scrub_learner",
 }
 
@@ -474,6 +500,19 @@ var dsarLearnerTables = map[string]string{
 	"implementation_intentions": "learner_id", "learning_sessions": "learner_id",
 	"concept_states": "learner_id", "scheduled_alerts": "learner_id",
 	"availability": "learner_id",
+	// Added after the first erasure release: canonical enrollment state,
+	// calibration, queues, idempotency payloads and every credential or grant
+	// tied to the learner.
+	"learner_concept_states": "learner_id", "calibration_records": "learner_id",
+	"pending_consolidations": "learner_id", "tool_call_idempotency": "learner_id",
+	"refresh_tokens": "learner_id", "oauth_codes": "learner_id", "login_challenges": "learner_id",
+	"account_tokens": "learner_id", "learner_approved_clients": "learner_id",
+}
+
+// dsarLatePhases are appended to requests created before they existed.
+var dsarLatePhases = []string{
+	"refresh_tokens", "oauth_codes", "login_challenges", "account_tokens", "learner_approved_clients",
+	"learner_concept_states", "calibration_records", "pending_consolidations", "tool_call_idempotency",
 }
 
 func (s *Store) ProcessTenantDSARErasureBatch(ctx context.Context, scope models.TenantScope, worker models.WorkerPrincipal, requestID string, limit int, now time.Time) (bool, int64, error) {
@@ -507,7 +546,7 @@ func (s *Store) ProcessTenantDSARErasureBatch(ctx context.Context, scope models.
 		// Requests created before the journals existed must also erase their
 		// rows. Append checkpoints without rewriting existing positions;
 		// execution follows the current dependency order, not insertion order.
-		for _, phase := range []string{"collective_weight_applications", "learning_badge_evidence", "learning_badges", "pedagogical_decisions", "assessment_reviews", "assessment_adjudications", "learning_events", "curriculum_review_opinions"} {
+		for _, phase := range append([]string{"collective_weight_applications", "learning_badge_evidence", "learning_badges", "pedagogical_decisions", "assessment_reviews", "assessment_adjudications", "learning_events", "curriculum_review_opinions"}, dsarLatePhases...) {
 			if _, err := txs.exec(txCtx, `INSERT INTO tenant_dsar_phases
 			(tenant_id, request_id, position, phase, status, affected_rows, updated_at)
 			SELECT ?, ?, COALESCE(MAX(position), -1) + 1, ?, 'pending', 0, ?
@@ -564,6 +603,28 @@ func (s *Store) ProcessTenantDSARErasureBatch(ctx context.Context, scope models.
 				return err
 			}
 			affected, _ = result.RowsAffected()
+			// Learner-authored text in the identity skeleton, and the enrollments
+			// that would keep counting this learner in cohort statistics.
+			if _, err := txs.exec(txCtx, `UPDATE domains SET name = 'erased', personal_goal = '', graph_json = '{}',
+				value_framings_json = '', goal_relevance_json = '', archived = 1,
+				deleted_at = COALESCE(deleted_at, ?) WHERE tenant_id = ? AND learner_id = ?`, now, scope.TenantID, learnerID); err != nil {
+				return err
+			}
+			cohorts, err := txs.erasedLearnerCohorts(txCtx, scope.TenantID, learnerID)
+			if err != nil {
+				return err
+			}
+			if _, err := txs.exec(txCtx, `UPDATE enrollments SET status = 'cancelled', seat_reserved = 0,
+				objectives_json = '{}', updated_at = ? WHERE tenant_id = ? AND learner_id = ?`, now, scope.TenantID, learnerID); err != nil {
+				return err
+			}
+			// Derived aggregates must stop including the learner immediately,
+			// not at the next hourly run.
+			for _, cohort := range cohorts {
+				if err := txs.recomputeCohortStatistics(txCtx, scope.TenantID, cohort[0], cohort[1], now.UTC()); err != nil {
+					return err
+				}
+			}
 			phaseComplete = true
 		} else {
 			column, ok := dsarLearnerTables[phase]

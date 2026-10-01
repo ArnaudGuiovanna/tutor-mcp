@@ -494,7 +494,8 @@ A background worker recomputes every published institutional cohort about once
 an hour and stores only the latest snapshot; nothing is computed while you read.
 Responses carry `computed_at`, `status` (`available`, `insufficient_data`,
 `not_yet_computed`) and `stale` (older than six hours, for example when the
-worker is stopped). Activity, departures and erasures appear at the next run.
+worker is stopped). Activity and departures appear at the next run; an erasure
+updates the cohort statistics immediately.
 
 Privacy rules are enforced when the worker writes, not when you read:
 
@@ -537,6 +538,35 @@ review counts are never changed. Each application is recorded in the interaction
 (`bkt_collective_weights`, with the parameters before and after) and in a per-learner
 ledger removed by learner erasure. See the
 [phase 7 acceptance contract](institution-phase-7.md).
+
+### Learner erasure
+
+An erasure request (`kind: erase`) is processed in bounded, resumable phases by
+the worker, and a legal hold blocks it. It now covers, besides the learning
+record (interactions, concept states, assessments, sessions, narrative, badges,
+collective-weight ledger):
+
+- the canonical enrollment learning state and calibration records;
+- queued consolidations and cached tool-call responses;
+- every credential and grant of the learner (refresh tokens, authorization
+  codes, login challenges, account tokens, approved clients), erased first so
+  the learner is signed out everywhere at once.
+
+The identity skeleton is kept but scrubbed: the learner's e-mail, password hash,
+objective, profile and webhook are replaced; their domains are renamed, emptied
+and archived; their enrollments are cancelled, release their seat and lose their
+stated objectives. The cohorts they belonged to have their anonymous statistics
+recomputed in the same transaction, so the erased learner stops counting at once.
+The audit trail is append-only and is retained by design, as are legal holds and
+the erasure request itself. Collective weights hold no learner data and are not
+recomputed on erasure.
+
+Known limit: curriculum history (`curriculum_versions` and its identity tables)
+is append-only by database trigger and is not erased. In institution formations
+it is derived from the published formation; text a learner typed into a
+self-created domain's curriculum remains in it. A test lists every table that
+holds a `learner_id` and fails unless the table is erased or justified, so a new
+table cannot silently escape erasure.
 
 ## Backups, restore and upgrades
 

@@ -75,6 +75,18 @@ Vérifier ensuite le ledger, le nombre de tenants, les keyrings restaurés,
 `/ready`, les legal holds et les DSAR achevées après le backup. Ne router aucun
 trafic avant réapplication des effacements/rétentions postérieurs.
 
+## Couverture de la vérification de restauration
+
+La vérification (`ComputeTenantChecksums` / `VerifyTenantRestore`) compare des
+empreintes de tables : formations, inscriptions, état d'apprentissage canonique,
+interactions, évaluations, événements, sessions, décisions, domaines, curriculum,
+badges et poids collectifs, notamment. Un test impose que toute table portant
+`tenant_id` soit empreinte ou listée comme exemptée avec sa raison (données
+dérivées, identifiants éphémères, files, routage, finance, conformité). Les
+statistiques de cohorte sont dérivées : le worker les recalcule après une
+restauration. Un manifeste demandé avant une mise à jour qui ajoute des tables
+ne correspondra plus : en demander un nouveau après la mise à jour.
+
 ## Archive logique d'un tenant
 
 L'export utilise une transaction repeatable-read et capture toutes les tables
