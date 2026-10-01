@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"tutor-mcp/algorithms"
+	"tutor-mcp/auth"
 	"tutor-mcp/engine"
 	"tutor-mcp/models"
 	"tutor-mcp/store"
@@ -143,6 +144,18 @@ func applyInteraction(
 		}
 		observation := structuredObservation(input)
 
+		// Institution collective BKT weights: applied at most once per weight
+		// version, here in the learner's own transaction so the worker never
+		// writes learner state. Mastery and FSRS are not touched.
+		var collective *models.CollectiveWeightApplication
+		if principal, authenticated := auth.GetPrincipal(ctx); authenticated {
+			if weights, ok := s.(store.CollectiveWeightStore); ok {
+				if collective, err = weights.ApplyCollectiveWeights(ctx, principal.TenantScope(), cs, now); err != nil {
+					return fmt.Errorf("apply collective weights: %w", err)
+				}
+			}
+		}
+
 		// ── Snapshot read-only prior state ──────────────────────────────
 		// All downstream algorithm steps read from this snapshot, never
 		// from `cs` directly, to keep the BKT and FSRS updates
@@ -204,6 +217,9 @@ func applyInteraction(
 			"bkt_individualized_profile": individualBKTProfileSnapshot(bktProfile),
 			"bkt_individualized_params":  individualBKTParamsSnapshot(bktResult.Params),
 		})
+		if collective != nil {
+			observation = mergeObservation(observation, map[string]any{"bkt_collective_weights": collective})
+		}
 
 		// Build and persist the interaction row.
 		interaction := &models.Interaction{

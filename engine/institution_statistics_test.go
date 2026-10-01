@@ -45,3 +45,31 @@ func TestRefreshInstitutionStatisticsRunsInsideTheTenantScope(t *testing.T) {
 		t.Fatalf("failure must carry a stable code: %+v", result)
 	}
 }
+
+type weightsRecorder struct {
+	storeport.Store
+	scopes []models.TenantScope
+	err    error
+}
+
+func (r *weightsRecorder) RecomputeCollectiveWeights(_ context.Context, scope models.TenantScope, _ time.Time) (int, error) {
+	r.scopes = append(r.scopes, scope)
+	return 1, r.err
+}
+
+func TestRefreshCollectiveWeightsRunsInsideTheTenantScope(t *testing.T) {
+	recorder := &weightsRecorder{}
+	scheduler := NewScheduler(recorder, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if result := scheduler.refreshCollectiveWeights(); !result.failed() || result.FailureCode != "collective_weights_store_unavailable" {
+		t.Fatalf("job ran without a tenant scope: %+v", result)
+	}
+	scope := models.TenantScope{TenantID: "tenant-a", MembershipID: "m", UserID: "u"}
+	scheduler.currentTenantScope = &scope
+	if result := scheduler.refreshCollectiveWeights(); result.failed() || len(recorder.scopes) != 1 || recorder.scopes[0].TenantID != "tenant-a" {
+		t.Fatalf("refresh: %+v %+v", result, recorder.scopes)
+	}
+	recorder.err = errors.New("database detail that must not leak")
+	if result := scheduler.refreshCollectiveWeights(); !result.failed() || result.FailureCode != "collective_weights_failed" {
+		t.Fatalf("failure must carry a stable code: %+v", result)
+	}
+}

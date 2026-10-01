@@ -153,6 +153,12 @@ var progressPageTmpl = template.Must(template.New("progress").Funcs(template.Fun
 		}
 		return fmt.Sprintf("%.0f%%", *cell.Value*100)
 	},
+	"weight": func(w *models.CollectiveWeight) string {
+		if w == nil {
+			return "None (fewer than 30 qualifying learners)"
+		}
+		return fmt.Sprintf("v%d · %d learners · learn %.2f, forget %.2f, slip %.2f, guess %.2f", w.Version, w.Contributors, w.PLearn, w.PForget, w.PSlip, w.PGuess)
+	},
 	"badgekind": func(b models.BadgeStatistics) string {
 		switch {
 		case b.Kind == models.BadgeMastery:
@@ -198,7 +204,8 @@ body{font:16px/1.6 system-ui;max-width:1100px;margin:2rem auto;padding:1rem;colo
 {{if eq .Status "insufficient_data"}}<section><p>Fewer than {{.MinimumContributors}} learners with recorded reviews: no collective figure is available for this cohort.</p></section>{{else}}
 <section><table><tbody><tr><th scope="row">Learners with recorded reviews</th><td>{{statint .Contributors}}</td></tr><tr><th scope="row">Active or completed learners</th><td>{{statint .Participants}}</td></tr><tr><th scope="row">Learners who completed the formation</th><td>{{statint .CompletedLearners}}</td></tr><tr><th scope="row">Mean of learner mastery estimates</th><td>{{statmastery .MeanMastery}}</td></tr><tr><th scope="row">Median of learner mastery estimates</th><td>{{statmastery .MedianMastery}}</td></tr></tbody></table></section>
 <section class="scroll"><h2>Learning badges</h2><table><thead><tr><th>Badge</th><th>Learners</th></tr></thead><tbody>{{range .Badges}}<tr><th scope="row">{{badgekind .}}</th><td>{{statint .Learners}}</td></tr>{{end}}</tbody></table></section>
-<section class="scroll"><h2>Concepts</h2><table><thead><tr><th>Concept</th><th>Observed learners</th><th>Mean</th><th>Median</th></tr></thead><tbody>{{range .Concepts}}<tr><th scope="row">{{.Label}}</th><td>{{statint .ObservedLearners}}</td><td>{{statmastery .MeanMastery}}</td><td>{{statmastery .MedianMastery}}</td></tr>{{else}}<tr><td colspan="4">No concepts on this page.</td></tr>{{end}}</tbody></table>
+<section class="scroll"><h2>Concepts</h2><table><thead><tr><th>Concept</th><th>Observed learners</th><th>Mean</th><th>Median</th><th>Collective BKT weight</th></tr></thead><tbody>{{range .Concepts}}<tr><th scope="row">{{.Label}}</th><td>{{statint .ObservedLearners}}</td><td>{{statmastery .MeanMastery}}</td><td>{{statmastery .MedianMastery}}</td><td>{{weight .CollectiveWeight}}</td></tr>{{else}}<tr><td colspan="5">No concepts on this page.</td></tr>{{end}}</tbody></table>
+<p class="muted">A collective weight is the median of at least thirty learners' individualized BKT parameters for the concept, published as an immutable version. It reaches each learner once per version, at their next recorded interaction, and never changes mastery estimates or review schedules.</p>
 {{if .NextConceptAfter}}<a href="/console/progress?cohort_id={{.Cohort.CohortID}}&amp;view=statistics&amp;concept_after={{.NextConceptAfter}}">Next concepts</a>{{end}}</section>{{end}}{{end}}
 {{end}}{{else if .Insights}}{{with .Insights}}
 <h2>{{.Cohort.FormationName}} — {{.Cohort.CohortName}}</h2><p>Version {{.Cohort.Version}} · Cohort {{.Cohort.CohortStatus}} · Formation {{.Cohort.FormationStatus}}</p><p>Whole cohort: {{.Cohort.EnrollmentCount}} enrollments, {{.Cohort.ActiveCount}} active, {{.Cohort.CompletedCount}} completed.</p>

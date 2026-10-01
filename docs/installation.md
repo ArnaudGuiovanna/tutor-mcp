@@ -515,6 +515,29 @@ figures (see `synthesis_guidance`). With PostgreSQL roles, re-apply
 `cohort_*_statistics` tables. See the
 [phase 6 acceptance contract](institution-phase-6.md).
 
+### Collective weights
+
+For every concept of a published institutional formation version with at least
+thirty learners who each have five recorded reviews of it, a worker publishes
+(every six hours) collective BKT parameters: the median of the contributors'
+learn, forget, slip and guess parameters, clamped to 0.01–0.5. A new version is
+published only when it differs by at least 0.01 and never moves a parameter by
+more than 0.02, so the collective stays stable. Versions are immutable, keep
+their contributor count and policy version, and contain no learner identifier.
+This is a robust consensus of already individualized parameters, not a
+maximum-likelihood fit. The current weight of each concept appears in the
+statistics view and in `get_cohort_statistics` (`collective_weight`).
+
+The worker never writes learner state. A weight reaches a learner inside that
+learner's own interaction, at most once per weight version, and only for active
+enrollments in published institutional formations: a learner without reviews of
+the concept takes it as their prior; a learner with reviews moves 25% of the way
+toward it, by at most 0.05 per parameter. Mastery estimates, review schedules and
+review counts are never changed. Each application is recorded in the interaction
+(`bkt_collective_weights`, with the parameters before and after) and in a per-learner
+ledger removed by learner erasure. See the
+[phase 7 acceptance contract](institution-phase-7.md).
+
 ## Backups, restore and upgrades
 
 Local/hobby backups must include the database **and** `keys.json`. For a native

@@ -8,6 +8,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- Institution collective BKT weights. For concepts with at least thirty learners
+  holding five reviews each, a worker publishes immutable, bounded, versioned
+  median parameters. They reach each learner once per version at their next
+  recorded interaction (a prior for learners without reviews, a capped blend
+  otherwise), never touch mastery or scheduling, and are traced per interaction.
+  Staff see the current weight in `get_cohort_statistics` and the console.
 - Anonymous institution cohort statistics. A worker recomputes, about hourly,
   learner counts, completion, badge holders and mean/median mastery per cohort
   and concept, withholding any cell below five learners or revealing a small

@@ -55,6 +55,11 @@ TO tutor_worker;
 GRANT SELECT, INSERT, UPDATE, DELETE ON
     cohort_statistics, cohort_concept_statistics, cohort_badge_statistics
 TO tutor_worker;
+-- Collective weights: the worker publishes immutable versions and only reads
+-- (and, for erasure, deletes) the per-learner application ledger. It never
+-- writes learner state.
+GRANT SELECT, INSERT ON concept_collective_weights TO tutor_worker;
+GRANT SELECT ON collective_weight_applications TO tutor_worker;
 GRANT SELECT, INSERT, UPDATE, DELETE ON
     outbox_events, async_jobs, integration_deliveries,
     webhook_message_queue, webhook_delivery_transitions, webhook_push_log,
@@ -69,7 +74,7 @@ GRANT UPDATE ON learners TO tutor_worker;
 GRANT UPDATE (rubric_score_json) ON assessment_reviews TO tutor_worker;
 GRANT UPDATE (findings_json) ON curriculum_review_opinions TO tutor_worker;
 GRANT DELETE ON
-    learning_badges, learning_badge_evidence,
+    collective_weight_applications, learning_badges, learning_badge_evidence,
     webhook_delivery_transitions, webhook_push_log, webhook_message_queue,
     narrative_mutations, narrative_objects, pedagogical_snapshots,
     transfer_records, interactions, learning_events, assessment_adjudications, assessment_reviews, curriculum_review_opinions, assessment_attempts, pedagogical_decisions, affect_states,

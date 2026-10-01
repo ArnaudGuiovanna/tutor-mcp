@@ -34,6 +34,8 @@ type ConceptStatistics struct {
 	ObservedLearners StatInt   `json:"observed_learners"`
 	MeanMastery      StatFloat `json:"mean_mastery"`
 	MedianMastery    StatFloat `json:"median_mastery"`
+	// Current collective BKT weight of the concept, absent below thirty learners.
+	CollectiveWeight *CollectiveWeight `json:"collective_weight"`
 }
 
 type BadgeStatistics struct {

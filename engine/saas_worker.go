@@ -112,6 +112,22 @@ func (s *Scheduler) refreshInstitutionStatistics() scheduledJobResult {
 	return scheduledJobSucceeded()
 }
 
+// refreshCollectiveWeights publishes new collective BKT weight versions. The
+// worker only reads learner state; weights reach learners in their own
+// interaction transaction.
+func (s *Scheduler) refreshCollectiveWeights() scheduledJobResult {
+	backend, ok := s.store.(storeport.CollectiveWeightWorkerStore)
+	if !ok || s.currentTenantScope == nil {
+		return scheduledJobFailed("collective_weights_store_unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), institutionStatisticsTimeout)
+	defer cancel()
+	if _, err := backend.RecomputeCollectiveWeights(ctx, *s.currentTenantScope, time.Now().UTC()); err != nil {
+		return scheduledJobFailed("collective_weights_failed")
+	}
+	return scheduledJobSucceeded()
+}
+
 func (s *Scheduler) consumeSaaSJob(backend saasWorkerStore, job *models.AsyncJob) (resultErr error) {
 	scope := *s.currentTenantScope
 	if job == nil {

@@ -903,6 +903,12 @@ func (s *Scheduler) Start() error {
 			})); err != nil {
 			return fmt.Errorf("add institution statistics: %w", err)
 		}
+		if err := s.schedule("institution_collective_weights", "21 */6 * * *", 6*time.Hour,
+			s.scheduledIndependentTenantJob("institution_collective_weights", func(child *Scheduler) scheduledJobResult {
+				return child.refreshCollectiveWeights()
+			})); err != nil {
+			return fmt.Errorf("add institution collective weights: %w", err)
+		}
 		if err := s.schedule("saas_entitlement_expiry", "*/1 * * * *", time.Minute,
 			s.scheduledIndependentTenantJob("saas_entitlement_expiry", func(child *Scheduler) scheduledJobResult {
 				return child.expireSaaSReservations()
@@ -917,7 +923,7 @@ func (s *Scheduler) Start() error {
 	}
 
 	s.cron.Start()
-	s.logger.Info("scheduler started", "jobs", "olm(13h), consolidation(13h30), consolidation_timeout(5m), motivation(8h), recap(21h), mirror(12h), cleanup(1h), metacog(30m), saas relay/async(1m worker), institution statistics(1h)", "distributed", s.distributed)
+	s.logger.Info("scheduler started", "jobs", "olm(13h), consolidation(13h30), consolidation_timeout(5m), motivation(8h), recap(21h), mirror(12h), cleanup(1h), metacog(30m), saas relay/async(1m worker), institution statistics(1h), collective weights(6h)", "distributed", s.distributed)
 	return nil
 }
 

@@ -18,3 +18,14 @@ type StatisticsStore interface {
 type StatisticsWorkerStore interface {
 	RecomputeInstitutionStatistics(context.Context, models.TenantScope, time.Time) (int, error)
 }
+
+// CollectiveWeightStore applies the current collective BKT weights to a locked
+// learner state inside the interaction transaction. It never persists state.
+type CollectiveWeightStore interface {
+	ApplyCollectiveWeights(context.Context, models.TenantScope, *models.ConceptState, time.Time) (*models.CollectiveWeightApplication, error)
+}
+
+// CollectiveWeightWorkerStore is the worker-only publisher of weight versions.
+type CollectiveWeightWorkerStore interface {
+	RecomputeCollectiveWeights(context.Context, models.TenantScope, time.Time) (int, error)
+}

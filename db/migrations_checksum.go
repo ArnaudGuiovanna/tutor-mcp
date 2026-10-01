@@ -1903,6 +1903,7 @@ END;`,
 	out = append(out, migration{Version: "0074_learner_formations", Body: learnerFormationsMigration})
 	out = append(out, migration{Version: "0075_learning_badges", Body: badgesMigration})
 	out = append(out, migration{Version: "0076_institution_statistics", Body: statisticsMigration})
+	out = append(out, migration{Version: "0077_collective_weights", Body: collectiveWeightsMigration})
 	return out
 }
 

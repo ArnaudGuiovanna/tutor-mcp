@@ -351,18 +351,30 @@ func (s *Store) GetCohortStatistics(ctx context.Context, p models.Principal, coh
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
 		for rows.Next() {
 			var item models.ConceptStatistics
 			var observed sql.NullInt64
 			var cMean, cMedian sql.NullFloat64
 			if err := rows.Scan(&item.ConceptID, &item.StableKey, &item.Label, &observed, &cMean, &cMedian); err != nil {
+				rows.Close()
 				return err
 			}
 			item.ObservedLearners, item.MeanMastery, item.MedianMastery = statInt(observed), statFloat(cMean), statFloat(cMedian)
 			out.Concepts = append(out.Concepts, item)
 		}
-		return rows.Err()
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		for i := range out.Concepts {
+			weight, _, err := txs.currentCollectiveWeight(ctx, p.TenantID, out.Concepts[i].ConceptID)
+			if err != nil {
+				return err
+			}
+			out.Concepts[i].CollectiveWeight = weight
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
