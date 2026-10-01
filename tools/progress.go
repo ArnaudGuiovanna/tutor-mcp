@@ -11,7 +11,7 @@ import (
 )
 
 func progressTool(name string) bool {
-	return name == "list_trainer_cohorts" || name == "get_cohort_insights" || name == "get_learner_progress" || name == "get_learner_badges"
+	return name == "list_trainer_cohorts" || name == "get_cohort_insights" || name == "get_learner_progress" || name == "get_learner_badges" || name == "get_cohort_statistics"
 }
 
 type CohortInsightsParams struct {
@@ -19,6 +19,12 @@ type CohortInsightsParams struct {
 	After        string `json:"after,omitempty" jsonschema:"next_after for the enrollment roster"`
 	ConceptAfter string `json:"concept_after,omitempty" jsonschema:"next_concept_after for the separate concept summary page"`
 	Limit        int    `json:"limit,omitempty" jsonschema:"page size 1..100, default 20"`
+}
+
+type CohortStatisticsParams struct {
+	CohortID     string `json:"cohort_id" jsonschema:"cohort ID returned by list_trainer_cohorts"`
+	ConceptAfter string `json:"concept_after,omitempty" jsonschema:"next_concept_after for the next concept page"`
+	Limit        int    `json:"limit,omitempty" jsonschema:"concept page size 1..100, default 20"`
 }
 
 type LearnerProgressParams struct {
@@ -50,6 +56,18 @@ func registerProgressTools(server *mcp.Server, deps *Deps) {
 			input.Limit = 20
 		}
 		out, err := s.GetCohortInsights(ctx, p, input.CohortID, input.After, input.ConceptAfter, input.Limit)
+		return progressToolResult(deps, out, err)
+	})
+	addTool(server, &mcp.Tool{Name: "get_cohort_statistics", Description: "Read the anonymous worker-computed statistics of an authorized cohort: learner counts, mean and median mastery estimates, completion, badge holder counts and per-concept distribution. Requires progress:read. A null value with status insufficient_data is suppressed to protect learners (fewer than five, or a small complementary group): never estimate or subtract it. Statistics are a snapshot refreshed about hourly; respect status, stale and computed_at. Follow next_concept_after for all concepts and write the synthesis in the client using synthesis_guidance."}, func(ctx context.Context, _ *mcp.CallToolRequest, input CohortStatisticsParams) (*mcp.CallToolResult, any, error) {
+		p, _ := auth.GetPrincipal(ctx)
+		s, ok := deps.Store.(storeport.StatisticsStore)
+		if !ok {
+			return progressToolResult(deps, nil, storeport.ErrProgressUnavailable)
+		}
+		if input.Limit == 0 {
+			input.Limit = 20
+		}
+		out, err := s.GetCohortStatistics(ctx, p, input.CohortID, input.ConceptAfter, input.Limit)
 		return progressToolResult(deps, out, err)
 	})
 	addTool(server, &mcp.Tool{Name: "get_learner_progress", Description: "Read one learner's progress for an exact authorized enrollment: concepts, reviews, evidence counts and the ten most recent session summaries. Historical enrollments stay bound to their own cohort/version. Private chats, answers and affect are excluded. Follow next_after for all concepts and use synthesis_guidance to write a grounded staff synthesis in the client."}, func(ctx context.Context, _ *mcp.CallToolRequest, input LearnerProgressParams) (*mcp.CallToolResult, any, error) {

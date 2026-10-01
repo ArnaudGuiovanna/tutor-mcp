@@ -47,6 +47,14 @@ GRANT SELECT ON
 TO tutor_worker;
 
 -- Durable queues and operational state owned by the worker.
+-- Anonymous statistics snapshots are written only by the worker.
+GRANT SELECT ON
+    cohorts, formation_versions, formations, formation_concepts,
+    learner_concept_states, enrollment_migrations
+TO tutor_worker;
+GRANT SELECT, INSERT, UPDATE, DELETE ON
+    cohort_statistics, cohort_concept_statistics, cohort_badge_statistics
+TO tutor_worker;
 GRANT SELECT, INSERT, UPDATE, DELETE ON
     outbox_events, async_jobs, integration_deliveries,
     webhook_message_queue, webhook_delivery_transitions, webhook_push_log,

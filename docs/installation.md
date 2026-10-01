@@ -373,8 +373,8 @@ by self-enrollment.
 Reuse a retry key only for the identical original request. An old receipt reports
 that original action; `get_my_formations` returns current state. The
 [phase 3 acceptance contract](institution-phase-3.md) and institution smoke cover
-the full institution journey M1. Learner-facing collective statistics remain
-a later phase; badges are described below.
+the full institution journey M1. Badges and anonymous collective statistics
+are described below; learner-facing comparison remains a later phase.
 
 ### Staff progress and AI-assisted synthesis
 
@@ -402,6 +402,7 @@ The tools are registered only in institution mode.
 | --- | --- |
 | `list_trainer_cohorts` | `after`, `limit`: cohort IDs, formation/version and whole-cohort enrollment counts. |
 | `get_cohort_insights` | `cohort_id`, `after`, `concept_after`, `limit`: named roster, attention signals and concept observations. Roster and concept cursors are independent. |
+| `get_cohort_statistics` | `cohort_id`, `concept_after`, `limit`: the latest anonymous worker snapshot (see [collective statistics](#collective-statistics)). |
 | `get_learner_progress` | `enrollment_id`, `after`, `limit`: concept estimates, review dates, evidence counts and up to ten recent sessions for that exact enrollment. |
 
 Page sizes default to 20 through MCP and are bounded to 1–100 (50 in the
@@ -478,6 +479,41 @@ bulk backfill runs during migration; the next observation or adjudication
 evaluates eligible stored evidence. Retention evaluation examines a bounded
 suffix of 500 observations; truncation can delay an award but never invent one.
 See the [phase 5 acceptance contract](institution-phase-5.md).
+
+### Collective statistics
+
+Staff open **Collective statistics** from a cohort in `/console/progress`, or call
+`get_cohort_statistics` (`progress:read`, the same live cohort assignments as the
+other progress reads). The figures are anonymous aggregates of one cohort's
+published version: learners with recorded reviews, active or completed learners,
+learners who completed the formation, the mean and median of each learner's
+average mastery estimate, learners holding each badge kind/milestone, and per
+concept the observed learners with mean and median mastery.
+
+A background worker recomputes every published institutional cohort about once
+an hour and stores only the latest snapshot; nothing is computed while you read.
+Responses carry `computed_at`, `status` (`available`, `insufficient_data`,
+`not_yet_computed`) and `stale` (older than six hours, for example when the
+worker is stopped). Activity, departures and erasures appear at the next run.
+
+Privacy rules are enforced when the worker writes, not when you read:
+
+- a cohort with fewer than five learners with recorded reviews stores no figure
+  at all; a concept needs five observed learners of its own;
+- a holder count (completion, each badge) is withheld when the holders or the
+  non-holders are a group of one to four, so a hidden small group cannot be
+  recovered by subtraction. A withheld cell is `null` with
+  `status: insufficient_data`, never zero; a real zero is reported as `0`;
+- only active and completed enrollments count, and estimates written after an
+  enrollment migrated are excluded, as in the individual views;
+- no learner identifier, answer, chat or profile data is stored.
+
+Statistics describe the cohort, not individuals, and mastery remains an estimate,
+not a grade or certification. The client AI writes any synthesis from the returned
+figures (see `synthesis_guidance`). With PostgreSQL roles, re-apply
+`deploy/postgres-roles.sql` after upgrading so the worker can write the three
+`cohort_*_statistics` tables. See the
+[phase 6 acceptance contract](institution-phase-6.md).
 
 ## Backups, restore and upgrades
 

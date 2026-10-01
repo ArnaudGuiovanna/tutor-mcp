@@ -19,6 +19,7 @@ type progressPageData struct {
 	Institution, MCPURL string
 	Cohorts             models.TrainerCohortPage
 	Insights            *models.CohortInsights
+	Statistics          *models.CohortStatistics
 	Learner             *models.LearnerProgress
 	After, ConceptAfter string
 }
@@ -47,6 +48,13 @@ func (s *OAuthServer) HandleConsoleProgress(w http.ResponseWriter, r *http.Reque
 	switch {
 	case q.Get("enrollment_id") != "":
 		data.Learner, err = store.GetLearnerProgress(r.Context(), p, q.Get("enrollment_id"), data.After, 50)
+	case q.Get("cohort_id") != "" && q.Get("view") == "statistics":
+		stats, ok := s.store.(storeport.StatisticsStore)
+		if !ok {
+			writeProgressPageError(w, storeport.ErrProgressUnavailable)
+			return
+		}
+		data.Statistics, err = stats.GetCohortStatistics(r.Context(), p, q.Get("cohort_id"), data.ConceptAfter, 50)
 	case q.Get("cohort_id") != "":
 		data.Insights, err = store.GetCohortInsights(r.Context(), p, q.Get("cohort_id"), data.After, data.ConceptAfter, 50)
 	default:
@@ -133,6 +141,27 @@ var progressPageTmpl = template.Must(template.New("progress").Funcs(template.Fun
 		}
 		return value.UTC().Format("2006-01-02 15:04 UTC")
 	},
+	"statint": func(cell models.StatInt) string {
+		if cell.Value == nil {
+			return "Insufficient data"
+		}
+		return fmt.Sprintf("%d", *cell.Value)
+	},
+	"statmastery": func(cell models.StatFloat) string {
+		if cell.Value == nil {
+			return "Insufficient data"
+		}
+		return fmt.Sprintf("%.0f%%", *cell.Value*100)
+	},
+	"badgekind": func(b models.BadgeStatistics) string {
+		switch {
+		case b.Kind == models.BadgeMastery:
+			return "Mastery challenge passed"
+		case b.Kind == models.BadgeFormation:
+			return "Formation completed"
+		}
+		return fmt.Sprintf("Memory maintained — %d days", b.RetentionDays)
+	},
 	"signal": func(value string) string {
 		switch value {
 		case "no_reviews":
@@ -160,8 +189,20 @@ body{font:16px/1.6 system-ui;max-width:1100px;margin:2rem auto;padding:1rem;colo
 {{if .NextAfter}}<a href="/console/progress?enrollment_id={{.Learner.EnrollmentID}}&amp;after={{.NextAfter}}">Next concepts</a>{{end}}</section>
 <section class="scroll"><h2>Recent sessions</h2><p>Up to {{.RecentSessionLimit}} most recent sessions for this enrollment. Session status is recorded state; an open session does not prove the learner is online.</p><table><thead><tr><th>Session</th><th>Status</th><th>Started</th><th>Last activity</th></tr></thead><tbody>{{range .RecentSessions}}<tr><td><code>{{.SessionID}}</code></td><td>{{.Status}}</td><td>{{.StartedAt.Format "2006-01-02 15:04 UTC"}}</td><td>{{.LastActiveAt.Format "2006-01-02 15:04 UTC"}}</td></tr>{{else}}<tr><td colspan="4">No sessions recorded.</td></tr>{{end}}</tbody></table></section>
 <p class="muted">Read at {{.GeneratedAt.Format "2006-01-02 15:04 UTC"}}.</p>
+{{end}}{{else if .Statistics}}{{with .Statistics}}
+<p><a href="/console/progress?cohort_id={{.Cohort.CohortID}}">{{.Cohort.FormationName}} — {{.Cohort.CohortName}}</a> · Version {{.Cohort.Version}}</p>
+<h2>Collective statistics</h2>
+<p class="muted">Anonymous figures computed by a background worker about once an hour; they lag recent learning activity. Figures concerning fewer than {{.MinimumContributors}} learners, and groups that would reveal them by subtraction, are withheld. Mastery is an estimate, not a grade or certification.</p>
+{{if eq .Status "not_yet_computed"}}<section><p>These statistics have not been computed yet. Try again later.</p></section>
+{{else}}<p>Computed at {{date .ComputedAt}}.{{if .Stale}} <strong>This snapshot is older than six hours and may be out of date.</strong>{{end}}</p>
+{{if eq .Status "insufficient_data"}}<section><p>Fewer than {{.MinimumContributors}} learners with recorded reviews: no collective figure is available for this cohort.</p></section>{{else}}
+<section><table><tbody><tr><th scope="row">Learners with recorded reviews</th><td>{{statint .Contributors}}</td></tr><tr><th scope="row">Active or completed learners</th><td>{{statint .Participants}}</td></tr><tr><th scope="row">Learners who completed the formation</th><td>{{statint .CompletedLearners}}</td></tr><tr><th scope="row">Mean of learner mastery estimates</th><td>{{statmastery .MeanMastery}}</td></tr><tr><th scope="row">Median of learner mastery estimates</th><td>{{statmastery .MedianMastery}}</td></tr></tbody></table></section>
+<section class="scroll"><h2>Learning badges</h2><table><thead><tr><th>Badge</th><th>Learners</th></tr></thead><tbody>{{range .Badges}}<tr><th scope="row">{{badgekind .}}</th><td>{{statint .Learners}}</td></tr>{{end}}</tbody></table></section>
+<section class="scroll"><h2>Concepts</h2><table><thead><tr><th>Concept</th><th>Observed learners</th><th>Mean</th><th>Median</th></tr></thead><tbody>{{range .Concepts}}<tr><th scope="row">{{.Label}}</th><td>{{statint .ObservedLearners}}</td><td>{{statmastery .MeanMastery}}</td><td>{{statmastery .MedianMastery}}</td></tr>{{else}}<tr><td colspan="4">No concepts on this page.</td></tr>{{end}}</tbody></table>
+{{if .NextConceptAfter}}<a href="/console/progress?cohort_id={{.Cohort.CohortID}}&amp;view=statistics&amp;concept_after={{.NextConceptAfter}}">Next concepts</a>{{end}}</section>{{end}}{{end}}
 {{end}}{{else if .Insights}}{{with .Insights}}
 <h2>{{.Cohort.FormationName}} — {{.Cohort.CohortName}}</h2><p>Version {{.Cohort.Version}} · Cohort {{.Cohort.CohortStatus}} · Formation {{.Cohort.FormationStatus}}</p><p>Whole cohort: {{.Cohort.EnrollmentCount}} enrollments, {{.Cohort.ActiveCount}} active, {{.Cohort.CompletedCount}} completed.</p>
+<p><a href="/console/progress?cohort_id={{.Cohort.CohortID}}&amp;view=statistics">Collective statistics</a></p>
 {{if .CanManageAssignments}}<section><h2>Trainer access</h2><p>Assign an existing active trainer in this institution to this cohort. Revoking this assignment takes effect on the next read; other role-based access still applies.</p><ul>{{range .Trainers}}<li>{{.Email}}</li>{{else}}<li>No assigned trainers.</li>{{end}}</ul>{{if .TrainersTruncated}}<p>The first 100 assignments are shown. Use the email form to revoke any assignment.</p>{{end}}
 <form method="post" action="/console/progress/trainers"><input type="hidden" name="csrf_token" value="{{$.CSRFToken}}"><input type="hidden" name="cohort_id" value="{{.Cohort.CohortID}}"><label for="trainer-email">Trainer email</label> <input id="trainer-email" type="email" name="email" required maxlength="254"> <button name="assigned" value="true">Grant access</button> <button name="assigned" value="false">Revoke access</button></form></section>{{end}}
 <section class="scroll"><h2>Learner follow-up</h2><table><caption>This page of enrollments, including historical records</caption><thead><tr><th>Learner</th><th>Status</th><th>Reviewed concepts</th><th>Mastery estimate</th><th>Last review</th><th>Follow-up signals</th></tr></thead><tbody>

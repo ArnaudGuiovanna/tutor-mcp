@@ -41,6 +41,7 @@ var readOnlyTools = map[string]bool{
 	"get_learner_badges":             true,
 	"list_trainer_cohorts":           true,
 	"get_cohort_insights":            true,
+	"get_cohort_statistics":          true,
 	"get_learner_progress":           true,
 	"list_available_formations":      true,
 	"get_my_formations":              true,

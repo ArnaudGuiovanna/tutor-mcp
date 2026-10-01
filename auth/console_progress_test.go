@@ -84,6 +84,22 @@ func TestInstitutionProgressConsoleSessionAndAssignments(t *testing.T) {
 	if !strings.Contains(page, "No estimate") || !strings.Contains(page, "No sessions recorded") {
 		t.Fatal("missing empty evidence guidance")
 	}
+	statsPath := "/console/progress?view=statistics&cohort_id=" + cohort.ID
+	if resp, body := b.get(statsPath); resp.StatusCode != 200 || !strings.Contains(body, "have not been computed yet") || resp.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("statistics before computation: %d %.800s", resp.StatusCode, body)
+	}
+	if _, cohortPage := b.get("/console/progress?cohort_id=" + cohort.ID); !strings.Contains(cohortPage, "view=statistics") {
+		t.Fatal("cohort page does not link to the statistics")
+	}
+	if _, err := store.RecomputeInstitutionStatistics(ctx, owner.TenantScope(), time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if resp, body := b.get(statsPath); resp.StatusCode != 200 || !strings.Contains(body, "Computed at") || !strings.Contains(body, "no collective figure is available") || strings.Contains(body, "<script>") {
+		t.Fatalf("statistics for a one-learner cohort: %d %.800s", resp.StatusCode, body)
+	}
+	if resp, body := b.get("/console/progress?view=statistics&cohort_id=missing"); resp.StatusCode != 404 || !strings.Contains(body, "not_found") {
+		t.Fatalf("statistics error: %d %s", resp.StatusCode, body)
+	}
 	if resp, body := b.get("/console/progress/badges?enrollment_id=" + enrollment.ID); resp.StatusCode != 200 || !strings.Contains(body, "No badges earned") || resp.Header.Get("Cache-Control") != "no-store" {
 		t.Fatalf("staff badges: %d %s", resp.StatusCode, body)
 	}

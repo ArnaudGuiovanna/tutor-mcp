@@ -123,6 +123,8 @@ func TestFormationScopesDoNotInheritLearnerBundle(t *testing.T) {
 		{"join_formation", "learner:write", true},
 		{"list_trainer_cohorts", "progress:read", true},
 		{"get_cohort_insights", "progress:read", true},
+		{"get_cohort_statistics", "progress:read", true},
+		{"get_cohort_statistics", "learner", false},
 		{"get_learner_progress", "progress:read", true},
 		{"get_learner_progress", "learner", false},
 		{"get_cohort_insights", "formation:read", false},

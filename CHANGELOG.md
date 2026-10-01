@@ -8,6 +8,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- Anonymous institution cohort statistics. A worker recomputes, about hourly,
+  learner counts, completion, badge holders and mean/median mastery per cohort
+  and concept, withholding any cell below five learners or revealing a small
+  group by subtraction. Staff read the latest snapshot with
+  `get_cohort_statistics` or in `/console/progress`; it carries `computed_at`
+  and a stale flag. Re-apply `deploy/postgres-roles.sql` for the new worker grants.
 - Institution badges for successful mastery challenges, completion of every
   concept in a published formation, and maintained FSRS recall at 7, 30 and
   90 days. Awards are transactional and deduplicated, retain dated evidence

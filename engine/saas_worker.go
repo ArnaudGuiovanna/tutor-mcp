@@ -19,12 +19,14 @@ import (
 
 	"tutor-mcp/models"
 	"tutor-mcp/observability"
+	storeport "tutor-mcp/store"
 )
 
 const (
-	saasWorkerBatchSize       = 100
-	saasWorkerLease           = 2 * time.Minute
-	maxIntegrationResponseLen = 64 << 10
+	saasWorkerBatchSize          = 100
+	saasWorkerLease              = 2 * time.Minute
+	maxIntegrationResponseLen    = 64 << 10
+	institutionStatisticsTimeout = 10 * time.Minute
 )
 
 type saasWorkerStore interface {
@@ -91,6 +93,21 @@ func (s *Scheduler) expireSaaSReservations() scheduledJobResult {
 	defer cancel()
 	if _, err := backend.ExpireEntitlementReservations(ctx, *s.currentTenantScope, time.Now().UTC(), saasWorkerBatchSize); err != nil {
 		return scheduledJobFailed("saas_reservation_expiry_failed")
+	}
+	return scheduledJobSucceeded()
+}
+
+// refreshInstitutionStatistics recomputes the anonymous cohort snapshots. The
+// store upserts per cohort, so a retry or a concurrent worker converges.
+func (s *Scheduler) refreshInstitutionStatistics() scheduledJobResult {
+	backend, ok := s.store.(storeport.StatisticsWorkerStore)
+	if !ok || s.currentTenantScope == nil {
+		return scheduledJobFailed("institution_statistics_store_unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), institutionStatisticsTimeout)
+	defer cancel()
+	if _, err := backend.RecomputeInstitutionStatistics(ctx, *s.currentTenantScope, time.Now().UTC()); err != nil {
+		return scheduledJobFailed("institution_statistics_failed")
 	}
 	return scheduledJobSucceeded()
 }

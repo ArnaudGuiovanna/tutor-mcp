@@ -116,6 +116,37 @@ func TestInstitutionProgressMCPJourney(t *testing.T) {
 			t.Fatalf("normalized %s: %s", tc.code, resultText(r))
 		}
 	}
+	var stats models.CohortStatistics
+	r = call(reader, "get_cohort_statistics", CohortStatisticsParams{CohortID: c.ID})
+	if r.IsError || json.Unmarshal([]byte(resultText(r)), &stats) != nil || stats.Status != models.StatisticsNotYetComputed || stats.SynthesisGuidance == "" {
+		t.Fatalf("statistics before computation: %s", resultText(r))
+	}
+	if _, err := s.RecomputeInstitutionStatistics(ctx, owner.TenantScope(), time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	stats = models.CohortStatistics{}
+	r = call(reader, "get_cohort_statistics", CohortStatisticsParams{CohortID: c.ID})
+	if r.IsError || json.Unmarshal([]byte(resultText(r)), &stats) != nil || stats.Status != models.StatisticsInsufficientData ||
+		stats.ComputedAt == nil || stats.Contributors.Value != nil || stats.Contributors.Status != models.StatisticsInsufficientData {
+		t.Fatalf("one learner must never produce a figure: %s", resultText(r))
+	}
+	for _, tc := range []struct {
+		p    models.Principal
+		args CohortStatisticsParams
+		code string
+	}{
+		{reader, CohortStatisticsParams{CohortID: "missing"}, "not_found"},
+		{reader, CohortStatisticsParams{CohortID: c.ID, Limit: 101}, "invalid_request"},
+		{models.Principal{UserID: student.UserID, TenantID: student.TenantID, MembershipID: student.MembershipID, LearnerID: student.LearnerID, Roles: student.Roles, TokenVersion: student.TokenVersion, Scopes: []string{models.OAuthScopeProgressRead}}, CohortStatisticsParams{CohortID: c.ID}, "forbidden"},
+	} {
+		r := call(tc.p, "get_cohort_statistics", tc.args)
+		if !r.IsError || !strings.Contains(resultText(r), `"code":"`+tc.code+`"`) && !strings.Contains(resultText(r), `"code": "`+tc.code+`"`) {
+			t.Fatalf("statistics %s: %s", tc.code, resultText(r))
+		}
+	}
+	if r := call(owner, "get_cohort_statistics", CohortStatisticsParams{CohortID: c.ID}); !r.IsError || !strings.Contains(resultText(r), "progress:read") {
+		t.Fatalf("statistics scope bypass: %s", resultText(r))
+	}
 	if r := call(owner, "list_trainer_cohorts", LearnerFormationPageParams{}); !r.IsError || !strings.Contains(resultText(r), "progress:read") {
 		t.Fatalf("missing scope step-up: %s", resultText(r))
 	}

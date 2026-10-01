@@ -405,6 +405,14 @@ def main():
           second['learners'][0]['enrollment_id'] != insights['learners'][0]['enrollment_id'], 'progress second page')
     check(all(c['average_mastery'] is None for c in insights['concepts']), 'small cohort average exposed')
     before_progress = tool(trainer, 'get_learner_progress', {'enrollment_id': enrollments[0]['id']})
+    # Phase 6: two learners are far below the anonymity threshold. Whether or not
+    # the hourly worker has run yet, no collective figure may be exposed.
+    stats = tool(trainer, 'get_cohort_statistics', {'cohort_id': cohort_id})
+    check(stats['status'] in ('not_yet_computed', 'insufficient_data') and stats['contributors']['value'] is None
+          and stats['mean_mastery']['value'] is None and not stats['concepts'] and stats['synthesis_guidance'],
+          'small cohort statistics exposed')
+    status, _, page = trainer_browser.get('/console/progress?view=statistics&cohort_id=' + cohort_id)
+    check(status == 200 and 'Collective statistics' in page, 'trainer browser statistics')
 
     check(tool(trainer, 'get_learner_badges', {'enrollment_id': enrollments[0]['id']})['items'] == [], 'staff badge evidence')
     status, _, page = trainer_browser.get('/console/progress/badges?enrollment_id=' + enrollments[0]['id'])
@@ -422,6 +430,8 @@ def main():
     check(denied.get('isError') and 'not_found' in json.dumps(denied), 'revoked trainer token retained progress access')
     denied = trainer('tools/call', {'name': 'get_learner_badges', 'arguments': {'enrollment_id': enrollments[0]['id']}})
     check(denied.get('isError') and 'not_found' in json.dumps(denied), 'revoked trainer read badges')
+    denied = trainer('tools/call', {'name': 'get_cohort_statistics', 'arguments': {'cohort_id': cohort_id}})
+    check(denied.get('isError') and 'not_found' in json.dumps(denied), 'revoked trainer read statistics')
     status, _, page = manager.get('/console/progress?cohort_id=' + cohort_id)
     status, _, _ = manager.post('/console/progress/trainers', {
         'csrf_token': csrf(page), 'cohort_id': cohort_id, 'email': 'trainer@acme.test', 'assigned': 'true'})
