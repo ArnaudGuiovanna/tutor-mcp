@@ -45,8 +45,16 @@ var restoreChecksumExempt = map[string]string{
 
 func TestEveryTenantTableIsRestoreCheckedOrExplicitlyExempt(t *testing.T) {
 	s := setupTestDB(t)
-	rows, err := s.query(t.Context(), `SELECT DISTINCT m.name FROM sqlite_master m, pragma_table_info(m.name) p
- WHERE m.type = 'table' AND p.name = 'tenant_id' ORDER BY m.name`)
+	query := `SELECT DISTINCT m.name FROM sqlite_master m, pragma_table_info(m.name) p
+ WHERE m.type = 'table' AND p.name = 'tenant_id' ORDER BY m.name`
+	if s.dialect == DialectPostgres {
+		// Each PostgreSQL test has its own schema; do not inventory other tests.
+		query = `SELECT c.table_name FROM information_schema.columns c
+ JOIN information_schema.tables t USING (table_catalog, table_schema, table_name)
+ WHERE c.table_schema = current_schema() AND t.table_type = 'BASE TABLE'
+ AND c.column_name = 'tenant_id' ORDER BY c.table_name`
+	}
+	rows, err := s.query(t.Context(), query)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,17 +64,25 @@ func TestEveryTenantTableIsRestoreCheckedOrExplicitlyExempt(t *testing.T) {
 		checked[spec.table] = true
 	}
 	var missing []string
+	var count int
 	for rows.Next() {
 		var table string
 		if err := rows.Scan(&table); err != nil {
 			t.Fatal(err)
 		}
+		count++
 		if _, exempt := restoreChecksumExempt[table]; !checked[table] && !exempt {
 			missing = append(missing, table)
 		}
 		if _, exempt := restoreChecksumExempt[table]; checked[table] && exempt {
 			t.Fatalf("%s is both checksummed and exempt", table)
 		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if count == 0 {
+		t.Fatal("tenant table inventory is empty")
 	}
 	sort.Strings(missing)
 	if len(missing) != 0 {
