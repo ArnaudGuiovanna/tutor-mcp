@@ -56,3 +56,10 @@ checks whether an institution identifier is free before a signup email is
 sent, and `PlanIsActive` validates the configured signup plan at startup.
 Neither reads tenant-owned data. The MFA ceremony, console membership reads
 and member administration take a `models.TenantScope` or `models.Principal`.
+
+`GetLearnerDomainByID` (2026-10-04) narrows the legacy `GetDomainByID`: it
+adds the owning learner to the query so that a domain identifier supplied by an
+MCP client can neither reach nor probe another learner's domain inside a
+tenant, where row-level security does not separate learners. It runs in the
+caller's tenant transaction like the legacy teaching API it replaces at those
+call sites, and `GetDomainByID` remains only for trusted system paths.

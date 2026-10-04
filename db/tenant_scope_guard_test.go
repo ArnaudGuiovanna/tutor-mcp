@@ -21,7 +21,7 @@ import (
 // force an explicit review and fingerprint update. Contract/control-plane
 // exceptions (migrations, health and test-only RawDB) are intentionally part
 // of the frozen set and documented in docs/store-scope-contract.md.
-const legacyUnscopedStoreMethodSetSHA256 = "2a2c8a3ed8e3814edd596f81ecd9813fb2239554e8ef991fe99873b3e3686b3e"
+const legacyUnscopedStoreMethodSetSHA256 = "697aa807218b7c2b468944a60f307aec318868e3f058621c5e0116d8f7275b18"
 
 func TestNoNewUnscopedStoreMethods(t *testing.T) {
 	fset := token.NewFileSet()
