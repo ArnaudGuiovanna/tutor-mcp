@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"tutor-mcp/auth"
 	"tutor-mcp/db"
 )
 
@@ -336,8 +337,8 @@ func validateTrustedProxyCIDRs(raw string) error {
 		if err != nil {
 			return fmt.Errorf("invalid CIDR %q", part)
 		}
-		if ones, _ := cidr.Mask.Size(); ones == 0 {
-			return fmt.Errorf("catch-all CIDR %q is unsafe", part)
+		if err := auth.CheckTrustedProxyCIDR(cidr); err != nil {
+			return err
 		}
 		valid++
 	}

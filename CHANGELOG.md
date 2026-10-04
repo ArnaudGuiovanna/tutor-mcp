@@ -111,6 +111,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   is accepted once per time step. Five wrong second-factor codes block further
   attempts for that account, whatever passwords are entered meanwhile.
 
+### Security
+
+- The per-IP rate limiter keys requests on the rightmost `X-Forwarded-For`
+  address that is not a trusted proxy. It previously took the leftmost entry,
+  which the client writes itself behind any appending reverse proxy (nginx,
+  Caddy, Traefik, cloud load balancers), so rotating that value bypassed the
+  login, invitation, recovery and registration limits.
+- IPv6 clients share one rate-limit bucket per /64 network, since a single
+  subscriber or instance controls a whole /64. IPv4 stays per address.
+- `TRUSTED_PROXY_CIDRS` rejects networks broader than /8 (IPv4) or /16 (IPv6),
+  in addition to catch-alls; IPv6 unique-local space (`fc00::/7`) stays
+  accepted. Startup fails on such a value, as it already did for `0.0.0.0/0`.
+- Organization learners can sign in again once their failure counter is full.
+  The device-approval challenge is now stored under the membership's own
+  tenant and mailed to the account address instead of the synthetic profile
+  address, and users with several organizations choose one before the
+  challenge. Previously anyone knowing the address could keep these learners
+  out with one wrong password every few minutes.
+
+### Fixed
+
+- Every database row iteration checks the iteration error. A connection lost
+  mid-query could previously yield a truncated result reported as complete,
+  for example a tenant restore declaring its foreign keys verified, or a
+  password reset leaving sessions of some organizations valid. A test now
+  fails on any new loop that omits the check.
+
 ## [0.6.1] — 2026-09-18
 
 ### Fixed

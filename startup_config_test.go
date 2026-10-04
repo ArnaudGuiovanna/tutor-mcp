@@ -305,6 +305,7 @@ func TestProductionProfileFailsClosed(t *testing.T) {
 		{name: "missing encryption keys", key: "INTEGRATION_SECRET_KEYS", value: "", want: "encryption keys"},
 		{name: "local narrative backend", key: "TUTOR_MCP_MEMORY_BACKEND", value: "local", want: "MEMORY_BACKEND=database"},
 		{name: "spoofable proxy", key: "TRUSTED_PROXY_CIDRS", value: "0.0.0.0/0", want: "catch-all"},
+		{name: "near catch-all proxy", key: "TRUSTED_PROXY_CIDRS", value: "0.0.0.0/1", want: "broader than /8"},
 		{name: "anonymous DCR", key: "OAUTH_DCR_MODE", value: "open", want: "OAUTH_DCR_MODE=token or disabled"},
 		{name: "implicit DCR", key: "OAUTH_DCR_MODE", value: "", want: "explicit OAUTH_DCR_MODE"},
 	}

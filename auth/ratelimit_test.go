@@ -35,11 +35,11 @@ func TestClientIP_HonorsXFFFromTrustedPeer(t *testing.T) {
 	r.Header.Set("X-Forwarded-For", "198.51.100.42, 10.0.0.5")
 
 	if got := clientIP(r); got != "198.51.100.42" {
-		t.Fatalf("first XFF entry expected; got %q", got)
+		t.Fatalf("rightmost untrusted XFF entry expected; got %q", got)
 	}
 }
 
-func TestClientIP_NormalizesIPv6FromXFF(t *testing.T) {
+func TestClientIP_KeysIPv6FromXFFByPrefix(t *testing.T) {
 	trustedProxiesOnce.Do(func() {})
 	_, cidr, _ := net.ParseCIDR("::1/128")
 	trustedProxies = []*net.IPNet{cidr}
@@ -51,8 +51,8 @@ func TestClientIP_NormalizesIPv6FromXFF(t *testing.T) {
 	r.Header.Set("X-Forwarded-For", "2001:DB8:0:0:0:0:0:1")
 
 	got := clientIP(r)
-	if got != "2001:db8::1" {
-		t.Fatalf("ipv6 not canonicalized: got %q", got)
+	if got != "2001:db8::/64" {
+		t.Fatalf("ipv6 not canonicalized to its /64 bucket: got %q", got)
 	}
 }
 

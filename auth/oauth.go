@@ -701,11 +701,45 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 			return
 		}
 		if !s.hobbyAccounts && !s.loginFailures.AllowContext(ctx, email) {
+			// The password is correct but the account is under failure pressure.
+			// The device challenge must run against one concrete membership. A
+			// user with several organizations chooses it first; refusing them
+			// outright would let anyone who knows the address keep the owner out
+			// by spending a wrong password every few minutes.
 			memberships, membershipErr := s.store.ListActiveMembershipsForUser(ctx, globalUser.ID)
-			if membershipErr != nil || len(memberships) != 1 {
-				renderAuthPage(w, data, "Choose an organization after signing in.", "login")
+			if membershipErr != nil {
+				s.logger.Error("adaptive login membership lookup failed", "error_type", authLogErrorType(membershipErr))
+				renderAuthPage(w, data, "Internal error. Please try again.", "login")
 				return
 			}
+			if len(memberships) == 0 {
+				renderAuthPage(w, data, "No active organization membership is available.", "login")
+				return
+			}
+			adaptive := memberships[0]
+			if len(memberships) > 1 {
+				selectedTenant := strings.TrimSpace(r.FormValue("tenant_id"))
+				if selectedTenant == "" {
+					data.TenantOptions = make([]tenantOption, 0, len(memberships))
+					for _, membership := range memberships {
+						data.TenantOptions = append(data.TenantOptions, tenantOption{ID: membership.TenantID, Name: membership.TenantName})
+					}
+					renderAuthPage(w, data, "Choose the organization for this session.", "login")
+					return
+				}
+				adaptive = models.TenantMembership{}
+				for _, membership := range memberships {
+					if membership.TenantID == selectedTenant {
+						adaptive = membership
+						break
+					}
+				}
+				if adaptive.ID == "" {
+					renderAuthPage(w, data, "The selected organization is not available.", "login")
+					return
+				}
+			}
+			memberships = []models.TenantMembership{adaptive}
 			trusted, trustErr := false, error(nil)
 			if memberships[0].LearnerID != "" {
 				trusted, trustErr = s.isTrustedLoginDevice(ctx, r, memberships[0].LearnerID)
@@ -720,17 +754,15 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 					TenantID: memberships[0].TenantID, UserID: memberships[0].UserID,
 					MembershipID: memberships[0].ID, LearnerID: memberships[0].LearnerID,
 				}
-				var learner *models.Learner
 				learnerErr := s.store.WithTenantTx(ctx, adaptiveScope, func(txCtx context.Context, scoped storeport.Store) error {
-					var loadErr error
-					learner, loadErr = scoped.GetLearnerByID(txCtx, memberships[0].LearnerID)
+					_, loadErr := scoped.GetLearnerByID(txCtx, memberships[0].LearnerID)
 					return loadErr
 				})
 				if learnerErr != nil {
 					renderAuthPage(w, data, "Internal error. Please try again.", "login")
 					return
 				}
-				if _, challengeErr := s.sendLoginChallenge(ctx, learner, data); challengeErr != nil {
+				if _, challengeErr := s.sendLoginChallenge(ctx, adaptiveScope, globalUser.Email, data); challengeErr != nil {
 					s.logger.Error("adaptive login challenge failed", "error_type", fmt.Sprintf("%T", challengeErr))
 					renderAuthPageStatus(w, http.StatusServiceUnavailable, data, "Additional sign-in verification is temporarily unavailable.", "login")
 					return

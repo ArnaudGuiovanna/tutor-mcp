@@ -1350,6 +1350,10 @@ func (s *Store) RequeueStaleWebhookClaims(ctx context.Context, cutoff, now time.
 			}
 			items = append(items, item)
 		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
 		if err := rows.Close(); err != nil {
 			return err
 		}
@@ -1458,6 +1462,10 @@ func (s *Store) ExpirePastWebhookMessages(ctx context.Context, now time.Time) (i
 				return scanErr
 			}
 			items = append(items, item)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
 		}
 		if err := rows.Close(); err != nil {
 			return err

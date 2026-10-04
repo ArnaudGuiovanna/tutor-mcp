@@ -2662,6 +2662,10 @@ func (s *Store) CleanupExpiredOAuthClients(ctx context.Context) (int64, error) {
 			}
 			expired = append(expired, item)
 		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("iterate expired oauth clients: %w", err)
+		}
 		if err := rows.Close(); err != nil {
 			return fmt.Errorf("close expired oauth clients: %w", err)
 		}

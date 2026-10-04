@@ -7,6 +7,7 @@ package auth
 import (
 	"container/list"
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -177,9 +178,54 @@ var (
 	trustedProxies     []*net.IPNet
 )
 
+// Narrowest prefix accepted for a trusted reverse-proxy network. A shorter
+// prefix covers a large share of the public Internet, so most direct peers
+// would be allowed to choose their own rate-limit key through X-Forwarded-For.
+// The limits still admit 10.0.0.0/8 and published CDN ranges (Cloudflare's
+// widest IPv6 range is a /29). IPv6 unique-local space (fc00::/7) is
+// non-routable and is accepted at its natural size for container networks.
+const (
+	minTrustedProxyPrefixIPv4 = 8
+	minTrustedProxyPrefixIPv6 = 16
+)
+
+var ipv6UniqueLocal = &net.IPNet{IP: net.ParseIP("fc00::"), Mask: net.CIDRMask(7, 128)}
+
+// CheckTrustedProxyCIDR rejects networks too broad to be a reverse proxy.
+// Catch-all CIDRs (0.0.0.0/0, ::/0) are reported as such so operators see why
+// their value is unsafe. Startup validation and the runtime parser share it.
+func CheckTrustedProxyCIDR(cidr *net.IPNet) error {
+	ones, bits := cidr.Mask.Size()
+	if bits == 128 && cidr.IP.To4() != nil {
+		// An IPv4-mapped network (::ffff:a.b.c.d/n) matches IPv4 peers on its
+		// last 32 bits, so ::ffff:0.0.0.0/96 would trust every IPv4 address.
+		ones, bits = ones-96, 32
+		if ones < 0 {
+			ones = 0
+		}
+	}
+	if ones == 0 {
+		return fmt.Errorf("catch-all CIDR %s is unsafe", cidr)
+	}
+	if bits == 32 {
+		if ones < minTrustedProxyPrefixIPv4 {
+			return fmt.Errorf("CIDR %s is broader than /%d", cidr, minTrustedProxyPrefixIPv4)
+		}
+		return nil
+	}
+	uniqueLocalOnes, _ := ipv6UniqueLocal.Mask.Size()
+	if ones >= uniqueLocalOnes && ipv6UniqueLocal.Contains(cidr.IP) {
+		return nil
+	}
+	if ones < minTrustedProxyPrefixIPv6 {
+		return fmt.Errorf("CIDR %s is broader than /%d", cidr, minTrustedProxyPrefixIPv6)
+	}
+	return nil
+}
+
 // parseTrustedProxiesCIDRs parses a comma-separated CIDR list and returns
-// the valid net.IPNet entries. Catch-all CIDRs (0.0.0.0/0, ::/0) are rejected
-// with a slog.Warn — they would treat every direct peer as trusted, letting a
+// the valid net.IPNet entries. Catch-all and overly broad CIDRs are rejected
+// with a slog.Warn — they would treat most direct peers as trusted, letting a
 // client spoof X-Forwarded-For at will and defeating the per-IP rate limiter.
 func parseTrustedProxiesCIDRs(raw string) []*net.IPNet {
 	if raw == "" {
@@ -196,8 +242,8 @@ func parseTrustedProxiesCIDRs(raw string) []*net.IPNet {
 			slog.Warn("invalid TRUSTED_PROXY_CIDRS entry", "value", part, "err", err)
 			continue
 		}
-		if ones, _ := cidr.Mask.Size(); ones == 0 {
-			slog.Warn("rejecting catch-all TRUSTED_PROXY_CIDRS entry — XFF would become attacker-controlled", "value", part)
+		if err := CheckTrustedProxyCIDR(cidr); err != nil {
+			slog.Warn("rejecting TRUSTED_PROXY_CIDRS entry — XFF would become attacker-controlled", "value", part, "err", err)
 			continue
 		}
 		out = append(out, cidr)
@@ -272,22 +318,60 @@ func isTrustedProxy(ip net.IP) bool {
 
 // clientIP returns the bucket key. X-Forwarded-For is honored only when the
 // direct peer is in TRUSTED_PROXY_CIDRS; otherwise a client could spoof its
-// own bucket and bypass the per-IP limit. The leftmost XFF entry must be a
-// well-formed IP — invalid values fall back to the direct peer address.
+// own bucket and bypass the per-IP limit.
+//
+// Reverse proxies append the address they received the request from, so only
+// the right-hand side of the header is trustworthy: every entry to the left of
+// the first untrusted hop may have been written by the client. The key is the
+// rightmost address that is not itself a trusted proxy, as with nginx
+// real_ip_recursive. If every hop is trusted, the leftmost one is the client.
+// A malformed entry stops the walk and falls back to the direct peer, because
+// nothing to its left can be attributed to a trusted proxy.
 func clientIP(r *http.Request) string {
 	peer := remoteIP(r)
 	if isTrustedProxy(peer) {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			first := strings.TrimSpace(strings.Split(xff, ",")[0])
-			if parsed := net.ParseIP(first); parsed != nil {
-				return parsed.String() // canonical form (normalizes IPv6)
-			}
+		if forwarded, ok := forwardedClientIP(r.Header.Values("X-Forwarded-For")); ok {
+			return rateLimitKey(forwarded)
 		}
 	}
 	if peer != nil {
-		return peer.String()
+		return rateLimitKey(peer)
 	}
 	return r.RemoteAddr
+}
+
+func forwardedClientIP(headerValues []string) (net.IP, bool) {
+	var hops []string
+	for _, value := range headerValues {
+		hops = append(hops, strings.Split(value, ",")...)
+	}
+	var candidate net.IP
+	for i := len(hops) - 1; i >= 0; i-- {
+		hop := strings.TrimSpace(hops[i])
+		if hop == "" {
+			continue
+		}
+		parsed := net.ParseIP(hop)
+		if parsed == nil {
+			return nil, false
+		}
+		if !isTrustedProxy(parsed) {
+			return parsed, true
+		}
+		candidate = parsed
+	}
+	return candidate, candidate != nil
+}
+
+// rateLimitKey canonicalizes an address into its rate-limit bucket. IPv4
+// (including IPv4-mapped IPv6) is keyed per address. IPv6 is keyed per /64:
+// a single subscriber or cloud instance routinely controls a whole /64, so a
+// per-address key would hand each client 2^64 fresh buckets.
+func rateLimitKey(ip net.IP) string {
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
+	}
+	return (&net.IPNet{IP: ip.Mask(net.CIDRMask(64, 128)), Mask: net.CIDRMask(64, 128)}).String()
 }
 
 // RateLimitMiddleware wraps an http.Handler with rate limiting.

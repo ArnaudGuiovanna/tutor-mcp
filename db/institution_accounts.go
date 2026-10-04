@@ -884,6 +884,10 @@ func (s *Store) ResetUserPassword(ctx context.Context, credential models.Passwor
 			}
 			tenants = append(tenants, tenantID)
 		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
 		if err := rows.Close(); err != nil {
 			return err
 		}

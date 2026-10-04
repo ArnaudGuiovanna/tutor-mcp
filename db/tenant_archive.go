@@ -594,6 +594,10 @@ func (s *Store) resetPostgresIdentitySequences(ctx context.Context) error {
 		}
 		identities = append(identities, item)
 	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
 	if err := rows.Close(); err != nil {
 		return err
 	}
@@ -640,6 +644,10 @@ func (s *Store) verifyPostgresTenantForeignKeys(ctx context.Context, tenantID st
 			return err
 		}
 		constraints = append(constraints, item)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
 	}
 	if err := rows.Close(); err != nil {
 		return err

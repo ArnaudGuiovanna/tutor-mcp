@@ -211,7 +211,14 @@ func (s *OAuthServer) sendUserPasswordReset(ctx context.Context, email string) e
 	return nil
 }
 
-func (s *OAuthServer) sendLoginChallenge(ctx context.Context, learner *models.Learner, data authPageData) (bool, error) {
+// sendLoginChallenge mails a device-approval link for the learner of scope to
+// recipient. The challenge is stored under the membership's own tenant;
+// without it the store can only resolve learners of the legacy tenant, and
+// every organization learner would be refused once their failure counter is
+// full. The recipient is the signing-in user's account address, never the
+// learner profile's: organization profiles carry a synthetic
+// "@profile.invalid" address that nobody can read.
+func (s *OAuthServer) sendLoginChallenge(ctx context.Context, scope models.TenantScope, recipient string, data authPageData) (bool, error) {
 	sender, ok := s.emailSender.(LoginChallengeEmailSender)
 	if !ok || sender == nil {
 		return false, fmt.Errorf("login challenge delivery is not configured")
@@ -222,7 +229,8 @@ func (s *OAuthServer) sendLoginChallenge(ctx context.Context, learner *models.Le
 	}
 	now := time.Now().UTC()
 	challenge := &models.LoginChallenge{
-		TokenHash: accountTokenHash(raw), LearnerID: learner.ID,
+		TokenHash: accountTokenHash(raw), LearnerID: scope.LearnerID,
+		TenantID: scope.TenantID, UserID: scope.UserID, MembershipID: scope.MembershipID,
 		ClientID: data.ClientID, RedirectURI: data.RedirectURI,
 		Resource: data.Resource, State: data.State, Scope: data.Scope,
 		CodeChallenge: data.CodeChallenge, CodeChallengeMethod: data.CodeChallengeMethod,
@@ -233,7 +241,7 @@ func (s *OAuthServer) sendLoginChallenge(ctx context.Context, learner *models.Le
 		return created, err
 	}
 	link := s.baseURL + "/login-challenge?" + url.Values{"token": []string{raw}}.Encode()
-	if err := sender.SendLoginChallenge(ctx, learner.Email, link); err != nil {
+	if err := sender.SendLoginChallenge(ctx, recipient, link); err != nil {
 		_ = s.store.DeleteLoginChallenge(ctx, challenge.TokenHash)
 		return false, fmt.Errorf("send login challenge: %w", err)
 	}

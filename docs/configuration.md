@@ -41,7 +41,7 @@ Environment variables read at boot:
 | `BASE_URL` | `http://localhost:$PORT` | Public HTTP(S) origin. A trailing `/` is normalized; paths, credentials, query strings, fragments, and non-HTTP schemes fail at boot. Triggers HSTS when `https://`. |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | Enables OTLP traces and metrics; standard trace/metric endpoints, resource attributes, headers and TLS variables are also accepted. |
-| `TRUSTED_PROXY_CIDRS` | — | Comma-separated CIDRs of trusted reverse-proxies. **Required behind a public proxy** — without it every IP-rate-limit collapses under the proxy's loopback bucket. |
+| `TRUSTED_PROXY_CIDRS` | — | Comma-separated CIDRs of trusted reverse-proxies. **Required behind a public proxy** — without it every IP-rate-limit collapses under the proxy's loopback bucket. The client is the rightmost `X-Forwarded-For` address outside these networks, so list every proxy hop. Networks broader than /8 (IPv4) or /16 (IPv6, except `fc00::/7`) are refused. IPv6 clients are rate-limited per /64. |
 | `AUTH_BCRYPT_MAX_CONCURRENT` | `4` | Process-wide CPU budget shared by password and OAuth client-secret bcrypt work (1–128). Admission is non-blocking; saturation receives HTTP 503 with `Retry-After` instead of an unbounded goroutine queue. |
 | `MCP_RATE_LIMIT_PER_MIN` | `60` | Per-IP and per-learner cap on `/mcp` |
 | `MCP_RATE_LIMIT_BURST` | `60` | Burst allowance |
