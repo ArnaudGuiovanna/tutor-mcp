@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 // migration is a single versioned schema change. Body is the SQL executed when
@@ -1972,25 +1973,63 @@ END;`,
 // markRemovedAlterColumns flags each ADD COLUMN whose column a later
 // migration removes, by DROP COLUMN or by rebuilding the table. Repairing
 // such a migration would resurrect a column the schema retired on purpose.
+// The migration bodies are static, so the scan runs once per process: the
+// list is rebuilt on every open and schema verification.
 func markRemovedAlterColumns(migrations []migration) {
+	removedAlterColumns.once.Do(func() {
+		removedAlterColumns.versions = findRemovedAlterColumns(migrations)
+	})
 	for i := range migrations {
-		if !migrations[i].AlterIfNeeded {
+		if removedAlterColumns.versions[migrations[i].Version] {
+			migrations[i].removedLater = true
+		}
+	}
+}
+
+var removedAlterColumns struct {
+	once     sync.Once
+	versions map[string]bool
+}
+
+func findRemovedAlterColumns(migrations []migration) map[string]bool {
+	tokens := make([]string, len(migrations))
+	for i, m := range migrations {
+		tokens[i] = sqlTokens(m.Body)
+	}
+	removed := map[string]bool{}
+	for i, m := range migrations {
+		if !m.AlterIfNeeded {
 			continue
 		}
-		match := reconcilableAlterPattern.FindStringSubmatch(strings.TrimSpace(migrations[i].Body))
+		match := reconcilableAlterPattern.FindStringSubmatch(strings.TrimSpace(m.Body))
 		if match == nil || !strings.EqualFold(match[2], "ADD") {
 			continue
 		}
-		table, column := regexp.QuoteMeta(match[1]), regexp.QuoteMeta(match[3])
-		removal := regexp.MustCompile(`(?is)\bDROP\s+TABLE\s+(IF\s+EXISTS\s+)?` + table + `\b|` +
-			`\bALTER\s+TABLE\s+` + table + `\s+DROP\s+COLUMN\s+` + column + `\b`)
-		for _, later := range migrations[i+1:] {
-			if removal.MatchString(later.Body) {
-				migrations[i].removedLater = true
-				break
+		table, column := strings.ToUpper(match[1]), strings.ToUpper(match[3])
+		needles := []string{
+			" DROP TABLE " + table + " ",
+			" DROP TABLE IF EXISTS " + table + " ",
+			" ALTER TABLE " + table + " DROP COLUMN " + column + " ",
+		}
+		for _, later := range tokens[i+1:] {
+			for _, needle := range needles {
+				if strings.Contains(later, needle) {
+					removed[m.Version] = true
+				}
 			}
 		}
 	}
+	return removed
+}
+
+// sqlTokens upper-cases body and reduces it to identifier tokens separated by
+// single spaces, with a leading and trailing space, so that a contains check
+// on " A B " matches whole words regardless of layout or punctuation.
+func sqlTokens(body string) string {
+	fields := strings.FieldsFunc(strings.ToUpper(body), func(r rune) bool {
+		return !(r == '_' || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'))
+	})
+	return " " + strings.Join(fields, " ") + " "
 }
 
 // VerifySQLiteSchemaCurrent is the read-only startup gate used by API and
