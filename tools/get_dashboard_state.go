@@ -72,13 +72,9 @@ func registerGetDashboardState(server *mcp.Server, deps *Deps) {
 
 		var domains []*models.Domain
 		if params.DomainID != "" {
-			d, derr := deps.Store.GetDomainByID(ctx, params.DomainID)
+			d, derr := deps.Store.GetLearnerDomainByID(ctx, learnerID, params.DomainID)
 			if derr != nil {
-				r, _ := safeErrorResult(deps.Logger, "domain not found", derr)
-				return r, nil, nil
-			}
-			if d.LearnerID != learnerID {
-				r, _ := errorResult("domain not found")
+				r, _ := domainLookupErrorResult(deps, derr)
 				return r, nil, nil
 			}
 			domains = []*models.Domain{d}

@@ -6,11 +6,13 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -28,7 +30,18 @@ type QueueWebhookMessageParams struct {
 const (
 	maxWebhookContentLen     = 1500
 	defaultWebhookMessageTTL = 7 * 24 * time.Hour
+	// A queued nudge is a near-term delivery, not a calendar. Bounding the
+	// window keeps every row reclaimable by expiry: a message scheduled years
+	// ahead would otherwise stay pending, and scanned, indefinitely.
+	maxWebhookScheduleAhead = 30 * 24 * time.Hour
+	maxWebhookSchedulePast  = time.Hour
+	maxWebhookLifetime      = 30 * 24 * time.Hour
+	// Internal nudges use priorities 0 to 95; the client stays in that lane.
+	maxWebhookPriority = 100
 )
+
+// webhookScheduleNow is the reference time for the schedule bounds; tests pin it.
+var webhookScheduleNow = time.Now
 
 func registerQueueWebhookMessage(server *mcp.Server, deps *Deps) {
 	addTool(server, &mcp.Tool{
@@ -96,6 +109,23 @@ func registerQueueWebhookMessage(server *mcp.Server, deps *Deps) {
 			r, _ := errorResult("expires_at must be after scheduled_for")
 			return r, nil, nil
 		}
+		now := webhookScheduleNow()
+		if scheduledFor.Before(now.Add(-maxWebhookSchedulePast)) {
+			r, _ := errorResult("scheduled_for must not be more than 1 hour in the past")
+			return r, nil, nil
+		}
+		if scheduledFor.After(now.Add(maxWebhookScheduleAhead)) {
+			r, _ := errorResult("scheduled_for must be within the next 30 days")
+			return r, nil, nil
+		}
+		if expiresAt.Sub(scheduledFor) > maxWebhookLifetime {
+			r, _ := errorResult("expires_at must be at most 30 days after scheduled_for")
+			return r, nil, nil
+		}
+		if params.Priority < -maxWebhookPriority || params.Priority > maxWebhookPriority {
+			r, _ := errorResult(fmt.Sprintf("priority must be between %d and %d", -maxWebhookPriority, maxWebhookPriority))
+			return r, nil, nil
+		}
 
 		availability, err := deps.Store.GetAvailability(ctx, learnerID)
 		if err != nil {
@@ -136,6 +166,10 @@ func registerQueueWebhookMessage(server *mcp.Server, deps *Deps) {
 		}
 
 		id, err := deps.Store.EnqueueWebhookMessage(ctx, learnerID, params.Kind, content, scheduledFor, expiresAt, params.Priority)
+		if errors.Is(err, storeport.ErrWebhookQueueFull) {
+			r, _ := errorResult("too many notifications are already pending for this learner; let queued messages deliver or expire first")
+			return r, nil, nil
+		}
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to enqueue", err)
 			return r, nil, nil

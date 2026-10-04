@@ -336,12 +336,9 @@ func resolveActiveDomain(ctx context.Context, store storeport.Store, learnerID, 
 		}
 		return domains[0], nil
 	}
-	d, err := store.GetDomainByID(ctx, domainID)
+	d, err := store.GetLearnerDomainByID(ctx, learnerID, domainID)
 	if err != nil {
 		return nil, fmt.Errorf("olm: get domain %s: %w", domainID, err)
-	}
-	if d == nil || d.LearnerID != learnerID {
-		return nil, fmt.Errorf("olm: domain %s not found for learner", domainID)
 	}
 	if d.Archived {
 		return nil, fmt.Errorf("olm: domain %s is archived", domainID)

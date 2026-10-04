@@ -119,7 +119,7 @@ func registerSetGoalRelevance(server *mcp.Server, deps *Deps) {
 			}
 		}
 
-		merged, err := deps.Store.MergeDomainGoalRelevance(ctx, domain.ID, params.Relevance)
+		merged, err := deps.Store.MergeDomainGoalRelevance(ctx, learnerID, domain.ID, params.Relevance)
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "persist failed", err)
 			return r, nil, nil
@@ -129,7 +129,7 @@ func registerSetGoalRelevance(server *mcp.Server, deps *Deps) {
 		// merge above is already durable, so a failed readback is an optional
 		// enrichment failure rather than a failed mutation. Returning IsError
 		// here would release the idempotency key and invite a second merge.
-		fresh, err := deps.Store.GetDomainByID(ctx, domain.ID)
+		fresh, err := deps.Store.GetLearnerDomainByID(ctx, learnerID, domain.ID)
 		var degradedComponents []string
 		var staleAfterSet any
 		if err != nil {

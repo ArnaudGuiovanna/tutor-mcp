@@ -61,6 +61,7 @@ func TestRegistrationPreHijackCannotActivateFromMailboxClick(t *testing.T) {
 	if authorizeRec.Code != http.StatusAccepted {
 		t.Fatalf("attacker registration status=%d body=%q", authorizeRec.Code, authorizeRec.Body.String())
 	}
+	drainBackgroundMail(t, s)
 
 	learner, err := dbStore.GetLearnerByEmail(context.Background(), "victim@example.com")
 	if err != nil || learner.EmailVerifiedAt != nil {
@@ -208,12 +209,14 @@ func TestRecoverResponseDoesNotEnumerateAccountsAndStoresOnlyTokenHash(t *testin
 
 	csrfKnown := accountCSRF(t, s, "/recover", s.HandleRecoverGet)
 	known := postAccountForm(t, "/recover", csrfKnown, url.Values{"email": {"known@example.com"}}, s.HandleRecoverPost)
+	drainBackgroundMail(t, s)
 	if known.Code != http.StatusAccepted || len(sender.resetLinks) != 1 {
 		t.Fatalf("known response status=%d deliveries=%d", known.Code, len(sender.resetLinks))
 	}
 
 	csrfUnknown := accountCSRF(t, s, "/recover", s.HandleRecoverGet)
 	unknown := postAccountForm(t, "/recover", csrfUnknown, url.Values{"email": {"unknown@example.com"}}, s.HandleRecoverPost)
+	drainBackgroundMail(t, s)
 	if unknown.Code != known.Code || unknown.Body.String() != known.Body.String() {
 		t.Fatalf("enumerating response: known=(%d,%q) unknown=(%d,%q)", known.Code, known.Body.String(), unknown.Code, unknown.Body.String())
 	}
@@ -240,6 +243,7 @@ func TestResetPasswordHTTPIsSingleUse(t *testing.T) {
 	seedLearner(t, dbStore, "reset@example.com", "old-password-123")
 	csrf := accountCSRF(t, s, "/recover", s.HandleRecoverGet)
 	postAccountForm(t, "/recover", csrf, url.Values{"email": {"reset@example.com"}}, s.HandleRecoverPost)
+	drainBackgroundMail(t, s)
 	resetURL, _ := url.Parse(s.emailSender.(*testEmailSender).resetLinks[0])
 	raw := resetURL.Query().Get("token")
 

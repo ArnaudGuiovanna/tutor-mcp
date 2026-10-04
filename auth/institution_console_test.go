@@ -438,6 +438,7 @@ func recoverAndReset(t *testing.T, s *OAuthServer, sender *testEmailSender, emai
 	_, page := recovery.get("/recover")
 	before := len(sender.resetLinks)
 	resp, _ := recovery.post("/recover", url.Values{"csrf_token": {field(t, csrfPattern, page)}, "email": {email}})
+	drainBackgroundMail(t, s)
 	if resp.StatusCode != http.StatusAccepted || len(sender.resetLinks) != before+1 {
 		t.Fatalf("recover %s = %d, links=%d", email, resp.StatusCode, len(sender.resetLinks))
 	}

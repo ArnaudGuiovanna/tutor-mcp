@@ -143,6 +143,12 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) er
 		return encoder.Encode(report)
 	}
 
+	if opts.Driver == "sqlite" {
+		// The relational phase commits its mutations and their proof in one
+		// transaction, which holds SQLite's single write lock until it ends.
+		fmt.Fprintln(stderr, "tutor-retention: SQLite apply holds the database write lock for the whole relational phase; "+
+			"stop tutor-mcp first or writes will fail with SQLITE_BUSY")
+	}
 	existing, existingErr := store.GetRetentionJob(ctx, opts.JobID)
 	if existingErr == nil {
 		asOf = existing.AsOf

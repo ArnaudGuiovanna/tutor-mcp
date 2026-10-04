@@ -1218,6 +1218,26 @@ func (s *Store) GetDomainByLearner(ctx context.Context, learnerID string) (*mode
 	return d, nil
 }
 
+// GetLearnerDomainByID returns a non-deleted domain owned by learnerID,
+// archived or not. A domain of another learner is reported exactly like a
+// missing one, so a client-supplied identifier can neither reach nor probe
+// another learner's domain. Row-level security separates tenants, not learners,
+// so this predicate is the guard inside a tenant.
+func (s *Store) GetLearnerDomainByID(ctx context.Context, learnerID, id string) (*models.Domain, error) {
+	row := s.queryRow(ctx, `SELECT `+domainCols+` FROM domains WHERE id = ? AND learner_id = ? AND deleted_at IS NULL`, id, learnerID)
+	d, err := scanDomainRow(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			err = store.WrapNotFound(err)
+		}
+		return nil, fmt.Errorf("get domain by id: %w", err)
+	}
+	return d, nil
+}
+
+// GetDomainByID looks a domain up without an owner check. It serves system
+// paths that already hold a trusted domain identifier; anything that receives
+// an identifier from a client must use GetLearnerDomainByID.
 func (s *Store) GetDomainByID(ctx context.Context, id string) (*models.Domain, error) {
 	row := s.queryRow(ctx, `SELECT `+domainCols+` FROM domains WHERE id = ? AND deleted_at IS NULL`, id)
 	d, err := scanDomainRow(row)

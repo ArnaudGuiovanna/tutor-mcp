@@ -29,7 +29,7 @@ func TestMergeDomainGoalRelevance_FreshDomain(t *testing.T) {
 	store := setupTestDB(t)
 	d := mkDomain(t, store, []string{"Goroutines", "Channels", "Interfaces"})
 
-	merged, err := store.MergeDomainGoalRelevance(context.Background(), d.ID, map[string]float64{
+	merged, err := store.MergeDomainGoalRelevance(context.Background(), d.LearnerID, d.ID, map[string]float64{
 		"Goroutines": 0.9,
 		"Channels":   0.7,
 	})
@@ -51,10 +51,10 @@ func TestMergeDomainGoalRelevance_IncrementalKeepsExisting(t *testing.T) {
 	store := setupTestDB(t)
 	d := mkDomain(t, store, []string{"A", "B", "C"})
 
-	if _, err := store.MergeDomainGoalRelevance(context.Background(), d.ID, map[string]float64{"A": 0.9, "B": 0.5}); err != nil {
+	if _, err := store.MergeDomainGoalRelevance(context.Background(), d.LearnerID, d.ID, map[string]float64{"A": 0.9, "B": 0.5}); err != nil {
 		t.Fatalf("first set: %v", err)
 	}
-	merged, err := store.MergeDomainGoalRelevance(context.Background(), d.ID, map[string]float64{"C": 0.3})
+	merged, err := store.MergeDomainGoalRelevance(context.Background(), d.LearnerID, d.ID, map[string]float64{"C": 0.3})
 	if err != nil {
 		t.Fatalf("second set: %v", err)
 	}
@@ -70,8 +70,8 @@ func TestMergeDomainGoalRelevance_OverwritesSameConcept(t *testing.T) {
 	store := setupTestDB(t)
 	d := mkDomain(t, store, []string{"A", "B"})
 
-	_, _ = store.MergeDomainGoalRelevance(context.Background(), d.ID, map[string]float64{"A": 0.9, "B": 0.5})
-	merged, err := store.MergeDomainGoalRelevance(context.Background(), d.ID, map[string]float64{"A": 0.2})
+	_, _ = store.MergeDomainGoalRelevance(context.Background(), d.LearnerID, d.ID, map[string]float64{"A": 0.9, "B": 0.5})
+	merged, err := store.MergeDomainGoalRelevance(context.Background(), d.LearnerID, d.ID, map[string]float64{"A": 0.2})
 	if err != nil {
 		t.Fatalf("overwrite: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestMergeDomainGoalRelevance_IncrementsVersion(t *testing.T) {
 	d := mkDomain(t, store, []string{"A"})
 
 	for i := 1; i <= 3; i++ {
-		if _, err := store.MergeDomainGoalRelevance(context.Background(), d.ID, map[string]float64{"A": 0.5}); err != nil {
+		if _, err := store.MergeDomainGoalRelevance(context.Background(), d.LearnerID, d.ID, map[string]float64{"A": 0.5}); err != nil {
 			t.Fatalf("set %d: %v", i, err)
 		}
 		fresh, _ := store.GetDomainByID(context.Background(), d.ID)
@@ -118,7 +118,7 @@ func TestConcurrentGraphAndGoalRelevanceMutationsPreserveBothWriters(t *testing.
 	go func() {
 		defer wg.Done()
 		<-start
-		_, err := store.MergeDomainGoalRelevance(context.Background(), d.ID, map[string]float64{"A": 0.9})
+		_, err := store.MergeDomainGoalRelevance(context.Background(), d.LearnerID, d.ID, map[string]float64{"A": 0.9})
 		errs <- err
 	}()
 	close(start)
@@ -137,7 +137,7 @@ func TestConcurrentGraphAndGoalRelevanceMutationsPreserveBothWriters(t *testing.
 	if fresh.GraphVersion != 2 || len(fresh.Graph.Concepts) != 2 || fresh.Graph.Concepts[0] != "A" || fresh.Graph.Concepts[1] != "B" {
 		t.Fatalf("graph writer was lost: %+v", fresh)
 	}
-	relevance, err := store.GetDomainGoalRelevance(context.Background(), d.ID)
+	relevance, err := store.GetDomainGoalRelevance(context.Background(), d.LearnerID, d.ID)
 	if err != nil {
 		t.Fatalf("get goal relevance: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestIsGoalRelevanceStale_AfterAddConcepts(t *testing.T) {
 	store := setupTestDB(t)
 	d := mkDomain(t, store, []string{"A", "B"})
 
-	if _, err := store.MergeDomainGoalRelevance(context.Background(), d.ID, map[string]float64{"A": 0.9, "B": 0.4}); err != nil {
+	if _, err := store.MergeDomainGoalRelevance(context.Background(), d.LearnerID, d.ID, map[string]float64{"A": 0.9, "B": 0.4}); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 	d1, _ := store.GetDomainByID(context.Background(), d.ID)
@@ -199,7 +199,7 @@ func TestGetDomainGoalRelevance_EmptyReturnsNil(t *testing.T) {
 	store := setupTestDB(t)
 	d := mkDomain(t, store, []string{"A"})
 
-	gr, err := store.GetDomainGoalRelevance(context.Background(), d.ID)
+	gr, err := store.GetDomainGoalRelevance(context.Background(), d.LearnerID, d.ID)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -212,8 +212,8 @@ func TestGetDomainGoalRelevance_RoundTrip(t *testing.T) {
 	store := setupTestDB(t)
 	d := mkDomain(t, store, []string{"A", "B"})
 
-	_, _ = store.MergeDomainGoalRelevance(context.Background(), d.ID, map[string]float64{"A": 0.9, "B": 0.4})
-	gr, err := store.GetDomainGoalRelevance(context.Background(), d.ID)
+	_, _ = store.MergeDomainGoalRelevance(context.Background(), d.LearnerID, d.ID, map[string]float64{"A": 0.9, "B": 0.4})
+	gr, err := store.GetDomainGoalRelevance(context.Background(), d.LearnerID, d.ID)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestMergeDomainGoalRelevance_RejectsNil(t *testing.T) {
 	store := setupTestDB(t)
 	d := mkDomain(t, store, []string{"A"})
 
-	if _, err := store.MergeDomainGoalRelevance(context.Background(), d.ID, nil); err == nil {
+	if _, err := store.MergeDomainGoalRelevance(context.Background(), d.LearnerID, d.ID, nil); err == nil {
 		t.Error("expected error for nil relevance map")
 	}
 }

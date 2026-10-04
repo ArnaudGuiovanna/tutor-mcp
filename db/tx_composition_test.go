@@ -127,12 +127,12 @@ func TestNestedTxComposition(t *testing.T) {
 		t.Fatalf("create domain 2: %v", err)
 	}
 	if err := s.WithTx(ctx, func(tx store.Store) error {
-		_, mErr := tx.MergeDomainGoalRelevance(ctx, d2.ID, map[string]float64{"x": 0.9})
+		_, mErr := tx.MergeDomainGoalRelevance(ctx, d2.LearnerID, d2.ID, map[string]float64{"x": 0.9})
 		return mErr
 	}); err != nil {
 		t.Fatalf("MergeDomainGoalRelevance inside WithTx: %v", err)
 	}
-	gr, err := s.GetDomainGoalRelevance(ctx, d2.ID)
+	gr, err := s.GetDomainGoalRelevance(ctx, d2.LearnerID, d2.ID)
 	if err != nil {
 		t.Fatalf("get goal relevance: %v", err)
 	}

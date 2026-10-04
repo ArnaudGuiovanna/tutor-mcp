@@ -90,7 +90,7 @@ func runCatalogMutation[T any](ctx context.Context, s *Store, actor models.Princ
 			return zero, false, err
 		}
 		if currentOperation != operation || currentHash != requestHash || currentActor != actor.UserID {
-			return zero, false, fmt.Errorf("catalog mutation: idempotency key conflict")
+			return zero, false, fmt.Errorf("catalog mutation: idempotency key conflict: %w", storeport.ErrIdempotencyKeyConflict)
 		}
 		var response T
 		if err := decodeCatalogReplay(responseJSON, &response); err != nil {

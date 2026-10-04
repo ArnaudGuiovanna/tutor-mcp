@@ -446,24 +446,26 @@ func (s *OAuthServer) HandleRecoverPost(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	email := NormalizeEmail(r.FormValue("email"))
-	if s.accounts != nil {
-		// Institution accounts authenticate against users, and staff or invited
-		// members may have no learner row carrying their address.
-		if validateEmail(email) == nil {
-			if err := s.sendUserPasswordReset(r.Context(), email); err != nil {
-				s.logger.Error("password reset delivery failed", "error_type", authLogErrorType(err))
-			}
-		}
-	} else if validateEmail(email) == nil {
-		learner, err := s.store.GetLearnerByEmail(r.Context(), email)
-		if err == nil && learner != nil {
-			if sendErr := s.sendPasswordReset(r.Context(), learner); sendErr != nil {
-				s.logger.Error("password reset delivery failed", "err", sendErr)
-			}
-		} else if err != nil {
-			// Deliberately do not distinguish sql.ErrNoRows or any backend
-			// failure in the public response.
-			s.logger.Debug("password reset lookup did not produce an account")
+	// The lookup and delivery run after the response so that neither the
+	// body nor the response time reveals whether the address has an account.
+	if validateEmail(email) == nil {
+		if s.accounts != nil {
+			// Institution accounts authenticate against users, and staff or
+			// invited members may have no learner row carrying their address.
+			s.runBackgroundMail(r.Context(), "password_reset", func(ctx context.Context) error {
+				return s.sendUserPasswordReset(ctx, email)
+			})
+		} else {
+			s.runBackgroundMail(r.Context(), "password_reset", func(ctx context.Context) error {
+				learner, err := s.store.GetLearnerByEmail(ctx, email)
+				if err != nil || learner == nil {
+					// An unknown address is the expected outcome for many
+					// requests, not a delivery failure.
+					s.logger.Debug("password reset lookup did not produce an account")
+					return nil
+				}
+				return s.sendPasswordReset(ctx, learner)
+			})
 		}
 	}
 	setAccountCSRFCookie(w, "", "/recover", -1)

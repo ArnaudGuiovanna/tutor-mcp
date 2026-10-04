@@ -561,12 +561,21 @@ The audit trail is append-only and is retained by design, as are legal holds and
 the erasure request itself. Collective weights hold no learner data and are not
 recomputed on erasure.
 
+The address on the member's own invitation record is replaced as well.
+
+Scope: an erasure acts on one organization's learner. The global account (its
+e-mail, password, second factor and federated links in `users`,
+`mfa_credentials`, `mfa_recovery_codes`, `external_identities` and
+`federated_identity_links`) can serve other organizations and is not deleted by
+an organization's request. The membership itself stays as granted; remove the
+member from the console if access should end too.
+
 Known limit: curriculum history (`curriculum_versions` and its identity tables)
 is append-only by database trigger and is not erased. In institution formations
 it is derived from the published formation; text a learner typed into a
-self-created domain's curriculum remains in it. A test lists every table that
-holds a `learner_id` and fails unless the table is erased or justified, so a new
-table cannot silently escape erasure.
+self-created domain's curriculum remains in it. Tests list every table that
+holds a `learner_id`, a `user_id` or an e-mail address and fail unless the table
+is erased or justified, so a new table cannot silently escape erasure.
 
 ## Backups, restore and upgrades
 

@@ -72,9 +72,10 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 
 // alterMigrations are historical incremental schema changes. Each statement is
 // recorded as its own migration in schema_migrations so future drift can be
-// detected on a per-statement basis. Errors during Exec are tolerated (see
-// migration.IgnoreExecErrors) because legacy databases will already have most
-// of these columns from the previous "best-effort ALTER" loop.
+// detected on a per-statement basis. Each is applied only when the live schema
+// does not already reflect it (see migration.AlterIfNeeded), because legacy
+// databases will already have most of these columns from the previous
+// "best-effort ALTER" loop.
 var alterMigrations = []string{
 	`ALTER TABLE learners ADD COLUMN profile_json TEXT DEFAULT '{}'`,
 	`ALTER TABLE interactions ADD COLUMN error_type TEXT DEFAULT ''`,
@@ -318,8 +319,8 @@ const (
 // The first invocation against a pre-existing database (one created before the
 // schema_migrations table existed) re-executes every migration body. Each
 // statement is either idempotent (CREATE TABLE/INDEX IF NOT EXISTS, the data
-// UPDATEs) or is marked IgnoreExecErrors so a "duplicate column" from an ALTER
-// that already ran does not abort startup; only the final INSERT into
+// UPDATEs) or is marked AlterIfNeeded so an ALTER that already ran is skipped
+// after inspecting the schema; only the final INSERT into
 // schema_migrations is required to succeed. Migration lock contention is
 // retried for a bounded minute; callers with a lifecycle context should use
 // MigrateContext.

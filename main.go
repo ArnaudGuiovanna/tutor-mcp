@@ -565,7 +565,11 @@ func main() {
 		logger.Info("shutdown signal received", "signal", sig.String())
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		shutdownErr <- server.Shutdown(ctx)
+		err := server.Shutdown(ctx)
+		if drainErr := oauthServer.DrainBackgroundMail(ctx); drainErr != nil {
+			logger.Warn("account emails still pending at shutdown", "err", drainErr)
+		}
+		shutdownErr <- err
 	}()
 
 	logger.Info("tutor mcp starting", "port", port, "base_url", baseURL)

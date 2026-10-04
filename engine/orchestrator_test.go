@@ -108,7 +108,11 @@ func setMastery(t *testing.T, store *db.Store, concept string, p float64) {
 
 func setGoalRelevance(t *testing.T, store *db.Store, domainID string, rel map[string]float64) {
 	t.Helper()
-	if _, err := store.MergeDomainGoalRelevance(context.Background(), domainID, rel); err != nil {
+	domain, err := store.GetDomainByID(context.Background(), domainID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.MergeDomainGoalRelevance(context.Background(), domain.LearnerID, domainID, rel); err != nil {
 		t.Fatal(err)
 	}
 }

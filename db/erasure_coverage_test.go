@@ -34,6 +34,116 @@ var erasureRetainedByDesign = map[string]string{
 	"hobby_account_links":     "hobby profile only; institution tenants never create them",
 }
 
+// Tables that identify a person by account (user_id) or address but carry no
+// learner_id. A tenant erasure acts on one organization's learner; the global
+// account can serve other organizations and is deleted with the account
+// itself, not by an organization's request.
+var identityOutsideTenantErasure = map[string]string{
+	"users":                    "global account identity shared across organizations",
+	"mfa_credentials":          "second factor of the global account",
+	"mfa_recovery_codes":       "second factor of the global account",
+	"user_password_resets":     "short-lived reset digest of the global account",
+	"external_identities":      "federated login link of the global account",
+	"federated_identity_links": "federated login link of the global account",
+	"console_sessions":         "staff console session, expiring, no learner content",
+	"pending_signups":          "institution founder sign-up request, expiring, not learner data",
+	"tenant_invitations":       "the erased member's invitation address is replaced by scrub_learner",
+}
+
+func TestEveryIdentityTableIsErasedOrExplicitlyRetained(t *testing.T) {
+	s := setupTestDB(t)
+	query := `SELECT DISTINCT m.name FROM sqlite_master m, pragma_table_info(m.name) p
+ WHERE m.type = 'table' AND p.name IN ('user_id', 'email', 'normalized_email') ORDER BY m.name`
+	if s.dialect == DialectPostgres {
+		query = `SELECT DISTINCT c.table_name FROM information_schema.columns c
+ JOIN information_schema.tables t USING (table_catalog, table_schema, table_name)
+ WHERE c.table_schema = current_schema() AND t.table_type = 'BASE TABLE'
+ AND c.column_name IN ('user_id', 'email', 'normalized_email') ORDER BY c.table_name`
+	}
+	rows, err := s.query(t.Context(), query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var missing []string
+	count := 0
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			t.Fatal(err)
+		}
+		count++
+		_, erased := dsarLearnerTables[table]
+		_, kept := erasureRetainedByDesign[table]
+		_, global := identityOutsideTenantErasure[table]
+		if !erased && !kept && !global {
+			missing = append(missing, table)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if count == 0 {
+		t.Fatal("identity table inventory is empty")
+	}
+	if len(missing) != 0 {
+		t.Fatalf("tables identifying a person are neither erased nor justified: %v", missing)
+	}
+}
+
+// The erased member's invitation record held their real address; other
+// invitations of the organization are left alone.
+func TestErasureScrubsTheErasedMembersInvitationAddress(t *testing.T) {
+	c := newStatisticsCohort(t)
+	c.add(t, .5)
+	c.add(t, .5)
+	victim, bystander := c.members[0], c.members[1]
+	now := time.Now().UTC()
+	for _, invitation := range []struct{ id, email, membership string }{
+		{"inv-victim", "victim.real@example.test", victim.MembershipID},
+		{"inv-bystander", "bystander.real@example.test", bystander.MembershipID},
+	} {
+		if _, err := c.s.exec(t.Context(), `INSERT INTO tenant_invitations
+			(id, token_hash, tenant_id, email, normalized_email, roles_json, status, created_by, created_at, expires_at,
+			 accepted_at, accepted_user_id, accepted_membership_id)
+			VALUES (?, ?, ?, ?, ?, '["learner"]', 'accepted', 'owner', ?, ?, ?, 'user', ?)`,
+			invitation.id, "hash-"+invitation.id, c.owner.TenantID, invitation.email, invitation.email,
+			now, now.Add(time.Hour), now, invitation.membership); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request, err := c.s.RequestTenantDSAR(t.Context(), c.owner, victim.LearnerID, "erase", "learner request")
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := models.WorkerPrincipal{ActorID: "invitation-erasure-worker"}
+	scope := c.owner.TenantScope()
+	scope.UserID, scope.MembershipID = "worker_"+worker.ActorID, "worker_process"
+	done := false
+	for batch := 0; batch < 200 && !done; batch++ {
+		if done, _, err = c.s.ProcessTenantDSARErasureBatch(t.Context(), scope, worker, request.ID, 50, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !done {
+		t.Fatal("erasure did not finish")
+	}
+	address := func(id string) (string, string) {
+		t.Helper()
+		var email, normalized string
+		if err := c.s.queryRow(t.Context(), `SELECT email, normalized_email FROM tenant_invitations WHERE id = ?`, id).Scan(&email, &normalized); err != nil {
+			t.Fatal(err)
+		}
+		return email, normalized
+	}
+	if email, normalized := address("inv-victim"); email == "victim.real@example.test" || normalized == "victim.real@example.test" {
+		t.Fatalf("erased member's invitation still holds the address: %s / %s", email, normalized)
+	}
+	if email, _ := address("inv-bystander"); email != "bystander.real@example.test" {
+		t.Fatalf("another member's invitation was changed: %s", email)
+	}
+}
+
 func TestEveryLearnerTableIsErasedOrExplicitlyRetained(t *testing.T) {
 	s := setupTestDB(t)
 	query := `SELECT DISTINCT m.name FROM sqlite_master m, pragma_table_info(m.name) p

@@ -213,7 +213,7 @@ func migratePostgresTestSchema(ctx context.Context, database *sql.DB) error {
 	}
 	for _, migration := range postgresMigrations {
 		for _, statement := range splitSQLStatements(migration.Body) {
-			if _, err := tx.ExecContext(ctx, statement); err != nil && !migration.IgnoreExecErrors {
+			if _, err := tx.ExecContext(ctx, statement); err != nil && !migration.AlterIfNeeded {
 				return fmt.Errorf("apply PostgreSQL test migration %s: %w", migration.Version, err)
 			}
 		}

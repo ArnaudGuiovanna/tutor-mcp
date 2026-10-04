@@ -141,6 +141,10 @@ var ErrIdempotencyResponseExpired = errors.New("mutation already completed; cach
 // overwriting learner-controlled notification or accessibility preferences.
 var ErrAvailabilityVersionConflict = errors.New("availability version conflict")
 var ErrCohortCapacityReached = errors.New("cohort capacity reached")
+
+// ErrWebhookQueueFull is returned when a learner already has the maximum
+// number of pending webhook messages.
+var ErrWebhookQueueFull = errors.New("webhook queue is full for this learner")
 var ErrFormationVersionImmutable = errors.New("formation version is immutable")
 var ErrFormationDomainLocked = errors.New("formation curriculum is managed by its author")
 
@@ -292,7 +296,10 @@ type DomainStore interface {
 	CreateDomain(ctx context.Context, learnerID, name, personalGoal string, graph models.KnowledgeSpace) (*models.Domain, error)
 	CreateDomainWithValueFramings(ctx context.Context, learnerID, name, personalGoal string, graph models.KnowledgeSpace, valueFramingsJSON string) (*models.Domain, error)
 	GetDomainByLearner(ctx context.Context, learnerID string) (*models.Domain, error)
+	// GetDomainByID has no owner check; client-supplied identifiers go through
+	// GetLearnerDomainByID.
 	GetDomainByID(ctx context.Context, id string) (*models.Domain, error)
+	GetLearnerDomainByID(ctx context.Context, learnerID, id string) (*models.Domain, error)
 	GetDomainsByLearner(ctx context.Context, learnerID string, includeArchived bool) ([]*models.Domain, error)
 	SetDomainPriority(ctx context.Context, domainID, learnerID string, rank int) error
 	MarkDomainHighStakes(ctx context.Context, domainID, learnerID string) error
@@ -309,8 +316,8 @@ type DomainStore interface {
 	DeleteDomain(ctx context.Context, domainID, learnerID string) error
 	UpdateDomainPhase(ctx context.Context, domainID string, phase models.Phase, phaseEntryEntropy float64, now time.Time) error
 	CompareAndSwapDomainPhase(ctx context.Context, domainID string, expectedPhase, phase models.Phase, phaseEntryEntropy float64, now time.Time) error
-	MergeDomainGoalRelevance(ctx context.Context, domainID string, relevance map[string]float64) (*models.GoalRelevance, error)
-	GetDomainGoalRelevance(ctx context.Context, domainID string) (*models.GoalRelevance, error)
+	MergeDomainGoalRelevance(ctx context.Context, learnerID, domainID string, relevance map[string]float64) (*models.GoalRelevance, error)
+	GetDomainGoalRelevance(ctx context.Context, learnerID, domainID string) (*models.GoalRelevance, error)
 }
 
 // ConceptStateStore manages cognitive state. Production learning paths use the

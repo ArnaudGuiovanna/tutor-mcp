@@ -6,12 +6,15 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"tutor-mcp/models"
+	"tutor-mcp/store"
 )
 
 // MergeDomainGoalRelevance performs an incremental upsert of a domain's
@@ -30,7 +33,7 @@ import (
 //
 // Returns the merged vector after persistence (so the caller can compose
 // the response payload — uncovered list, covered count, etc.).
-func (s *Store) MergeDomainGoalRelevance(ctx context.Context, domainID string, relevance map[string]float64) (*models.GoalRelevance, error) {
+func (s *Store) MergeDomainGoalRelevance(ctx context.Context, learnerID, domainID string, relevance map[string]float64) (*models.GoalRelevance, error) {
 	if relevance == nil {
 		return nil, fmt.Errorf("relevance map is nil")
 	}
@@ -40,9 +43,12 @@ func (s *Store) MergeDomainGoalRelevance(ctx context.Context, domainID string, r
 		var existingJSON string
 		var graphVersion int
 		err := txs.queryRow(ctx,
-			`SELECT goal_relevance_json, graph_version FROM domains WHERE id = ?`,
-			domainID,
+			`SELECT goal_relevance_json, graph_version FROM domains WHERE id = ? AND learner_id = ?`,
+			domainID, learnerID,
 		).Scan(&existingJSON, &graphVersion)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("read prior goal_relevance: %w", store.WrapNotFound(err))
+		}
 		if err != nil {
 			return fmt.Errorf("read prior goal_relevance: %w", err)
 		}
@@ -79,8 +85,8 @@ func (s *Store) MergeDomainGoalRelevance(ctx context.Context, domainID string, r
 		if _, err := txs.exec(ctx,
 			`UPDATE domains
 			 SET goal_relevance_json = ?, goal_relevance_version = goal_relevance_version + 1
-			 WHERE id = ?`,
-			string(newJSON), domainID,
+			 WHERE id = ? AND learner_id = ?`,
+			string(newJSON), domainID, learnerID,
 		); err != nil {
 			return fmt.Errorf("write goal_relevance: %w", err)
 		}
@@ -95,11 +101,11 @@ func (s *Store) MergeDomainGoalRelevance(ctx context.Context, domainID string, r
 // GetDomainGoalRelevance returns the parsed goal-relevance payload for a
 // domain. Returns (nil, nil) if no vector has been set yet — callers MUST
 // treat this as "uniform fallback (1.0 everywhere)" rather than an error.
-func (s *Store) GetDomainGoalRelevance(ctx context.Context, domainID string) (*models.GoalRelevance, error) {
+func (s *Store) GetDomainGoalRelevance(ctx context.Context, learnerID, domainID string) (*models.GoalRelevance, error) {
 	var raw string
 	err := s.queryRow(ctx,
-		`SELECT goal_relevance_json FROM domains WHERE id = ?`,
-		domainID,
+		`SELECT goal_relevance_json FROM domains WHERE id = ? AND learner_id = ?`,
+		domainID, learnerID,
 	).Scan(&raw)
 	if err != nil {
 		return nil, fmt.Errorf("get goal_relevance: %w", err)

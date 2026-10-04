@@ -112,14 +112,15 @@ func configureProfileCommand(ctx context.Context, options commandOptions, output
 	return false, nil
 }
 
-func httpListenAddress(options commandOptions, port string) string {
-	if options.Profile == "hobby" || options.Profile == "institution" {
-		if addr := strings.TrimSpace(os.Getenv("LISTEN_ADDR")); addr != "" {
-			return addr
-		}
-		return net.JoinHostPort("127.0.0.1", port)
+// httpListenAddress binds loopback unless LISTEN_ADDR says otherwise, in every
+// mode. The legacy environment-based mode used to listen on all interfaces
+// while defaulting to open dynamic client registration, which exposed an
+// unauthenticated registration endpoint on any reachable network.
+func httpListenAddress(_ commandOptions, port string) string {
+	if addr := strings.TrimSpace(os.Getenv("LISTEN_ADDR")); addr != "" {
+		return addr
 	}
-	return ":" + port
+	return net.JoinHostPort("127.0.0.1", port)
 }
 
 func lockHobbyServer(options commandOptions) (func(), error) {

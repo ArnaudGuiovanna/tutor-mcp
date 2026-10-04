@@ -5,16 +5,28 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"tutor-mcp/models"
 )
+
+// pinQueueWebhookClock fixes the reference time of the schedule bounds so the
+// calendar dates used by these tests stay valid.
+func pinQueueWebhookClock(t *testing.T) {
+	t.Helper()
+	previous := webhookScheduleNow
+	webhookScheduleNow = func() time.Time { return time.Date(2026, 5, 2, 0, 0, 0, 0, time.UTC) }
+	t.Cleanup(func() { webhookScheduleNow = previous })
+}
 
 func optInQueueNotifications(t *testing.T, store interface {
 	UpsertAvailability(context.Context, *models.Availability) error
 }) {
 	t.Helper()
+	pinQueueWebhookClock(t)
 	if err := store.UpsertAvailability(context.Background(), &models.Availability{
 		LearnerID:              "L_owner",
 		Timezone:               "UTC",
@@ -155,6 +167,7 @@ func TestQueueWebhookMessage_HappyPath(t *testing.T) {
 
 func TestQueueWebhookMessageEnforcesConsentAndWeeklyWindow(t *testing.T) {
 	store, deps := setupToolsTest(t)
+	pinQueueWebhookClock(t)
 	args := map[string]any{
 		"kind":          "daily_recap",
 		"scheduled_for": "2026-05-04T09:30:00Z", // Monday
@@ -333,5 +346,63 @@ func TestValidWebhookKind_AcceptsOLMPrefix(t *testing.T) {
 	}
 	if validWebhookKind("olm") {
 		t.Errorf("validWebhookKind('olm') = true, want false (no colon)")
+	}
+}
+
+// Before the bounds, any RFC3339 time and priority were accepted, and a
+// message scheduled years ahead stayed pending and scanned indefinitely.
+func TestQueueWebhookMessage_RejectsOutOfBoundsScheduleAndPriority(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	optInQueueNotifications(t, store)
+	cases := []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{name: "far future", args: map[string]any{"scheduled_for": "9999-01-01T08:00:00Z"}, want: "within the next 30 days"},
+		{name: "beyond 30 days", args: map[string]any{"scheduled_for": "2026-06-02T00:00:01Z"}, want: "within the next 30 days"},
+		{name: "stale past", args: map[string]any{"scheduled_for": "2026-05-01T22:59:59Z"}, want: "in the past"},
+		{name: "endless expiry", args: map[string]any{"scheduled_for": "2026-05-03T08:00:00Z", "expires_at": "9999-01-01T00:00:00Z"}, want: "at most 30 days"},
+		{name: "priority too high", args: map[string]any{"scheduled_for": "2026-05-03T08:00:00Z", "priority": 101}, want: "priority must be between"},
+		{name: "priority too low", args: map[string]any{"scheduled_for": "2026-05-03T08:00:00Z", "priority": -101}, want: "priority must be between"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			args := map[string]any{"kind": "daily_motivation", "content": "Keep going."}
+			for key, value := range tc.args {
+				args[key] = value
+			}
+			res := callTool(t, deps, registerQueueWebhookMessage, "L_owner", "queue_webhook_message", args)
+			if !res.IsError || !strings.Contains(resultText(res), tc.want) {
+				t.Fatalf("response=%q, want error containing %q", resultText(res), tc.want)
+			}
+		})
+	}
+	// The boundaries themselves are accepted.
+	for _, scheduled := range []string{"2026-05-01T23:00:00Z", "2026-06-01T00:00:00Z"} {
+		res := callTool(t, deps, registerQueueWebhookMessage, "L_owner", "queue_webhook_message", map[string]any{
+			"kind": "daily_motivation", "content": "Keep going.", "scheduled_for": scheduled, "priority": 100,
+		})
+		if res.IsError {
+			t.Fatalf("boundary %s rejected: %q", scheduled, resultText(res))
+		}
+	}
+}
+
+func TestQueueWebhookMessage_ReportsFullQueue(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	optInQueueNotifications(t, store)
+	scheduled := time.Date(2026, 5, 3, 8, 0, 0, 0, time.UTC)
+	for i := 0; i < 100; i++ {
+		if _, err := store.EnqueueWebhookMessage(context.Background(), "L_owner", "reminder",
+			fmt.Sprintf("reminder %d", i), scheduled, scheduled.Add(time.Hour), 0); err != nil {
+			t.Fatalf("enqueue %d: %v", i, err)
+		}
+	}
+	res := callTool(t, deps, registerQueueWebhookMessage, "L_owner", "queue_webhook_message", map[string]any{
+		"kind": "daily_motivation", "content": "One more.", "scheduled_for": "2026-05-03T08:00:00Z",
+	})
+	if !res.IsError || !strings.Contains(resultText(res), "too many notifications are already pending") {
+		t.Fatalf("full queue response=%q", resultText(res))
 	}
 }

@@ -278,6 +278,12 @@ DB_PATH=/home/ubuntu/mcp/data/runtime.db ./tutor-retention \
   --apply
 ```
 
+Schedule apply in a maintenance window. On SQLite, stop `tutor-mcp` first: the
+relational phase holds the single database write lock until it commits, so the
+server's writes would fail with `SQLITE_BUSY` for its whole duration. On
+PostgreSQL it holds row locks on every affected table; run it off-peak. The
+dry-run counts show how much work the phase will do.
+
 Apply mode persists the policy, cutoff, backup proof and phase reports under
 `job-id`. The relational phase and its checkpoint commit in one transaction;
 the narrative phase follows and is idempotent. A category failure rolls the

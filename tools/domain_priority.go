@@ -6,7 +6,6 @@ package tools
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -43,13 +42,9 @@ func registerSetDomainPriority(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		domain, err := deps.Store.GetDomainByID(ctx, params.DomainID)
+		domain, err := deps.Store.GetLearnerDomainByID(ctx, learnerID, params.DomainID)
 		if err != nil {
-			r, _ := errorResult(fmt.Sprintf("domain not found: %s", params.DomainID))
-			return r, nil, nil
-		}
-		if domain.LearnerID != learnerID {
-			r, _ := errorResult("domain not found")
+			r, _ := domainLookupErrorResult(deps, err)
 			return r, nil, nil
 		}
 		if domain.Archived {

@@ -1375,41 +1375,169 @@ func TestApplyMigration_NonAtomicBody_IsRolledBack_Issue118(t *testing.T) {
 	}
 }
 
-// TestApplyMigration_IgnoreExecErrors_StillRecords is the regression guard
-// for the IgnoreExecErrors path under the per-migration transaction added in
-// issue #118. When a migration's body fails (e.g. a legacy ALTER that
-// targets a column that does not exist) and IgnoreExecErrors is true, the
-// row in schema_migrations must still be inserted so subsequent runs treat
-// the migration as applied. Without careful handling, the failed body
-// statement aborts the transaction and the bookkeeping INSERT also fails.
-func TestApplyMigration_IgnoreExecErrors_StillRecords(t *testing.T) {
-	db := openMigrateTestDB(t, "ignore_exec_errors")
+// TestApplyMigration_AlterIfNeeded_SkipsAppliedDrop: a DROP COLUMN whose
+// column is already absent (fresh database, or a legacy one that already ran
+// it) is recorded without executing the body.
+func TestApplyMigration_AlterIfNeeded_SkipsAppliedDrop(t *testing.T) {
+	db := openMigrateTestDB(t, "alter_if_needed_drop")
 	if err := ensureSchemaMigrationsTable(db); err != nil {
 		t.Fatalf("ensureSchemaMigrationsTable: %v", err)
 	}
-	// Seed a small base table so the failing ALTER has a concrete target.
 	if _, err := db.Exec(`CREATE TABLE issue118_t (id INTEGER PRIMARY KEY)`); err != nil {
 		t.Fatalf("seed base table: %v", err)
 	}
 
 	m := migration{
-		Version:          "9999_issue118_ignore_exec_errors",
-		Body:             `ALTER TABLE issue118_t DROP COLUMN does_not_exist`,
-		IgnoreExecErrors: true,
+		Version:       "9999_issue118_drop_absent_column",
+		Body:          `ALTER TABLE issue118_t DROP COLUMN does_not_exist`,
+		AlterIfNeeded: true,
 	}
-
 	if err := applyMigration(db, m); err != nil {
-		t.Fatalf("applyMigration with IgnoreExecErrors must not return an error, got: %v", err)
+		t.Fatalf("applyMigration for an already-applied DROP must succeed, got: %v", err)
+	}
+	var version string
+	if err := db.QueryRow(`SELECT version FROM schema_migrations WHERE version = ?`, m.Version).Scan(&version); err != nil {
+		t.Fatalf("schema_migrations must record the already-applied DROP: %v", err)
+	}
+}
+
+func TestApplyMigration_AlterIfNeeded_SkipsExistingColumn(t *testing.T) {
+	db := openMigrateTestDB(t, "alter_if_needed_add_existing")
+	if err := ensureSchemaMigrationsTable(db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE legacy_t (id INTEGER PRIMARY KEY, Note TEXT DEFAULT '')`); err != nil {
+		t.Fatal(err)
+	}
+	m := migration{
+		Version:       "9999_add_existing_column",
+		Body:          `ALTER TABLE legacy_t ADD COLUMN note TEXT DEFAULT ''`,
+		AlterIfNeeded: true,
+	}
+	if err := applyMigration(db, m); err != nil {
+		t.Fatalf("ADD COLUMN already present (case-insensitively) must be skipped, got: %v", err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version = ?`, m.Version).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("migration recorded %d times, err=%v", count, err)
+	}
+}
+
+// Before the fix, any ALTER failure was swallowed and the migration recorded,
+// so later startups skipped it forever and the runtime failed on a missing
+// column. A real failure must now abort and leave nothing recorded.
+func TestApplyMigration_AlterIfNeeded_PropagatesRealFailure(t *testing.T) {
+	db := openMigrateTestDB(t, "alter_if_needed_failure")
+	if err := ensureSchemaMigrationsTable(db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE populated_t (id INTEGER PRIMARY KEY); INSERT INTO populated_t (id) VALUES (1)`); err != nil {
+		t.Fatal(err)
+	}
+	m := migration{
+		Version:       "9999_add_not_null_without_default",
+		Body:          `ALTER TABLE populated_t ADD COLUMN required_value TEXT NOT NULL`,
+		AlterIfNeeded: true,
+	}
+	if err := applyMigration(db, m); err == nil {
+		t.Fatal("ALTER that cannot be applied must fail the migration")
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version = ?`, m.Version).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("failed ALTER was recorded as applied")
+	}
+}
+
+// Databases damaged by the old behaviour carry a ledger row for an ADD COLUMN
+// whose column does not exist. Startup must add it.
+func TestApplyMigration_AlterIfNeeded_RepairsRecordedMissingColumn(t *testing.T) {
+	db := openMigrateTestDB(t, "alter_if_needed_repair")
+	if err := ensureSchemaMigrationsTable(db); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE damaged_t (id INTEGER PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	m := migration{
+		Version:       "9999_add_missing_column",
+		Body:          `ALTER TABLE damaged_t ADD COLUMN repaired TEXT DEFAULT ''`,
+		AlterIfNeeded: true,
+	}
+	if _, err := db.Exec(`INSERT INTO schema_migrations (version, checksum) VALUES (?, ?)`, m.Version, m.checksum()); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyMigration(db, m); err != nil {
+		t.Fatalf("repair recorded migration: %v", err)
+	}
+	if _, err := db.Exec(`SELECT repaired FROM damaged_t`); err != nil {
+		t.Fatalf("recorded ADD COLUMN was not repaired: %v", err)
+	}
+}
+
+// Columns retired by a later migration must never be repaired: a fully
+// migrated database would otherwise get chat_mode_enabled or pinned_concept
+// back on its next startup.
+func TestBuildMigrations_DoesNotRepairRetiredColumns(t *testing.T) {
+	removed := map[string]bool{}
+	repairable := map[string]bool{}
+	for _, m := range buildMigrations() {
+		if !m.AlterIfNeeded {
+			continue
+		}
+		if m.removedLater {
+			removed[m.Body] = true
+		} else {
+			repairable[m.Body] = true
+		}
+	}
+	for _, body := range []string{
+		`ALTER TABLE domains ADD COLUMN pinned_concept TEXT DEFAULT ''`,
+		`ALTER TABLE learners ADD COLUMN chat_mode_enabled INTEGER NOT NULL DEFAULT 0`,
+	} {
+		if !removed[body] {
+			t.Errorf("retired column is still repairable: %s", body)
+		}
+	}
+	if !repairable[`ALTER TABLE learners ADD COLUMN profile_json TEXT DEFAULT '{}'`] {
+		t.Error("a live column is no longer repairable")
 	}
 
-	var version string
-	if err := db.QueryRow(
-		`SELECT version FROM schema_migrations WHERE version = ?`, m.Version,
-	).Scan(&version); err != nil {
-		t.Fatalf("schema_migrations must record the IgnoreExecErrors migration even when body fails: %v", err)
+	db := openMigrateTestDB(t, "retired_columns")
+	if err := Migrate(db); err != nil {
+		t.Fatalf("Migrate: %v", err)
 	}
-	if version != m.Version {
-		t.Errorf("recorded version = %q, want %q", version, m.Version)
+	for _, m := range buildMigrations() {
+		if m.removedLater {
+			continue
+		}
+		if !m.AlterIfNeeded {
+			continue
+		}
+		if applied, add, err := alterAlreadyApplied(context.Background(), db, m.Body); err != nil {
+			t.Fatalf("%s: %v", m.Version, err)
+		} else if add && !applied {
+			t.Errorf("fully migrated database lacks repairable column from %s", m.Version)
+		}
+	}
+}
+
+func TestApplyMigration_AlterIfNeeded_RejectsOtherStatements(t *testing.T) {
+	db := openMigrateTestDB(t, "alter_if_needed_reject")
+	if err := ensureSchemaMigrationsTable(db); err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range []string{
+		`CREATE TABLE x (id INTEGER)`,
+		`ALTER TABLE x RENAME TO y`,
+		`ALTER TABLE x ADD COLUMN a TEXT; DROP TABLE x`,
+	} {
+		m := migration{Version: "9999_reject_" + alterShortName(body), Body: body, AlterIfNeeded: true}
+		if err := applyMigration(db, m); err == nil || !strings.Contains(err.Error(), "AlterIfNeeded requires") {
+			t.Fatalf("body %q: err=%v, want AlterIfNeeded rejection", body, err)
+		}
 	}
 }
 

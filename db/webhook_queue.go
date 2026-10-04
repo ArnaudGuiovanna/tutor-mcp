@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 )
 
 const (
@@ -130,6 +131,14 @@ func (s *Store) EnqueueWebhookMessageWithMaxAttempts(ctx context.Context, learne
 	)
 }
 
+// MaxPendingWebhookMessagesPerLearner bounds the pending rows of one learner
+// across every enqueue path (client tool, scheduler, fallbacks). Ordinary use
+// stays far below it; the bound stops a looping or hostile client from growing
+// the queue, and every claim scan, without limit. Under concurrent PostgreSQL
+// writers it is a soft bound that can be exceeded by the number of racing
+// inserts.
+const MaxPendingWebhookMessagesPerLearner = 100
+
 func (s *Store) enqueueWebhookMessage(
 	ctx context.Context,
 	learnerID, kind, domainID, content, contentFormat string,
@@ -164,6 +173,16 @@ func (s *Store) enqueueWebhookMessage(
 	createdAt := time.Now().UTC()
 	var id int64
 	err = s.inTx(ctx, txOptionsForDialect(s.dialect), func(txs *Store) error {
+		var pending int
+		if err := txs.queryRow(ctx,
+			`SELECT COUNT(*) FROM webhook_message_queue WHERE learner_id = ? AND status = 'pending'`,
+			learnerID,
+		).Scan(&pending); err != nil {
+			return fmt.Errorf("count pending webhook messages: %w", err)
+		}
+		if pending >= MaxPendingWebhookMessagesPerLearner {
+			return storeport.ErrWebhookQueueFull
+		}
 		var reservation any
 		if reservationID != 0 {
 			reservation = reservationID

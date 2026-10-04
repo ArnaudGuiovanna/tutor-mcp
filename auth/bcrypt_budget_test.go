@@ -286,6 +286,13 @@ func rejectingBcryptBudget(t *testing.T) *bcryptBudget {
 
 func postRegistrationStart(t *testing.T, server *OAuthServer, email, csrf string) *httptest.ResponseRecorder {
 	t.Helper()
+	rec := postRegistrationStartNoDrain(t, server, email, csrf)
+	drainBackgroundMail(t, server)
+	return rec
+}
+
+func postRegistrationStartNoDrain(t *testing.T, server *OAuthServer, email, csrf string) *httptest.ResponseRecorder {
+	t.Helper()
 	form := url.Values{
 		"csrf_token": {csrf}, "mode": {"register"}, "client_id": {"cid"},
 		"redirect_uri": {"https://good.example/cb"}, "response_type": {"code"},
@@ -368,6 +375,7 @@ func TestEveryHandlerBcryptEntryPointUsesBudget(t *testing.T) {
 		seedLearner(t, store, "reset-busy@example.com", "old-password-123")
 		recoverCSRF := accountCSRF(t, server, "/recover", server.HandleRecoverGet)
 		postAccountForm(t, "/recover", recoverCSRF, url.Values{"email": {"reset-busy@example.com"}}, server.HandleRecoverPost)
+		drainBackgroundMail(t, server)
 		resetURL, err := url.Parse(server.emailSender.(*testEmailSender).resetLinks[0])
 		if err != nil {
 			t.Fatal(err)

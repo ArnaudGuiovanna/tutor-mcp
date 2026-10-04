@@ -6,10 +6,14 @@ package adminapi
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -18,6 +22,10 @@ import (
 	"tutor-mcp/auth"
 	"tutor-mcp/models"
 	storeport "tutor-mcp/store"
+
+	"github.com/jackc/pgx/v5/pgconn"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 const maxAdminBodyBytes = 1 << 20
@@ -120,22 +128,68 @@ func pageParams(w http.ResponseWriter, r *http.Request) (string, int, bool) {
 	return r.URL.Query().Get("after"), limit, true
 }
 
+// writeStoreError maps a catalog store error to an HTTP response. Typed
+// sentinels come first. Infrastructure failures (lost connections, expired
+// contexts, driver errors) are server errors and are logged; integrity
+// constraint violations are conflicts. The catalog store reports validation
+// problems as plain errors, so whatever remains is a client error.
 func (api *API) writeStoreError(w http.ResponseWriter, err error) {
 	status, code := http.StatusBadRequest, "invalid_request"
 	switch {
 	case errors.Is(err, storeport.ErrInvalidPrincipal):
 		status, code = http.StatusForbidden, "forbidden"
-	case strings.Contains(err.Error(), "idempotency key conflict"):
+	case errors.Is(err, storeport.ErrIdempotencyKeyConflict):
 		status, code = http.StatusConflict, "idempotency_conflict"
-	case strings.Contains(err.Error(), "capacity"):
+	case errors.Is(err, storeport.ErrCohortCapacityReached):
 		status, code = http.StatusConflict, "cohort_capacity_reached"
+	case errors.Is(err, storeport.ErrNotFound) || errors.Is(err, sql.ErrNoRows):
+		status, code = http.StatusNotFound, "not_found"
+	case isConstraintViolation(err):
+		status, code = http.StatusConflict, "conflict"
+	case isInfrastructureError(err):
+		status, code = http.StatusInternalServerError, "internal_error"
 	case strings.Contains(err.Error(), "not found"):
 		status, code = http.StatusNotFound, "not_found"
 	}
 	if status >= 500 {
-		api.logger.Error("catalog admin request failed", "error_type", "store")
+		api.logger.Error("catalog admin request failed", "error_type", rootErrorType(err))
 	}
 	writeError(w, status, code)
+}
+
+// rootErrorType names the innermost wrapped error type without logging the
+// message, which can carry SQL text or tenant data.
+func rootErrorType(err error) string {
+	for {
+		next := errors.Unwrap(err)
+		if next == nil {
+			return fmt.Sprintf("%T", err)
+		}
+		err = next
+	}
+}
+
+func isConstraintViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return strings.HasPrefix(pgErr.Code, "23")
+	}
+	var sqliteErr *sqlite.Error
+	if errors.As(err, &sqliteErr) {
+		return sqliteErr.Code()&0xff == sqlite3.SQLITE_CONSTRAINT
+	}
+	return false
+}
+
+func isInfrastructureError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) ||
+		errors.Is(err, sql.ErrConnDone) || errors.Is(err, sql.ErrTxDone) || errors.Is(err, driver.ErrBadConn) {
+		return true
+	}
+	var pgErr *pgconn.PgError
+	var sqliteErr *sqlite.Error
+	var netErr net.Error
+	return errors.As(err, &pgErr) || errors.As(err, &sqliteErr) || errors.As(err, &netErr)
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

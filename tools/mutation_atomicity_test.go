@@ -21,12 +21,12 @@ type failGoalRelevanceReadbackStore struct {
 	domainReads int
 }
 
-func (s *failGoalRelevanceReadbackStore) GetDomainByID(ctx context.Context, id string) (*models.Domain, error) {
+func (s *failGoalRelevanceReadbackStore) GetLearnerDomainByID(ctx context.Context, learnerID, id string) (*models.Domain, error) {
 	s.domainReads++
 	if s.domainReads > 1 {
 		return nil, errInjectedReadback
 	}
-	return s.Store.GetDomainByID(ctx, id)
+	return s.Store.GetLearnerDomainByID(ctx, learnerID, id)
 }
 
 type failHumanReviewReadbackStore struct{ storeport.Store }
@@ -85,7 +85,7 @@ func TestSetGoalRelevance_PostCommitReadbackFailureIsDegradedSuccess(t *testing.
 	}
 	payload := decodeResult(t, result)
 	assertDegradedComponent(t, payload, "updated_domain_readback")
-	stored, err := store.GetDomainGoalRelevance(context.Background(), domain.ID)
+	stored, err := store.GetDomainGoalRelevance(context.Background(), domain.LearnerID, domain.ID)
 	if err != nil || stored.Relevance["a"] != 0.9 {
 		t.Fatalf("goal relevance was not committed: stored=%+v err=%v", stored, err)
 	}

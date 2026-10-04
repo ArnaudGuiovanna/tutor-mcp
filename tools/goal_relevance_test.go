@@ -125,7 +125,7 @@ func TestSetGoalRelevance_UnknownConceptRejected(t *testing.T) {
 		t.Errorf("error must cite the unknown concept by name, got %q", resultText(res))
 	}
 	// And nothing must have been persisted (atomic rejection).
-	gr, _ := store.GetDomainGoalRelevance(context.Background(), d.ID)
+	gr, _ := store.GetDomainGoalRelevance(context.Background(), d.LearnerID, d.ID)
 	if gr != nil {
 		t.Errorf("partial persistence on rejected call: %+v", gr)
 	}
@@ -147,7 +147,7 @@ func TestSetGoalRelevance_ClampsOutOfRange(t *testing.T) {
 	if v, _ := out["concepts_clamped"].(float64); int(v) != 2 {
 		t.Errorf("clamped: want 2, got %v", out["concepts_clamped"])
 	}
-	gr, _ := store.GetDomainGoalRelevance(context.Background(), d.ID)
+	gr, _ := store.GetDomainGoalRelevance(context.Background(), d.LearnerID, d.ID)
 	if gr.Relevance["A"] != 0 || gr.Relevance["B"] != 1 {
 		t.Errorf("clamp values: got A=%v B=%v", gr.Relevance["A"], gr.Relevance["B"])
 	}
@@ -172,7 +172,7 @@ func TestSetGoalRelevance_IncrementalMergeKeepsExisting(t *testing.T) {
 	if second.IsError {
 		t.Fatalf("second set: %q", resultText(second))
 	}
-	gr, _ := store.GetDomainGoalRelevance(context.Background(), d.ID)
+	gr, _ := store.GetDomainGoalRelevance(context.Background(), d.LearnerID, d.ID)
 	if gr.Relevance["A"] != 0.9 || gr.Relevance["B"] != 0.4 || gr.Relevance["C"] != 0.2 {
 		t.Errorf("incremental merge lost data: %+v", gr.Relevance)
 	}
@@ -215,7 +215,7 @@ func TestSetGoalRelevance_AddConceptsAfterDoesNotInvalidatePrior(t *testing.T) {
 		t.Fatalf("update graph: %v", err)
 	}
 
-	gr, _ := store.GetDomainGoalRelevance(context.Background(), d.ID)
+	gr, _ := store.GetDomainGoalRelevance(context.Background(), d.LearnerID, d.ID)
 	if gr.Relevance["A"] != 0.9 || gr.Relevance["B"] != 0.4 {
 		t.Errorf("prior entries lost after add_concepts: %+v", gr.Relevance)
 	}

@@ -343,22 +343,29 @@ func logAuthFailure(deps *Deps, tool string, err error) {
 	deps.Logger.Info(tool+": auth failed", "error_type", fmt.Sprintf("%T", err))
 }
 
+// domainLookupErrorResult reports a failed owner-scoped domain lookup. A
+// missing domain and another learner's domain produce the same message, so the
+// response never confirms that an identifier exists.
+func domainLookupErrorResult(deps *Deps, err error) (*mcp.CallToolResult, error) {
+	if errors.Is(err, storeport.ErrNotFound) {
+		return errorResult("domain not found")
+	}
+	return safeErrorResult(deps.Logger, "failed to load domain", err)
+}
+
 // resolveDomain resolves a domain by ID or falls back to the learner's most recent domain.
 //
 // Archived domains are explicitly rejected when resolved by ID: see issue #94.
 // Without this guard, callers like record_interaction would silently advance
 // BKT/FSRS state on a domain the learner has explicitly archived. Archive-
 // specific tools (archive_domain, unarchive_domain, delete_domain) do not go
-// through resolveDomain — they call store.GetDomainByID directly because they
-// legitimately need to operate on archived rows.
+// through resolveDomain — they call store.GetLearnerDomainByID directly because
+// they legitimately need to operate on archived rows.
 func resolveDomain(ctx context.Context, store storeport.Store, learnerID, domainID string) (*models.Domain, error) {
 	if domainID != "" {
-		d, err := store.GetDomainByID(ctx, domainID)
+		d, err := store.GetLearnerDomainByID(ctx, learnerID, domainID)
 		if err != nil {
 			return nil, err
-		}
-		if d.LearnerID != learnerID {
-			return nil, fmt.Errorf("domain not found: %w", storeport.ErrNotFound)
 		}
 		if d.Archived {
 			return nil, fmt.Errorf("domain not found: %w", storeport.ErrNotFound)

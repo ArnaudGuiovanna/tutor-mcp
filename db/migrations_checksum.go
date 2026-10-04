@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -17,14 +18,21 @@ import (
 // the migration is first applied; Checksum is computed from Body and persisted
 // in schema_migrations to detect drift on subsequent startups.
 //
-// IgnoreExecErrors is set for ALTER-style migrations whose statements may
-// already have been applied to a pre-existing database (e.g. "duplicate column"
-// from sqlite). For those, errors during Exec are intentionally swallowed so
-// the migration can still be recorded as applied.
+// AlterIfNeeded marks a single SQLite "ALTER TABLE t ADD|DROP COLUMN c"
+// statement that a pre-existing database may already reflect: legacy databases
+// ran these through a best-effort loop before schema_migrations existed. The
+// runner inspects the live schema instead of guessing from an error: a column
+// that is already present (ADD) or already absent (DROP) skips the body, and
+// any other failure aborts startup. A recorded ADD whose column is missing is
+// applied again, which repairs databases where earlier releases swallowed the
+// error and recorded the migration anyway.
 type migration struct {
-	Version          string
-	Body             string
-	IgnoreExecErrors bool
+	Version       string
+	Body          string
+	AlterIfNeeded bool
+	// removedLater is set by buildMigrations when a later migration removes
+	// the column this ADD COLUMN creates; such a migration is never repaired.
+	removedLater bool
 }
 
 // checksum returns the lowercase hex SHA-256 of the migration body. Whitespace
@@ -67,6 +75,9 @@ func applyMigrationInTx(ctx context.Context, tx migrationTx, m migration) error 
 				m.Version, storedChecksum, m.checksum(),
 			)
 		}
+		if m.AlterIfNeeded {
+			return repairRecordedAlter(ctx, tx, m)
+		}
 		return nil
 	case sql.ErrNoRows:
 		// fall through to apply
@@ -74,23 +85,27 @@ func applyMigrationInTx(ctx context.Context, tx migrationTx, m migration) error 
 		return fmt.Errorf("schema_migrations: read version %q: %w", m.Version, err)
 	}
 
-	if _, err := tx.ExecContext(ctx, `SAVEPOINT migration_body`); err != nil {
-		return fmt.Errorf("start migration savepoint %q: %w", m.Version, err)
-	}
-	if _, execErr := tx.ExecContext(ctx, m.Body); execErr != nil {
-		if err := rollbackMigrationBody(ctx, tx, m.Version, execErr); err != nil {
-			return err
+	skipBody := false
+	if m.AlterIfNeeded {
+		applied, _, err := alterAlreadyApplied(ctx, tx, m.Body)
+		if err != nil {
+			return fmt.Errorf("inspect migration %q: %w", m.Version, err)
 		}
-		if !m.IgnoreExecErrors {
+		skipBody = applied
+	}
+	if !skipBody {
+		if _, err := tx.ExecContext(ctx, `SAVEPOINT migration_body`); err != nil {
+			return fmt.Errorf("start migration savepoint %q: %w", m.Version, err)
+		}
+		if _, execErr := tx.ExecContext(ctx, m.Body); execErr != nil {
+			if err := rollbackMigrationBody(ctx, tx, m.Version, execErr); err != nil {
+				return err
+			}
 			return fmt.Errorf("apply migration %q: %w", m.Version, execErr)
 		}
-		// IgnoreExecErrors covers ALTERs already applied on legacy DBs
-		// ("duplicate column name", "no such column" on DROP COLUMN,
-		// etc.). Roll back any partial body effects, then record the
-		// bookkeeping row in the still-open transaction — subsequent runs
-		// then take the "checksum already matches, skip" branch.
-	} else if _, err := tx.ExecContext(ctx, `RELEASE SAVEPOINT migration_body`); err != nil {
-		return fmt.Errorf("release migration savepoint %q: %w", m.Version, err)
+		if _, err := tx.ExecContext(ctx, `RELEASE SAVEPOINT migration_body`); err != nil {
+			return fmt.Errorf("release migration savepoint %q: %w", m.Version, err)
+		}
 	}
 	if _, err := tx.ExecContext(
 		ctx,
@@ -98,6 +113,53 @@ func applyMigrationInTx(ctx context.Context, tx migrationTx, m migration) error 
 		m.Version, m.checksum(),
 	); err != nil {
 		return fmt.Errorf("record migration %q: %w", m.Version, err)
+	}
+	return nil
+}
+
+var reconcilableAlterPattern = regexp.MustCompile(
+	`(?is)^\s*ALTER\s+TABLE\s+([A-Za-z_][A-Za-z0-9_]*)\s+(ADD|DROP)\s+COLUMN\s+([A-Za-z_][A-Za-z0-9_]*)\b`)
+
+// alterAlreadyApplied reports whether the live schema already reflects a
+// single ADD COLUMN or DROP COLUMN statement, and which of the two it is.
+func alterAlreadyApplied(ctx context.Context, tx migrationTx, body string) (applied bool, add bool, err error) {
+	statement := strings.TrimSuffix(strings.TrimSpace(body), ";")
+	match := reconcilableAlterPattern.FindStringSubmatch(statement)
+	if match == nil || strings.Contains(statement, ";") {
+		return false, false, fmt.Errorf("AlterIfNeeded requires one ALTER TABLE ... ADD|DROP COLUMN statement")
+	}
+	var count int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ? COLLATE NOCASE`,
+		match[1], match[3],
+	).Scan(&count); err != nil {
+		return false, false, fmt.Errorf("read columns of %s: %w", match[1], err)
+	}
+	add = strings.EqualFold(match[2], "ADD")
+	if add {
+		return count > 0, true, nil
+	}
+	return count == 0, false, nil
+}
+
+// repairRecordedAlter re-applies a recorded ADD COLUMN whose column is
+// missing. Earlier releases recorded these migrations even when the ALTER
+// failed, leaving the runtime to fail later on "no such column". Columns a
+// later migration retires are skipped, and a leftover column from a recorded
+// DROP is harmless and left alone.
+func repairRecordedAlter(ctx context.Context, tx migrationTx, m migration) error {
+	if m.removedLater {
+		return nil
+	}
+	applied, add, err := alterAlreadyApplied(ctx, tx, m.Body)
+	if err != nil {
+		return fmt.Errorf("inspect migration %q: %w", m.Version, err)
+	}
+	if applied || !add {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, m.Body); err != nil {
+		return fmt.Errorf("repair migration %q: %w", m.Version, err)
 	}
 	return nil
 }
@@ -127,9 +189,8 @@ func buildMigrations() []migration {
 			Version: fmt.Sprintf("0002_alter_%03d_%s", i+1, alterShortName(body)),
 			Body:    body,
 			// ALTERs may already be present on legacy DBs that ran the old
-			// "ignore errors" migrator. Swallow per-statement errors so the
-			// row still gets recorded.
-			IgnoreExecErrors: true,
+			// "ignore errors" migrator; the runner checks the live schema.
+			AlterIfNeeded: true,
 		})
 	}
 	out = append(out, migration{
@@ -156,9 +217,9 @@ func buildMigrations() []migration {
 		})
 	}
 	out = append(out, migration{
-		Version:          "0005_alter_pedagogical_snapshots_interpretation_brief",
-		Body:             `ALTER TABLE pedagogical_snapshots ADD COLUMN interpretation_brief TEXT NOT NULL DEFAULT ''`,
-		IgnoreExecErrors: true,
+		Version:       "0005_alter_pedagogical_snapshots_interpretation_brief",
+		Body:          `ALTER TABLE pedagogical_snapshots ADD COLUMN interpretation_brief TEXT NOT NULL DEFAULT ''`,
+		AlterIfNeeded: true,
 	})
 	out = append(out, migration{
 		Version: "0006_create_pending_consolidations",
@@ -1904,7 +1965,32 @@ END;`,
 	out = append(out, migration{Version: "0075_learning_badges", Body: badgesMigration})
 	out = append(out, migration{Version: "0076_institution_statistics", Body: statisticsMigration})
 	out = append(out, migration{Version: "0077_collective_weights", Body: collectiveWeightsMigration})
+	markRemovedAlterColumns(out)
 	return out
+}
+
+// markRemovedAlterColumns flags each ADD COLUMN whose column a later
+// migration removes, by DROP COLUMN or by rebuilding the table. Repairing
+// such a migration would resurrect a column the schema retired on purpose.
+func markRemovedAlterColumns(migrations []migration) {
+	for i := range migrations {
+		if !migrations[i].AlterIfNeeded {
+			continue
+		}
+		match := reconcilableAlterPattern.FindStringSubmatch(strings.TrimSpace(migrations[i].Body))
+		if match == nil || !strings.EqualFold(match[2], "ADD") {
+			continue
+		}
+		table, column := regexp.QuoteMeta(match[1]), regexp.QuoteMeta(match[3])
+		removal := regexp.MustCompile(`(?is)\bDROP\s+TABLE\s+(IF\s+EXISTS\s+)?` + table + `\b|` +
+			`\bALTER\s+TABLE\s+` + table + `\s+DROP\s+COLUMN\s+` + column + `\b`)
+		for _, later := range migrations[i+1:] {
+			if removal.MatchString(later.Body) {
+				migrations[i].removedLater = true
+				break
+			}
+		}
+	}
 }
 
 // VerifySQLiteSchemaCurrent is the read-only startup gate used by API and

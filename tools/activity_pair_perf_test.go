@@ -153,7 +153,7 @@ func seedAlertActivityPairFixture(tb testing.TB, store *db.Store, activeLearners
 		if err := store.UpdateDomainPhase(context.Background(), domain.ID, models.PhaseInstruction, 0, base); err != nil {
 			tb.Fatalf("seed phase for %s: %v", learnerID, err)
 		}
-		if _, err := store.MergeDomainGoalRelevance(context.Background(), domain.ID, relevance); err != nil {
+		if _, err := store.MergeDomainGoalRelevance(context.Background(), domain.LearnerID, domain.ID, relevance); err != nil {
 			tb.Fatalf("seed goal relevance for %s: %v", learnerID, err)
 		}
 

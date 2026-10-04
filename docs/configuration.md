@@ -17,8 +17,9 @@ memory backend and single-server scheduler. `--profile institution` selects
 PostgreSQL and applies the production validation gates. Starting without a profile
 retains the legacy environment-based behavior.
 
-For hobby and institution, `LISTEN_ADDR` overrides the default loopback HTTP
-bind address (for example `0.0.0.0:3000` inside a private container network).
+Every mode binds HTTP to loopback (`127.0.0.1:$PORT`) by default. `LISTEN_ADDR`
+overrides the bind address, for example `0.0.0.0:3000` inside a private
+container network.
 Expose the service through an HTTPS proxy; see [VPS prerequisites](installation.md#vps-prerequisites).
 
 ## Environment variables
@@ -32,6 +33,7 @@ Environment variables read at boot:
 | `DEPLOYMENT_PROFILE` | `development` | `production` fails closed unless the public origin is HTTPS, PostgreSQL uses verified TLS with an explicit CA, shared rate limits, SMTP, integration-secret encryption and trusted proxy CIDRs are configured. |
 | `PROCESS_ROLE` | `all` in development | `api`, `worker`, or `migrator` is mandatory in production. Only the migrator applies DDL. |
 | `PORT` | `3000` | HTTP listen port |
+| `LISTEN_ADDR` | `127.0.0.1:$PORT` | HTTP bind address. Set it explicitly (for example `0.0.0.0:3000`) only on a private network behind an HTTPS proxy. |
 | `DB_DRIVER` | `sqlite` | `sqlite` for legacy development or `postgres` for institutional deployments; explicit profiles choose the driver. |
 | `DB_PATH` | `./data/runtime.db` | SQLite path (ignored when `DB_DRIVER=postgres`) |
 | `DATABASE_URL` | — | Postgres DSN, **required** when `DB_DRIVER=postgres`. Production requires `sslmode=verify-full` and an explicit `sslrootcert` CA. |

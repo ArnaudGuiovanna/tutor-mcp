@@ -83,6 +83,9 @@ GRANT UPDATE (findings_json) ON curriculum_review_opinions TO tutor_worker;
 GRANT UPDATE (name, personal_goal, graph_json, value_framings_json, goal_relevance_json, archived, deleted_at)
     ON domains TO tutor_worker;
 GRANT UPDATE (status, seat_reserved, objectives_json, updated_at) ON enrollments TO tutor_worker;
+-- Erasure replaces the address on the erased member's own invitation record.
+GRANT SELECT (tenant_id, accepted_membership_id), UPDATE (email, normalized_email)
+    ON tenant_invitations TO tutor_worker;
 GRANT DELETE ON
     learner_concept_states, calibration_records,
     tool_call_idempotency, login_challenges, learner_approved_clients,

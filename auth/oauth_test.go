@@ -135,6 +135,17 @@ func authTestDBTemplateBytes() ([]byte, error) {
 	return authTestDBTemplate.data, authTestDBTemplate.err
 }
 
+// drainBackgroundMail waits for account emails sent after the response
+// (registration, password recovery) so tests can inspect their effects.
+func drainBackgroundMail(t *testing.T, s *OAuthServer) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := s.DrainBackgroundMail(ctx); err != nil {
+		t.Fatalf("background account mail did not finish: %v", err)
+	}
+}
+
 func seedClient(t *testing.T, store *db.Store, clientID, redirectURI string) {
 	t.Helper()
 	if err := store.CreateOAuthClient(context.Background(), clientID, "Test Client", fmt.Sprintf(`[%q]`, redirectURI)); err != nil {
@@ -648,6 +659,7 @@ func TestAuthorizePost_InvalidEmailRejectedBeforePersistence(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "matching-token"})
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
+	drainBackgroundMail(t, s)
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401; body=%q", rec.Code, rec.Body.String())

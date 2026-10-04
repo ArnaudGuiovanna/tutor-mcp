@@ -106,7 +106,7 @@ func Orchestrate(ctx context.Context, store storeport.Store, input OrchestratorI
 // On error, the returned phase is the empty string ("").
 func OrchestrateWithPhase(ctx context.Context, store storeport.Store, input OrchestratorInput) (models.Activity, models.Phase, error) {
 	logger := input.logger()
-	domain, err := store.GetDomainByID(ctx, input.DomainID)
+	domain, err := store.GetLearnerDomainByID(ctx, input.LearnerID, input.DomainID)
 	if err != nil {
 		return models.Activity{}, "", fmt.Errorf("%w: %q: %v", ErrUnknownDomain, input.DomainID, err)
 	}

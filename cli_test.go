@@ -18,16 +18,17 @@ func TestProfileCLI(t *testing.T) {
 	}
 }
 
-func TestHobbyLoopbackListenDefault(t *testing.T) {
+func TestLoopbackListenDefault(t *testing.T) {
 	t.Setenv("LISTEN_ADDR", "")
-	if got := httpListenAddress(commandOptions{Profile: "hobby"}, "3000"); got != "127.0.0.1:3000" {
-		t.Fatal(got)
-	}
-	if got := httpListenAddress(commandOptions{}, "3000"); got != ":3000" {
-		t.Fatal(got)
+	for _, profile := range []string{"hobby", "institution", ""} {
+		if got := httpListenAddress(commandOptions{Profile: profile}, "3000"); got != "127.0.0.1:3000" {
+			t.Fatalf("profile %q listens on %q, want loopback", profile, got)
+		}
 	}
 	t.Setenv("LISTEN_ADDR", "0.0.0.0:3000")
-	if got := httpListenAddress(commandOptions{Profile: "hobby"}, "3000"); got != "0.0.0.0:3000" {
-		t.Fatal(got)
+	for _, profile := range []string{"hobby", ""} {
+		if got := httpListenAddress(commandOptions{Profile: profile}, "3000"); got != "0.0.0.0:3000" {
+			t.Fatalf("profile %q ignored LISTEN_ADDR: %q", profile, got)
+		}
 	}
 }

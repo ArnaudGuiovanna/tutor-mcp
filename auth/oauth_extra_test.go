@@ -1611,6 +1611,7 @@ func TestAuthorizePost_RegisterRequiresEmailVerificationBeforeRedirect(t *testin
 	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "tkn"})
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
+	drainBackgroundMail(t, s)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202; body=%q", rec.Code, rec.Body.String())
@@ -1739,6 +1740,7 @@ func TestAuthorizePost_RegisterDoesNotAcceptInitiatorCredential(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "tkn"})
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
+	drainBackgroundMail(t, s)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202", rec.Code)
@@ -1776,6 +1778,7 @@ func TestAuthorizePost_RegisterNeedsOnlyEmail(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "tkn"})
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
+	drainBackgroundMail(t, s)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202; body=%q", rec.Code, rec.Body.String())
@@ -1808,6 +1811,7 @@ func TestAuthorizePost_RegisterDuplicateEmail(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "tkn"})
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
+	drainBackgroundMail(t, s)
 
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202", rec.Code)
@@ -2272,6 +2276,7 @@ func TestAuthorizePost_RegisterRejectsCaseDuplicate(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "tkn"})
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
+	drainBackgroundMail(t, s)
 
 	if rec.Code != http.StatusAccepted || !strings.Contains(rec.Body.String(), "Check your email") {
 		t.Fatalf("case-variant response status=%d, body=%q", rec.Code, rec.Body.String())

@@ -596,6 +596,11 @@ func (s *Store) ProcessTenantDSARErasureBatch(ctx context.Context, scope models.
 		phaseComplete := false
 		if phase == "scrub_learner" {
 			anon := "erased+" + opaqueTokenHash(scope.TenantID + ":" + learnerID)[:24] + "@invalid.local"
+			var membershipID sql.NullString
+			if err := txs.queryRow(txCtx, `SELECT membership_id FROM learners WHERE tenant_id = ? AND id = ?`,
+				scope.TenantID, learnerID).Scan(&membershipID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
 			result, err := txs.exec(txCtx, `UPDATE learners SET email = ?, password_hash = 'erased', objective = '',
 				profile_json = '{}', webhook_url = '', email_verified_at = NULL WHERE tenant_id = ? AND id = ?`,
 				anon, scope.TenantID, learnerID)
@@ -603,6 +608,17 @@ func (s *Store) ProcessTenantDSARErasureBatch(ctx context.Context, scope models.
 				return err
 			}
 			affected, _ = result.RowsAffected()
+			// The organization's invitation record of this member carries their
+			// real address. The global account (users, MFA) can serve other
+			// organizations and is outside a tenant erasure; see
+			// docs/tenant-data-inventory.md.
+			if membershipID.Valid && membershipID.String != "" {
+				if _, err := txs.exec(txCtx, `UPDATE tenant_invitations SET email = ?, normalized_email = ?
+					WHERE tenant_id = ? AND accepted_membership_id = ?`,
+					anon, anon, scope.TenantID, membershipID.String); err != nil {
+					return err
+				}
+			}
 			// Learner-authored text in the identity skeleton, and the enrollments
 			// that would keep counting this learner in cohort statistics.
 			if _, err := txs.exec(txCtx, `UPDATE domains SET name = 'erased', personal_goal = '', graph_json = '{}',

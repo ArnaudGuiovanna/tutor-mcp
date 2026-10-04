@@ -543,7 +543,7 @@ func registerAddConcepts(server *mcp.Server, deps *Deps) {
 			return nil
 		})
 		if errors.Is(err, storeport.ErrCurriculumVersionConflict) {
-			fresh, _ := deps.Store.GetDomainByID(ctx, domain.ID)
+			fresh, _ := deps.Store.GetLearnerDomainByID(ctx, domain.LearnerID, domain.ID)
 			currentVersion := domain.GraphVersion
 			if fresh != nil {
 				currentVersion = fresh.GraphVersion

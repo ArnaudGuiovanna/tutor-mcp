@@ -129,9 +129,43 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   address, and users with several organizations choose one before the
   challenge. Previously anyone knowing the address could keep these learners
   out with one wrong password every few minutes.
+- Password recovery and registration look the account up and send their
+  e-mail after the response, from a bounded background pool drained at
+  shutdown. Only addresses with an account (recovery) or without one
+  (registration) used to wait for SMTP, so response time revealed which
+  addresses are registered. Registration now always answers that a
+  verification e-mail is on its way.
+- Domain tools resolve client-supplied domain identifiers with the learner in
+  the query, and answer "domain not found" identically for a missing domain and
+  for another learner's. Goal-relevance reads and writes are scoped the same
+  way; row-level security separates tenants, not learners.
+- The legacy mode without `--profile` binds `127.0.0.1` like the hobby and
+  institution profiles. It used to listen on every interface while defaulting
+  to open dynamic client registration. `LISTEN_ADDR` overrides the address in
+  every mode.
 
 ### Fixed
 
+- SQLite ALTER migrations inspect the schema instead of swallowing every
+  error. An ADD COLUMN already present or a DROP COLUMN already absent is
+  skipped; any other failure stops startup instead of being recorded as
+  applied. A recorded ADD COLUMN whose column is missing is applied again,
+  except for columns a later migration retires.
+- `queue_webhook_message` accepts `scheduled_for` from one hour ago to 30 days
+  ahead, an expiry at most 30 days later and a priority between -100 and 100.
+  Each learner holds at most 100 pending messages across every enqueue path.
+  Messages scheduled years ahead used to stay pending, and scanned, forever.
+- The catalog administration API reports database outages and expired
+  contexts as logged 500 errors and integrity conflicts as 409, instead of
+  400 for every unrecognized error.
+- Learner erasure replaces the address on the member's own invitation record.
+  The scope of an erasure, which leaves the global account to the account
+  holder, is documented. Re-apply `deploy/postgres-roles.sql` for the new
+  worker grant.
+- `tutor-retention --apply` warns that on SQLite it holds the write lock for the
+  whole relational phase, and the runbook asks for a maintenance window. The
+  phase stays one transaction on purpose: its mutations and their proof commit
+  together.
 - Every database row iteration checks the iteration error. A connection lost
   mid-query could previously yield a truncated result reported as complete,
   for example a tenant restore declaring its foreign keys verified, or a

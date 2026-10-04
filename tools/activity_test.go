@@ -611,7 +611,7 @@ func TestGetNextActivity_ReviewIntentAvoidsNewConcept(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create domain: %v", err)
 	}
-	if _, err := store.MergeDomainGoalRelevance(context.Background(), d.ID, map[string]float64{
+	if _, err := store.MergeDomainGoalRelevance(context.Background(), d.LearnerID, d.ID, map[string]float64{
 		"Pointers": 0.2,
 		"Generics": 1.0,
 	}); err != nil {
@@ -811,7 +811,7 @@ func TestGetNextActivity_PostOrchestratePhaseMatchesDB(t *testing.T) {
 	if err := store.UpdateDomainPhase(context.Background(), d.ID, models.PhaseInstruction, 0, time.Now().UTC()); err != nil {
 		t.Fatalf("seed phase: %v", err)
 	}
-	if _, err := store.MergeDomainGoalRelevance(context.Background(), d.ID, map[string]float64{
+	if _, err := store.MergeDomainGoalRelevance(context.Background(), d.LearnerID, d.ID, map[string]float64{
 		"a": 1.0, "b": 0.8,
 	}); err != nil {
 		t.Fatalf("seed goal_relevance: %v", err)
@@ -881,7 +881,7 @@ func BenchmarkGetNextActivity(b *testing.B) {
 	if err := store.UpdateDomainPhase(context.Background(), d.ID, models.PhaseInstruction, 0, time.Now().UTC()); err != nil {
 		b.Fatalf("seed phase: %v", err)
 	}
-	if _, err := store.MergeDomainGoalRelevance(context.Background(), d.ID, map[string]float64{"a": 0.9, "b": 0.6}); err != nil {
+	if _, err := store.MergeDomainGoalRelevance(context.Background(), d.LearnerID, d.ID, map[string]float64{"a": 0.9, "b": 0.6}); err != nil {
 		b.Fatalf("seed goal_relevance: %v", err)
 	}
 	for _, c := range []string{"a", "b"} {
@@ -920,7 +920,7 @@ func BenchmarkGetNextActivityLargeDomain(b *testing.B) {
 	if err := store.UpdateDomainPhase(context.Background(), d.ID, models.PhaseInstruction, 0, time.Now().UTC()); err != nil {
 		b.Fatalf("seed phase: %v", err)
 	}
-	if _, err := store.MergeDomainGoalRelevance(context.Background(), d.ID, relevance); err != nil {
+	if _, err := store.MergeDomainGoalRelevance(context.Background(), d.LearnerID, d.ID, relevance); err != nil {
 		b.Fatalf("seed goal_relevance: %v", err)
 	}
 

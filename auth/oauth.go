@@ -196,6 +196,8 @@ type OAuthServer struct {
 	csrfMu               sync.Mutex
 	usedCSRF             map[string]time.Time
 	lastCSRFPrune        time.Time
+	mailSlots            chan struct{}
+	mailJobs             sync.WaitGroup
 }
 
 // SetGranularScopesEnabled switches discovery and authorization issuance from
@@ -221,6 +223,7 @@ func NewOAuthServer(store oauthStore, baseURL string, logger *slog.Logger) *OAut
 		cimdHTTPClient:       newCIMDHTTPClient(),
 		cimdCache:            make(map[string]cachedCIMDClient),
 		usedCSRF:             make(map[string]time.Time),
+		mailSlots:            make(chan struct{}, backgroundMailConcurrency),
 	}
 }
 
@@ -615,48 +618,14 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 			return
 		}
 
-		// Check if email already exists. A database failure is not equivalent
-		// to an available address; continuing could create a duplicate account
-		// or expose backend-dependent behavior.
-		existingUser, lookupErr := s.store.GetLocalUserByEmail(ctx, email)
-		if lookupErr == nil && existingUser != nil {
-			// A fresh request for an inactive placeholder replaces the prior OAuth
-			// continuation. This lets the mailbox owner recover from an attacker-
-			// initiated pending registration without revealing account state.
-			if existingUser.EmailVerifiedAt == nil {
-				memberships, membershipErr := s.store.ListMembershipsForUser(ctx, existingUser.ID)
-				if membershipErr == nil && len(memberships) == 1 && memberships[0].LearnerID != "" {
-					membership := memberships[0]
-					scope := models.TenantScope{
-						TenantID: membership.TenantID, UserID: membership.UserID,
-						MembershipID: membership.ID, LearnerID: membership.LearnerID,
-					}
-					_ = s.store.WithTenantTx(ctx, scope, func(txCtx context.Context, scoped storeport.Store) error {
-						learner, learnerErr := scoped.GetLearnerByID(txCtx, membership.LearnerID)
-						if learnerErr != nil {
-							return learnerErr
-						}
-						return s.sendEmailVerification(txCtx, learner, data)
-					})
-				}
-			}
-			s.renderVerificationPending(w)
-			return
-		}
-		if lookupErr != nil && !errors.Is(lookupErr, sql.ErrNoRows) && !errors.Is(lookupErr, storeport.ErrAmbiguousIdentity) {
-			s.logger.Error("registration learner lookup failed", "err", lookupErr)
-			renderAuthPage(w, data, "Internal error. Please try again.", "register")
-			return
-		}
-		learner, err := s.store.CreateUnverifiedLearner(ctx, email, string(pendingHash), "", "")
-		if err != nil {
-			s.logger.Error("create learner failed", "err", err)
-			renderAuthPage(w, data, "Could not create account. Please try again.", "register")
-			return
-		}
-		if err := s.sendEmailVerification(ctx, learner, data); err != nil {
-			s.logger.Error("registration verification delivery failed", "err", err)
-		}
+		// The account lookup, creation and verification email run after the
+		// response: their duration depends on whether the address is already
+		// registered, which the identical response body must not reveal.
+		pendingCredentialHash := string(pendingHash)
+		registrationData := data
+		s.runBackgroundMail(ctx, "registration", func(taskCtx context.Context) error {
+			return s.registerUnverifiedLearner(taskCtx, email, pendingCredentialHash, registrationData)
+		})
 		s.renderVerificationPending(w)
 		return
 	} else {
@@ -1632,4 +1601,43 @@ func (s *OAuthServer) grantPrincipal(ctx context.Context, tenantID, userID, memb
 	return s.store.GetPrincipal(ctx, models.TenantScope{
 		TenantID: tenantID, UserID: userID, MembershipID: membershipID, LearnerID: learnerID,
 	}, scopes)
+}
+
+// registerUnverifiedLearner creates the inactive placeholder account for a
+// registration request and mails its verification link. A fresh request for
+// an existing unverified placeholder replaces the prior OAuth continuation so
+// the mailbox owner can recover from an attacker-initiated registration; an
+// existing verified account receives nothing. A database failure is not
+// treated as an available address, so it never creates a duplicate account.
+func (s *OAuthServer) registerUnverifiedLearner(ctx context.Context, email, pendingHash string, data authPageData) error {
+	existingUser, lookupErr := s.store.GetLocalUserByEmail(ctx, email)
+	if lookupErr == nil && existingUser != nil {
+		if existingUser.EmailVerifiedAt != nil {
+			return nil
+		}
+		memberships, err := s.store.ListMembershipsForUser(ctx, existingUser.ID)
+		if err != nil || len(memberships) != 1 || memberships[0].LearnerID == "" {
+			return err
+		}
+		membership := memberships[0]
+		scope := models.TenantScope{
+			TenantID: membership.TenantID, UserID: membership.UserID,
+			MembershipID: membership.ID, LearnerID: membership.LearnerID,
+		}
+		return s.store.WithTenantTx(ctx, scope, func(txCtx context.Context, scoped storeport.Store) error {
+			learner, err := scoped.GetLearnerByID(txCtx, membership.LearnerID)
+			if err != nil {
+				return err
+			}
+			return s.sendEmailVerification(txCtx, learner, data)
+		})
+	}
+	if lookupErr != nil && !errors.Is(lookupErr, sql.ErrNoRows) && !errors.Is(lookupErr, storeport.ErrAmbiguousIdentity) {
+		return fmt.Errorf("registration lookup: %w", lookupErr)
+	}
+	learner, err := s.store.CreateUnverifiedLearner(ctx, email, pendingHash, "", "")
+	if err != nil {
+		return fmt.Errorf("create unverified learner: %w", err)
+	}
+	return s.sendEmailVerification(ctx, learner, data)
 }
