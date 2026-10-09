@@ -65,7 +65,7 @@ Binaries target **Linux, macOS and Windows**, on amd64 and arm64. Profiles requi
 
 ### 1. Get the binary
 
-Build the current local-mode implementation with Git and [Go 1.26.8+](https://go.dev/dl/):
+Build the current local-mode implementation with Git and [Go 1.26.9 or a newer patched release](https://go.dev/dl/):
 
 ```sh
 git clone --branch main https://github.com/ArnaudGuiovanna/tutor-mcp.git

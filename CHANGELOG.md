@@ -113,6 +113,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Security
 
+- Build with Go 1.26.9 and `golang.org/x/net` v0.60.0 to include the October 8,
+  2026 security fixes for HTTP, TLS, MIME parsing and HTML templates. CI,
+  release packaging and Docker use the patched compiler. Existing binaries
+  must be rebuilt to receive the standard-library fixes.
 - The per-IP rate limiter keys requests on the rightmost `X-Forwarded-For`
   address that is not a trusted proxy. It previously took the leftmost entry,
   which the client writes itself behind any appending reverse proxy (nginx,
