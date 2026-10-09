@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 // blockingEmailSender holds every delivery until released, standing in for a
@@ -49,7 +51,19 @@ func TestAccountEmailsDoNotDelayTheResponse(t *testing.T) {
 	s, store := newTestServer(t)
 	seedClient(t, store, "cid", "https://good.example/cb")
 	seedLearner(t, store, "known@example.com", "old-password-123")
+	// Isolate the SMTP ordering check from the production bcrypt cost, which
+	// can exceed the response guard under race instrumentation and CPU load.
+	// Use a private budget so other tests retain the production hash settings.
+	s.bcrypt = mustBcryptBudget(defaultBcryptMaxConcurrent)
+	s.bcrypt.generate = func(password []byte, _ int) ([]byte, error) {
+		return bcrypt.GenerateFromPassword(password, bcrypt.MinCost)
+	}
 	sender := &blockingEmailSender{release: make(chan struct{})}
+	releaseMail := sync.OnceFunc(func() { close(sender.release) })
+	t.Cleanup(func() {
+		releaseMail()
+		drainBackgroundMail(t, s)
+	})
 	s.SetEmailSender(sender)
 
 	within := func(name string, request func()) {
@@ -82,7 +96,7 @@ func TestAccountEmailsDoNotDelayTheResponse(t *testing.T) {
 		t.Fatalf("deliveries completed before release: %v", got)
 	}
 
-	close(sender.release)
+	releaseMail()
 	drainBackgroundMail(t, s)
 	got := map[string]bool{}
 	for _, delivery := range sender.deliveries() {
