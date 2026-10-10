@@ -22,6 +22,7 @@ tutor-mcp.exe
 *.swp
 
 # Internal docs — never commit
+/PRD.md
 docs/superpowers/
 docs/audit-report.md
 docs/audit-scope.md
