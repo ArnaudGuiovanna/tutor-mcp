@@ -30,6 +30,21 @@ func stableLearningID(prefix string, parts ...string) string {
 	return prefix + hex.EncodeToString(h.Sum(nil))[:24]
 }
 
+// domainLearnerScope resolves the authoritative persisted identity in the
+// caller's tenant transaction. It does not assume the legacy tenant for native
+// institution learner profiles.
+func (s *Store) domainLearnerScope(ctx context.Context, learnerID string) (models.TenantScope, error) {
+	var scope models.TenantScope
+	if err := s.queryRow(ctx, `SELECT tenant_id, user_id, membership_id, id FROM learners WHERE id = ?`, learnerID).
+		Scan(&scope.TenantID, &scope.UserID, &scope.MembershipID, &scope.LearnerID); err != nil {
+		return models.TenantScope{}, fmt.Errorf("resolve domain learner identity: %w", err)
+	}
+	if err := scope.Validate(); err != nil {
+		return models.TenantScope{}, fmt.Errorf("resolve domain learner identity: %w", err)
+	}
+	return scope, nil
+}
+
 // provisionDomainEnrollment is the expand/contract dual-write boundary for
 // the legacy domain API. The legacy domain and the target catalogue graph are
 // committed by the same transaction, so no caller can observe only one side.
@@ -37,11 +52,11 @@ func (s *Store) provisionDomainEnrollment(ctx context.Context, domain *models.Do
 	if domain == nil || domain.ID == "" || domain.LearnerID == "" {
 		return fmt.Errorf("provision domain enrollment: domain is required")
 	}
-	var tenantID, userID, membershipID string
-	if err := s.queryRow(ctx, `SELECT tenant_id, user_id, membership_id
-		FROM learners WHERE id = ?`, domain.LearnerID).Scan(&tenantID, &userID, &membershipID); err != nil {
+	scope, err := s.domainLearnerScope(ctx, domain.LearnerID)
+	if err != nil {
 		return fmt.Errorf("provision domain enrollment identity: %w", err)
 	}
+	tenantID, userID, membershipID := scope.TenantID, scope.UserID, scope.MembershipID
 	formationID := "domain_formation_" + domain.ID
 	versionID := "domain_version_" + domain.ID
 	moduleID := "domain_module_" + domain.ID

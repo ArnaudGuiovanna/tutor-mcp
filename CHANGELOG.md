@@ -88,6 +88,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Changed
 
+- Personal domains use fixed BKT reference parameters while mastery and FSRS
+  continue to adapt. Common formations use reference or versioned collective
+  parameters; individualized estimation is recorded separately as a source.
+  Parameter policy, reference, effective values and source estimates are traced.
+
 - Institution learners without an active domain are guided to the formation
   catalog. Private compatibility formations are excluded from the shared
   learner catalog, and cancelled enrollments cannot be resumed by unarchiving
@@ -150,6 +155,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Fixed
 
+- Native institution personal-domain creation now explicitly uses the learner's
+  institution instead of the legacy tenant default, inside the enrollment
+  transaction and under the existing free-domain policy.
+- Collective BKT calibration now reads independent, current-version estimates
+  from admissible committed responses instead of applied `concept_states`
+  parameters. Eligibility counts source observations rather than FSRS reviews,
+  and bounded source validation excludes stale, duplicate and declared synthetic
+  evidence. Applying a weight cannot feed its own estimation source. Historical
+  v1 weights stay in history; the corrected v2 policy requires new qualifying
+  estimates. Re-apply `deploy/postgres-roles.sql` after migration.
 - SQLite ALTER migrations inspect the schema instead of swallowing every
   error. An ADD COLUMN already present or a DROP COLUMN already absent is
   skipped; any other failure stops startup instead of being recorded as

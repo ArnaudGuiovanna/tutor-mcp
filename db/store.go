@@ -1083,9 +1083,6 @@ func (s *Store) CreateDomain(ctx context.Context, learnerID, name, personalGoal 
 // CreateDomainWithValueFramings creates a domain and optionally persists a JSON-encoded
 // set of value framings (4 axes: financial, employment, intellectual, innovation).
 func (s *Store) CreateDomainWithValueFramings(ctx context.Context, learnerID, name, personalGoal string, graph models.KnowledgeSpace, valueFramingsJSON string) (*models.Domain, error) {
-	if err := s.ensureFreeDomainAllowed(ctx, learnerID); err != nil {
-		return nil, err
-	}
 	id, err := generateID()
 	if err != nil {
 		return nil, err
@@ -1108,10 +1105,17 @@ func (s *Store) CreateDomainWithValueFramings(ctx context.Context, learnerID, na
 		CreatedAt:         now,
 	}
 	err = s.inTx(ctx, nil, func(txs *Store) error {
+		identity, err := txs.domainLearnerScope(ctx, learnerID)
+		if err != nil {
+			return err
+		}
+		if err := txs.ensureFreeDomainAllowed(ctx, learnerID); err != nil {
+			return err
+		}
 		if _, err := txs.exec(ctx,
-			`INSERT INTO domains (id, learner_id, name, personal_goal, graph_json, value_framings_json, graph_version, created_at)
-			 VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
-			id, learnerID, name, personalGoal, string(graphJSON), valueFramingsJSON, now,
+			`INSERT INTO domains (id, learner_id, tenant_id, name, personal_goal, graph_json, value_framings_json, graph_version, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+			id, learnerID, identity.TenantID, name, personalGoal, string(graphJSON), valueFramingsJSON, now,
 		); err != nil {
 			return fmt.Errorf("create domain: %w", err)
 		}

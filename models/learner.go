@@ -62,6 +62,7 @@ func NewConceptState(learnerID, concept string) *ConceptState {
 // a domain; using DomainID here prevents common labels such as "functions" or
 // "probability" from sharing BKT/FSRS/IRT state across unrelated subjects.
 func NewConceptStateInDomain(learnerID, domainID, concept string) *ConceptState {
+	reference := BKTReferenceParams()
 	return &ConceptState{
 		LearnerID:  learnerID,
 		DomainID:   domainID,
@@ -70,10 +71,10 @@ func NewConceptStateInDomain(learnerID, domainID, concept string) *ConceptState 
 		Difficulty: 0.3,
 		CardState:  "new",
 		PMastery:   0.1,
-		PLearn:     0.15,
-		PForget:    0.05,
-		PSlip:      0.1,
-		PGuess:     0.2,
+		PLearn:     reference.PLearn,
+		PForget:    reference.PForget,
+		PSlip:      reference.PSlip,
+		PGuess:     reference.PGuess,
 		Theta:      0.0,
 	}
 }

@@ -65,7 +65,7 @@ TO tutor_worker;
 -- (and, for erasure, deletes) the per-learner application ledger. It never
 -- writes learner state.
 GRANT SELECT, INSERT ON concept_collective_weights TO tutor_worker;
-GRANT SELECT ON collective_weight_applications TO tutor_worker;
+GRANT SELECT ON collective_weight_applications, concept_bkt_estimates TO tutor_worker;
 GRANT SELECT, INSERT, UPDATE, DELETE ON
     outbox_events, async_jobs, integration_deliveries,
     webhook_message_queue, webhook_delivery_transitions, webhook_push_log,
@@ -89,7 +89,7 @@ GRANT SELECT (tenant_id, accepted_membership_id), UPDATE (email, normalized_emai
 GRANT DELETE ON
     learner_concept_states, calibration_records,
     tool_call_idempotency, login_challenges, learner_approved_clients,
-    collective_weight_applications, learning_badges, learning_badge_evidence,
+    concept_bkt_estimates, collective_weight_applications, learning_badges, learning_badge_evidence,
     webhook_delivery_transitions, webhook_push_log, webhook_message_queue,
     narrative_mutations, narrative_objects, pedagogical_snapshots,
     transfer_records, interactions, learning_events, assessment_adjudications, assessment_reviews, curriculum_review_opinions, assessment_attempts, pedagogical_decisions, affect_states,

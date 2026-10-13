@@ -906,11 +906,9 @@ func TestRecordInteraction_RejectsOutOfRangeHints(t *testing.T) {
 	}
 }
 
-// Issue #51: each interaction must persist the slip/guess values the
-// non-canonical error-type heuristic fed into the BKT update so the run
-// can be replayed deterministically. SYNTAX_ERROR ramps slip up by 0.15;
-// the row's bkt_slip column must reflect that.
-func TestRecordInteraction_AuditRowCarriesHeuristicSlipGuess_SyntaxError(t *testing.T) {
+// Each interaction records the parameters actually used so the update can be
+// replayed. A syntax-error label does not change the personal fixed policy.
+func TestRecordInteraction_AuditRowCarriesFixedSlipGuess_SyntaxError(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	makeOwnerDomain(t, store, "L_owner", "math")
 
@@ -935,19 +933,17 @@ func TestRecordInteraction_AuditRowCarriesHeuristicSlipGuess_SyntaxError(t *test
 	if got.BKTSlip == nil || got.BKTGuess == nil {
 		t.Fatalf("expected bkt_slip and bkt_guess to be persisted, got slip=%v guess=%v", got.BKTSlip, got.BKTGuess)
 	}
-	// Default ConceptState has PSlip=0.1; SYNTAX_ERROR ramp is +0.15 → 0.25.
-	if *got.BKTSlip < 0.249 || *got.BKTSlip > 0.251 {
-		t.Errorf("bkt_slip = %f, want ~0.25 (base 0.1 + SYNTAX_ERROR ramp 0.15)", *got.BKTSlip)
+	if *got.BKTSlip < 0.099 || *got.BKTSlip > 0.101 {
+		t.Errorf("bkt_slip = %f, want fixed reference ~0.10", *got.BKTSlip)
 	}
-	// Default ConceptState has PGuess=0.2 — SYNTAX_ERROR doesn't ramp guess.
 	if *got.BKTGuess < 0.199 || *got.BKTGuess > 0.201 {
-		t.Errorf("bkt_guess = %f, want ~0.20 (unchanged by SYNTAX_ERROR)", *got.BKTGuess)
+		t.Errorf("bkt_guess = %f, want fixed reference ~0.20", *got.BKTGuess)
 	}
 }
 
-// Issue #51: KNOWLEDGE_GAP ramps guess down by 0.10 — the audit row must
-// carry the resulting value (0.20 - 0.10 = 0.10).
-func TestRecordInteraction_AuditRowCarriesHeuristicSlipGuess_KnowledgeGap(t *testing.T) {
+// A knowledge-gap label remains an observation; it cannot adjust the personal
+// fixed reference that the audit row must record.
+func TestRecordInteraction_AuditRowCarriesFixedSlipGuess_KnowledgeGap(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	makeOwnerDomain(t, store, "L_owner", "math")
 
@@ -973,10 +969,10 @@ func TestRecordInteraction_AuditRowCarriesHeuristicSlipGuess_KnowledgeGap(t *tes
 		t.Fatalf("expected bkt_slip and bkt_guess to be persisted, got slip=%v guess=%v", got.BKTSlip, got.BKTGuess)
 	}
 	if *got.BKTSlip < 0.099 || *got.BKTSlip > 0.101 {
-		t.Errorf("bkt_slip = %f, want ~0.10 (unchanged by KNOWLEDGE_GAP)", *got.BKTSlip)
+		t.Errorf("bkt_slip = %f, want fixed reference ~0.10", *got.BKTSlip)
 	}
-	if *got.BKTGuess < 0.099 || *got.BKTGuess > 0.101 {
-		t.Errorf("bkt_guess = %f, want ~0.10 (base 0.20 - KNOWLEDGE_GAP ramp 0.10)", *got.BKTGuess)
+	if *got.BKTGuess < 0.199 || *got.BKTGuess > 0.201 {
+		t.Errorf("bkt_guess = %f, want fixed reference ~0.20", *got.BKTGuess)
 	}
 }
 

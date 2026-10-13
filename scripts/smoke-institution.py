@@ -362,15 +362,26 @@ def main():
         check(denied.get('isError'), 'learner rewrote the formation curriculum')
         activity = tool(learner, 'get_next_activity', {'domain_id': enrollment['domain_id']})
         check(activity['domain_id'] == enrollment['domain_id'], 'tutor selected an unrelated domain')
+        selected = activity['activity']
         prepared = tool(learner, 'prepare_assessment_attempt', {
-            'domain_id': enrollment['domain_id'], 'concept': 'variables', 'activity_type': 'PRACTICE',
+            'domain_id': enrollment['domain_id'], 'session_id': activity['session_id'],
+            'decision_id': activity['decision_id'], 'concept': selected['concept'], 'activity_type': selected['type'],
             'observable': 'Read x', 'task_text': 'Given x = 3, what is x?',
             'rubric_json': json.dumps({'criteria': [{'id': 'correct', 'description': 'Answer is 3', 'max_score': 1}], 'passing_score': 1})})
         tool(learner, 'submit_assessment_attempt', {'attempt_id': prepared['attempt_id'], 'learner_response': '3'})
-        tool(learner, 'record_interaction', {'domain_id': enrollment['domain_id'], 'concept': 'variables',
-            'activity_type': 'PRACTICE', 'success': True, 'response_time_seconds': 5, 'confidence': 0.9,
+        recorded = tool(learner, 'record_interaction', {'domain_id': enrollment['domain_id'],
+            'session_id': activity['session_id'], 'concept': selected['concept'],
+            'activity_type': selected['type'], 'success': True, 'response_time_seconds': 5, 'confidence': 0.9,
             'attempt_id': prepared['attempt_id'], 'evaluator_id': 'smoke-host', 'evaluation_method': 'host_llm',
-            'rubric_score_json': json.dumps({'criteria_scores': [{'id': 'correct', 'score': 1}], 'total': 1, 'max_total': 1})})
+            'rubric_score_json': json.dumps({'criteria_scores': [{'id': 'correct', 'score': 1, 'evidence': 'The committed answer is 3.'}], 'total': 1, 'max_total': 1})})
+        observation = recorded['observation']
+        check(observation['bkt_parameter_policy'] == 'common-collective-reference-v2',
+              'institution interaction omitted the common parameter policy')
+        check(observation['bkt_effective_params'] == {'p_learn': .15, 'p_forget': .05, 'p_slip': .1, 'p_guess': .2},
+              'small cohort did not use fixed reference parameters')
+        source = observation['bkt_calibration_source']
+        check(source['recorded'] and source['observations'] == 1,
+              'committed institution response did not produce an independent calibration source')
     check(enrollments[0]['domain_id'] != enrollments[1]['domain_id'], 'learners share a private domain')
     status, report = console_api(manager, 'GET', f'/admin/catalog/cohorts/{cohort_id}/report')
     check(status == 200 and report['enrollment_count'] == 2 and report['active_count'] == 2,

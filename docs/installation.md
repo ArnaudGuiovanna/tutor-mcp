@@ -519,14 +519,17 @@ figures (see `synthesis_guidance`). With PostgreSQL roles, re-apply
 ### Collective weights
 
 For every concept of a published institutional formation version with at least
-thirty learners who each have five recorded reviews of it, a worker publishes
-(every six hours) collective BKT parameters: the median of the contributors'
-learn, forget, slip and guess parameters, clamped to 0.01–0.5. A new version is
+thirty learners who each have five admissible committed observations of it, a
+worker publishes (every six hours) collective BKT parameters: the median of
+independent learn, forget, slip and guess estimates, clamped to 0.01–0.5. FSRS
+review counts and previously applied weights are not estimation sources. A new version is
 published only when it differs by at least 0.01 and never moves a parameter by
 more than 0.02, so the collective stays stable. Versions are immutable, keep
 their contributor count and policy version, and contain no learner identifier.
-This is a robust consensus of already individualized parameters, not a
-maximum-likelihood fit. The current weight of each concept appears in the
+This is a robust consensus of individualized heuristic estimates, not a
+maximum-likelihood fit. The estimator uses the fixed reference and admissible
+current-version responses, including the latest response; it inherits no mastery,
+collective parameter or FSRS stability. The current weight of each concept appears in the
 statistics view and in `get_cohort_statistics` (`collective_weight`).
 
 The worker never writes learner state. A weight reaches a learner inside that
@@ -538,6 +541,20 @@ review counts are never changed. Each application is recorded in the interaction
 (`bkt_collective_weights`, with the parameters before and after) and in a per-learner
 ledger removed by learner erasure. See the
 [phase 7 acceptance contract](institution-phase-7.md).
+
+Personal domains (including local, hobby and private compatibility formations)
+use fixed BKT reference parameters: learn 0.15, forget 0.05, slip 0.10 and guess
+0.20. Mastery, memory and review dates still adapt to responses. Interaction
+traces identify the parameter policy, reference and effective parameters; common
+source estimates have a separate trace.
+
+After upgrading, historical v1 collective weights remain in history but are not
+applied. Common formations use the reference until the corrected v2 source
+reaches its eligibility threshold. No historical applied state is backfilled as
+independent evidence. Re-apply `deploy/postgres-roles.sql` after migration for the
+worker's read/erasure privileges on the new source table. Independent estimates
+participate in tenant export, erasure and restore verification. See the
+[parameter policy](bkt-parameter-policy.md) for provenance and upgrade details.
 
 ### Learner erasure
 

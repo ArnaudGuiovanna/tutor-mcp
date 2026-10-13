@@ -144,17 +144,36 @@ func applyInteraction(
 		}
 		observation := structuredObservation(input)
 
-		// Institution collective BKT weights: applied at most once per weight
-		// version, here in the learner's own transaction so the worker never
-		// writes learner state. Mastery and FSRS are not touched.
+		// Personal domains use the immutable reference; published common
+		// formations may apply a compatible collective version. Eligibility and
+		// source estimation are separate from these effective parameters.
+		referenceParams := models.BKTReferenceParams()
+		parameterPolicy := models.BKTPersonalParameterPolicy
+		principal, authenticated := auth.GetPrincipal(ctx)
+		var calibration store.BKTCalibrationStore
+		var calibrationEvidence *models.BKTCalibrationEvidence
+		if authenticated {
+			if calibration, _ = s.(store.BKTCalibrationStore); calibration != nil {
+				calibrationEvidence, err = calibration.GetBKTCalibrationEvidence(ctx, principal.TenantScope(), cs, 0)
+				if err != nil {
+					return fmt.Errorf("load BKT calibration policy: %w", err)
+				}
+			}
+		}
 		var collective *models.CollectiveWeightApplication
-		if principal, authenticated := auth.GetPrincipal(ctx); authenticated {
+		if calibrationEvidence != nil {
+			parameterPolicy = models.BKTCommonParameterPolicy
 			if weights, ok := s.(store.CollectiveWeightStore); ok {
 				if collective, err = weights.ApplyCollectiveWeights(ctx, principal.TenantScope(), cs, now); err != nil {
 					return fmt.Errorf("apply collective weights: %w", err)
 				}
+			} else {
+				setStateBKTParams(cs, referenceParams)
 			}
+		} else {
+			setStateBKTParams(cs, referenceParams)
 		}
+		effectiveParams := stateBKTParams(cs)
 
 		// ── Snapshot read-only prior state ──────────────────────────────
 		// All downstream algorithm steps read from this snapshot, never
@@ -179,11 +198,9 @@ func applyInteraction(
 		}
 		priorNextReview := cs.NextReview
 
-		// ── BKT update — individualized over recent learner/concept
-		// evidence, while preserving the existing error_type ramps for the
-		// empty-history path. Computed up front (it only reads from the
-		// prior snapshot + prior interactions) so the effective parameters
-		// can be persisted and replayed deterministically.
+		// ── BKT update — change mastery using the declared fixed/applied
+		// parameters. The independent individual estimate, computed after the
+		// committed interaction, never changes these effective parameters.
 		bktState := algorithms.BKTState{
 			PMastery: priorPMastery,
 			PLearn:   priorPLearn,
@@ -191,30 +208,25 @@ func applyInteraction(
 			PSlip:    priorPSlip,
 			PGuess:   priorPGuess,
 		}
-		recentForBKT, err := s.GetRecentInteractionsInDomain(ctx, learnerID, input.DomainID, input.Concept, 20)
-		if err != nil {
-			deps.Logger.Warn("applyInteraction: individualized BKT profile unavailable", "err", err, "learner", learnerID, "concept", input.Concept)
-			recentForBKT = nil
-		}
-		bktProfile := buildIndividualBKTProfile(recentForBKT, priorStability)
 		bktMode := engine.BKTUpdateModeForActivity(models.ActivityType(input.ActivityType))
-		var bktResult algorithms.IndividualBKTUpdateResult
-		if bktMode == models.BKTLearningOpportunity {
-			bktResult = algorithms.BKTUpdateIndividualized(bktState, bktProfile, input.Success, input.ErrorType)
-		} else {
-			bktResult = algorithms.BKTObserveIndividualized(bktState, bktProfile, input.Success, input.ErrorType)
-		}
+		bktResult := updateBKTWithFixedParameters(bktState, bktMode, input.Success)
 		bktState = bktResult.State
 		slipUsed := bktResult.Params.PSlip
 		guessUsed := bktResult.Params.PGuess
 
 		observation = mergeObservation(observation, map[string]any{
-			"bkt_update_mode":            bktMode,
-			"bkt_transition_applied":     bktResult.TransitionApplied,
-			"bkt_posterior":              bktResult.PosteriorMastery,
-			"bkt_transition_delta":       bktState.PMastery - bktResult.PosteriorMastery,
-			"bkt_forget":                 bktResult.Params.PForget,
-			"bkt_individualized_profile": individualBKTProfileSnapshot(bktProfile),
+			"bkt_parameter_policy":         parameterPolicy,
+			"bkt_reference_policy_version": models.BKTReferencePolicyVersion,
+			"bkt_reference_params":         referenceParams,
+			"bkt_effective_params":         effectiveParams,
+			"bkt_update_mode":              bktMode,
+			"bkt_transition_applied":       bktResult.TransitionApplied,
+			"bkt_posterior":                bktResult.PosteriorMastery,
+			"bkt_transition_delta":         bktState.PMastery - bktResult.PosteriorMastery,
+			"bkt_forget":                   bktResult.Params.PForget,
+			// Legacy audit keys describe the actual update. No individual
+			// adjustment is applied; common-source estimates have their own key.
+			"bkt_individualized_profile": individualBKTProfileSnapshot(algorithms.IndividualBKTProfile{}),
 			"bkt_individualized_params":  individualBKTParamsSnapshot(bktResult.Params),
 		})
 		if collective != nil {
@@ -257,6 +269,37 @@ func applyInteraction(
 
 		if err := s.CreateInteraction(ctx, interaction); err != nil {
 			return fmt.Errorf("create interaction: %w", err)
+		}
+		if calibrationEvidence != nil {
+			// Include this observation only if the store recognizes its frozen,
+			// committed assessment as admissible for this common concept/version.
+			// An unlinked or synthetic observation cannot refresh the source.
+			calibrationEvidence, err = calibration.GetBKTCalibrationEvidence(ctx, principal.TenantScope(), cs, models.BKTCalibrationProfileWindow)
+			if err != nil {
+				return fmt.Errorf("load committed BKT calibration evidence: %w", err)
+			}
+			if calibrationEvidence == nil {
+				return fmt.Errorf("BKT calibration scope changed during interaction")
+			}
+			source := map[string]any{
+				"policy_version":           models.BKTIndividualEstimatePolicyVersion,
+				"reference_policy_version": models.BKTReferencePolicyVersion,
+				"reference_params":         referenceParams,
+				"observations":             calibrationEvidence.Observations,
+				"profile_observations":     len(calibrationEvidence.Interactions),
+				"source_interaction_id":    calibrationEvidence.LastInteractionID,
+				"recorded":                 false,
+			}
+			if calibrationEvidence.Observations > 0 && calibrationEvidence.LastInteractionID == interaction.ID {
+				estimate, profile := estimateIndependentBKTParameters(calibrationEvidence.Interactions, input.Success, input.ErrorType)
+				if err := calibration.SaveBKTCalibrationEstimate(ctx, principal.TenantScope(), cs, calibrationEvidence, estimate, now); err != nil {
+					return fmt.Errorf("save independent BKT calibration estimate: %w", err)
+				}
+				source["params"] = estimate
+				source["profile"] = individualBKTProfileSnapshot(profile)
+				source["recorded"] = true
+			}
+			observation["bkt_calibration_source"] = source
 		}
 		if input.TransferScore != nil {
 			transferSessionID := input.SessionID

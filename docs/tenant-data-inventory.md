@@ -60,6 +60,7 @@ activité, `H` flux potentiellement non borné.
 | `curriculum_metadata_ids` | Tenant-owned / concept | M | immuable tant que référencée | Concept, domaine et learner doivent converger. |
 | `concept_states` | Tenant-owned / enrollment + concept | H | politique progression/RGPD | Backfill learner→enrollment; domaine vide/ambigu en quarantaine. |
 | `learner_concept_states` | Tenant-owned / enrollment + formation concept | H | politique progression/RGPD | Source canonique M3; PK tenant/enrollment/concept et double FK de version. |
+| `concept_bkt_estimates` | Tenant-owned / learner + enrollment + concept + curriculum + politique | M | progression jusqu'au DSAR ; export et restauration vérifiés | Estimation indépendante du référentiel fixe à partir des réponses admissibles ; aucune reprise des paramètres appliqués historiques ; empreinte de la source revérifiée avant agrégation. |
 | `learning_sessions` | Tenant-owned / enrollment | H | politique preuves/RGPD | Learner et domaine doivent converger; domaine NULL reste traçable. |
 | `assessment_attempts` | Tenant-owned / enrollment + concept | H | politique preuves/formation | Learner, session, domaine et concept contrôlés ensemble. |
 | `assessment_reviews` | Tenant-owned / learner + attempt + reviewer | H | prose selon rétention, journal jusqu'au DSAR | Avis aveugle figé, empreintes conservées après purge des justifications. |

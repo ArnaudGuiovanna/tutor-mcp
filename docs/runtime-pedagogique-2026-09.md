@@ -9,6 +9,18 @@ notes de conception historiques.
 
 ## Principe conservé
 
+### October parameter-policy correction
+
+Policy `2026-10-parameters-v6` retains the observation/learning-transition
+distinction below. Personal domains now use fixed BKT reference parameters;
+published institutional common domains use the reference or a compatible
+collective application. Independent individual estimation is a separate source
+for collective calibration and never adjusts personal effective parameters.
+The source uses admissible committed assessments from the current version,
+with bounded history and no inherited collective parameters or FSRS stability.
+Historical applied state is not backfilled into the new source. See the
+[correction plan and contract](bkt-parameter-policy.md).
+
 Le runtime fixe les transitions, les règles de preuve et les droits de mutation.
 L'IA génère curriculum, tâches, références de correction, explications et
 dialogues. Une tâche générée devient un artefact figé avant la réponse : conserver

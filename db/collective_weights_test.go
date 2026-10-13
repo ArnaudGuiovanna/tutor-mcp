@@ -4,6 +4,7 @@
 package db
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -29,10 +30,12 @@ func newWeightCohort(t *testing.T) *weightCohort {
 	return &weightCohort{statisticsCohort: &statisticsCohort{s: s, owner: owner, reader: progressReader(owner), cohort: cohort, version: detail.Version.ID}}
 }
 
-// enroll adds one learner whose "numbers" state has the given reviews and parameters.
+// enroll adds independently sourced committed observations. Parameters here
+// are estimator fixtures: real algorithm-to-estimate behavior is exercised in
+// the tools pipeline tests, while these tests discriminate aggregation policy.
 func (c *weightCohort) enroll(t *testing.T, reps int, p models.BKTParams) *models.ConceptState {
 	t.Helper()
-	student := formationStudent(t, c.s, fmt.Sprintf("weight%d@weights.test", len(c.members)))
+	student := formationStudent(t, c.s, fmt.Sprintf("weight%s-%d@weights.test", c.version, len(c.members)))
 	e, err := c.s.EnrollMembership(t.Context(), c.owner, c.cohort.ID, student.MembershipID, "{}")
 	if err != nil {
 		t.Fatal(err)
@@ -44,7 +47,29 @@ func (c *weightCohort) enroll(t *testing.T, reps int, p models.BKTParams) *model
 		t.Fatal(err)
 	}
 	c.members, c.enrolls = append(c.members, student), append(c.enrolls, e)
+	start := time.Now().UTC().Add(-24 * time.Hour).Truncate(time.Second)
+	for n := 0; n < reps; n++ {
+		badgeObservation(t, c.s, student, e, "numbers", models.ActivityPractice, start.Add(time.Duration(n)*time.Minute), time.Time{}, time.Time{}, true, 0)
+	}
+	if reps > 0 {
+		c.saveEstimate(t, state, p)
+	}
 	return state
+}
+
+func (c *weightCohort) saveEstimate(t *testing.T, state *models.ConceptState, p models.BKTParams) {
+	t.Helper()
+	scope := c.scopeFor(state.LearnerID)
+	if err := c.s.WithTenantTx(t.Context(), scope, func(ctx context.Context, scoped storeport.Store) error {
+		txs := scoped.(*Store)
+		evidence, err := txs.GetBKTCalibrationEvidence(ctx, scope, state, 20)
+		if err != nil {
+			return err
+		}
+		return txs.SaveBKTCalibrationEstimate(ctx, scope, state, evidence, p, time.Now().UTC())
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (c *weightCohort) publish(t *testing.T) int {
@@ -122,9 +147,9 @@ func TestCollectiveWeightsHysteresisStepCapAndAppendOnly(t *testing.T) {
 	move := func(learn float64) {
 		for _, st := range states {
 			st.PLearn = learn
-			if err := c.s.UpsertConceptState(t.Context(), st); err != nil {
-				t.Fatal(err)
-			}
+			p := consensus
+			p.PLearn = learn
+			c.saveEstimate(t, st, p)
 		}
 	}
 	move(.305) // below the hysteresis band

@@ -6,10 +6,12 @@ package tools
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"tutor-mcp/db"
@@ -75,9 +77,11 @@ func TestPostgresMCPProgressionPath(t *testing.T) {
 	}
 }
 
+var postgresToolsTestSchema atomic.Uint64
+
 func postgresToolsTestStore(t *testing.T, baseDSN string) *db.Store {
 	t.Helper()
-	const schema = "p1_tools_mcp"
+	schema := fmt.Sprintf("p1_tools_mcp_%d", postgresToolsTestSchema.Add(1))
 	admin, err := sql.Open("pgx", baseDSN)
 	if err != nil {
 		t.Fatal(err)

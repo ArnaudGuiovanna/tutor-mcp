@@ -193,6 +193,7 @@ func (s *Store) ListTenantRetentionPolicies(ctx context.Context, actor models.Pr
 type tenantChecksumSpec struct{ table, keyExpression string }
 
 var tenantChecksumSpecs = []tenantChecksumSpec{
+	{"concept_bkt_estimates", "enrollment_id || ':' || formation_version_id || ':' || formation_concept_id || ':' || learner_id || ':' || curriculum_version || ':' || reference_policy_version || ':' || policy_version || ':' || p_learn || ':' || p_forget || ':' || p_slip || ':' || p_guess || ':' || admissible_observations || ':' || last_interaction_id || ':' || evidence_hash"},
 	{"concept_collective_weights", "formation_concept_id || ':' || version"},
 	{"collective_weight_applications", "enrollment_id || ':' || formation_concept_id"},
 	{"learning_badges", "id"},
@@ -417,7 +418,7 @@ func (s *Store) CompleteTenantDSARExport(ctx context.Context, scope models.Tenan
 			return err
 		}
 		counts := make(map[string]int64)
-		for _, table := range []string{"collective_weight_applications", "learner_concept_states", "calibration_records", "learning_badges", "learning_badge_evidence", "interactions", "learning_events", "concept_states", "narrative_objects", "pedagogical_decisions", "assessment_adjudications", "assessment_reviews", "curriculum_review_opinions", "audit_events"} {
+		for _, table := range []string{"concept_bkt_estimates", "collective_weight_applications", "learner_concept_states", "calibration_records", "learning_badges", "learning_badge_evidence", "interactions", "learning_events", "concept_states", "narrative_objects", "pedagogical_decisions", "assessment_adjudications", "assessment_reviews", "curriculum_review_opinions", "audit_events"} {
 			var count int64
 			predicate := "learner_id = ?"
 			args := []any{learnerID}
@@ -477,7 +478,7 @@ func (s *Store) ResumeTenantDSAR(ctx context.Context, actor models.Principal, re
 var dsarErasurePhases = []string{
 	// Credentials first: an erasure request ends every session and grant at once.
 	"refresh_tokens", "oauth_codes", "login_challenges", "account_tokens", "learner_approved_clients",
-	"collective_weight_applications", "learning_badge_evidence", "learning_badges",
+	"concept_bkt_estimates", "collective_weight_applications", "learning_badge_evidence", "learning_badges",
 	"webhook_delivery_transitions", "webhook_push_log", "webhook_message_queue",
 	"narrative_mutations", "narrative_objects", "pedagogical_snapshots",
 	"transfer_records", "interactions", "learning_events", "assessment_adjudications", "assessment_reviews", "curriculum_review_opinions", "assessment_attempts", "pedagogical_decisions", "affect_states",
@@ -487,7 +488,7 @@ var dsarErasurePhases = []string{
 }
 
 var dsarLearnerTables = map[string]string{
-	"learning_badges": "learner_id", "learning_badge_evidence": "learner_id", "collective_weight_applications": "learner_id",
+	"concept_bkt_estimates": "learner_id", "learning_badges": "learner_id", "learning_badge_evidence": "learner_id", "collective_weight_applications": "learner_id",
 	"webhook_delivery_transitions": "learner_id", "webhook_push_log": "learner_id",
 	"webhook_message_queue": "learner_id", "narrative_mutations": "learner_id",
 	"narrative_objects": "learner_id", "pedagogical_snapshots": "learner_id",
@@ -546,7 +547,7 @@ func (s *Store) ProcessTenantDSARErasureBatch(ctx context.Context, scope models.
 		// Requests created before the journals existed must also erase their
 		// rows. Append checkpoints without rewriting existing positions;
 		// execution follows the current dependency order, not insertion order.
-		for _, phase := range append([]string{"collective_weight_applications", "learning_badge_evidence", "learning_badges", "pedagogical_decisions", "assessment_reviews", "assessment_adjudications", "learning_events", "curriculum_review_opinions"}, dsarLatePhases...) {
+		for _, phase := range append([]string{"concept_bkt_estimates", "collective_weight_applications", "learning_badge_evidence", "learning_badges", "pedagogical_decisions", "assessment_reviews", "assessment_adjudications", "learning_events", "curriculum_review_opinions"}, dsarLatePhases...) {
 			if _, err := txs.exec(txCtx, `INSERT INTO tenant_dsar_phases
 			(tenant_id, request_id, position, phase, status, affected_rows, updated_at)
 			SELECT ?, ?, COALESCE(MAX(position), -1) + 1, ?, 'pending', 0, ?
