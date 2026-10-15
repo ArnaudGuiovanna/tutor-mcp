@@ -18,7 +18,11 @@ import (
 
 func badgeObservation(t *testing.T, s *Store, p models.Principal, e *models.Enrollment, key string, activity models.ActivityType, at, last, due time.Time, pass bool, hints int) string {
 	t.Helper()
-	ctx := t.Context()
+	return badgeObservationContext(t, t.Context(), s, p, e, key, activity, at, last, due, pass, hints)
+}
+
+func badgeObservationContext(t *testing.T, ctx context.Context, s *Store, p models.Principal, e *models.Enrollment, key string, activity models.ActivityType, at, last, due time.Time, pass bool, hints int) string {
+	t.Helper()
 	curriculum, err := s.GetCurriculumSnapshot(ctx, p.LearnerID, e.DomainID, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -204,8 +208,8 @@ func TestInstitutionBadgesTrustAndTransactionRollback(t *testing.T) {
 	}
 	s.SetHostLLMDemonstrationPolicy(true)
 	sentinel := errors.New("rollback")
-	err = s.WithTenantTx(ctx, p.TenantScope(), func(_ context.Context, tx storeport.Store) error {
-		badgeObservation(t, tx.(*Store), p, e, "equations", models.ActivityMasteryChallenge, time.Now().Add(-time.Minute), time.Time{}, time.Time{}, true, 0)
+	err = s.WithTenantTx(ctx, p.TenantScope(), func(ctx context.Context, tx storeport.Store) error {
+		badgeObservationContext(t, ctx, tx.(*Store), p, e, "equations", models.ActivityMasteryChallenge, time.Now().Add(-time.Minute), time.Time{}, time.Time{}, true, 0)
 		return sentinel
 	})
 	if !errors.Is(err, sentinel) {
@@ -308,43 +312,60 @@ func TestInstitutionBadgesPostgresForcedRLS(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	tx, err := s.root.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `SET LOCAL ROLE `+role); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.ExecContext(ctx, `SELECT set_config('app.current_tenant', $1, true)`, p.TenantID); err != nil {
-		t.Fatal(err)
-	}
-	scope := p.TenantScope()
-	limited := &Store{db: tx, dialect: DialectPostgres, tenantScope: &scope, hostLLMDemonstrates: true}
-	badgeObservation(t, limited, p, e, "numbers", models.ActivityMasteryChallenge, time.Now().Add(-time.Minute), time.Time{}, time.Time{}, true, 0)
-	page, err := limited.GetEnrollmentBadges(ctx, p, e.ID, "", 10, false)
-	if err != nil || len(page.Items) != 1 || page.Items[0].EvidenceStatus != "valid" {
-		t.Fatalf("RLS award/read: %+v %v", page, err)
-	}
-	if _, err := tx.ExecContext(ctx, `SELECT set_config('app.current_tenant', 'foreign', true)`); err != nil {
-		t.Fatal(err)
-	}
-	for _, table := range []string{"learning_badges", "learning_badge_evidence"} {
-		var n int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table).Scan(&n); err != nil || n != 0 {
-			t.Fatalf("RLS read %s: %d %v", table, n, err)
+	if err := s.WithTenantTx(ctx, p.TenantScope(), func(ctx context.Context, scoped storeport.Store) error {
+		limited := scoped.(*Store)
+		if !limited.hostLLMDemonstrates {
+			t.Fatal("transaction did not preserve host-LLM demonstration policy")
 		}
-		result, err := tx.ExecContext(ctx, `DELETE FROM `+table)
-		if err != nil {
+		if _, err := limited.exec(ctx, `SET LOCAL ROLE `+role); err != nil {
+			return err
+		}
+		badgeObservationContext(t, ctx, limited, p, e, "numbers", models.ActivityMasteryChallenge, time.Now().Add(-time.Minute), time.Time{}, time.Time{}, true, 0)
+		page, err := limited.GetEnrollmentBadges(ctx, p, e.ID, "", 10, false)
+		if err != nil || len(page.Items) != 1 || page.Items[0].EvidenceStatus != "valid" {
+			t.Fatalf("RLS award/read: %+v %v", page, err)
+		}
+		if _, err := limited.exec(ctx, `SELECT set_config('app.current_tenant', 'foreign', true)`); err != nil {
 			t.Fatal(err)
 		}
-		affected, _ := result.RowsAffected()
-		if affected != 0 {
-			t.Fatal("foreign badge deletion")
+		for _, table := range []string{"learning_badges", "learning_badge_evidence"} {
+			var n int
+			if err := limited.queryRow(ctx, `SELECT COUNT(*) FROM `+table).Scan(&n); err != nil || n != 0 {
+				t.Fatalf("RLS read %s: %d %v", table, n, err)
+			}
+			result, err := limited.exec(ctx, `DELETE FROM `+table)
+			if err != nil {
+				t.Fatal(err)
+			}
+			affected, _ := result.RowsAffected()
+			if affected != 0 {
+				t.Fatal("foreign badge deletion")
+			}
 		}
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO learning_badge_evidence (tenant_id,badge_id,learner_id,attempt_id,concept_id,snapshot_id,responded_at,evaluated_at,evaluation_method) VALUES ($1,$2,$3,'forged','concept',0,$4,$4,'host_llm')`, p.TenantID, page.Items[0].ID, p.LearnerID, time.Now()); err == nil {
-		t.Fatal("cross-tenant evidence insertion")
+		if _, err := limited.exec(ctx, `SAVEPOINT foreign_badge_insert`); err != nil {
+			return err
+		}
+		if _, err := limited.exec(ctx, `INSERT INTO learning_badge_evidence (tenant_id,badge_id,learner_id,attempt_id,concept_id,snapshot_id,responded_at,evaluated_at,evaluation_method) VALUES ($1,$2,$3,'forged','concept',0,$4,$4,'host_llm')`, p.TenantID, page.Items[0].ID, p.LearnerID, time.Now()); err == nil {
+			t.Fatal("cross-tenant evidence insertion")
+		} else {
+			var denied interface{ SQLState() string }
+			if !errors.As(err, &denied) || denied.SQLState() != "42501" {
+				t.Fatalf("foreign evidence insert was not rejected by RLS: %v", err)
+			}
+		}
+		if _, err := limited.exec(ctx, `ROLLBACK TO SAVEPOINT foreign_badge_insert`); err != nil {
+			return err
+		}
+		if _, err := limited.exec(ctx, `SELECT set_config('app.current_tenant', $1, true)`, p.TenantID); err != nil {
+			return err
+		}
+		var ownBadges int
+		if err := limited.queryRow(ctx, `SELECT COUNT(*) FROM learning_badges`).Scan(&ownBadges); err != nil || ownBadges != 1 {
+			t.Fatalf("own badge was changed: %d %v", ownBadges, err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("RLS badge transaction: %v", err)
 	}
 }
 

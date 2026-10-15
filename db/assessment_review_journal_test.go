@@ -16,6 +16,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"tutor-mcp/adminapi"
 	"tutor-mcp/auth"
 	"tutor-mcp/models"
@@ -409,59 +410,63 @@ func TestAssessmentReviewJournalPostgresForcedRLS(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	tx, err := s.root.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `SET LOCAL ROLE `+role); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.ExecContext(ctx, `SELECT set_config('app.current_tenant', 'tenant_legacy', true)`); err != nil {
-		t.Fatal(err)
-	}
-	scope := owner.TenantScope()
-	limited := &Store{db: tx, dialect: DialectPostgres, tenantScope: &scope}
-	review, _, err := limited.RecordAssessmentReview(ctx, owner, a.ID, "rls", material.MaterialHash, completeBoundScore)
-	if err != nil {
-		t.Fatalf("authorized write under RLS: %v", err)
-	}
-	if _, err := limited.GetOwnAssessmentReview(ctx, owner, a.ID); err != nil {
-		t.Fatalf("authorized read under RLS: %v", err)
-	}
-	if _, err := tx.ExecContext(ctx, `SELECT set_config('app.current_tenant', 'foreign', true)`); err != nil {
-		t.Fatal(err)
-	}
-	var count int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM assessment_reviews`).Scan(&count); err != nil || count != 0 {
-		t.Fatalf("review bypassed RLS: %d %v", count, err)
-	}
-	for _, statement := range []string{`UPDATE assessment_reviews SET rubric_score_json = NULL`, `DELETE FROM assessment_reviews`} {
-		result, err := tx.ExecContext(ctx, statement)
+	if err := s.WithTenantTx(ctx, owner.TenantScope(), func(ctx context.Context, scoped storeport.Store) error {
+		limited := scoped.(*Store)
+		if _, err := limited.exec(ctx, `SET LOCAL ROLE `+role); err != nil {
+			return err
+		}
+		review, _, err := limited.RecordAssessmentReview(ctx, owner, a.ID, "rls", material.MaterialHash, completeBoundScore)
 		if err != nil {
+			t.Fatalf("authorized write under RLS: %v", err)
+		}
+		if _, err := limited.GetOwnAssessmentReview(ctx, owner, a.ID); err != nil {
+			t.Fatalf("authorized read under RLS: %v", err)
+		}
+		if _, err := limited.exec(ctx, `SELECT set_config('app.current_tenant', 'foreign', true)`); err != nil {
 			t.Fatal(err)
 		}
-		if n, _ := result.RowsAffected(); n != 0 {
-			t.Fatal("cross-tenant mutation succeeded")
+		var count int
+		if err := limited.queryRow(ctx, `SELECT COUNT(*) FROM assessment_reviews`).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("review bypassed RLS: %d %v", count, err)
 		}
-	}
-	if _, err := tx.ExecContext(ctx, `SAVEPOINT wrong_tenant`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO assessment_reviews
- (id, tenant_id, learner_id, attempt_id, reviewer_user_id, reviewer_membership_id, reviewer_token_version,
- idempotency_key, material_hash, rubric_score_hash, rubric_score_json, total, passed, created_at)
- VALUES ('foreign-insert', 'tenant_legacy', 'L2', $1, $2, $3, $4, 'foreign', $5, $6, '{}', 1, 1, $7)`,
-		a.ID, owner.UserID, owner.MembershipID, owner.TokenVersion, review.MaterialHash, review.RubricScoreHash, review.CreatedAt); err == nil {
-		t.Fatal("cross-tenant insert succeeded")
-	}
-	if _, err := tx.ExecContext(ctx, `ROLLBACK TO SAVEPOINT wrong_tenant`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tx.ExecContext(ctx, `SELECT set_config('app.current_tenant', 'tenant_legacy', true)`); err != nil {
-		t.Fatal(err)
-	}
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM assessment_reviews`).Scan(&count); err != nil || count != 1 {
-		t.Fatalf("own review was changed: %d %v", count, err)
+		for _, statement := range []string{`UPDATE assessment_reviews SET rubric_score_json = NULL`, `DELETE FROM assessment_reviews`} {
+			result, err := limited.exec(ctx, statement)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n, _ := result.RowsAffected(); n != 0 {
+				t.Fatal("cross-tenant mutation succeeded")
+			}
+		}
+		if _, err := limited.exec(ctx, `SAVEPOINT wrong_tenant`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := limited.exec(ctx, `INSERT INTO assessment_reviews
+	 (id, tenant_id, learner_id, attempt_id, reviewer_user_id, reviewer_membership_id, reviewer_token_version,
+	 idempotency_key, material_hash, rubric_score_hash, rubric_score_json, total, passed, created_at)
+	 VALUES ('foreign-insert', 'tenant_legacy', 'L2', $1, $2, $3, $4, 'foreign', $5, $6, '{}', 1, 1, $7)`,
+			a.ID, owner.UserID, owner.MembershipID, owner.TokenVersion, review.MaterialHash, review.RubricScoreHash, review.CreatedAt); err == nil {
+			t.Fatal("cross-tenant insert succeeded")
+		} else {
+			// The invoker BEFORE INSERT trigger reads references hidden by
+			// RLS and may reject their scope before the policy's WITH CHECK.
+			var denied *pgconn.PgError
+			if !errors.As(err, &denied) || (denied.Code != "42501" &&
+				(denied.Code != "P0001" || denied.Message != "assessment review scope mismatch")) {
+				t.Fatalf("foreign insert was not rejected by RLS or the review scope trigger: %v", err)
+			}
+		}
+		if _, err := limited.exec(ctx, `ROLLBACK TO SAVEPOINT wrong_tenant`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := limited.exec(ctx, `SELECT set_config('app.current_tenant', 'tenant_legacy', true)`); err != nil {
+			t.Fatal(err)
+		}
+		if err := limited.queryRow(ctx, `SELECT COUNT(*) FROM assessment_reviews`).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("own review was changed: %d %v", count, err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("RLS transaction: %v", err)
 	}
 }
