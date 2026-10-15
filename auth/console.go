@@ -396,14 +396,20 @@ func (s *OAuthServer) HandleConsoleMFAPost(w http.ResponseWriter, r *http.Reques
 	}
 	ctx := r.Context()
 	now := time.Now().UTC()
-	ok, throttled := s.checkSecondFactor(ctx, c.session.TenantScope(), r.FormValue("code"), now)
-	if throttled {
+	ok, retryAfter, budgetErr := s.checkSecondFactor(ctx, c.session.TenantScope(), r.FormValue("code"), now)
+	if budgetErr != nil {
+		s.logger.Error("second-factor budget unavailable", "error_type", authLogErrorType(budgetErr))
+		w.Header().Set("Retry-After", "5")
+		s.renderConsoleMFA(w, http.StatusServiceUnavailable, c, "Verification is temporarily unavailable. Please try again shortly.")
+		return
+	}
+	if retryAfter > 0 {
 		// The attempt budget is spent: end the session without checking the
 		// code. The password must be entered again once the window passes.
 		_ = s.accounts.DeleteConsoleSession(ctx, c.credential)
 		setConsoleSessionCookie(w, "", -1)
-		w.Header().Set("Retry-After", s.secondFactorRetryAfter())
-		s.renderConsoleLogin(w, http.StatusTooManyRequests, consolePageData{Error: "Too many invalid codes. Sign in again in a few minutes."})
+		w.Header().Set("Retry-After", secondFactorRetryAfter(retryAfter))
+		s.renderConsoleLogin(w, http.StatusTooManyRequests, consolePageData{Error: "Too many verification attempts. Sign in again after the retry delay."})
 		return
 	}
 	if !ok {
@@ -421,28 +427,32 @@ func (s *OAuthServer) HandleConsoleMFAPost(w http.ResponseWriter, r *http.Reques
 
 func secondFactorFailureKey(userID string) string { return "mfa:" + userID }
 
-// checkSecondFactor verifies a TOTP or recovery code within a per-user attempt
-// budget. A correct password never resets that budget, and a spent budget
-// refuses before the code is checked.
-func (s *OAuthServer) checkSecondFactor(ctx context.Context, scope models.TenantScope, code string, at time.Time) (ok, throttled bool) {
+// checkSecondFactor reserves a per-user slot before checking a TOTP or recovery
+// code. Neither a correct password nor a successful factor resets this budget.
+func (s *OAuthServer) checkSecondFactor(ctx context.Context, scope models.TenantScope, code string, at time.Time) (bool, time.Duration, error) {
 	key := secondFactorFailureKey(scope.UserID)
-	if !s.loginFailures.AllowContext(ctx, key) {
-		return false, true
+	count, retryAfter, err := s.loginFailures.ReserveSecondFactorAttempt(ctx, key, at)
+	if err != nil {
+		return false, 0, err
+	}
+	if count > s.loginFailures.Threshold() {
+		return false, retryAfter, nil
 	}
 	if err := s.accounts.VerifySecondFactor(ctx, scope, strings.TrimSpace(code), at); err != nil {
-		count := s.loginFailures.RecordContext(ctx, key)
-		return false, s.loginFailures.RetryAfter(count) > 0
+		if count >= s.loginFailures.Threshold() {
+			return false, retryAfter, nil
+		}
+		return false, 0, nil
 	}
-	s.loginFailures.ResetContext(ctx, key)
-	return true, false
+	return true, 0, nil
 }
 
-func (s *OAuthServer) secondFactorRetryAfter() string {
-	retry := s.loginFailures.RetryAfter(s.loginFailures.Threshold())
-	if retry <= 0 {
-		retry = time.Minute
+func secondFactorRetryAfter(retry time.Duration) string {
+	seconds := (retry + time.Second - 1) / time.Second
+	if seconds < 1 {
+		seconds = 1
 	}
-	return fmt.Sprintf("%d", int(retry/time.Second))
+	return fmt.Sprintf("%d", seconds)
 }
 
 func (s *OAuthServer) completeConsoleMFA(ctx context.Context, c *consoleContext, at time.Time) error {
@@ -787,10 +797,16 @@ func (s *OAuthServer) verifyAuthorizeSecondFactor(w http.ResponseWriter, r *http
 		return 0, false
 	}
 	now := time.Now().UTC()
-	ok, throttled := s.checkSecondFactor(ctx, scope, code, now)
-	if throttled {
-		w.Header().Set("Retry-After", s.secondFactorRetryAfter())
-		renderAuthPageStatus(w, http.StatusTooManyRequests, data, "Too many invalid authentication codes. Try again in a few minutes.", "login")
+	ok, retryAfter, budgetErr := s.checkSecondFactor(ctx, scope, code, now)
+	if budgetErr != nil {
+		s.logger.Error("second-factor budget unavailable", "error_type", authLogErrorType(budgetErr))
+		w.Header().Set("Retry-After", "5")
+		renderAuthPageStatus(w, http.StatusServiceUnavailable, data, "Verification is temporarily unavailable. Please try again shortly.", "login")
+		return 0, false
+	}
+	if retryAfter > 0 {
+		w.Header().Set("Retry-After", secondFactorRetryAfter(retryAfter))
+		renderAuthPageStatus(w, http.StatusTooManyRequests, data, "Too many verification attempts. Try again after the retry delay.", "login")
 		return 0, false
 	}
 	if !ok {

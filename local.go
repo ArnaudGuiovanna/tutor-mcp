@@ -19,8 +19,12 @@ import (
 
 func newTutorServer(deps *tools.Deps, timeout time.Duration) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: "tutor-mcp", Version: mcpVersion()}, nil)
-	tools.RegisterTools(server, deps)
-	server.AddReceivingMiddleware(mcpToolCallDeadlineMiddleware(timeout))
+	if timeout <= 0 {
+		panic("MCP tool call timeout must be positive")
+	}
+	configured := *deps
+	configured.ToolCallTimeout = timeout
+	tools.RegisterTools(server, &configured)
 	return server
 }
 

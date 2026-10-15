@@ -163,7 +163,19 @@ func TestVerifySQLiteSchemaCurrentIsReadOnlyAndFailsClosed(t *testing.T) {
 	if err := VerifySQLiteSchemaCurrent(context.Background(), raw); err != nil {
 		t.Fatalf("current schema rejected: %v", err)
 	}
+	if _, err := raw.Exec(`INSERT INTO schema_migrations(version,checksum) VALUES ('9999_future_additive','future')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifySQLiteSchemaCurrent(context.Background(), raw); err != nil {
+		t.Fatalf("future additive migration rejected: %v", err)
+	}
 	last := buildMigrations()[len(buildMigrations())-1]
+	if _, err := raw.Exec(`UPDATE schema_migrations SET checksum='drift' WHERE version=?`, last.Version); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifySQLiteSchemaCurrent(context.Background(), raw); err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("checksum drift verification = %v", err)
+	}
 	if _, err := raw.Exec(`DELETE FROM schema_migrations WHERE version = ?`, last.Version); err != nil {
 		t.Fatal(err)
 	}
@@ -176,6 +188,20 @@ func TestVerifySQLiteSchemaCurrentIsReadOnlyAndFailsClosed(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatal("schema verifier mutated the ledger")
+	}
+}
+
+func TestVerifyMigrationLedgerRejectsDuplicateVersions(t *testing.T) {
+	raw, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec(`CREATE TABLE schema_migrations(version TEXT,checksum TEXT); INSERT INTO schema_migrations VALUES ('known','checksum'),('known','checksum')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyMigrationLedger(context.Background(), raw, []migrationChecksum{{version: "known", checksum: "checksum"}}); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("duplicate ledger verification=%v", err)
 	}
 }
 

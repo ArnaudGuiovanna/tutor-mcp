@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"tutor-mcp/auth"
 	"tutor-mcp/models"
@@ -120,6 +121,7 @@ func OAuthScopeHTTPMiddleware(baseURL string, maxBodyBytes int64, granular bool,
 		panic("OAuth scope preflight body limit must be positive")
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now()
 		if r.Method != http.MethodPost || r.Body == nil {
 			next.ServeHTTP(w, r)
 			return
@@ -166,6 +168,8 @@ func OAuthScopeHTTPMiddleware(baseURL string, maxBodyBytes int64, granular bool,
 		}
 
 		result := insufficientOAuthScopeResult(r.Context(), baseURL, required, granular)
+		// This terminal HTTP refusal never enters the SDK observation middleware.
+		defer recordToolCall(r.Context(), call.Params.Name, "denied", started)
 		challenge := insufficientOAuthScopeChallenge(r.Context(), baseURL, required, granular)
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json")

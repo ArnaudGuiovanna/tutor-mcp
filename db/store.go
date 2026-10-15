@@ -85,7 +85,7 @@ func (s *Store) VerifySchemaCurrent(ctx context.Context) error {
 	if s.dialect == DialectPostgres {
 		return VerifyPostgresSchemaCurrent(ctx, s.root)
 	}
-	return verifyMigrationLedger(ctx, s.root, buildMigrations())
+	return VerifySQLiteSchemaCurrent(ctx, s.root)
 }
 
 func NewStore(database *sql.DB) *Store {

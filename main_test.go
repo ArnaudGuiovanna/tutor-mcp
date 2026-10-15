@@ -412,7 +412,7 @@ func TestCORSDoesNotReflectUnknownRequestHeader(t *testing.T) {
 func TestMCPToolCallDeadlineOnlyBoundsToolCalls(t *testing.T) {
 	const timeout = 25 * time.Millisecond
 	deadlineSeen := false
-	handler := mcpToolCallDeadlineMiddleware(timeout)(func(ctx context.Context, method string, _ mcp.Request) (mcp.Result, error) {
+	handler := tutortools.ToolCallDeadlineMiddleware(timeout)(func(ctx context.Context, method string, _ mcp.Request) (mcp.Result, error) {
 		if method != "tools/call" {
 			t.Fatalf("method=%q", method)
 		}
@@ -437,7 +437,7 @@ func TestMCPToolCallDeadlineOnlyBoundsToolCalls(t *testing.T) {
 		t.Fatalf("deadline elapsed=%v, want [%v, 1s]", elapsed, timeout)
 	}
 
-	listHandler := mcpToolCallDeadlineMiddleware(timeout)(func(ctx context.Context, method string, _ mcp.Request) (mcp.Result, error) {
+	listHandler := tutortools.ToolCallDeadlineMiddleware(timeout)(func(ctx context.Context, method string, _ mcp.Request) (mcp.Result, error) {
 		if method != "tools/list" {
 			t.Fatalf("method=%q", method)
 		}
@@ -467,7 +467,7 @@ func TestMCPToolCallDeadlineReleasesPrincipalConcurrencySlot(t *testing.T) {
 		t.Fatal(err)
 	}
 	entered := make(chan struct{}, 1)
-	methodHandler := mcpToolCallDeadlineMiddleware(timeout)(func(ctx context.Context, _ string, _ mcp.Request) (mcp.Result, error) {
+	methodHandler := tutortools.ToolCallDeadlineMiddleware(timeout)(func(ctx context.Context, _ string, _ mcp.Request) (mcp.Result, error) {
 		select {
 		case entered <- struct{}{}:
 		default:

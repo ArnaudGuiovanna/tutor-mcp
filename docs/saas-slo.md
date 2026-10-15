@@ -39,6 +39,16 @@ diagnostic, et conserver une vue fleet-wide sans tenant. Ne jamais utiliser
 membership, enrollment, `event_id` ou trace ID comme label de métrique. Ils
 appartiennent aux spans/journaux consultés à la demande.
 
+Chaque `tools/call` entrant dans le SDK produit une seule observation, y compris
+un replay idempotent, une erreur de réservation, de transaction ou de commit.
+La durée comprend l'attente SQL et se termine après le résultat final et
+l'application de la deadline serveur. Un timeout est `failed`, même si le
+handler a renvoyé tardivement un succès ou un refus. Les refus OAuth/RBAC sont
+`denied` ; le refus OAuth HTTP 403 avant le SDK est compté à cette frontière.
+Les noms d'outils absents du registre de cette instance partagent le label
+`unknown`. Les autres méthodes MCP et les refus HTTP d'authentification ou de
+limitation avant cette frontière ne sont pas des appels d'outil observés.
+
 ## Exercices et revue
 
 - chaque déploiement : smoke `/live`/`/ready`, OAuth négatif, appel MCP canary,

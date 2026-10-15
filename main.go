@@ -406,8 +406,9 @@ func main() {
 	// reflects whether this instance can safely receive traffic. /health remains
 	// a backwards-compatible alias for readiness.
 	mux.HandleFunc("GET /live", livenessHandler)
-	mux.HandleFunc("GET /ready", readinessHandler(store))
-	mux.HandleFunc("GET /health", readinessHandler(store))
+	ready := readinessHandler(store)
+	mux.HandleFunc("GET /ready", ready)
+	mux.HandleFunc("GET /health", ready)
 
 	// Rate limiters (in-process). Warn loudly if the deployment looks public but
 	// TRUSTED_PROXY_CIDRS is unset - without it every IP-limited request shares
@@ -506,17 +507,23 @@ func main() {
 	// writer exposes Unwrap so the controller can reach net/http's writer.
 	mux.Handle("/mcp", withoutWriteTimeout(mcpProtectedHandler))
 	mountAdmin := func(prefix string, handler http.Handler) {
+		protect := func(authenticate func(http.Handler) http.Handler, next http.Handler) http.Handler {
+			return administrativeHandler(mcpIPLimiter, mcpLearnerLimiter, mcpConcurrencyLimiter, authenticate, next)
+		}
 		if oauthServer.InstitutionAccountsEnabled() {
-			mux.Handle("/console"+prefix, oauthServer.ConsoleAPIHandler(http.StripPrefix("/console", handler)))
-			mux.Handle(prefix, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mux.Handle("/console"+prefix, protect(oauthServer.ConsoleAPIHandler, http.StripPrefix("/console", handler)))
+			mux.Handle(prefix, auth.RateLimitMiddleware(mcpIPLimiter, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "administrative API requires a console session", http.StatusForbidden)
-			}))
+			})))
 		} else {
-			mux.Handle(prefix, auth.BearerMiddlewareWithPrincipalValidator(baseURL, initialOAuthScope, store, handler))
+			mux.Handle(prefix, protect(func(next http.Handler) http.Handler {
+				return auth.BearerMiddlewareWithPrincipalValidator(baseURL, initialOAuthScope, store, next)
+			}, handler))
 		}
 	}
 	if oauthServer.InstitutionAccountsEnabled() {
-		mux.HandleFunc("GET /console/api-csrf", oauthServer.HandleConsoleAPICSRF)
+		mux.Handle("GET /console/api-csrf", administrativeHandler(mcpIPLimiter, mcpLearnerLimiter, mcpConcurrencyLimiter,
+			oauthServer.ConsoleAPIHandler, http.HandlerFunc(oauthServer.HandleConsoleAPICSRF)))
 	}
 	mountAdmin("/admin/catalog/", adminapi.New(store, logger).Handler())
 	// Raw response review and opinion recording are separate administrative capabilities;
@@ -526,10 +533,8 @@ func main() {
 		logger.Error("invalid independent assessment authority configuration")
 		os.Exit(1)
 	}
-	mountAdmin("/admin/assessment-reviews/", auth.RateLimitMiddleware(mcpIPLimiter,
-		auth.LearnerRateLimitMiddleware(mcpLearnerLimiter, adminapi.NewAssessmentReview(store, logger, db.NewAssessmentAdjudicator(store, assessmentCertifiers)).Handler())))
-	mountAdmin("/admin/curriculum-reviews/", auth.RateLimitMiddleware(mcpIPLimiter,
-		auth.LearnerRateLimitMiddleware(mcpLearnerLimiter, adminapi.NewCurriculumReview(store, logger).Handler())))
+	mountAdmin("/admin/assessment-reviews/", adminapi.NewAssessmentReview(store, logger, db.NewAssessmentAdjudicator(store, assessmentCertifiers)).Handler())
+	mountAdmin("/admin/curriculum-reviews/", adminapi.NewCurriculumReview(store, logger).Handler())
 
 	if runsWorker {
 		// Development PROCESS_ROLE=all preserves the one-process experience.
@@ -768,28 +773,6 @@ func livenessHandler(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte(`{"status":"live"}`))
 }
 
-func readinessHandler(pinger readinessPinger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-		defer cancel()
-		if err := pinger.Ping(ctx); err != nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = w.Write([]byte(`{"status":"not_ready","error":"database unreachable"}`))
-			return
-		}
-		if verifier, ok := pinger.(schemaCompatibilityVerifier); ok {
-			if err := verifier.VerifySchemaCurrent(ctx); err != nil {
-				w.WriteHeader(http.StatusServiceUnavailable)
-				_, _ = w.Write([]byte(`{"status":"not_ready","error":"schema incompatible"}`))
-				return
-			}
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ready"}`))
-	}
-}
-
 type statusRecorder struct {
 	http.ResponseWriter
 	status      int
@@ -840,39 +823,6 @@ func withoutWriteTimeout(next http.Handler) http.Handler {
 		_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 		next.ServeHTTP(w, r)
 	})
-}
-
-var errMCPToolCallDeadline = errors.New("MCP tool call deadline exceeded")
-
-// mcpToolCallDeadlineMiddleware bounds cooperative tool execution without
-// imposing a deadline on Streamable HTTP itself. Store calls receive this
-// context and can cancel in-flight database work; a handler that ignores its
-// context cannot be detached safely because it may still commit a mutation.
-func mcpToolCallDeadlineMiddleware(timeout time.Duration) mcp.Middleware {
-	if timeout <= 0 {
-		panic("MCP tool call timeout must be positive")
-	}
-	return func(next mcp.MethodHandler) mcp.MethodHandler {
-		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
-			if method != "tools/call" {
-				return next(ctx, method, req)
-			}
-			deadlineCtx, cancel := context.WithTimeoutCause(ctx, timeout, errMCPToolCallDeadline)
-			defer cancel()
-			result, err := next(deadlineCtx, method, req)
-			if errors.Is(context.Cause(deadlineCtx), errMCPToolCallDeadline) {
-				return &mcp.CallToolResult{
-					Content: []mcp.Content{&mcp.TextContent{Text: "tool call exceeded the server deadline; retry a mutation only by reusing its original idempotency_key"}},
-					StructuredContent: map[string]any{
-						"error": "tool_call_timeout",
-						"retry_with_original_idempotency_key_only": true,
-					},
-					IsError: true,
-				}, nil
-			}
-			return result, err
-		}
-	}
 }
 
 // mcpRequestBodyLimitMiddleware bounds POST bodies before they reach the MCP

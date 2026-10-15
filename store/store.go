@@ -173,6 +173,15 @@ type LoginFailureBackend interface {
 	Reset(ctx context.Context, key string) error
 }
 
+// SecondFactorAttemptBackend reserves verification attempts in a fixed window
+// anchored at its first reservation. The returned count is capped at limit+1;
+// counts above limit are denied. retryAfter is the remaining window duration.
+// Password-failure accounting deliberately keeps its separate legacy contract.
+// Supported budgets are 1..100 attempts and a window greater than zero up to 24h.
+type SecondFactorAttemptBackend interface {
+	ReserveSecondFactorAttempt(context.Context, string, int, time.Duration, time.Time) (count int, retryAfter time.Duration, err error)
+}
+
 // ---------------------------------------------------------------------------
 // Sub-interfaces — segregated by domain concern
 // ---------------------------------------------------------------------------

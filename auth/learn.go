@@ -259,18 +259,27 @@ func (s *OAuthServer) HandleLearnerMFA(w http.ResponseWriter, r *http.Request) {
 		now := time.Now().UTC()
 		var codes []string
 		var err error
-		verified, throttled := false, false
+		verified := false
+		var retryAfter time.Duration
 		if setup {
 			codes, err = s.accounts.ConfirmTOTPEnrollment(r.Context(), c.principal, r.FormValue("credential_id"), strings.TrimSpace(r.FormValue("code")), now)
 			verified = err == nil
 		} else {
-			verified, throttled = s.checkSecondFactor(r.Context(), c.session.TenantScope(), r.FormValue("code"), now)
+			var budgetErr error
+			verified, retryAfter, budgetErr = s.checkSecondFactor(r.Context(), c.session.TenantScope(), r.FormValue("code"), now)
+			if budgetErr != nil {
+				s.logger.Error("second-factor budget unavailable", "error_type", authLogErrorType(budgetErr))
+				w.Header().Set("Retry-After", "5")
+				data.Error = "Verification is temporarily unavailable. Please try again shortly."
+				s.renderLearn(w, http.StatusServiceUnavailable, data)
+				return
+			}
 		}
-		if throttled {
+		if retryAfter > 0 {
 			_ = s.accounts.DeleteConsoleSession(r.Context(), c.credential)
 			setLearnerSessionCookie(w, "", -1)
-			w.Header().Set("Retry-After", s.secondFactorRetryAfter())
-			http.Error(w, "too many invalid codes; sign in again later", http.StatusTooManyRequests)
+			w.Header().Set("Retry-After", secondFactorRetryAfter(retryAfter))
+			http.Error(w, "too many verification attempts; sign in again after the retry delay", http.StatusTooManyRequests)
 			return
 		}
 		if verified {

@@ -2036,19 +2036,54 @@ func sqlTokens(body string) string {
 // VerifySQLiteSchemaCurrent is the read-only startup gate used by API and
 // worker processes. Only the dedicated migrator may apply DDL in production.
 func VerifySQLiteSchemaCurrent(ctx context.Context, database *sql.DB) error {
-	return verifyMigrationLedger(ctx, database, buildMigrations())
+	return verifyMigrationLedger(ctx, database, sqliteExpectedLedger())
 }
 
-func verifyMigrationLedger(ctx context.Context, database *sql.DB, expected []migration) error {
+type migrationChecksum struct{ version, checksum string }
+
+func migrationChecksums(migrations []migration) []migrationChecksum {
+	checksums := make([]migrationChecksum, 0, len(migrations))
+	for _, item := range migrations {
+		checksums = append(checksums, migrationChecksum{item.Version, item.checksum()})
+	}
+	return checksums
+}
+
+var sqliteExpectedLedger = sync.OnceValue(func() []migrationChecksum { return migrationChecksums(buildMigrations()) })
+
+func verifyMigrationLedger(ctx context.Context, database *sql.DB, expected []migrationChecksum) error {
+	wanted := make(map[string]bool, len(expected))
 	for _, item := range expected {
-		var checksum string
-		err := database.QueryRowContext(ctx,
-			`SELECT checksum FROM schema_migrations WHERE version = ?`, item.Version).Scan(&checksum)
-		if err != nil {
-			return fmt.Errorf("schema compatibility: migration %s is missing: %w", item.Version, err)
+		wanted[item.version] = true
+	}
+	rows, err := database.QueryContext(ctx, `SELECT version, checksum FROM schema_migrations`)
+	if err != nil {
+		return fmt.Errorf("schema compatibility: read migration ledger: %w", err)
+	}
+	defer rows.Close()
+	actual := make(map[string]string, len(expected))
+	for rows.Next() {
+		var version, checksum string
+		if err := rows.Scan(&version, &checksum); err != nil {
+			return fmt.Errorf("schema compatibility: scan ledger: %w", err)
 		}
-		if checksum != item.checksum() {
-			return fmt.Errorf("schema compatibility: migration %s checksum mismatch", item.Version)
+		if wanted[version] {
+			if _, duplicate := actual[version]; duplicate {
+				return fmt.Errorf("schema compatibility: duplicate migration %s", version)
+			}
+			actual[version] = checksum
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("schema compatibility: read ledger rows: %w", err)
+	}
+	for _, item := range expected {
+		checksum, exists := actual[item.version]
+		if !exists {
+			return fmt.Errorf("schema compatibility: migration %s is missing", item.version)
+		}
+		if checksum != item.checksum {
+			return fmt.Errorf("schema compatibility: migration %s checksum mismatch", item.version)
 		}
 	}
 	return nil

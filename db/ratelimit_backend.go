@@ -26,8 +26,9 @@ import (
 
 // Compile-time proof the adapters satisfy the backend ports.
 var (
-	_ storeport.RateLimitBackend    = (*rateLimitBackend)(nil)
-	_ storeport.LoginFailureBackend = (*loginFailureBackend)(nil)
+	_ storeport.RateLimitBackend           = (*rateLimitBackend)(nil)
+	_ storeport.LoginFailureBackend        = (*loginFailureBackend)(nil)
+	_ storeport.SecondFactorAttemptBackend = (*loginFailureBackend)(nil)
 )
 
 // rateLimitBackend adapts *Store to store.RateLimitBackend.
@@ -128,6 +129,36 @@ func (b *loginFailureBackend) CountInWindow(ctx context.Context, key string, win
 
 func (b *loginFailureBackend) Reset(ctx context.Context, key string) error {
 	return b.s.resetLoginFailures(ctx, key)
+}
+
+func (b *loginFailureBackend) ReserveSecondFactorAttempt(ctx context.Context, key string, limit int, window time.Duration, now time.Time) (int, time.Duration, error) {
+	if key == "" || limit < 1 || limit > maxLoginFailuresPerWindow || window <= 0 || window > 24*time.Hour {
+		return 0, 0, fmt.Errorf("invalid second-factor attempt budget")
+	}
+	now = now.UTC()
+	cutoff := now.Add(-window)
+	var count int
+	var started time.Time
+	err := b.s.queryRow(ctx, `INSERT INTO login_failure_windows
+		(account_key, window_started_at, last_attempt_at, failure_count, updated_at)
+		VALUES (?, ?, ?, 1, ?)
+		ON CONFLICT (account_key) DO UPDATE SET
+		window_started_at = CASE WHEN login_failure_windows.window_started_at <= ? THEN excluded.window_started_at ELSE login_failure_windows.window_started_at END,
+		last_attempt_at = CASE WHEN login_failure_windows.last_attempt_at < excluded.last_attempt_at THEN excluded.last_attempt_at ELSE login_failure_windows.last_attempt_at END,
+		failure_count = CASE WHEN login_failure_windows.window_started_at <= ? THEN 1 ELSE login_failure_windows.failure_count + 1 END,
+		updated_at = CASE WHEN login_failure_windows.updated_at < excluded.updated_at THEN excluded.updated_at ELSE login_failure_windows.updated_at END
+		WHERE login_failure_windows.window_started_at <= ? OR login_failure_windows.failure_count < ?
+		RETURNING failure_count, window_started_at`, key, now, now, now, cutoff, cutoff, cutoff, limit).Scan(&count, &started)
+	if err == sql.ErrNoRows {
+		// Denial never increments beyond the schema's counter bound. Read only
+		// the window start after the atomic reservation to report its expiry.
+		count = limit + 1
+		err = b.s.queryRow(ctx, `SELECT window_started_at FROM login_failure_windows WHERE account_key = ?`, key).Scan(&started)
+	}
+	if err != nil {
+		return 0, 0, fmt.Errorf("reserve second-factor attempt: %w", err)
+	}
+	return count, started.Add(window).Sub(now), nil
 }
 
 const (

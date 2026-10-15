@@ -129,6 +129,14 @@ sudo systemctl reload caddy
 curl --fail https://tutor.example.org/ready
 ```
 
+`/ready` and its `/health` alias share one database/schema probe per process.
+Success is cached for one second, failure for 250 milliseconds; each probe has
+a two-second deadline. With continuous probes, a persistent database or ledger
+failure is visible within three seconds, including when a database
+driver ignores cancellation. Only one unfinished probe is allowed. `/live`
+does not access the database. Administrative catalog and review APIs share the
+MCP IP, authenticated-principal rate and concurrency guards.
+
 TUTOR listens on `127.0.0.1:3000`. Your final MCP URL is
 **`https://tutor.example.org/mcp`**. Paste it into the remote client, sign in
 with the invited account and authorize that client. Account creation alone
@@ -217,6 +225,13 @@ client. Learners never use the console: they connect their AI client to
 `https://tutor.example.org/mcp` and sign in with the email of their
 invitation. Accounts are created only by invitation; self-registration into
 the shared legacy tenant is closed with `--profile institution`.
+
+Each user has five second-factor verification attempts per fixed ten-minute
+window, starting with the first attempt. Successful verifications also consume
+an attempt; signing in with the correct password does not reset this budget.
+A `429` response gives the remaining wait in `Retry-After`. If the shared
+budget is unavailable, verification returns `503` without ending an existing
+browser session. Authenticator enrollment is a separate setup ceremony.
 
 Set `INSTITUTION_SIGNUP` on the API; startup fails without it:
 

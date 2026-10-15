@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // database/sql driver "pgx"
@@ -1784,27 +1785,12 @@ func MigratePostgres(ctx context.Context, d *sql.DB) error {
 // migration locks or issuing DDL. API and worker startup use this fail-closed
 // compatibility gate.
 func VerifyPostgresSchemaCurrent(ctx context.Context, d *sql.DB) error {
-	const schemaVersion = "postgres_schema"
-	sum := sha256.Sum256([]byte(postgresSchema))
-	expectedSchema := hex.EncodeToString(sum[:])
-	var current string
-	if err := d.QueryRowContext(ctx, `SELECT checksum FROM schema_migrations WHERE version = $1`, schemaVersion).Scan(&current); err != nil {
-		return fmt.Errorf("schema compatibility: PostgreSQL base schema is missing: %w", err)
-	}
-	if current != expectedSchema {
-		return fmt.Errorf("schema compatibility: PostgreSQL base schema checksum mismatch")
-	}
-	for _, item := range postgresMigrations {
-		if err := d.QueryRowContext(ctx,
-			`SELECT checksum FROM schema_migrations WHERE version = $1`, item.Version).Scan(&current); err != nil {
-			return fmt.Errorf("schema compatibility: migration %s is missing: %w", item.Version, err)
-		}
-		if current != item.checksum() {
-			return fmt.Errorf("schema compatibility: migration %s checksum mismatch", item.Version)
-		}
-	}
-	return nil
+	return verifyMigrationLedger(ctx, d, postgresExpectedLedger())
 }
+
+var postgresExpectedLedger = sync.OnceValue(func() []migrationChecksum {
+	return append(migrationChecksums([]migration{{Version: "postgres_schema", Body: postgresSchema}}), migrationChecksums(postgresMigrations)...)
+})
 
 func applyPostgresMigrations(ctx context.Context, conn *sql.Conn, migrations []migration) error {
 	for _, m := range migrations {

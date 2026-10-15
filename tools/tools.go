@@ -15,7 +15,6 @@ import (
 
 	"tutor-mcp/auth"
 	"tutor-mcp/models"
-	"tutor-mcp/observability"
 	storeport "tutor-mcp/store"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -30,11 +29,15 @@ type Deps struct {
 	Logger              *slog.Logger
 	BaseURL             string
 	OAuthGranularScopes bool
+	// Zero leaves direct RegisterTools embedders without a server deadline.
+	ToolCallTimeout time.Duration
 }
 
 var toolRegistrationLocalModes sync.Map
 
 var toolRegistrationOAuthModes sync.Map // map[*mcp.Server]bool; populated only during RegisterTools
+
+var toolRegistrationNames sync.Map // map[*mcp.Server]map[string]struct{}; registration only
 
 var readOnlyTools = map[string]bool{
 	"get_my_badges":                  true,
@@ -276,29 +279,22 @@ func addTool[In, Out any](server *mcp.Server, tool *mcp.Tool, handler mcp.ToolHa
 	}
 	scopedHandler := func(ctx context.Context, req *mcp.CallToolRequest, input In) (*mcp.CallToolResult, Out, error) {
 		var zero Out
-		startedAt := time.Now()
 		principal, _ := auth.GetPrincipal(ctx)
-		outcome := "succeeded"
-		defer func() {
-			observability.RecordMCPTool(ctx, principal.TenantID, principal.MembershipID,
-				"", tool.Name, outcome, time.Since(startedAt))
-		}()
 		// Leave missing authentication to the handler's existing canonical path,
 		// but fail closed when a principal exists without the capability required
 		// by this exact tool. The bounded legacy learner grant is accepted by
 		// OAuthScopeAllows and cannot silently cover future scope families.
 		if (principal.UserID != "" || auth.GetLearnerID(ctx) != "") && !hasRequiredOAuthScopes(ctx, requiredScopes) {
-			outcome = "denied"
 			result := insufficientOAuthScopeResult(ctx, "", requiredScopes, granular)
+			markToolCallDenied(ctx, result)
 			return result, zero, nil
 		}
-		result, output, err := handler(ctx, req, input)
-		if err != nil || (result != nil && result.IsError) {
-			outcome = "failed"
-		}
-		return result, output, err
+		return handler(ctx, req, input)
 	}
 	constrainInputSchema[In](tool)
+	if names, ok := toolRegistrationNames.Load(server); ok {
+		names.(map[string]struct{})[tool.Name] = struct{}{}
+	}
 	mcp.AddTool(server, tool, scopedHandler)
 }
 
@@ -323,7 +319,9 @@ func toolOAuthScopeMiddleware(baseURL string, granular bool) mcp.Middleware {
 			if hasRequiredOAuthScopes(ctx, requiredScopes) {
 				return next(ctx, method, req)
 			}
-			return insufficientOAuthScopeResult(ctx, baseURL, requiredScopes, granular), nil
+			result := insufficientOAuthScopeResult(ctx, baseURL, requiredScopes, granular)
+			markToolCallDenied(ctx, result)
+			return result, nil
 		}
 	}
 }
@@ -440,6 +438,9 @@ func domainSetupInstruction(deps *Deps) string {
 
 // RegisterTools registers all MCP tools and prompts on the given server.
 func RegisterTools(server *mcp.Server, deps *Deps) {
+	names := make(map[string]struct{})
+	toolRegistrationNames.Store(server, names)
+	defer toolRegistrationNames.Delete(server)
 	granularScopes := deps != nil && deps.OAuthGranularScopes
 	toolRegistrationLocalModes.Store(server, deps != nil && deps.LocalStdio)
 	defer toolRegistrationLocalModes.Delete(server)
@@ -510,6 +511,10 @@ func RegisterTools(server *mcp.Server, deps *Deps) {
 		toolOAuthScopeMiddleware(baseURL, granularScopes),
 		toolTenantTransactionMiddleware(deps),
 	)
+	if deps != nil && deps.ToolCallTimeout != 0 {
+		server.AddReceivingMiddleware(ToolCallDeadlineMiddleware(deps.ToolCallTimeout))
+	}
+	server.AddReceivingMiddleware(toolCallObservationMiddleware(names))
 }
 
 var errToolApplicationFailure = errors.New("MCP tool returned an application error")
@@ -523,6 +528,7 @@ func toolTenantTransactionMiddleware(deps *Deps) mcp.Middleware {
 			principal, ok := auth.GetPrincipal(ctx)
 			if !ok {
 				result, _ := errorResult("authenticated tenant principal is required")
+				markToolCallDenied(ctx, result)
 				return result, nil
 			}
 			permission := models.PermissionLearningSelf
@@ -532,10 +538,12 @@ func toolTenantTransactionMiddleware(deps *Deps) mcp.Middleware {
 			isProgress := progressTool(toolNameFromRequest(req))
 			if isProgress && !principal.CanReadInstitutionProgress() {
 				result, _, _ := progressToolResult(deps, nil, storeport.ErrInvalidPrincipal)
+				markToolCallDenied(ctx, result)
 				return result, nil
 			}
 			if !isProgress && !principal.Authorize(permission, models.AuthorizationResource{TenantID: principal.TenantID, OwnerUserID: principal.UserID}) {
 				result, _ := errorResult("tenant principal is not authorized for this tool")
+				markToolCallDenied(ctx, result)
 				return result, nil
 			}
 			var result mcp.Result
