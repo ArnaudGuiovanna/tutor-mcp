@@ -109,11 +109,33 @@ func TestSaaSConsumerDoesNotSpinBehindOnlyInflightJob(t *testing.T) {
 	raw, store := saasConsumerTestStore(t)
 	seedSaaSConsumerTenant(t, raw, store, "a_wait", 1)
 	seedSaaSConsumerTenant(t, raw, store, "b_empty", 0)
+	// Enumerate only A/B: a legacy tenant's real SQL probe could otherwise
+	// occupy the pending-claim loop throughout the spin observation window.
+	result, err := raw.ExecContext(t.Context(), `UPDATE tenants SET status='suspended' WHERE id=? AND status='active'`, models.LegacyTenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+		t.Fatalf("suspend legacy fixture tenant: affected=%d err=%v", affected, err)
+	}
 	backend := &watchedSaaSStore{Store: store, claims: map[string]int{}}
-	probed := make(chan struct{}, 1)
+	probed := make(chan struct{})
+	excessProbes := make(chan struct{})
+	var probeOnce sync.Once
+	backend.beforeClaim = func(ctx context.Context, scope models.TenantScope, count int) error {
+		if scope.TenantID == "b_empty" && count > 1 {
+			// B has no producer. Its first probe uses real SQL; later empty
+			// probes return immediately so SQL latency cannot hide a spin.
+			if count == 3 {
+				close(excessProbes)
+			}
+			return sql.ErrNoRows
+		}
+		return nil
+	}
 	backend.afterClaim = func(scope models.TenantScope, count int, err error) {
-		if scope.TenantID == "b_empty" && count == 2 && errors.Is(err, sql.ErrNoRows) {
-			probed <- struct{}{}
+		if scope.TenantID == "b_empty" && errors.Is(err, sql.ErrNoRows) {
+			probeOnce.Do(func() { close(probed) })
 		}
 	}
 	release := make(chan struct{})
@@ -129,7 +151,11 @@ func TestSaaSConsumerDoesNotSpinBehindOnlyInflightJob(t *testing.T) {
 	defer cancel()
 	waitSaaSTest(t, ctx, gate.entered, "claimed job did not reach finalization gate")
 	waitSaaSTest(t, ctx, probed, "empty probe not reached")
-	time.Sleep(100 * time.Millisecond)
+	select {
+	case <-excessProbes:
+		t.Fatal("empty probes caused rescan spin: third probe before gate release")
+	case <-time.After(100 * time.Millisecond):
+	}
 	select {
 	case result := <-done:
 		t.Fatalf("consumer ended before explicit gate release: %+v", result)
@@ -141,9 +167,10 @@ func TestSaaSConsumerDoesNotSpinBehindOnlyInflightJob(t *testing.T) {
 	}
 	backend.mu.Lock()
 	lists := backend.lists
+	bClaims := backend.claims["b_empty"]
 	backend.mu.Unlock()
-	if lists > 2 {
-		t.Fatalf("empty probes caused rescan spin: %d sweeps", lists)
+	if bClaims < 1 || bClaims > 2 || lists > 2 {
+		t.Fatalf("empty probes caused rescan spin: %d probes, %d sweeps", bClaims, lists)
 	}
 	releaseGate()
 	select {
