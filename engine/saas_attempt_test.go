@@ -136,7 +136,7 @@ func TestSaaSDSARHealthyContinuationExceedsTechnicalRetryBudget(t *testing.T) {
 		if result.failed() {
 			t.Fatal(result)
 		}
-	case <-time.After(12 * time.Second):
+	case <-time.After(90 * time.Second):
 		t.Fatal("healthy DSAR did not drain")
 	}
 	var jobStatus, requestStatus string

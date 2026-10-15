@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -11,6 +12,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,12 +22,78 @@ import (
 
 	"tutor-mcp/db"
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 )
+
+var saasConsumerDBTemplate struct {
+	sync.Once
+	data []byte
+	err  error
+}
+
+// Only the closed, migrated schema is shared. Every fixture opens a private
+// file and owns its writer/reader pools, learner data and integration keyring.
+func saasConsumerTemplateBytes() ([]byte, error) {
+	saasConsumerDBTemplate.Do(func() {
+		dir, err := os.MkdirTemp("", "tutor-mcp-saas-test-template-")
+		if err != nil {
+			saasConsumerDBTemplate.err = err
+			return
+		}
+		defer os.RemoveAll(dir)
+		path := filepath.Join(dir, "template.db")
+		raw, err := db.OpenDB(path)
+		if err != nil {
+			saasConsumerDBTemplate.err = err
+			return
+		}
+		if err := db.Migrate(raw); err != nil {
+			_ = raw.Close()
+			saasConsumerDBTemplate.err = err
+			return
+		}
+		if err := raw.Close(); err != nil {
+			saasConsumerDBTemplate.err = err
+			return
+		}
+		saasConsumerDBTemplate.data, saasConsumerDBTemplate.err = os.ReadFile(path)
+	})
+	return saasConsumerDBTemplate.data, saasConsumerDBTemplate.err
+}
 
 func saasConsumerTestStore(t *testing.T) (*sql.DB, *db.Store) {
 	t.Helper()
-	raw, s, _ := rawTestSetup(t, "")
-	keyring, err := db.NewIntegrationSecretKeyring("key:"+base64.StdEncoding.EncodeToString(make([]byte, 32)), "key")
+	template, err := saasConsumerTemplateBytes()
+	if err != nil {
+		t.Fatalf("build SaaS database template: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "saas.db")
+	if err := os.WriteFile(path, template, 0o600); err != nil {
+		t.Fatalf("copy SaaS database template: %v", err)
+	}
+	raw, err := db.OpenDB(path)
+	if err != nil {
+		t.Fatalf("open SaaS database: %v", err)
+	}
+	s, err := db.NewSQLiteStore(raw, path)
+	if err != nil {
+		_ = raw.Close()
+		t.Fatalf("open SaaS reader pool: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	now := time.Now().UTC()
+	if _, err := raw.ExecContext(t.Context(),
+		`INSERT INTO learners (id, email, password_hash, objective, webhook_url, created_at, last_active, email_verified_at)
+		 VALUES ('L1', 'test@example.com', 'hash', 'obj', '', ?, ?, ?)`,
+		now, now.Add(-48*time.Hour), now); err != nil {
+		t.Fatalf("insert SaaS learner: %v", err)
+	}
+	optInSchedulerNotifications(t, s, "L1")
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		t.Fatal(err)
+	}
+	keyring, err := db.NewIntegrationSecretKeyring("key:"+base64.StdEncoding.EncodeToString(secret), "key")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,6 +102,48 @@ func saasConsumerTestStore(t *testing.T) (*sql.DB, *db.Store) {
 		t.Fatal(err)
 	}
 	return raw, s
+}
+
+func TestSaaSConsumerFixturesOwnIndependentDatabasesAndPools(t *testing.T) {
+	rawA, storeA := saasConsumerTestStore(t)
+	rawB, storeB := saasConsumerTestStore(t)
+	if _, err := rawA.ExecContext(t.Context(), `UPDATE learners SET objective='fixture A' WHERE id='L1'`); err != nil {
+		t.Fatal(err)
+	}
+	for label, raw := range map[string]*sql.DB{"A": rawA, "B": rawB} {
+		var objective string
+		if err := raw.QueryRowContext(t.Context(), `SELECT objective FROM learners WHERE id='L1'`).Scan(&objective); err != nil {
+			t.Fatal(err)
+		}
+		want := "obj"
+		if label == "A" {
+			want = "fixture A"
+		}
+		if objective != want {
+			t.Fatalf("fixture %s objective=%q want=%q", label, objective, want)
+		}
+	}
+	if err := storeA.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := rawA.PingContext(t.Context()); err == nil {
+		t.Fatal("closed fixture A retained its writer pool")
+	}
+	if _, err := rawB.ExecContext(t.Context(), `UPDATE learners SET objective='fixture B remains open' WHERE id='L1'`); err != nil {
+		t.Fatalf("closing fixture A affected fixture B writer: %v", err)
+	}
+	if err := storeB.WithTenantReadTx(t.Context(), models.LegacyPrincipal("L1").TenantScope(), func(ctx context.Context, _ storeport.Store) error {
+		learner, err := storeB.GetLearnerByID(ctx, "L1")
+		if err != nil {
+			return err
+		}
+		if learner.Objective != "fixture B remains open" {
+			t.Fatalf("fixture B reader returned objective=%q", learner.Objective)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("closing fixture A affected fixture B reader: %v", err)
+	}
 }
 
 func seedSaaSConsumerTenant(t *testing.T, raw *sql.DB, s *db.Store, id string, jobs int) models.TenantScope {

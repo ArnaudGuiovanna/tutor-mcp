@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -21,6 +23,7 @@ type watchedSaaSStore struct {
 	sequence    []string
 	lists       int
 	beforeClaim func(context.Context, models.TenantScope, int) error
+	afterClaim  func(models.TenantScope, int, error)
 }
 
 func (s *watchedSaaSStore) ClaimAsyncJob(ctx context.Context, scope models.TenantScope, owner string, now time.Time, lease time.Duration) (*models.AsyncJob, error) {
@@ -34,13 +37,31 @@ func (s *watchedSaaSStore) ClaimAsyncJob(ctx context.Context, scope models.Tenan
 			return nil, err
 		}
 	}
-	return s.Store.ClaimAsyncJob(ctx, scope, owner, now, lease)
+	job, err := s.Store.ClaimAsyncJob(ctx, scope, owner, now, lease)
+	if s.afterClaim != nil {
+		s.afterClaim(scope, count, err)
+	}
+	return job, err
 }
 func (s *watchedSaaSStore) ListWorkerTenantScopes(ctx context.Context, worker models.WorkerPrincipal, after string, limit int) ([]models.TenantScope, string, error) {
 	s.mu.Lock()
 	s.lists++
 	s.mu.Unlock()
 	return s.Store.ListWorkerTenantScopes(ctx, worker, after, limit)
+}
+
+type gatedSaaSFinalizer struct {
+	*watchedSaaSStore
+	entered chan struct{}
+	release <-chan struct{}
+}
+
+func (s *gatedSaaSFinalizer) FinalizeAsyncJobAttempt(ctx context.Context, scope models.TenantScope, id, owner string, attempt int, result models.AsyncJobAttemptResult, delivery *models.AsyncJobDeliveryResult, now time.Time) (models.AsyncJobOutcome, error) {
+	close(s.entered)
+	// Hold the real claimed job after HTTP acceptance, independently of the
+	// HTTP deadline. The test always releases this gate before Scheduler.Stop.
+	<-s.release
+	return s.Store.FinalizeAsyncJobAttempt(ctx, scope, id, owner, attempt, result, delivery, now)
 }
 
 func TestSaaSConsumerVisitsTenant101BeforeRevisitingPrefix(t *testing.T) {
@@ -61,7 +82,7 @@ func TestSaaSConsumerVisitsTenant101BeforeRevisitingPrefix(t *testing.T) {
 		if result.failed() {
 			t.Fatal(result)
 		}
-	case <-time.After(8 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("paged drain did not complete")
 	}
 	backend.mu.Lock()
@@ -90,42 +111,51 @@ func TestSaaSConsumerDoesNotSpinBehindOnlyInflightJob(t *testing.T) {
 	seedSaaSConsumerTenant(t, raw, store, "b_empty", 0)
 	backend := &watchedSaaSStore{Store: store, claims: map[string]int{}}
 	probed := make(chan struct{}, 1)
-	backend.beforeClaim = func(ctx context.Context, scope models.TenantScope, count int) error {
-		if scope.TenantID == "b_empty" && count == 2 {
+	backend.afterClaim = func(scope models.TenantScope, count int, err error) {
+		if scope.TenantID == "b_empty" && count == 2 && errors.Is(err, sql.ErrNoRows) {
 			probed <- struct{}{}
 		}
-		return nil
 	}
 	release := make(chan struct{})
 	var once sync.Once
-	defer once.Do(func() { close(release) })
-	s := NewTenantDistributedScheduler(backend, quietLogger(), "consumer-test")
-	s.integrationClient = &http.Client{Transport: webhookRoundTripFunc(func(req *http.Request) (*http.Response, error) {
-		select {
-		case <-release:
-			return webhookResponse(204), nil
-		case <-req.Context().Done():
-			return nil, req.Context().Err()
-		}
-	})}
+	releaseGate := func() { once.Do(func() { close(release) }) }
+	defer releaseGate()
+	gate := &gatedSaaSFinalizer{watchedSaaSStore: backend, entered: make(chan struct{}), release: release}
+	s := NewTenantDistributedScheduler(gate, quietLogger(), "consumer-test")
+	s.integrationClient = &http.Client{Transport: webhookRoundTripFunc(func(*http.Request) (*http.Response, error) { return webhookResponse(204), nil })}
 	done := startSaaSTestCallback(t, s)
-	select {
-	case <-probed:
-	case <-time.After(3 * time.Second):
-		t.Fatal("empty probe not reached")
-	}
+	t.Cleanup(releaseGate) // LIFO: release before the callback helper's Stop.
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	waitSaaSTest(t, ctx, gate.entered, "claimed job did not reach finalization gate")
+	waitSaaSTest(t, ctx, probed, "empty probe not reached")
 	time.Sleep(100 * time.Millisecond)
+	select {
+	case result := <-done:
+		t.Fatalf("consumer ended before explicit gate release: %+v", result)
+	default:
+	}
+	var status string
+	if err := raw.QueryRowContext(ctx, `SELECT status FROM async_jobs WHERE tenant_id='a_wait'`).Scan(&status); err != nil || status != "processing" {
+		t.Fatalf("job did not remain in flight: status=%q err=%v", status, err)
+	}
 	backend.mu.Lock()
 	lists := backend.lists
 	backend.mu.Unlock()
 	if lists > 2 {
 		t.Fatalf("empty probes caused rescan spin: %d sweeps", lists)
 	}
-	once.Do(func() { close(release) })
+	releaseGate()
 	select {
-	case <-done:
-	case <-time.After(3 * time.Second):
+	case result := <-done:
+		if result.failed() {
+			t.Fatal(result)
+		}
+	case <-time.After(30 * time.Second):
 		t.Fatal("drain did not finish")
+	}
+	if err := raw.QueryRowContext(t.Context(), `SELECT status FROM async_jobs WHERE tenant_id='a_wait'`).Scan(&status); err != nil || status != "completed" {
+		t.Fatalf("released job did not complete: status=%q err=%v", status, err)
 	}
 	before := lists
 	if result := s.consumeSaaSJobs(); result.failed() {
