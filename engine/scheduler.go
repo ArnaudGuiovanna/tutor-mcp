@@ -76,6 +76,9 @@ type Scheduler struct {
 	tenantStore        tenantSchedulerStore
 	worker             models.WorkerPrincipal
 	currentTenantScope *models.TenantScope
+	// tenantDBPhase forbids network dispatch from a child holding an RLS
+	// transaction, including future jobs accidentally registered that way.
+	tenantDBPhase bool
 }
 
 type tenantSchedulerStore interface {
@@ -259,7 +262,12 @@ func (s *Scheduler) processWebhookTargets(
 produce:
 	for {
 		pageCtx, pageCancel := context.WithTimeout(ctx, schedulerDBTimeout)
-		page, err := s.store.ListWebhookDispatchTargetsPage(pageCtx, afterID, pageSize)
+		var page []models.WebhookDispatchTarget
+		err := s.withTenantStore(pageCtx, func(txCtx context.Context, child *Scheduler) error {
+			var err error
+			page, err = child.store.ListWebhookDispatchTargetsPage(txCtx, afterID, pageSize)
+			return err
+		})
 		pageCancel()
 		if err != nil {
 			if ctx.Err() == nil {
@@ -414,9 +422,10 @@ func NewDistributedScheduler(store storeport.Store, logger *slog.Logger) *Schedu
 	return s
 }
 
-// NewTenantDistributedScheduler keeps the global lease election but executes
-// every business job in one explicit tenant transaction. The worker role never
-// owns tables and never receives BYPASSRLS.
+// NewTenantDistributedScheduler keeps global lease election and binds every
+// database phase to an explicit tenant transaction. Network jobs commit each
+// phase independently and hold no transaction during HTTP. The worker role
+// never owns tables and never receives BYPASSRLS.
 func NewTenantDistributedScheduler(store storeport.Store, logger *slog.Logger, actorID string) *Scheduler {
 	s := NewDistributedScheduler(store, logger)
 	tenantStore, ok := store.(tenantSchedulerStore)
@@ -439,6 +448,9 @@ func (s *Scheduler) scheduledTenantJob(name string, fn func(*Scheduler) schedule
 // while each durable store transition opens its own short RLS transaction.
 // Consequently an HTTP timeout never pins a database transaction or row lock.
 func (s *Scheduler) scheduledIndependentTenantJob(name string, fn func(*Scheduler) scheduledJobResult) scheduledJobFunc {
+	if s.tenantStore == nil {
+		return func() scheduledJobResult { return fn(s) }
+	}
 	return func() scheduledJobResult { return s.runAcrossTenantRoots(name, fn) }
 }
 
@@ -515,6 +527,7 @@ func (s *Scheduler) runAcrossTenants(name string, fn func(*Scheduler) scheduledJ
 				child := *s
 				child.store = scoped
 				child.tenantStore = nil
+				child.tenantDBPhase = true
 				tenantResult = fn(&child)
 				// Business methods persist their own durable retry state. A
 				// partial job result must commit those transitions.
@@ -842,7 +855,7 @@ func (s *Scheduler) Start() error {
 		return fmt.Errorf("tenant scheduler store does not support tenant enumeration")
 	}
 	if err := s.schedule("olm", "0 13 * * *", 24*time.Hour,
-		s.scheduledTenantJob("olm", func(child *Scheduler) scheduledJobResult { return child.sendOLM() })); err != nil {
+		s.scheduledIndependentTenantJob("olm", func(child *Scheduler) scheduledJobResult { return child.sendOLM() })); err != nil {
 		return fmt.Errorf("add olm job: %w", err)
 	}
 	if err := s.schedule("consolidation", "30 13 * * *", 24*time.Hour,
@@ -855,12 +868,12 @@ func (s *Scheduler) Start() error {
 	}
 	// Daily motivation: once at 8h UTC.
 	if err := s.schedule("motivation", "0 8 * * *", 24*time.Hour,
-		s.scheduledTenantJob("motivation", func(child *Scheduler) scheduledJobResult { return child.sendDailyMotivation() })); err != nil {
+		s.scheduledIndependentTenantJob("motivation", func(child *Scheduler) scheduledJobResult { return child.sendDailyMotivation() })); err != nil {
 		return fmt.Errorf("add daily motivation job: %w", err)
 	}
 	// End-of-day recap: once at 21h UTC.
 	if err := s.schedule("recap", "0 21 * * *", 24*time.Hour,
-		s.scheduledTenantJob("recap", func(child *Scheduler) scheduledJobResult { return child.sendDailyRecap() })); err != nil {
+		s.scheduledIndependentTenantJob("recap", func(child *Scheduler) scheduledJobResult { return child.sendDailyRecap() })); err != nil {
 		return fmt.Errorf("add daily recap job: %w", err)
 	}
 	// Mirror messages: once at 12h UTC. Dispatches any metacognitive mirror
@@ -868,7 +881,7 @@ func (s *Scheduler) Start() error {
 	// at the alert layer (MIRROR_MESSAGE) so an in-session enqueue + the
 	// scheduler tick can't double-fire.
 	if err := s.schedule("mirror", "0 12 * * *", 24*time.Hour,
-		s.scheduledTenantJob("mirror", func(child *Scheduler) scheduledJobResult { return child.sendMirrorMessages() })); err != nil {
+		s.scheduledIndependentTenantJob("mirror", func(child *Scheduler) scheduledJobResult { return child.sendMirrorMessages() })); err != nil {
 		return fmt.Errorf("add mirror messages job: %w", err)
 	}
 	// Cleanup: hourly.
@@ -881,7 +894,7 @@ func (s *Scheduler) Start() error {
 	// cadence only controls *latency* (worst case 30 min between the state
 	// being met and the webhook firing), not frequency-of-spam.
 	if err := s.schedule("metacog_alerts", "*/30 * * * *", 30*time.Minute,
-		s.scheduledTenantJob("metacog_alerts", func(child *Scheduler) scheduledJobResult { return child.dispatchMetacognitiveAlerts() })); err != nil {
+		s.scheduledIndependentTenantJob("metacog_alerts", func(child *Scheduler) scheduledJobResult { return child.dispatchMetacognitiveAlerts() })); err != nil {
 		return fmt.Errorf("add metacognitive alerts job: %w", err)
 	}
 	if s.tenantStore != nil {
@@ -1002,27 +1015,38 @@ func (s *Scheduler) dispatchQueuedTarget(
 	fallback func(*models.Learner) discordPayload,
 	now time.Time,
 ) bool {
+	return s.dispatchWebhookTarget(ctx, func(txCtx context.Context, child *Scheduler) (*webhookDispatch, bool) {
+		return child.prepareQueuedTarget(txCtx, target, kind, alertTag, fallback, now)
+	})
+}
+
+func (s *Scheduler) prepareQueuedTarget(
+	ctx context.Context,
+	target models.WebhookDispatchTarget,
+	kind, alertTag string,
+	fallback func(*models.Learner) discordPayload,
+	now time.Time,
+) (*webhookDispatch, bool) {
 	learner, avail := &models.Learner{ID: target.LearnerID}, target.Availability
 	if learner.ID == "" || avail == nil {
-		return true
+		return nil, true
 	}
 	allowed, err := avail.AllowsNotificationAt(now)
 	if err != nil {
 		s.logger.Error("scheduler: invalid notification policy", "err", err, "learner", learner.ID, "kind", kind)
-		return true
+		return nil, true
 	}
 	if !allowed {
-		return false
+		return nil, false
 	}
 
 	item, err := s.store.ClaimNextPendingWebhook(ctx, learner.ID, kind, now, 30*time.Minute)
 	if err != nil {
 		s.logger.Error("scheduler: claim webhook", "err", err, "learner", learner.ID, "kind", kind)
-		return true
+		return nil, true
 	}
 
 	var payload discordPayload
-	var source string
 	var briefForLog *models.WebhookBrief
 	domainID := ""
 	payloadAlreadyAccessible := false
@@ -1033,11 +1057,10 @@ func (s *Scheduler) dispatchQueuedTarget(
 					s.logger.Error("scheduler: persist invalid fallback payload", "error_type", fmt.Sprintf("%T", recordErr), "learner", learner.ID, "queue_id", item.ID)
 				}
 				s.logger.Error("scheduler: invalid durable fallback payload", "learner", learner.ID, "queue_id", item.ID)
-				return true
+				return nil, true
 			}
 			domainID = item.DomainID
 			payloadAlreadyAccessible = true
-			source = "fallback"
 		} else {
 			embed, brief := embedFromWebhookContent(kind, item.Content, models.UrgencyInfo)
 			payload = discordPayload{Embeds: []discordEmbed{embed}}
@@ -1045,7 +1068,6 @@ func (s *Scheduler) dispatchQueuedTarget(
 			if brief != nil {
 				domainID = brief.DomainID
 			}
-			source = "queue"
 		}
 		if domainID == "" && strings.HasPrefix(kind, "olm:") {
 			domainID = strings.TrimPrefix(kind, "olm:")
@@ -1054,15 +1076,14 @@ func (s *Scheduler) dispatchQueuedTarget(
 		live, liveErr := s.store.HasLiveWebhookMessageKind(ctx, learner.ID, kind, now)
 		if liveErr != nil {
 			s.logger.Error("scheduler: check live webhook before fallback", "error_type", fmt.Sprintf("%T", liveErr), "learner", learner.ID, "kind", kind)
-			return true
+			return nil, true
 		}
 		if live {
-			return false
+			return nil, false
 		}
 		payload = fallback(learner)
-		source = "fallback"
 	} else {
-		return false
+		return nil, false
 	}
 
 	accessibility, err := avail.Accessibility()
@@ -1073,7 +1094,7 @@ func (s *Scheduler) dispatchQueuedTarget(
 			}
 		}
 		s.logger.Error("scheduler: invalid accessibility policy", "err", err, "learner", learner.ID)
-		return true
+		return nil, true
 	}
 	if !payloadAlreadyAccessible {
 		payload = applyAccessibilityPreferences(payload, accessibility)
@@ -1082,7 +1103,7 @@ func (s *Scheduler) dispatchQueuedTarget(
 		encoded, encodeErr := json.Marshal(payload)
 		if encodeErr != nil {
 			s.logger.Error("scheduler: encode fallback payload", "error_type", fmt.Sprintf("%T", encodeErr), "learner", learner.ID, "kind", kind)
-			return true
+			return nil, true
 		}
 		var enqueued bool
 		item, enqueued, err = s.store.EnqueueClaimedWebhookPayloadOncePerDay(
@@ -1091,29 +1112,18 @@ func (s *Scheduler) dispatchQueuedTarget(
 		)
 		if err != nil {
 			s.logger.Error("scheduler: enqueue durable fallback", "error_type", fmt.Sprintf("%T", err), "learner", learner.ID, "kind", kind)
-			return true
+			return nil, true
 		}
 		if !enqueued || item == nil {
-			return false
+			return nil, false
 		}
 	}
-	if err := s.dispatchDurableWebhook(
-		ctx, learner.ID, alertTag, domainID,
-		models.IsIntrusiveWebhookKind(kind), []int64{item.ID}, payload, now,
-	); err != nil {
-		s.logger.Error("scheduler: durable webhook delivery",
-			"error_type", fmt.Sprintf("%T", err), "learner", learner.ID, "kind", kind,
-		)
-		return true
-	}
+	delivery := &webhookDispatch{learnerID: learner.ID, alertType: alertTag, domainID: domainID,
+		intrusive: models.IsIntrusiveWebhookKind(kind), queueIDs: []int64{item.ID}, payload: payload, now: now}
 	if briefForLog != nil {
-		if _, err := s.store.CreateWebhookPushLog(ctx, learner.ID, item.ID, briefForLog, now); err != nil {
-			s.logger.Warn("scheduler: push log", "err", err, "learner", learner.ID, "kind", kind)
-			return true
-		}
+		delivery.pushes = append(delivery.pushes, webhookPushRecord{queueID: item.ID, brief: briefForLog})
 	}
-	s.logger.Info("scheduler: dispatched", "learner", learner.ID, "kind", kind, "source", source)
-	return false
+	return delivery, false
 }
 
 // queueKindTitle returns the embed title for a given webhook kind.
@@ -1549,18 +1559,85 @@ func (s *Scheduler) dispatchDurableWebhook(
 	payload discordPayload,
 	now time.Time,
 ) error {
+	if s.tenantDBPhase {
+		return fmt.Errorf("webhook dispatch cannot run inside a tenant database phase")
+	}
+	var prepared *preparedWebhookRequest
+	var preparationErr error
+	if err := s.withTenantStore(ctx, func(txCtx context.Context, child *Scheduler) error {
+		prepared, preparationErr = child.prepareDurableWebhook(txCtx, learnerID, alertType, domainID, intrusive, queueIDs, payload, now)
+		// A rejected preparation can release a claim or reservation. Persist
+		// that cleanup even though no HTTP request will be made.
+		return nil
+	}); err != nil {
+		return fmt.Errorf("commit webhook HTTP boundary: %w", err)
+	}
+	if preparationErr != nil {
+		return preparationErr
+	}
+	// No tenant transaction or SQL connection survives into the HTTP call.
+	// A crash from here leaves committed dispatching rows for quarantine.
+	result := s.doOnceClassified(prepared.url, prepared.body)
+	if err := s.withTenantStore(ctx, func(txCtx context.Context, child *Scheduler) error {
+		switch result.outcome {
+		case webhookHTTPDelivered:
+			if err := child.store.CompleteWebhookDelivery(txCtx, learnerID, queueIDs, prepared.reservationID, time.Now().UTC()); err != nil {
+				// The persisted dispatching state is intentional: reconciliation will
+				// quarantine it because Discord accepted the request but the local
+				// completion transaction did not commit.
+				return fmt.Errorf("complete durable webhook delivery after 2xx: %w", err)
+			}
+			return nil
+		case webhookHTTPRejected:
+			reason := fmt.Sprintf("http_%d", result.statusCode)
+			if _, err := child.store.RecordKnownWebhookDeliveryFailure(
+				txCtx, learnerID, queueIDs, prepared.reservationID, reason, time.Now().UTC(),
+			); err != nil {
+				return fmt.Errorf("record known webhook delivery failure: %w", err)
+			}
+			return nil
+		case webhookHTTPUnknown:
+			if err := child.store.MarkWebhookDeliveryUnknown(
+				txCtx, learnerID, queueIDs, prepared.reservationID, "transport_outcome_unknown", time.Now().UTC(),
+			); err != nil {
+				return fmt.Errorf("quarantine unknown webhook delivery: %w", err)
+			}
+			return nil
+		default:
+			return fmt.Errorf("unknown webhook delivery outcome")
+		}
+	}); err != nil {
+		return err
+	}
+	return result.err
+}
+
+type preparedWebhookRequest struct {
+	url           string
+	body          []byte
+	reservationID int64
+}
+
+func (s *Scheduler) prepareDurableWebhook(
+	ctx context.Context,
+	learnerID, alertType, domainID string,
+	intrusive bool,
+	queueIDs []int64,
+	payload discordPayload,
+	now time.Time,
+) (*preparedWebhookRequest, error) {
 	// Resolve plaintext only after all caller-side computation, policy checks,
 	// queue claims, and claim revalidation have completed. This is the single
 	// runtime boundary where an integration credential enters memory.
 	webhookURL, err := s.store.GetWebhookDispatchURL(ctx, learnerID)
 	if err != nil {
 		s.releaseWebhookClaims(ctx, learnerID, queueIDs)
-		return fmt.Errorf("resolve webhook dispatch credential: %w", err)
+		return nil, fmt.Errorf("resolve webhook dispatch credential: %w", err)
 	}
 	body, err := marshalDiscordRequest(webhookURL, payload)
 	if err != nil {
 		s.releaseWebhookClaims(ctx, learnerID, queueIDs)
-		return err
+		return nil, err
 	}
 
 	reservationID, prepared, err := s.store.PrepareWebhookDelivery(
@@ -1568,11 +1645,11 @@ func (s *Scheduler) dispatchDurableWebhook(
 	)
 	if err != nil {
 		s.releaseWebhookClaims(ctx, learnerID, queueIDs)
-		return fmt.Errorf("prepare durable webhook delivery: %w", err)
+		return nil, fmt.Errorf("prepare durable webhook delivery: %w", err)
 	}
 	if !prepared {
 		s.releaseWebhookClaims(ctx, learnerID, queueIDs)
-		return fmt.Errorf("webhook delivery blocked by notification policy")
+		return nil, fmt.Errorf("webhook delivery blocked by notification policy")
 	}
 
 	if err := s.store.BeginWebhookDelivery(ctx, learnerID, queueIDs, reservationID, now); err != nil {
@@ -1583,37 +1660,10 @@ func (s *Scheduler) dispatchDurableWebhook(
 				"error_type", fmt.Sprintf("%T", releaseErr), "learner", learnerID,
 			)
 		}
-		return fmt.Errorf("begin durable webhook delivery: %w", err)
+		return nil, fmt.Errorf("begin durable webhook delivery: %w", err)
 	}
 
-	result := s.doOnceClassified(webhookURL, body)
-	switch result.outcome {
-	case webhookHTTPDelivered:
-		if err := s.store.CompleteWebhookDelivery(ctx, learnerID, queueIDs, reservationID, time.Now().UTC()); err != nil {
-			// The persisted dispatching state is intentional: reconciliation will
-			// quarantine it because Discord accepted the request but the local
-			// completion transaction did not commit.
-			return fmt.Errorf("complete durable webhook delivery after 2xx: %w", err)
-		}
-		return nil
-	case webhookHTTPRejected:
-		reason := fmt.Sprintf("http_%d", result.statusCode)
-		if _, err := s.store.RecordKnownWebhookDeliveryFailure(
-			ctx, learnerID, queueIDs, reservationID, reason, time.Now().UTC(),
-		); err != nil {
-			return fmt.Errorf("record known webhook delivery failure: %w", err)
-		}
-		return result.err
-	case webhookHTTPUnknown:
-		if err := s.store.MarkWebhookDeliveryUnknown(
-			ctx, learnerID, queueIDs, reservationID, "transport_outcome_unknown", time.Now().UTC(),
-		); err != nil {
-			return fmt.Errorf("quarantine unknown webhook delivery: %w", err)
-		}
-		return result.err
-	default:
-		return fmt.Errorf("unknown webhook delivery outcome")
-	}
+	return &preparedWebhookRequest{url: webhookURL, body: body, reservationID: reservationID}, nil
 }
 
 // retryDelays defines the exponential backoff schedule for doWithRetry.
@@ -1722,24 +1772,30 @@ func (s *Scheduler) sendOLM() scheduledJobResult {
 }
 
 func (s *Scheduler) sendOLMTarget(ctx context.Context, target models.WebhookDispatchTarget, now time.Time) bool {
+	return s.dispatchWebhookTarget(ctx, func(txCtx context.Context, child *Scheduler) (*webhookDispatch, bool) {
+		return child.prepareOLMTarget(txCtx, target, now)
+	})
+}
+
+func (s *Scheduler) prepareOLMTarget(ctx context.Context, target models.WebhookDispatchTarget, now time.Time) (*webhookDispatch, bool) {
 	learner, avail := &models.Learner{ID: target.LearnerID}, target.Availability
 	if learner.ID == "" || avail == nil {
-		return true
+		return nil, true
 	}
 	failed := false
 	allowed, err := avail.AllowsNotificationAt(now)
 	if err != nil {
 		s.logger.Error("scheduler: olm invalid notification policy", "err", err, "learner", learner.ID)
-		return true
+		return nil, true
 	}
 	if !allowed {
-		return false
+		return nil, false
 	}
 
 	domains, err := s.store.GetDomainsByLearner(ctx, learner.ID, false /*includeArchived*/)
 	if err != nil {
 		s.logger.Error("scheduler: olm list domains", "err", err, "learner", learner.ID)
-		return true
+		return nil, true
 	}
 
 	var prepared []preparedWebhookEmbed
@@ -1819,7 +1875,7 @@ func (s *Scheduler) sendOLMTarget(ctx context.Context, target models.WebhookDisp
 	}
 
 	if len(prepared) == 0 {
-		return failed
+		return nil, failed
 	}
 	embeds := make([]discordEmbed, 0, len(prepared))
 	for _, p := range prepared {
@@ -1834,7 +1890,7 @@ func (s *Scheduler) sendOLMTarget(ctx context.Context, target models.WebhookDisp
 			}
 		}
 		s.logger.Error("scheduler: olm invalid accessibility policy", "err", err, "learner", learner.ID)
-		return true
+		return nil, true
 	}
 	payload := applyAccessibilityPreferences(discordPayload{Embeds: embeds}, accessibility)
 	claimsActive := true
@@ -1871,7 +1927,7 @@ func (s *Scheduler) sendOLMTarget(ctx context.Context, target models.WebhookDisp
 	}
 	if !claimsActive {
 		s.releaseWebhookClaims(ctx, learner.ID, queueIDs)
-		return failed
+		return nil, failed
 	}
 
 	fallbackQueueID := int64(0)
@@ -1881,7 +1937,7 @@ func (s *Scheduler) sendOLMTarget(ctx context.Context, target models.WebhookDisp
 			failed = true
 			s.releaseWebhookClaims(ctx, learner.ID, queueIDs)
 			s.logger.Error("scheduler: encode olm fallback", "error_type", fmt.Sprintf("%T", encodeErr), "learner", learner.ID)
-			return true
+			return nil, true
 		}
 		fallbackItem, enqueued, enqueueErr := s.store.EnqueueClaimedWebhookPayloadOncePerDay(
 			ctx, learner.ID, "olm:"+fallbackDomainID, alertKindOLM, fallbackDomainID,
@@ -1893,21 +1949,13 @@ func (s *Scheduler) sendOLMTarget(ctx context.Context, target models.WebhookDisp
 				failed = true
 				s.logger.Error("scheduler: enqueue durable olm fallback", "error_type", fmt.Sprintf("%T", enqueueErr), "learner", learner.ID)
 			}
-			return failed
+			return nil, failed
 		}
 		fallbackQueueID = fallbackItem.ID
 		queueIDs = append(queueIDs, fallbackItem.ID)
 	}
-	if err := s.dispatchDurableWebhook(
-		ctx, learner.ID, alertKindOLM,
-		prepared[0].DomainID, true, queueIDs, payload, now,
-	); err != nil {
-		failed = true
-		s.logger.Error("scheduler: durable olm delivery",
-			"error_type", fmt.Sprintf("%T", err), "learner", learner.ID,
-		)
-		return true
-	}
+	delivery := &webhookDispatch{learnerID: learner.ID, alertType: alertKindOLM, domainID: prepared[0].DomainID,
+		intrusive: true, queueIDs: queueIDs, payload: payload, now: now}
 	for _, p := range prepared {
 		queueID := int64(0)
 		if p.Item != nil {
@@ -1916,14 +1964,10 @@ func (s *Scheduler) sendOLMTarget(ctx context.Context, target models.WebhookDisp
 			queueID = fallbackQueueID
 		}
 		if p.Brief != nil {
-			if _, err := s.store.CreateWebhookPushLog(ctx, learner.ID, queueID, p.Brief, now); err != nil {
-				failed = true
-				s.logger.Warn("scheduler: olm push log", "err", err, "learner", learner.ID)
-			}
+			delivery.pushes = append(delivery.pushes, webhookPushRecord{queueID: queueID, brief: p.Brief})
 		}
 	}
-	s.logger.Info("scheduler: olm dispatched", "learner", learner.ID, "embeds", len(embeds))
-	return failed
+	return delivery, failed
 }
 
 func (s *Scheduler) runConsolidationCycle() scheduledJobResult {
@@ -2049,34 +2093,40 @@ func (s *Scheduler) sendMirrorMessages() scheduledJobResult {
 }
 
 func (s *Scheduler) sendMirrorTarget(ctx context.Context, target models.WebhookDispatchTarget, now time.Time) bool {
+	return s.dispatchWebhookTarget(ctx, func(txCtx context.Context, child *Scheduler) (*webhookDispatch, bool) {
+		return child.prepareMirrorTarget(txCtx, target, now)
+	})
+}
+
+func (s *Scheduler) prepareMirrorTarget(ctx context.Context, target models.WebhookDispatchTarget, now time.Time) (*webhookDispatch, bool) {
 	learner, avail := &models.Learner{ID: target.LearnerID}, target.Availability
 	if learner.ID == "" || avail == nil {
-		return true
+		return nil, true
 	}
 	allowed, err := avail.AllowsNotificationAt(now)
 	if err != nil {
 		s.logger.Error("scheduler: mirror invalid notification policy", "err", err, "learner", learner.ID)
-		return true
+		return nil, true
 	}
 	if !allowed {
-		return false
+		return nil, false
 	}
 	highStakesAllowed, err := allHighStakesDomainsHumanReviewed(ctx, s.store, learner.ID)
 	if err != nil {
 		s.logger.Error("scheduler: mirror high-stakes review", "err", err, "learner", learner.ID)
-		return true
+		return nil, true
 	}
 	if !highStakesAllowed {
-		return false
+		return nil, false
 	}
 
 	item, err := s.store.ClaimNextPendingWebhook(ctx, learner.ID, models.WebhookKindMirror, now, 30*time.Minute)
 	if err != nil {
 		s.logger.Error("scheduler: mirror claim", "err", err, "learner", learner.ID)
-		return true
+		return nil, true
 	}
 	if item == nil || item.Content == "" {
-		return false
+		return nil, false
 	}
 
 	embed := mirrorEmbedFromContent(item.Content)
@@ -2086,7 +2136,7 @@ func (s *Scheduler) sendMirrorTarget(ctx context.Context, target models.WebhookD
 			s.logger.Error("scheduler: mirror release invalid accessibility", "error_type", fmt.Sprintf("%T", releaseErr), "learner", learner.ID)
 		}
 		s.logger.Error("scheduler: mirror invalid accessibility policy", "err", err, "learner", learner.ID)
-		return true
+		return nil, true
 	}
 	payload := applyAccessibilityPreferences(discordPayload{Embeds: []discordEmbed{embed}}, accessibility)
 	active, activeErr := s.store.IsWebhookClaimActive(ctx, item.ID, learner.ID)
@@ -2095,22 +2145,13 @@ func (s *Scheduler) sendMirrorTarget(ctx context.Context, target models.WebhookD
 			s.logger.Error("scheduler: mirror release after revalidation error", "error_type", fmt.Sprintf("%T", releaseErr), "learner", learner.ID)
 		}
 		s.logger.Error("scheduler: mirror revalidate claim", "err", activeErr, "learner", learner.ID, "queue_id", item.ID)
-		return true
+		return nil, true
 	}
 	if !active {
-		return false
+		return nil, false
 	}
-	if err := s.dispatchDurableWebhook(
-		ctx, learner.ID, MirrorAlertKind, "", true,
-		[]int64{item.ID}, payload, now,
-	); err != nil {
-		s.logger.Error("scheduler: durable mirror delivery",
-			"error_type", fmt.Sprintf("%T", err), "learner", learner.ID,
-		)
-		return true
-	}
-	s.logger.Info("scheduler: mirror dispatched", "learner", learner.ID)
-	return false
+	return &webhookDispatch{learnerID: learner.ID, alertType: MirrorAlertKind, intrusive: true,
+		queueIDs: []int64{item.ID}, payload: payload, now: now}, false
 }
 
 // mirrorEmbedFromContent renders a queued MirrorWebhookContent payload into

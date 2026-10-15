@@ -186,10 +186,40 @@ func (s *Store) ClaimAsyncJob(ctx context.Context, scope models.TenantScope, wor
 	var claimed *models.AsyncJob
 	err := s.WithTenantTx(ctx, scope, func(txCtx context.Context, scoped storeport.Store) error {
 		txs := scoped.(*Store)
+		// A process can die on its final attempt without reaching FinishAsyncJob.
+		// Reconcile a bounded page, even when there is no runnable work to return.
+		exhausted := `SELECT id FROM async_jobs WHERE tenant_id = ?
+			AND status = 'processing' AND attempt_count >= max_attempts
+			AND lease_expires_at <= ? ORDER BY lease_expires_at, id LIMIT 100`
+		if txs.dialect == DialectPostgres {
+			exhausted += ` FOR UPDATE SKIP LOCKED`
+		}
+		updateExhausted := `UPDATE async_jobs
+			SET status = 'dead_letter', lease_owner = '', lease_expires_at = NULL,
+			    completed_at = ?, last_error = 'lease_expired_after_max_attempts'
+			WHERE tenant_id = ? AND status = 'processing' AND attempt_count >= max_attempts
+			  AND lease_expires_at <= ? AND id IN (` + exhausted + `)`
+		updateArgs := []any{now.UTC(), scope.TenantID, now.UTC(), scope.TenantID, now.UTC()}
+		if txs.dialect == DialectPostgres {
+			// Lock and freeze the page once. An inline IN subquery may be
+			// re-evaluated by the UPDATE plan as rows change, exceeding LIMIT.
+			updateExhausted = `WITH exhausted_page AS MATERIALIZED (` + exhausted + `)
+				UPDATE async_jobs SET status = 'dead_letter', lease_owner = '', lease_expires_at = NULL,
+				completed_at = ?, last_error = 'lease_expired_after_max_attempts'
+				WHERE tenant_id = ? AND status = 'processing' AND attempt_count >= max_attempts
+				  AND lease_expires_at <= ? AND id IN (SELECT id FROM exhausted_page)`
+			updateArgs = []any{scope.TenantID, now.UTC(), now.UTC(), scope.TenantID, now.UTC()}
+		}
+		if _, err := txs.exec(txCtx, updateExhausted, updateArgs...); err != nil {
+			return fmt.Errorf("reconcile exhausted async jobs: %w", err)
+		}
 		query := `SELECT id, kind, idempotency_key, payload_json, attempt_count,
 			max_attempts, available_at, created_at FROM async_jobs
 			WHERE tenant_id = ? AND available_at <= ?
 			  AND (status = 'pending' OR (status = 'processing' AND lease_expires_at <= ?))
+			  AND NOT EXISTS (SELECT 1 FROM tenant_dsar_requests dsar
+			      WHERE async_jobs.kind = 'tenant_dsar' AND dsar.tenant_id = async_jobs.tenant_id
+			        AND dsar.id = async_jobs.idempotency_key AND dsar.status = 'blocked')
 			  AND attempt_count < max_attempts ORDER BY created_at, id LIMIT 1`
 		if txs.dialect == DialectPostgres {
 			query += ` FOR UPDATE SKIP LOCKED`
@@ -199,6 +229,9 @@ func (s *Store) ClaimAsyncJob(ctx context.Context, scope models.TenantScope, wor
 			&candidate.ID, &candidate.Kind, &candidate.IdempotencyKey, &candidate.PayloadJSON,
 			&candidate.AttemptCount, &candidate.MaxAttempts, &candidate.AvailableAt,
 			&candidate.CreatedAt); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil // commit the reconciliation above
+			}
 			return err
 		}
 		expires := now.UTC().Add(lease)
@@ -206,7 +239,10 @@ func (s *Store) ClaimAsyncJob(ctx context.Context, scope models.TenantScope, wor
 			SET status = 'processing', attempt_count = attempt_count + 1,
 			    lease_owner = ?, lease_expires_at = ?, heartbeat_at = ?, last_error = ''
 			WHERE tenant_id = ? AND id = ?
-			  AND (status = 'pending' OR (status = 'processing' AND lease_expires_at <= ?))`,
+			  AND (status = 'pending' OR (status = 'processing' AND lease_expires_at <= ?))
+			  AND NOT EXISTS (SELECT 1 FROM tenant_dsar_requests dsar
+			      WHERE async_jobs.kind = 'tenant_dsar' AND dsar.tenant_id = async_jobs.tenant_id
+			        AND dsar.id = async_jobs.idempotency_key AND dsar.status = 'blocked')`,
 			workerID, expires, now.UTC(), scope.TenantID, candidate.ID, now.UTC())
 		if err != nil {
 			return err
@@ -220,6 +256,9 @@ func (s *Store) ClaimAsyncJob(ctx context.Context, scope models.TenantScope, wor
 		claimed = candidate
 		return nil
 	})
+	if err == nil && claimed == nil {
+		return nil, sql.ErrNoRows
+	}
 	return claimed, err
 }
 

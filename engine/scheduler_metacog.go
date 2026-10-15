@@ -57,7 +57,14 @@ func (s *Scheduler) dispatchMetacognitiveAlerts() scheduledJobResult {
 	result := s.processWebhookTargets(
 		"metacog", "metacog_list_learners_failed", "metacog_partial_failure",
 		func(ctx context.Context, target models.WebhookDispatchTarget) bool {
-			return s.dispatchMetacognitiveTarget(ctx, target, now, &enqueuedKinds)
+			var failed bool
+			if err := s.withTenantStore(ctx, func(txCtx context.Context, child *Scheduler) error {
+				failed = child.dispatchMetacognitiveTarget(txCtx, target, now, &enqueuedKinds)
+				return nil
+			}); err != nil {
+				return true
+			}
+			return failed
 		},
 	)
 

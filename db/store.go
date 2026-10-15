@@ -591,6 +591,13 @@ func (s *Store) ListWebhookDispatchTargetsPage(ctx context.Context, afterLearner
 	if limit < 1 || limit > 1000 {
 		return nil, fmt.Errorf("list webhook dispatch targets: limit must be between 1 and 1000")
 	}
+	tenantClause := ""
+	args := []any{afterLearnerID}
+	if s.tenantScope != nil {
+		tenantClause = " AND l.tenant_id = ?"
+		args = append(args, s.tenantScope.TenantID)
+	}
+	args = append(args, limit)
 	rows, err := s.query(ctx,
 		`SELECT l.id,
 		        COALESCE(a.timezone, 'UTC'), COALESCE(a.windows_json, '[]'),
@@ -602,9 +609,9 @@ func (s *Store) ListWebhookDispatchTargetsPage(ctx context.Context, afterLearner
 		        a.updated_at
 		 FROM learners l
 		 LEFT JOIN availability a ON a.learner_id = l.id
-		 WHERE l.webhook_url <> '' AND ((l.identity_mode = 'email' AND l.email_verified_at IS NOT NULL) OR l.identity_mode = 'username') AND l.id > ?
+		 WHERE l.webhook_url <> '' AND ((l.identity_mode = 'email' AND l.email_verified_at IS NOT NULL) OR l.identity_mode = 'username') AND l.id > ?`+tenantClause+`
 		 ORDER BY l.id
-		 LIMIT ?`, afterLearnerID, limit,
+		 LIMIT ?`, args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list webhook dispatch targets: %w", err)
@@ -645,10 +652,16 @@ func (s *Store) ListWebhookDispatchTargetsPage(ctx context.Context, afterLearner
 // entering the HTTP delivery boundary.
 func (s *Store) GetWebhookDispatchURL(ctx context.Context, learnerID string) (string, error) {
 	var stored string
+	tenantClause := ""
+	args := []any{learnerID}
+	if s.tenantScope != nil {
+		tenantClause = " AND tenant_id = ?"
+		args = append(args, s.tenantScope.TenantID)
+	}
 	err := s.queryRow(ctx,
 		`SELECT webhook_url FROM learners
-		 WHERE id = ? AND ((identity_mode = 'email' AND email_verified_at IS NOT NULL) OR identity_mode = 'username') AND webhook_url <> ''`,
-		learnerID,
+		 WHERE id = ? AND ((identity_mode = 'email' AND email_verified_at IS NOT NULL) OR identity_mode = 'username') AND webhook_url <> ''`+tenantClause,
+		args...,
 	).Scan(&stored)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("webhook dispatch credential is unavailable")

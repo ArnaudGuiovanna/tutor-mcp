@@ -409,13 +409,16 @@ func (s *Store) CompleteTenantDSARExport(ctx context.Context, scope models.Tenan
 	}
 	return s.WithTenantTx(ctx, scope, func(txCtx context.Context, scoped storeport.Store) error {
 		txs := scoped.(*Store)
-		query := `SELECT learner_id FROM tenant_dsar_requests WHERE tenant_id = ? AND id = ? AND kind = 'export' AND status = 'pending'`
+		query := `SELECT learner_id, status FROM tenant_dsar_requests WHERE tenant_id = ? AND id = ? AND kind = 'export' AND status IN ('pending', 'completed')`
 		if txs.dialect == DialectPostgres {
 			query += ` FOR UPDATE`
 		}
-		var learnerID string
-		if err := txs.queryRow(txCtx, query, scope.TenantID, requestID).Scan(&learnerID); err != nil {
+		var learnerID, status string
+		if err := txs.queryRow(txCtx, query, scope.TenantID, requestID).Scan(&learnerID, &status); err != nil {
 			return err
+		}
+		if status == "completed" {
+			return nil // recover a crash between the manifest commit and job completion
 		}
 		counts := make(map[string]int64)
 		for _, table := range []string{"concept_bkt_estimates", "collective_weight_applications", "learner_concept_states", "calibration_records", "learning_badges", "learning_badge_evidence", "interactions", "learning_events", "concept_states", "narrative_objects", "pedagogical_decisions", "assessment_adjudications", "assessment_reviews", "curriculum_review_opinions", "audit_events"} {
@@ -450,12 +453,99 @@ func (s *Store) CompleteTenantDSARExport(ctx context.Context, scope models.Tenan
 	})
 }
 
+// ParkTenantDSARJob suspends only the lease generation that encountered a
+// legal hold. The request lock serializes parking and resume; the owner and
+// attempt checks fence old workers, including attempts in the same process.
+func (s *Store) ParkTenantDSARJob(ctx context.Context, scope models.TenantScope, jobID, requestID, workerID string, attempt int, now time.Time) error {
+	if scope.Validate() != nil || jobID == "" || requestID == "" || workerID == "" || attempt < 1 {
+		return fmt.Errorf("park tenant DSAR job: invalid input")
+	}
+	return s.WithTenantTx(ctx, scope, func(txCtx context.Context, scoped storeport.Store) error {
+		txs := scoped.(*Store)
+		requestQuery := `SELECT id FROM tenant_dsar_requests WHERE tenant_id = ? AND id = ? AND status = 'blocked'`
+		if txs.dialect == DialectPostgres {
+			requestQuery += ` FOR UPDATE`
+		}
+		var id string
+		if err := txs.queryRow(txCtx, requestQuery, scope.TenantID, requestID).Scan(&id); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrLeaseLost
+			}
+			return err
+		}
+		result, err := txs.exec(txCtx, `UPDATE async_jobs SET status = 'pending',
+			attempt_count = attempt_count - 1, lease_owner = '', lease_expires_at = NULL,
+			heartbeat_at = NULL, last_error = 'dsar_legal_hold'
+			WHERE tenant_id = ? AND id = ? AND kind = 'tenant_dsar' AND idempotency_key = ?
+			  AND status = 'processing' AND lease_owner = ? AND attempt_count = ? AND lease_expires_at > ?`,
+			scope.TenantID, jobID, requestID, workerID, attempt, now.UTC())
+		if err != nil {
+			return err
+		}
+		if count, err := result.RowsAffected(); err != nil {
+			return err
+		} else if count != 1 {
+			return ErrLeaseLost
+		}
+		return nil
+	})
+}
+
 func (s *Store) ResumeTenantDSAR(ctx context.Context, actor models.Principal, requestID string) error {
 	if !actor.Authorize(models.PermissionTenantManage, models.AuthorizationResource{TenantID: actor.TenantID}) || requestID == "" {
 		return fmt.Errorf("resume tenant DSAR: invalid authorization or input")
 	}
 	return s.WithTenantTx(ctx, actor.TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {
 		txs := scoped.(*Store)
+		now := time.Now().UTC()
+		requestQuery := `SELECT learner_id, kind FROM tenant_dsar_requests
+			WHERE tenant_id = ? AND id = ? AND status IN ('blocked','failed')`
+		if txs.dialect == DialectPostgres {
+			requestQuery += ` FOR UPDATE`
+		}
+		var learnerID, kind string
+		if err := txs.queryRow(txCtx, requestQuery, actor.TenantID, requestID).Scan(&learnerID, &kind); err != nil {
+			return fmt.Errorf("resume tenant DSAR: blocked request not found: %w", err)
+		}
+		var holds int
+		if err := txs.queryRow(txCtx, `SELECT COUNT(*) FROM retention_legal_holds
+			WHERE learner_id = ? AND released_at IS NULL`, learnerID).Scan(&holds); err != nil {
+			return err
+		}
+		if holds != 0 {
+			return storeport.ErrTenantDSARBlocked
+		}
+		if kind == "export" || kind == "erase" {
+			jobQuery := `SELECT id, status, lease_expires_at FROM async_jobs
+				WHERE tenant_id = ? AND kind = 'tenant_dsar' AND idempotency_key = ?`
+			if txs.dialect == DialectPostgres {
+				jobQuery += ` FOR UPDATE`
+			}
+			var jobID, jobStatus string
+			var leasedUntil sql.NullTime
+			jobErr := txs.queryRow(txCtx, jobQuery, actor.TenantID, requestID).Scan(&jobID, &jobStatus, &leasedUntil)
+			if jobErr != nil && !errors.Is(jobErr, sql.ErrNoRows) {
+				return jobErr
+			}
+			if jobErr == nil && jobStatus == "processing" && (!leasedUntil.Valid || leasedUntil.Time.After(now)) {
+				return fmt.Errorf("resume tenant DSAR: job is still leased")
+			}
+			if jobErr == nil {
+				if _, err := txs.exec(txCtx, `UPDATE async_jobs SET status = 'pending', attempt_count = 0,
+					available_at = ?, lease_owner = '', lease_expires_at = NULL, heartbeat_at = NULL,
+					last_error = '', completed_at = NULL WHERE tenant_id = ? AND id = ?`, now, actor.TenantID, jobID); err != nil {
+					return err
+				}
+			} else {
+				payload, _ := json.Marshal(models.TenantDSARJob{RequestID: requestID, Kind: kind})
+				if err := s.EnqueueAsyncJob(txCtx, actor.TenantScope(), models.AsyncJob{
+					TenantID: actor.TenantID, Kind: "tenant_dsar", IdempotencyKey: requestID,
+					PayloadJSON: string(payload), MaxAttempts: 32, CreatedAt: now, AvailableAt: now,
+				}); err != nil {
+					return err
+				}
+			}
+		}
 		result, err := txs.exec(txCtx, `UPDATE tenant_dsar_requests SET status = 'pending'
 			WHERE tenant_id = ? AND id = ? AND status IN ('blocked','failed')`, actor.TenantID, requestID)
 		if err != nil {
@@ -465,7 +555,7 @@ func (s *Store) ResumeTenantDSAR(ctx context.Context, actor models.Principal, re
 			return fmt.Errorf("resume tenant DSAR: blocked request not found")
 		}
 		if _, err := txs.exec(txCtx, `UPDATE tenant_dsar_phases SET status = 'pending', updated_at = ?
-			WHERE tenant_id = ? AND request_id = ? AND status IN ('blocked','failed')`, time.Now().UTC(), actor.TenantID, requestID); err != nil {
+			WHERE tenant_id = ? AND request_id = ? AND status IN ('blocked','failed')`, now, actor.TenantID, requestID); err != nil {
 			return err
 		}
 		return txs.AppendAuditEvent(txCtx, actor, models.AuditEvent{Action: "dsar.resume", TargetType: "dsar_request", TargetID: requestID})
@@ -541,6 +631,9 @@ func (s *Store) ProcessTenantDSARErasureBatch(ctx context.Context, scope models.
 			completed = true
 			return nil
 		}
+		if requestStatus == "blocked" {
+			return storeport.ErrTenantDSARBlocked
+		}
 		if requestStatus != "pending" && requestStatus != "processing" {
 			return fmt.Errorf("process tenant DSAR erasure: request is not runnable")
 		}
@@ -564,9 +657,13 @@ func (s *Store) ProcessTenantDSARErasureBatch(ctx context.Context, scope models.
 			return err
 		}
 		if holds != 0 {
-			_, _ = txs.exec(txCtx, `UPDATE tenant_dsar_requests SET status = 'blocked' WHERE tenant_id = ? AND id = ?`, scope.TenantID, requestID)
-			_, _ = txs.exec(txCtx, `UPDATE tenant_dsar_phases SET status = 'blocked', updated_at = ?
-				WHERE tenant_id = ? AND request_id = ? AND status IN ('pending','running')`, now, scope.TenantID, requestID)
+			if _, err := txs.exec(txCtx, `UPDATE tenant_dsar_requests SET status = 'blocked' WHERE tenant_id = ? AND id = ?`, scope.TenantID, requestID); err != nil {
+				return err
+			}
+			if _, err := txs.exec(txCtx, `UPDATE tenant_dsar_phases SET status = 'blocked', updated_at = ?
+				WHERE tenant_id = ? AND request_id = ? AND status IN ('pending','running')`, now, scope.TenantID, requestID); err != nil {
+				return err
+			}
 			blockedByHold = true
 			return nil
 		}
@@ -671,7 +768,7 @@ func (s *Store) ProcessTenantDSARErasureBatch(ctx context.Context, scope models.
 		return err
 	})
 	if err == nil && blockedByHold {
-		err = fmt.Errorf("process tenant DSAR erasure: active legal hold")
+		err = storeport.ErrTenantDSARBlocked
 	}
 	return completed, affected, err
 }

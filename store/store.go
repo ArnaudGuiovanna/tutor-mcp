@@ -35,6 +35,10 @@ var ErrInvalidLoginChallenge = errors.New("invalid login challenge")
 // ErrInvalidPrincipal deliberately collapses unknown, inactive, stale-version
 // and role-mismatched memberships at the bearer boundary.
 var ErrInvalidPrincipal = errors.New("invalid tenant principal")
+
+// ErrTenantDSARBlocked is a durable administrative suspension, not a
+// technical failure. The job remains parked until an authorized resume.
+var ErrTenantDSARBlocked = errors.New("tenant DSAR is blocked by an active legal hold")
 var ErrAmbiguousIdentity = errors.New("ambiguous global identity")
 
 // ErrAccountExists reports that an address already has a local account, whose
