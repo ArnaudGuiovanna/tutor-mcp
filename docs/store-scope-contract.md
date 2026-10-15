@@ -63,3 +63,35 @@ MCP client can neither reach nor probe another learner's domain inside a
 tenant, where row-level security does not separate learners. It runs in the
 caller's tenant transaction like the legacy teaching API it replaces at those
 call sites, and `GetDomainByID` remains only for trusted system paths.
+
+`WithTenantReadTx` shares the same explicit tenant boundary as `WithTenantTx`.
+The 26 tools in the reviewed `readOnlyTools` map use it; an unfamiliar `get_`
+name does not grant read-only routing. `get_curriculum_snapshot`,
+`get_memory_state`, `get_next_activity` and `get_metacognitive_mirror` retain
+writer transactions because their getters can persist state or queue work.
+Nested calls inherit the current transaction, scope and root identity. A
+writer wrapper inside a read transaction cannot promote it; a read wrapper
+inside a writer transaction does not split its atomic snapshot or commit.
+
+After SQLite migrations, `NewSQLiteStore(writer, path)` opens an independent
+four-connection reader pool for the same existing file. The writer retains
+one connection and `BEGIN IMMEDIATE`. Readers use deferred transactions with
+`mode=ro` and `query_only=ON`; both ordinary DML and `INSERT ... RETURNING`
+are rejected by SQLite. WAL lets a writer commit while readers retain their
+earlier snapshots. The constructor takes writer ownership on success and
+`Store.Close` closes both pools. HTTP, local/hobby profiles and memory-index
+use this constructor. Constructing a Store does not run migrations.
+
+Embedders using `NewStore(rawDB)` without a separate reader retain a protected
+compatibility path: one connection is pinned, its previous `query_only` value
+is saved, the guard is enabled before a deferred transaction, and restored
+after the transaction ends. Restoration uses an independent bounded context;
+if it fails, the connection is discarded. This path shares writer-pool capacity
+and provides no extra read concurrency. Prefer the configured constructor for
+file-backed SQLite runtimes.
+
+PostgreSQL uses its existing pool once, with `TxOptions.ReadOnly=true` for
+new read transactions and the same transaction-local tenant/user/membership
+settings and RLS. Pool telemetry labels physical pools as `writer` and `reader`
+for configured SQLite, or `shared` for PostgreSQL and rawDB compatibility;
+it never counts the shared PostgreSQL pool twice.

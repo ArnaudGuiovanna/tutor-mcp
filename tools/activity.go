@@ -509,13 +509,20 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 			}
 		}
 		diagnosticsMs := time.Since(diagnosticsStart).Milliseconds()
+		goalRelevanceStatus := buildGoalRelevanceStatus(domain)
+		episodicContext, olmSnapshot, narrativeErr := loadEpisodicContextForActivity(
+			ctx, deps, learnerID, domain, domainStates, activity.Concept, alerts, now, evidenceSnapshot,
+		)
+		if narrativeErr != nil {
+			component := "narrative_context"
+			if errors.Is(narrativeErr, memory.ErrSessionIndexIncomplete) {
+				component = "session_narrative_index"
+			}
+			markDegraded(component, narrativeErr)
+		}
 		if len(degradedComponents) > 0 {
 			extra["degraded_components"] = degradedComponents
 		}
-		goalRelevanceStatus := buildGoalRelevanceStatus(domain)
-		episodicContext, olmSnapshot := loadEpisodicContextForActivity(
-			ctx, deps, learnerID, domain, domainStates, activity.Concept, alerts, now, evidenceSnapshot,
-		)
 		contract := buildPedagogicalContract(activity, intent, evidenceQuality, uncertainty, typedTransferProfile, goalRelevanceStatus, extra["fade_params"], episodicContext, activeMisconceptionCount, olmSnapshot)
 		if err := freezePedagogicalDecision(ctx, deps, learnerID, learningSession.ID, domain, &contract, activity, now,
 			map[string]any{"concept_state": selectedState, "evidence_quality": evidenceQuality, "uncertainty": uncertainty, "intent": intent}); err != nil {
@@ -592,9 +599,9 @@ func loadEpisodicContextForActivity(
 	alerts []models.Alert,
 	now time.Time,
 	evidenceSnapshot *engine.EvidenceSnapshot,
-) (*memory.EpisodicContext, *engine.OLMSnapshot) {
+) (*memory.EpisodicContext, *engine.OLMSnapshot, error) {
 	if !memory.Enabled() {
-		return nil, nil
+		return nil, nil, nil
 	}
 	var olmSnapshot *engine.OLMSnapshot
 	if snap, err := engine.BuildOLMSnapshotAtWithEvidence(
@@ -616,9 +623,9 @@ func loadEpisodicContextForActivity(
 		if deps.Logger != nil {
 			deps.Logger.Warn("get_next_activity: episodic context load failed", "err", err, "learner", learnerID)
 		}
-		return nil, olmSnapshot
+		return nil, olmSnapshot, err
 	}
-	return ec, olmSnapshot
+	return ec, olmSnapshot, nil
 }
 
 func buildMemoryConceptBuckets(domain *models.Domain, states []*models.ConceptState) map[string]string {

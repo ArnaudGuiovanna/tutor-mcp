@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -291,17 +292,20 @@ func (s *Store) PrepareTenantWebhook(ctx context.Context, scope models.TenantSco
 		if err := txs.queryRow(txCtx, `SELECT endpoint_url, event_types_json, secret_ciphertext, secret_version
 			FROM tenant_integrations WHERE tenant_id = ? AND id = ? AND status = 'active'`,
 			scope.TenantID, integrationID).Scan(&endpoint, &eventsJSON, &ciphertext, &version); err != nil {
-			return fmt.Errorf("prepare tenant webhook: integration not found")
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("prepare tenant webhook: %w", storeport.ErrWebhookPermanent)
+			}
+			return fmt.Errorf("prepare tenant webhook: query: %w", err)
 		}
 		if err := s.validateTenantIntegrationURL(endpoint); err != nil {
-			return fmt.Errorf("prepare tenant webhook: stored endpoint rejected: %w", err)
+			return fmt.Errorf("prepare tenant webhook: stored endpoint rejected: %w", storeport.ErrWebhookPermanent)
 		}
 		var events []string
 		if err := json.Unmarshal([]byte(eventsJSON), &events); err != nil {
-			return err
+			return fmt.Errorf("prepare tenant webhook: invalid subscription: %w", storeport.ErrWebhookPermanent)
 		}
 		if index := sort.SearchStrings(events, eventType); index >= len(events) || events[index] != eventType {
-			return fmt.Errorf("prepare tenant webhook: event type is not subscribed")
+			return fmt.Errorf("prepare tenant webhook: event type is not subscribed: %w", storeport.ErrWebhookPermanent)
 		}
 		secret, err := txs.secretKeyring.decryptWithAAD(ciphertext, tenantIntegrationAAD(scope.TenantID, integrationID, version))
 		if err != nil {

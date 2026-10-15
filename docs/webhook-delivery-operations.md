@@ -143,9 +143,14 @@ Le message signé est la concaténation exacte
 `timestamp + "." + event_id + "." + corps brut`. Le receveur compare le HMAC
 en temps constant, refuse un timestamp hors de sa fenêtre anti-replay, puis
 insère `event_id` sous contrainte unique avant d'appliquer l'effet. Il doit
-retourner 2xx pour un replay déjà appliqué. Le worker borne la réponse à 64 KiB,
-l'appel à 12 secondes et les retries à huit tentatives exponentielles ; une
-livraison acceptée est retrouvée après crash sans nouvel envoi.
+retourner 2xx pour un replay déjà appliqué. Le worker détermine l'acceptation
+par le statut HTTP sans lire le corps de réponse, borne l'appel à 12 secondes
+et les retries techniques à huit tentatives avec backoff et jitter. Les
+statuts permanents passent immédiatement en DLQ ; `Retry-After` est pris en
+compte sans bloquer un worker (voir [la politique SaaS](saas-runtime-operations.md#workers-webhooks-et-rgpd)).
+Job et livraison acceptée sont validés atomiquement, sous fencing de la
+tentative. Un succès déjà durable est retrouvé après crash sans nouvel envoi ;
+une réponse perdue avant commit conserve le contrat at-least-once.
 
 La rotation produit un secret aléatoire affiché une fois. Le receveur accepte
 la nouvelle version et la précédente pendant une fenêtre choisie entre cinq

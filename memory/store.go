@@ -229,6 +229,10 @@ func Write(req WriteRequest) error {
 }
 
 func WriteContext(ctx context.Context, req WriteRequest) error {
+	return writeNarrativeContext(ctx, req, atomicWrite)
+}
+
+func writeNarrativeContext(ctx context.Context, req WriteRequest, writeContent func(string, string) error) error {
 	if !Enabled() {
 		return errors.New("memory: not_enabled")
 	}
@@ -304,7 +308,38 @@ func WriteContext(ctx context.Context, req WriteRequest) error {
 	if err := enforceWriteQuota(base, path, int64(len(next)), limits); err != nil {
 		return err
 	}
-	return atomicWrite(path, next)
+	var sessionIndex fileSessionIndex
+	var sessionIndexReady bool
+	var sessionDomain string
+	if req.Scope == ScopeSession {
+		sessionDomain, err = SessionDomainID(next)
+		if err != nil {
+			return err
+		}
+		sessionIndex, err = loadFileSessionIndex(ctx, base, false)
+		sessionIndexReady = err == nil
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err := dirtyFileSessionIndex(base); err != nil {
+			return err
+		}
+	}
+	writeErr := writeContent(path, next)
+	if req.Scope == ScopeSession && sessionIndexReady && writeErr == nil {
+		info, indexErr := os.Stat(path)
+		if indexErr == nil {
+			key := req.Timestamp.UTC().Format(sessionFilenameLayout)
+			sessionIndex.Entries[key] = fileSessionEntry{DomainDigest: SessionDomainDigest(sessionDomain), Size: info.Size(), Modified: info.ModTime().UnixNano(), info: info}
+			indexErr = persistFileSessionIndex(base, sessionIndex)
+		}
+		if indexErr != nil {
+			// The user's content is already visible. Retain the dirty marker
+			// and report a committed write instead of inviting append replay.
+			return &CommittedWriteError{Err: errors.Join(writeErr, indexErr)}
+		}
+	}
+	return writeErr
 }
 
 func enforceWriteQuota(base, target string, nextSize int64, limits Limits) error {
@@ -691,6 +726,10 @@ func listMarkdownKeys(learnerID, dir string, unescape bool) ([]string, error) {
 }
 
 func atomicWrite(path, content string) error {
+	return atomicWriteWithParentSync(path, content, syncNarrativeDirectory)
+}
+
+func atomicWriteWithParentSync(path, content string, syncParent func(string) error) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
 	if err != nil {
 		return fmt.Errorf("memory: create temp: %w", err)
@@ -715,16 +754,23 @@ func atomicWrite(path, content string) error {
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("memory: rename temp: %w", err)
 	}
-	parent, err := os.Open(filepath.Dir(path))
+	if err := syncParent(filepath.Dir(path)); err != nil {
+		return &CommittedWriteError{Err: err}
+	}
+	return nil
+}
+
+func syncNarrativeDirectory(path string) error {
+	parent, err := os.Open(path)
 	if err != nil {
-		return &CommittedWriteError{Err: fmt.Errorf("memory: open parent for sync: %w", err)}
+		return fmt.Errorf("memory: open parent for sync: %w", err)
 	}
 	if err := parent.Sync(); err != nil {
 		_ = parent.Close()
-		return &CommittedWriteError{Err: fmt.Errorf("memory: sync parent: %w", err)}
+		return fmt.Errorf("memory: sync parent: %w", err)
 	}
 	if err := parent.Close(); err != nil {
-		return &CommittedWriteError{Err: fmt.Errorf("memory: close parent: %w", err)}
+		return fmt.Errorf("memory: close parent: %w", err)
 	}
 	return nil
 }

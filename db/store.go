@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"tutor-mcp/algorithms"
+	"tutor-mcp/memory"
 	"tutor-mcp/models"
 	"tutor-mcp/store"
 	"tutor-mcp/webhookurl"
@@ -51,6 +52,7 @@ const (
 type Store struct {
 	db                      sqlExecutor // *sql.DB normally; *sql.Tx inside WithTx — query methods use this unchanged
 	root                    *sql.DB     // the real pool. For WithTx/Ping/Close/Migrate + internal BeginTx. nil in a tx-scoped Store.
+	reader                  *sql.DB     // optional distinct SQLite read-only pool, owned by the root Store
 	dialect                 Dialect     // SQL flavor; propagated into tx-scoped Stores by WithTx.
 	secretKeyring           *IntegrationSecretKeyring
 	tenantScope             *models.TenantScope
@@ -111,8 +113,14 @@ func (s *Store) SetHostLLMDemonstrationPolicy(enabled bool) {
 // Ping verifies a live connection to the database.
 func (s *Store) Ping(ctx context.Context) error { return s.root.PingContext(ctx) }
 
-// Close closes the underlying connection pool.
-func (s *Store) Close() error { return s.root.Close() }
+// Close closes both owned pools. PostgreSQL uses only the shared root pool.
+func (s *Store) Close() error {
+	var readErr error
+	if s.reader != nil && s.reader != s.root {
+		readErr = s.reader.Close()
+	}
+	return errors.Join(readErr, s.root.Close())
+}
 
 // Migrate runs the schema migrations. (Wraps the package-level Migrate.)
 func (s *Store) Migrate(ctx context.Context) error { return MigrateContext(ctx, s.root) }
@@ -252,10 +260,15 @@ func (f *flexTime) parse(s string) error {
 // for read-modify-write patterns where concurrent goroutines would otherwise
 // both read a stale snapshot and one overwrite the other on commit (R008).
 func (s *Store) WithTx(ctx context.Context, fn func(s store.Store) error) error {
-	if scoped, ok := ctx.Value(tenantTransactionContextKey{}).(*tenantTransactionContext); ok &&
-		s.root != nil && scoped.root == s.root {
+	if scoped, ok := ctx.Value(tenantTransactionContextKey{}).(*tenantTransactionContext); ok {
+		if !s.matchesTenantTransaction(scoped) {
+			return fmt.Errorf("transaction: nested store mismatch")
+		}
 		copyScope := scoped.scope
 		return fn(&Store{db: scoped.tx, root: nil, dialect: s.dialect, secretKeyring: s.secretKeyring, hostLLMDemonstrates: s.hostLLMDemonstrates, tenantScope: &copyScope})
+	}
+	if s.root == nil {
+		return fn(s)
 	}
 	// Isolation differs by dialect on purpose:
 	//   SQLite   — SERIALIZABLE maps to BEGIN IMMEDIATE (DSN _txlock=immediate):
@@ -290,27 +303,61 @@ func (s *Store) WithTx(ctx context.Context, fn func(s store.Store) error) error 
 // cancellation and connection-pool reuse cannot leak a tenant to the next
 // request. SQLite receives the same typed scope for compatibility tests.
 func (s *Store) WithTenantTx(ctx context.Context, scope models.TenantScope, fn func(context.Context, store.Store) error) error {
+	return s.withTenantTransaction(ctx, scope, false, fn)
+}
+
+// WithTenantReadTx opens a read-only transaction, or inherits an existing
+// transaction unchanged. Captured root Store calls retain the writer root's
+// identity even when their executor is a transaction from the reader pool.
+func (s *Store) WithTenantReadTx(ctx context.Context, scope models.TenantScope, fn func(context.Context, store.Store) error) error {
+	return s.withTenantTransaction(ctx, scope, true, fn)
+}
+
+func (s *Store) withTenantTransaction(ctx context.Context, scope models.TenantScope, readOnly bool, fn func(context.Context, store.Store) error) (resultErr error) {
 	if err := scope.Validate(); err != nil {
 		return fmt.Errorf("tenant transaction: %w", err)
 	}
 	if scoped, ok := ctx.Value(tenantTransactionContextKey{}).(*tenantTransactionContext); ok {
-		if s.root == nil || scoped.root != s.root || scoped.scope != scope {
+		matchesRoot := s.root != nil && scoped.root == s.root
+		matchesScoped := s.root == nil && s.db == scoped.tx && s.tenantScope != nil && *s.tenantScope == scope
+		if (!matchesRoot && !matchesScoped) || scoped.scope != scope {
 			return fmt.Errorf("tenant transaction: nested scope mismatch")
+		}
+		ctx, err := memory.WithNarrativeTenantScope(ctx, scope)
+		if err != nil {
+			return err
 		}
 		copyScope := scope
 		return fn(ctx, &Store{db: scoped.tx, root: nil, dialect: s.dialect, secretKeyring: s.secretKeyring, hostLLMDemonstrates: s.hostLLMDemonstrates, tenantScope: &copyScope})
 	}
 	if s.root == nil {
-		if s.tenantScope == nil || *s.tenantScope != scope {
-			return fmt.Errorf("tenant transaction: nested scope mismatch")
-		}
-		return fn(ctx, s)
+		// The original transaction context also carries its root identity for
+		// captured root-backend calls. Fabricating only a scope here can make
+		// those calls open a second transaction and deadlock a one-slot pool.
+		return fmt.Errorf("tenant transaction: originating context is required")
 	}
 	iso := sql.LevelSerializable
 	if s.dialect == DialectPostgres {
 		iso = sql.LevelReadCommitted
 	}
-	tx, err := s.root.BeginTx(ctx, &sql.TxOptions{Isolation: iso})
+	pool := s.root
+	if readOnly && s.reader != nil {
+		pool = s.reader
+	}
+	var tx *sql.Tx
+	var err error
+	if readOnly && s.dialect == DialectSQLite && s.reader == nil {
+		// Embedders using NewStore/raw DB keep a safe, serialized fallback.
+		// Pin query_only to this connection and restore it before pool reuse;
+		// TxOptions.ReadOnly alone is not enforced by the SQLite driver.
+		var cleanup func() error
+		tx, cleanup, err = beginSQLiteReadFallback(ctx, pool)
+		if err == nil {
+			defer func() { resultErr = errors.Join(resultErr, cleanup()) }()
+		}
+	} else {
+		tx, err = pool.BeginTx(ctx, &sql.TxOptions{Isolation: iso, ReadOnly: readOnly})
+	}
 	if err != nil {
 		return fmt.Errorf("tenant transaction: begin: %w", err)
 	}
@@ -329,6 +376,10 @@ func (s *Store) WithTenantTx(ctx context.Context, scope models.TenantScope, fn f
 	copyScope := scope
 	txStore := &Store{db: tx, root: nil, dialect: s.dialect, secretKeyring: s.secretKeyring, hostLLMDemonstrates: s.hostLLMDemonstrates, tenantScope: &copyScope}
 	txCtx := context.WithValue(ctx, tenantTransactionContextKey{}, &tenantTransactionContext{root: s.root, tx: tx, scope: scope})
+	txCtx, err = memory.WithNarrativeTenantScope(txCtx, scope)
+	if err != nil {
+		return err
+	}
 	if err := fn(txCtx, txStore); err != nil {
 		return err
 	}
@@ -346,8 +397,10 @@ func (s *Store) WithTenantTx(ctx context.Context, scope models.TenantScope, fn f
 // inside WithTx instead of dereferencing a nil root. In that nested case the
 // outer WithTx owns commit/rollback, so inTx neither commits nor rolls back.
 func (s *Store) inTx(ctx context.Context, opts *sql.TxOptions, fn func(txs *Store) error) error {
-	if scoped, ok := ctx.Value(tenantTransactionContextKey{}).(*tenantTransactionContext); ok &&
-		s.root != nil && scoped.root == s.root {
+	if scoped, ok := ctx.Value(tenantTransactionContextKey{}).(*tenantTransactionContext); ok {
+		if !s.matchesTenantTransaction(scoped) {
+			return fmt.Errorf("transaction: nested store mismatch")
+		}
 		copyScope := scoped.scope
 		return fn(&Store{db: scoped.tx, root: nil, dialect: s.dialect, secretKeyring: s.secretKeyring, hostLLMDemonstrates: s.hostLLMDemonstrates, tenantScope: &copyScope})
 	}
@@ -366,6 +419,11 @@ func (s *Store) inTx(ctx context.Context, opts *sql.TxOptions, fn func(txs *Stor
 		return err
 	}
 	return tx.Commit()
+}
+
+func (s *Store) matchesTenantTransaction(scoped *tenantTransactionContext) bool {
+	return (s.root != nil && s.root == scoped.root) ||
+		(s.root == nil && s.db == scoped.tx && s.tenantScope != nil && *s.tenantScope == scoped.scope)
 }
 
 // GetConceptStateForUpdate reads the concept state with a row lock so a

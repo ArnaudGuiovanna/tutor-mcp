@@ -97,14 +97,45 @@ refusée si `used + reserved` dépasse la nouvelle limite.
 Les mutations productrices et l'outbox partagent une transaction. Le relay
 crée des jobs idempotents par intégration ; claims, heartbeats, backoff, limite
 de tentatives et DLQ sont durables. Une perte de nœud ne requiert pas de sticky
-session. Sur arrêt, retirer le worker du scheduler, laisser finir les appels
-HTTP bornés à 12 secondes, puis attendre l'expiration des leases restants.
+session. Le consommateur SaaS partage un coordinateur entre fenêtres cron et
+retries : quatre workers, un job en vol par tenant et processus, une page de
+100 scopes au maximum et quatre résultats en mémoire. La capacité est réservée
+avant le claim. Chaque passage visite les nouveaux scopes avant de revisiter
+les tenants terminés ; il ne rejoint pas tous les appels HTTP lents à sa fin.
+Les scans vides attendent une fin de travail en vol avant de recommencer.
+Les transactions métier restent courtes et tenant-scoped, hors HTTP.
+
+Un job a un contexte de 45 secondes, inférieur au bail de deux minutes ; le
+claim SQL est borné séparément à 20 secondes et HTTP à 12 secondes. Il n'existe
+pas de plafond global de jobs, de passages ou de durée sans curseur durable :
+le drain peut rester actif sous demande soutenue, avec heartbeat du
+scheduled-run. Les nouvelles fenêtres sont alors sans effet ; le retry SaaS
+dispose d'un unique runner suivi pour ne pas bloquer les autres retries.
+Sur arrêt, le worker annule scans, SQL et HTTP, puis joint ses workers et le
+cycle complet du scheduled-run avant fermeture du Store. Un backend qui
+n'honore pas l'annulation peut prolonger cette jointure au-delà du budget
+historique de 25 secondes des autres tâches cron. Les baux laissés en vol
+après annulation se récupèrent à expiration.
 
 Les webhooks SaaS sont signés sur
 `timestamp + "." + event_id + "." + payload` avec HMAC-SHA-256. Le destinataire
 doit vérifier `X-Tutor-Timestamp`, `X-Tutor-Event-ID`,
 `X-Tutor-Secret-Version` et `X-Tutor-Signature`, rejeter une horloge trop
 ancienne et dédupliquer durablement `event_id`. Le contrat est at-least-once.
+Le même identifiant est conservé entre tentatives. Un statut 2xx signifie
+acceptation : le corps de réponse n'est pas lu ni haché et ne peut provoquer
+un nouvel envoi. Les erreurs transport ambiguës, 408, 425, 429 et 5xx sont
+réessayées ; les autres statuts, payloads invalides et intégrations révoquées
+ou interdites passent immédiatement en DLQ. Une panne SQL ou une clé retenue
+temporairement indisponible reste une erreur technique réessayable.
+Le backoff exponentiel reçoit un jitter de ±25 %, plafonné à 64 minutes.
+`Retry-After` accepte secondes ou date HTTP, avec borne de 24 heures, sans
+débordement ; la prochaine échéance est le maximum du backoff avec jitter et
+de cette date. Aucun sommeil de retry n'occupe un worker. Job et livraison se
+finalisent dans une transaction indépendante, clôturée avant retour, sous
+CAS du propriétaire, numéro de tentative et bail encore vivant. Un succès
+déjà durable d'une tentative précédente acquitte le job sans réécrire sa preuve.
+
 La rotation garde l'ancienne version entre 5 minutes et 7 jours selon la
 fenêtre choisie. Les notifications Discord directes conservent leur procédure
 de quarantaine distincte dans
@@ -112,7 +143,11 @@ de quarantaine distincte dans
 
 Une demande DSAR autorisée crée un job `tenant_dsar`. Les exports sont
 manifestés et les effacements avancent par phases/lots ; un legal hold place la
-demande en `blocked`. Après levée documentée du hold, `ResumeTenantDSAR`
+demande en `blocked`. Un quantum sain d'effacement traite huit lots puis
+réenfile une continuation sans consommer de tentative technique ; une demande
+volumineuse peut donc dépasser 32 quanta. Une vraie erreur conserve la
+consommation normale du budget de retry. Le hold gare le job sans consommer
+continuellement ce budget. Après levée documentée du hold, `ResumeTenantDSAR`
 réenfile la même demande. Toute restauration antérieure à un effacement impose
 une réconciliation DSAR/rétention avant retour au trafic.
 

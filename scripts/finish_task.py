@@ -162,7 +162,7 @@ class Publisher:
     def verify(self):
         script = self.root / "scripts" / "verify-task.sh"
         result = subprocess.run(["bash", str(script)], cwd=self.root,
-                                stdout=sys.stderr, stderr=sys.stderr, timeout=480, check=False)
+                                stdout=sys.stderr, stderr=sys.stderr, timeout=900, check=False)
         if result.returncode:
             raise FinishError("task verification failed; nothing new was published")
 

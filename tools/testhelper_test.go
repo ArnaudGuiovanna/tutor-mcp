@@ -52,12 +52,16 @@ func setupToolsTest(t *testing.T) (*db.Store, *Deps) {
 	if err := os.WriteFile(dbPath, template, 0o600); err != nil {
 		t.Fatalf("copy tools test database template: %v", err)
 	}
-	raw, err := sql.Open("sqlite", dbPath)
+	raw, err := db.OpenDB(dbPath)
 	if err != nil {
 		t.Fatalf("open tools test database: %v", err)
 	}
-	t.Cleanup(func() { raw.Close() })
-	store := db.NewStore(raw)
+	store, err := db.NewSQLiteStore(raw, dbPath)
+	if err != nil {
+		_ = raw.Close()
+		t.Fatalf("open tools reader pool: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
 	deps := &Deps{
 		Store:  store,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),

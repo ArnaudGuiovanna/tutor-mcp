@@ -5,10 +5,13 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"tutor-mcp/auth"
+	"tutor-mcp/db"
 	"tutor-mcp/engine"
 	"tutor-mcp/memory"
 	"tutor-mcp/models"
@@ -40,6 +43,11 @@ func runLocal(options commandOptions, logger *slog.Logger) error {
 		return err
 	}
 	defer store.Close()
+	unregisterPoolMetrics, err := db.RegisterStoreDBPools(store)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = unregisterPoolMetrics() }()
 	hostLLMDemonstrates, err := onOffEnv("ASSESSMENT_HOST_LLM_DEMONSTRATES", true)
 	if err != nil {
 		return err
@@ -66,6 +74,19 @@ func runLocal(options commandOptions, logger *slog.Logger) error {
 	}
 	if err = memory.ConfigureLimits(limits); err != nil {
 		return err
+	}
+	if memory.Enabled() {
+		// A local profile imports its own rollback tree, never another profile's
+		// default home-directory memory. An explicit legacy root remains supported.
+		importRoot := strings.TrimSpace(os.Getenv("TUTOR_MCP_MEMORY_ROOT"))
+		if importRoot == "" {
+			importRoot = filepath.Join(dir, "memory")
+		}
+		if _, err := memory.BackfillLocalNarratives(ctx, store, importRoot); err != nil {
+			return err
+		}
+		stopRepair := startNarrativeIndexRepair(ctx, store, logger, true, 30*time.Second)
+		defer stopRepair()
 	}
 	server := newTutorServer(&tools.Deps{Store: store, Logger: logger, LocalStdio: true}, defaultMCPToolCallTimeout)
 	// The distributed scheduler's durable lease protocol also works on SQLite.

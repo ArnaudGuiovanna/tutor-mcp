@@ -39,6 +39,10 @@ type Scheduler struct {
 	// tenant integrations never follow redirects: the signed destination is
 	// immutable for one delivery attempt.
 	integrationClient *http.Client
+	saasDrain         *saasDrainState
+	saasNow           func() time.Time
+	saasJitter        func() float64
+	stopSignal        *sync.Once
 
 	// stopTimeout bounds how long Stop() waits for in-flight cron jobs to
 	// drain before forcing shutdown. Defaults to 25s (5s of margin within
@@ -79,6 +83,9 @@ type Scheduler struct {
 	// tenantDBPhase forbids network dispatch from a child holding an RLS
 	// transaction, including future jobs accidentally registered that way.
 	tenantDBPhase bool
+	// Constructor identity survives tenant child copies. Nil tenantStore is
+	// also used by institutional children and must never imply legacy scope.
+	legacyNarrativeScope bool
 }
 
 type tenantSchedulerStore interface {
@@ -137,7 +144,8 @@ func NewScheduler(store storeport.Store, logger *slog.Logger) *Scheduler {
 	// learner could DoS the entire tutor at scheduled job times. See #35.
 	cl := slogCronLogger{l: logger}
 	return &Scheduler{
-		store: store,
+		store:                store,
+		legacyNarrativeScope: true,
 		cron: cron.New(cron.WithChain(
 			cron.Recover(cl),
 			cron.SkipIfStillRunning(cl),
@@ -164,6 +172,8 @@ func NewScheduler(store storeport.Store, logger *slog.Logger) *Scheduler {
 		stopTimeout: defaultStopTimeout,
 		stopCh:      make(chan struct{}),
 		owner:       newSchedulerOwner(),
+		saasDrain:   newSaaSDrainState(),
+		stopSignal:  &sync.Once{},
 
 		jobLeaseDuration:      defaultJobLeaseDuration,
 		jobHeartbeatInterval:  defaultJobHeartbeatInterval,
@@ -428,6 +438,7 @@ func NewDistributedScheduler(store storeport.Store, logger *slog.Logger) *Schedu
 // never owns tables and never receives BYPASSRLS.
 func NewTenantDistributedScheduler(store storeport.Store, logger *slog.Logger, actorID string) *Scheduler {
 	s := NewDistributedScheduler(store, logger)
+	s.legacyNarrativeScope = false
 	tenantStore, ok := store.(tenantSchedulerStore)
 	if ok {
 		s.tenantStore = tenantStore
@@ -624,6 +635,24 @@ func (s *Scheduler) leaseConfig() (time.Duration, time.Duration, time.Duration, 
 // function. Panics are persisted as retryable failures and then re-panicked so
 // cron.Recover retains the process-safety behavior and stack fingerprinting.
 func (s *Scheduler) runDistributedJob(name, windowKey string, fn scheduledJobFunc) {
+	runCtx := context.Background()
+	if name == "saas_async_jobs" && s.saasDrain != nil {
+		s.saasDrain.mu.Lock()
+		if s.saasDrain.stopped || s.saasDrain.scheduledRunning || s.saasDrain.running {
+			s.saasDrain.mu.Unlock()
+			return
+		}
+		s.saasDrain.runs.Add(1)
+		s.saasDrain.scheduledRunning = true
+		s.saasDrain.mu.Unlock()
+		defer func() {
+			s.saasDrain.mu.Lock()
+			s.saasDrain.scheduledRunning = false
+			s.saasDrain.mu.Unlock()
+			s.saasDrain.runs.Done()
+		}()
+		runCtx = s.saasDrain.ctx
+	}
 	lease, heartbeatEvery, retryDelay, maxAttempts, _ := s.leaseConfig()
 	if s.owner == "" {
 		s.owner = newSchedulerOwner()
@@ -632,7 +661,7 @@ func (s *Scheduler) runDistributedJob(name, windowKey string, fn scheduledJobFun
 	// same process completing a lease that this process has since reacquired.
 	leaseOwner := s.owner + "." + newSchedulerOwner()
 	now := time.Now().UTC()
-	claimCtx, claimCancel := context.WithTimeout(context.Background(), schedulerDBTimeout)
+	claimCtx, claimCancel := context.WithTimeout(runCtx, schedulerDBTimeout)
 	acquired, err := s.store.AcquireJobRunLease(
 		claimCtx, name, windowKey, leaseOwner, now, lease, maxAttempts,
 	)
@@ -658,7 +687,7 @@ func (s *Scheduler) runDistributedJob(name, windowKey string, fn scheduledJobFun
 			case <-stopHeartbeat:
 				return
 			case tick := <-ticker.C:
-				renewCtx, renewCancel := context.WithTimeout(context.Background(), schedulerDBTimeout)
+				renewCtx, renewCancel := context.WithTimeout(runCtx, schedulerDBTimeout)
 				renewed, renewErr := s.store.RenewJobRunLease(
 					renewCtx, name, windowKey, leaseOwner, tick.UTC(), lease,
 				)
@@ -685,7 +714,7 @@ func (s *Scheduler) runDistributedJob(name, windowKey string, fn scheduledJobFun
 		finishedAt := time.Now().UTC()
 
 		if panicValue != nil {
-			failCtx, failCancel := context.WithTimeout(context.Background(), schedulerDBTimeout)
+			failCtx, failCancel := context.WithTimeout(runCtx, schedulerDBTimeout)
 			accepted, failErr := s.store.FailJobRun(
 				failCtx, name, windowKey, leaseOwner, finishedAt,
 				finishedAt.Add(retryDelay), "panic_recovered",
@@ -706,7 +735,7 @@ func (s *Scheduler) runDistributedJob(name, windowKey string, fn scheduledJobFun
 			return
 		}
 		if jobResult.failed() {
-			failCtx, failCancel := context.WithTimeout(context.Background(), schedulerDBTimeout)
+			failCtx, failCancel := context.WithTimeout(runCtx, schedulerDBTimeout)
 			accepted, failErr := s.store.FailJobRun(
 				failCtx, name, windowKey, leaseOwner, finishedAt,
 				finishedAt.Add(retryDelay), jobResult.FailureCode,
@@ -719,7 +748,7 @@ func (s *Scheduler) runDistributedJob(name, windowKey string, fn scheduledJobFun
 			}
 			return
 		}
-		completeCtx, completeCancel := context.WithTimeout(context.Background(), schedulerDBTimeout)
+		completeCtx, completeCancel := context.WithTimeout(runCtx, schedulerDBTimeout)
 		completed, completeErr := s.store.CompleteJobRun(
 			completeCtx, name, windowKey, leaseOwner, finishedAt,
 		)
@@ -752,6 +781,10 @@ func (s *Scheduler) retryRunnableJobs() {
 	for _, ref := range refs {
 		fn, ok := s.registeredDistributed[ref.Name]
 		if ok {
+			if ref.Name == "saas_async_jobs" {
+				s.launchSaaSRetry(ref.WindowKey, fn)
+				continue
+			}
 			s.runDistributedJob(ref.Name, ref.WindowKey, fn)
 			continue
 		}
@@ -904,10 +937,7 @@ func (s *Scheduler) Start() error {
 			})); err != nil {
 			return fmt.Errorf("add SaaS outbox relay: %w", err)
 		}
-		if err := s.schedule("saas_async_jobs", "*/1 * * * *", time.Minute,
-			s.scheduledIndependentTenantJob("saas_async_jobs", func(child *Scheduler) scheduledJobResult {
-				return child.consumeSaaSJobs()
-			})); err != nil {
+		if err := s.schedule("saas_async_jobs", "*/1 * * * *", time.Minute, s.consumeSaaSJobs); err != nil {
 			return fmt.Errorf("add SaaS async consumer: %w", err)
 		}
 		if err := s.schedule("institution_statistics", "7 * * * *", time.Hour,
@@ -940,8 +970,9 @@ func (s *Scheduler) Start() error {
 	return nil
 }
 
-// Stop halts the cron scheduler and waits for any in-flight jobs to drain
-// before returning, capped by s.stopTimeout (default 25s).
+// Stop cancels and joins the SaaS consumer before closing any database. Its
+// drivers/transports must honor context cancellation; a non-cooperative backend
+// can delay this join. The subsequent legacy cron drain has a 25s default cap.
 //
 // robfig/cron/v3's Stop() returns a context.Context that is cancelled only
 // once all running jobs have finished. Discarding that context (the previous
@@ -950,16 +981,25 @@ func (s *Scheduler) Start() error {
 // producing "sql: database is closed" mid-loop and silent data loss on
 // webhook_message_queue + scheduled_alerts. See issue #123.
 func (s *Scheduler) Stop() {
+	// Cancel first, then join even a drain invoked outside cron. No database
+	// or HTTP work owned by this consumer may survive Store.Close.
+	if s.saasDrain != nil {
+		s.saasDrain.stop()
+	}
 	// Signal in-flight webhook backoff sleeps to abort before we start the
 	// drain timer, so a job parked in doWithRetry's exponential schedule
 	// doesn't burn the Stop() budget waiting out 0+1+5+25s. Guard against a
 	// double Stop() (and a nil stopCh from test fixtures).
 	if s.stopCh != nil {
-		select {
-		case <-s.stopCh:
-			// already closed
-		default:
-			close(s.stopCh)
+		if s.stopSignal != nil {
+			s.stopSignal.Do(func() { close(s.stopCh) })
+		} else {
+			select {
+			case <-s.stopCh:
+				// already closed
+			default:
+				close(s.stopCh)
+			}
 		}
 	}
 
@@ -1825,7 +1865,7 @@ func (s *Scheduler) prepareOLMTarget(ctx context.Context, target models.WebhookD
 		}
 		var memCtx *memory.EpisodicContext
 		if memory.Enabled() && snap.FocusReason == "next frontier" {
-			if ctx, err := memory.LoadContextForDomainContext(ctx, learner.ID, d.ID, snap.FocusConcept, &memory.OLMView{FocusConcept: snap.FocusConcept}, nil); err == nil {
+			if ctx, err := s.loadOLMNarrativeContext(ctx, learner.ID, d.ID, snap.FocusConcept); err == nil {
 				memCtx = ctx
 			} else {
 				failed = true
@@ -1968,6 +2008,25 @@ func (s *Scheduler) prepareOLMTarget(ctx context.Context, target models.WebhookD
 		}
 	}
 	return delivery, failed
+}
+
+func (s *Scheduler) loadOLMNarrativeContext(ctx context.Context, learnerID, domainID, concept string) (*memory.EpisodicContext, error) {
+	load := func(loadCtx context.Context) (*memory.EpisodicContext, error) {
+		return memory.LoadContextForDomainContext(loadCtx, learnerID, domainID, concept, &memory.OLMView{FocusConcept: concept}, nil)
+	}
+	_, alreadyScoped := memory.NarrativeTenantScope(ctx)
+	if alreadyScoped || !s.legacyNarrativeScope || !memory.UsingSharedNarrativeStore() {
+		return load(ctx)
+	}
+	// Only the legacy constructors may supply this known tenant identity.
+	// Wrap the complete loader so root-backend calls retain RLS on PostgreSQL.
+	var result *memory.EpisodicContext
+	err := s.store.WithTenantTx(ctx, models.LegacyPrincipal(learnerID).TenantScope(), func(txCtx context.Context, _ storeport.Store) error {
+		var err error
+		result, err = load(txCtx)
+		return err
+	})
+	return result, err
 }
 
 func (s *Scheduler) runConsolidationCycle() scheduledJobResult {

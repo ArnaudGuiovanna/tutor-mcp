@@ -48,11 +48,11 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 	// database/sql's default pool is unbounded, so under load it opens
 	// many connections that then serialise at the SQLite layer, turning
 	// lock contention into SQLITE_BUSY errors. We pin the pool to a
-	// single connection so every BEGIN IMMEDIATE (see _txlock above)
+	// single writer connection so every BEGIN IMMEDIATE (see _txlock above)
 	// queues in Go rather than racing for the writer lock — busy_timeout
 	// then only has to absorb the rare cross-process contention. This is
-	// a single-node deployment, so serialising all access on one conn is
-	// the correct, simplest choice (#5).
+	// a single-node deployment. NewSQLiteStore attaches a separate bounded
+	// read-only pool after migrations so readers do not consume writer capacity.
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	// A single long-lived connection is fine for an embedded DB; recycle

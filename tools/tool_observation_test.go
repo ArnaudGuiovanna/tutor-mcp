@@ -109,6 +109,12 @@ type observedTransactionStore struct {
 }
 
 func (s *observedTransactionStore) WithTenantTx(ctx context.Context, _ models.TenantScope, fn func(context.Context, storeport.Store) error) error {
+	return s.observeTransaction(ctx, fn)
+}
+func (s *observedTransactionStore) WithTenantReadTx(ctx context.Context, _ models.TenantScope, fn func(context.Context, storeport.Store) error) error {
+	return s.observeTransaction(ctx, fn)
+}
+func (s *observedTransactionStore) observeTransaction(ctx context.Context, fn func(context.Context, storeport.Store) error) error {
 	if s.before != nil {
 		s.before()
 	}
@@ -128,43 +134,54 @@ func (s *observedTransactionStore) WithTenantTx(ctx context.Context, _ models.Te
 func (s *observedTransactionStore) GetDomainByLearner(context.Context, string) (*models.Domain, error) {
 	return &models.Domain{ID: "domain", Name: "domain", Graph: models.KnowledgeSpace{Concepts: []string{"a"}}}, nil
 }
+func (s *observedTransactionStore) GetCurriculumSnapshot(context.Context, string, string, int) (*models.CurriculumSnapshot, error) {
+	return &models.CurriculumSnapshot{}, nil
+}
 
 func TestToolObservationIncludesTransactionAndFinalCommitResult(t *testing.T) {
-	for _, mode := range []string{"success", "begin_failure", "commit_failure", "deadline"} {
-		t.Run(mode, func(t *testing.T) {
-			reader := toolMetricReader(t)
-			checkNotObserved := func() {
-				if got := collectToolMetrics(t, reader); len(got) != 0 {
-					t.Errorf("observed before transaction completed: %+v", got)
-				}
-			}
-			store := &observedTransactionStore{before: checkNotObserved, after: checkNotObserved, delay: 15 * time.Millisecond}
-			deps := &Deps{Store: store, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
-			if mode == "begin_failure" {
-				store.beginErr = errors.New("pool unavailable")
-			}
-			if mode == "commit_failure" {
-				store.commitErr = errors.New("commit unavailable")
-			}
-			if mode == "deadline" {
-				deps.ToolCallTimeout = 5 * time.Millisecond
-			}
-			started := time.Now()
-			result := callTool(t, deps, RegisterTools, "L_owner", "validate_domain_graph", map[string]any{})
-			want := "succeeded"
-			if mode != "success" {
-				want = "failed"
-			}
-			if result.IsError != (want == "failed") {
-				t.Fatalf("final error=%v mode=%s", result.IsError, mode)
-			}
-			p := requireToolMetric(t, reader, "validate_domain_graph", want, 1)
-			minimum := store.delay
-			if mode != "begin_failure" {
-				minimum *= 2
-			}
-			if p.seconds < minimum.Seconds() || p.seconds > time.Since(started).Seconds() {
-				t.Fatalf("duration=%fs, minimum=%s elapsed=%s", p.seconds, minimum, time.Since(started))
+	for _, name := range []string{"validate_domain_graph", "get_curriculum_snapshot"} {
+		t.Run(name, func(t *testing.T) {
+			for _, mode := range []string{"success", "begin_failure", "commit_failure", "deadline"} {
+				t.Run(mode, func(t *testing.T) {
+					reader := toolMetricReader(t)
+					checkNotObserved := func() {
+						if got := collectToolMetrics(t, reader); len(got) != 0 {
+							t.Errorf("observed before transaction completed: %+v", got)
+						}
+					}
+					store := &observedTransactionStore{before: checkNotObserved, after: checkNotObserved, delay: 15 * time.Millisecond}
+					deps := &Deps{Store: store, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+					if mode == "begin_failure" {
+						store.beginErr = errors.New("pool unavailable")
+					}
+					if mode == "commit_failure" {
+						store.commitErr = errors.New("commit unavailable")
+					}
+					if mode == "deadline" {
+						deps.ToolCallTimeout = 5 * time.Millisecond
+					}
+					started := time.Now()
+					args := map[string]any{}
+					if name == "get_curriculum_snapshot" {
+						args["domain_id"] = "domain"
+					}
+					result := callTool(t, deps, RegisterTools, "L_owner", name, args)
+					want := "succeeded"
+					if mode != "success" {
+						want = "failed"
+					}
+					if result.IsError != (want == "failed") {
+						t.Fatalf("final error=%v mode=%s", result.IsError, mode)
+					}
+					p := requireToolMetric(t, reader, name, want, 1)
+					minimum := store.delay
+					if mode != "begin_failure" {
+						minimum *= 2
+					}
+					if p.seconds < minimum.Seconds() || p.seconds > time.Since(started).Seconds() {
+						t.Fatalf("duration=%fs, minimum=%s elapsed=%s", p.seconds, minimum, time.Since(started))
+					}
+				})
 			}
 		})
 	}

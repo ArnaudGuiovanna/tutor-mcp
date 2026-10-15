@@ -90,12 +90,17 @@ func LoadContextForDomainContext(ctx context.Context, learnerID, domainID, focus
 	if err := EnsureLearnerDirs(learnerID); err != nil {
 		return nil, err
 	}
+	// Validate the scoped index before the legacy singleton reads. A missing or
+	// stale projection must never look like a complete but empty history.
+	recentSessions, err := recentSessionPayloads(ctx, learnerID, domainID)
+	if err != nil {
+		return nil, err
+	}
 	ec := &EpisodicContext{
-		RecentSessions: []SessionPayload{},
+		RecentSessions: recentSessions,
 		LoadedAt:       time.Now().UTC(),
 	}
 
-	var err error
 	ec.LearnerMemory, err = ReadContext(ctx, learnerID, ScopeMemory, "")
 	if err != nil {
 		return nil, err
@@ -116,28 +121,6 @@ func LoadContextForDomainContext(ctx context.Context, learnerID, domainID, focus
 		}
 		if err != nil {
 			return nil, err
-		}
-	}
-
-	sessions, err := ListSessionsContext(ctx, learnerID)
-	if err != nil {
-		return nil, err
-	}
-	for _, ts := range sessions {
-		raw, err := ReadContext(ctx, learnerID, ScopeSession, ts.Format(time.RFC3339))
-		if err != nil {
-			return nil, err
-		}
-		payload, err := ParseSessionPayload(ts, raw)
-		if err != nil {
-			return nil, err
-		}
-		if domainID != "" && strings.TrimSpace(fmt.Sprint(payload.Frontmatter["domain_id"])) != domainID {
-			continue
-		}
-		ec.RecentSessions = append(ec.RecentSessions, payload)
-		if len(ec.RecentSessions) == 3 {
-			break
 		}
 	}
 

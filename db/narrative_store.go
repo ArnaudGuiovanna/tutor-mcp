@@ -232,6 +232,19 @@ func (s *Store) CompareAndSwapNarrative(
 		return nil, false, fmt.Errorf("memory: mutation fingerprint must be lowercase SHA-256")
 	}
 	checksum := narrativeChecksum(content)
+	sessionDomainID := ""
+	sessionSortKey := ""
+	if key.Scope == memory.ScopeSession {
+		var err error
+		sessionDomainID, err = memory.SessionDomainID(content)
+		if err != nil {
+			return nil, false, err
+		}
+		sessionSortKey, err = memory.SessionSortKey(key.Key)
+		if err != nil {
+			return nil, false, err
+		}
+	}
 	now := time.Now().UTC()
 	var result *memory.NarrativeObject
 	replayed := false
@@ -324,11 +337,18 @@ func (s *Store) CompareAndSwapNarrative(
 		newVersion := int64(1)
 		if exists {
 			newVersion = currentVersion + 1
+		}
+		indexedVersion := int64(0)
+		if key.Scope == memory.ScopeSession {
+			indexedVersion = newVersion
+		}
+		if exists {
 			updated, err := txs.exec(ctx,
 				`UPDATE narrative_objects
-				 SET ciphertext = ?, key_id = ?, aad_version = 2, version = ?, checksum = ?, size_bytes = ?, updated_at = ?
+				 SET ciphertext = ?, key_id = ?, aad_version = 2, version = ?, checksum = ?, size_bytes = ?, updated_at = ?,
+				 session_domain_digest = ?, session_sort_key = ?, session_indexed_version = ?
 				 WHERE tenant_id = ? AND enrollment_id = ? AND scope = ? AND domain_id = ? AND object_key = ? AND version = ?`,
-				ciphertext, keyID, newVersion, checksum, len(content), now,
+				ciphertext, keyID, newVersion, checksum, len(content), now, memory.SessionDomainDigest(sessionDomainID), sessionSortKey, indexedVersion,
 				canonicalKey.TenantID, canonicalKey.EnrollmentID, string(key.Scope), key.DomainID, key.Key, currentVersion,
 			)
 			if err != nil {
@@ -341,11 +361,11 @@ func (s *Store) CompareAndSwapNarrative(
 			if _, err := txs.exec(ctx,
 				`INSERT INTO narrative_objects
 				    (tenant_id, enrollment_id, learner_id, scope, domain_id, object_key, ciphertext, key_id, aad_version,
-				     version, checksum, size_bytes, created_at, updated_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 2, 1, ?, ?, ?, ?)`,
+				     version, checksum, size_bytes, created_at, updated_at, session_domain_digest, session_sort_key, session_indexed_version)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 2, 1, ?, ?, ?, ?, ?, ?, ?)`,
 				canonicalKey.TenantID, canonicalKey.EnrollmentID,
 				key.LearnerID, string(key.Scope), key.DomainID, key.Key,
-				ciphertext, keyID, checksum, len(content), now, now,
+				ciphertext, keyID, checksum, len(content), now, now, memory.SessionDomainDigest(sessionDomainID), sessionSortKey, indexedVersion,
 			); err != nil {
 				return fmt.Errorf("memory: create narrative object: %w", err)
 			}

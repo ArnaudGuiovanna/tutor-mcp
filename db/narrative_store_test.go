@@ -15,6 +15,7 @@ import (
 
 	"tutor-mcp/memory"
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 )
 
 func narrativeTestLimits() memory.Limits {
@@ -415,7 +416,12 @@ func TestNarrativeStoreTwoPackageInstancesReadSameEpisodicState(t *testing.T) {
 	// A separate Store value models another process/pool connected to the same
 	// database and carrying the same rolling keyring.
 	memory.ConfigureNarrativeStore(secondNode)
-	contextView, err := memory.LoadContext("L1", "", nil, nil)
+	var contextView *memory.EpisodicContext
+	err := secondNode.WithTenantTx(t.Context(), models.LegacyPrincipal("L1").TenantScope(), func(txCtx context.Context, _ storeport.Store) error {
+		var err error
+		contextView, err = memory.LoadContextForDomainContext(txCtx, "L1", "", "", nil, nil)
+		return err
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

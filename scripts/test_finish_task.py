@@ -125,6 +125,48 @@ class TaskPublicationTests(unittest.TestCase):
         self.assertEqual(self.git("rev-parse", "HEAD"), self.base)
         self.assertEqual(self.heads(), [self.base] * 2)
 
+    def test_verification_timeout_preserves_candidate_and_can_resume(self):
+        self.prepare()
+        with patch.dict(os.environ, self.env):
+            publisher = Publisher(self.repo)
+            prepared = publisher.load()
+            original_run = subprocess.run
+            verification = ["bash", str(self.repo / "scripts/verify-task.sh")]
+            intercepted = []
+
+            def timeout_verification(args, *positional, **kwargs):
+                if args == verification:
+                    intercepted.append(kwargs["timeout"])
+                    raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+                return original_run(args, *positional, **kwargs)
+
+            # Git operations remain real. Only the verification subprocess
+            # times out immediately; no real timeout or network is involved.
+            with patch("finish_task.subprocess.run", side_effect=timeout_verification):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    publisher.publish()
+            self.assertEqual(intercepted, [900])
+            self.assertEqual(self.git("rev-parse", "HEAD"), self.base)
+            self.assertEqual(self.heads(), [self.base] * 2)
+            self.assertEqual(self.git("branch", "--show-current"), "staging")
+            self.assertEqual(self.git("write-tree"), prepared["tree"])
+            remaining = publisher.load()
+            self.assertEqual(remaining, prepared)
+            self.assertIsNone(remaining["commit"])
+            self.assertIs(remaining["verified"], False)
+            self.assertFalse(publisher.receipt.exists())
+            self.assertFalse((self.repo / ".git/verified").exists())
+
+            # Resume this exact preparation after the timeout, with the real
+            # disposable verifier and local bare remote, without preparing anew.
+            report = publisher.publish()
+        self.assertTrue(report["published"])
+        self.assertEqual(self.heads(), [report["commit"]] * 2)
+        self.assertEqual(self.git("rev-parse", "HEAD^"), self.base)
+        self.assertEqual(self.git("rev-parse", "HEAD^{tree}"), prepared["tree"])
+        self.assertEqual((self.repo / ".git/verified").read_text(), "x")
+        self.assertFalse(publisher.intent.exists())
+
     def test_verification_cannot_silently_change_the_candidate(self):
         self.write("scripts/verify-task.sh", "#!/bin/sh\nprintf changed > work.txt\ngit add work.txt\n")
         self.prepare("work.txt", "scripts/verify-task.sh")

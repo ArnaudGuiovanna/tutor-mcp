@@ -64,6 +64,13 @@ La publication :
 3. Exécute `scripts/verify-task.sh` : tests hors ligne du publisher, build, vet,
    `govulncheck` et suite Go complète. `TUTOR_GO_BIN` permet de choisir le binaire
    Go local ; utiliser la version corrigée de la CI pour reproduire ses résultats.
+   Cette vérification a un délai fixe de 15 minutes. Son dépassement bloque la
+   publication sans nouveau commit ni validation enregistrée ; l'intention et
+   l'arbre préparé restent disponibles pour une reprise explicite avec `publish`.
+   Le délai externe du hook `Stop` reste indépendant, à 600 secondes : il peut
+   interrompre l'appel avant ces 15 minutes. Examiner l'état et les processus
+   de vérification restants, puis reprendre explicitement `publish`, sans
+   modifier le hook ni sa confiance et sans contourner les contrôles.
 4. Vérifie que le parent et l'arbre indexé n'ont pas changé durant les tests,
    puis crée le commit sur `staging` et le pousse.
 5. Attend les contrôles GitHub listés dans `.github/required-checks.json` sur

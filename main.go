@@ -68,6 +68,15 @@ func main() {
 	// Packages using the package-level slog helpers must inherit the same
 	// privacy and level policy as explicitly injected components.
 	slog.SetDefault(logger)
+	if options.Command == "memory-index" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := runMemoryIndexCommand(ctx, options, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if options.Local {
 		if err := runLocal(options, logger); err != nil && !errors.Is(err, context.Canceled) {
 			fmt.Fprintln(os.Stderr, "local startup/session:", err)
@@ -162,13 +171,6 @@ func main() {
 			logger.Error("failed to open postgres", "err", err)
 			os.Exit(1)
 		}
-		defer database.Close()
-		unregisterPoolMetrics, err := observability.RegisterDBPool(database)
-		if err != nil {
-			logger.Error("register database pool metrics", "error_type", "otel_db_pool")
-			os.Exit(1)
-		}
-		defer func() { _ = unregisterPoolMetrics() }()
 		if runsMigrations {
 			if err := db.MigratePostgres(context.Background(), database); err != nil {
 				logger.Error("failed to migrate postgres", "err", err)
@@ -196,13 +198,6 @@ func main() {
 			logger.Error("failed to open database", "err", err)
 			os.Exit(1)
 		}
-		defer database.Close()
-		unregisterPoolMetrics, err := observability.RegisterDBPool(database)
-		if err != nil {
-			logger.Error("register database pool metrics", "error_type", "otel_db_pool")
-			os.Exit(1)
-		}
-		defer func() { _ = unregisterPoolMetrics() }()
 		if runsMigrations {
 			if err := db.Migrate(database); err != nil {
 				logger.Error("failed to migrate database", "err", err)
@@ -212,12 +207,24 @@ func main() {
 			logger.Error("incompatible SQLite schema; run the migrator first", "err", err)
 			os.Exit(1)
 		}
-		store = db.NewStore(database)
+		store, err = db.NewSQLiteStore(database, dbPath)
+		if err != nil {
+			_ = database.Close()
+			logger.Error("open SQLite reader pool", "err", err)
+			os.Exit(1)
+		}
 		logger.Info("database ready", "driver", "sqlite", "path", dbPath)
 	default:
 		logger.Error("unknown DB_DRIVER (want sqlite|postgres)", "driver", dbDriver)
 		os.Exit(1)
 	}
+	defer store.Close()
+	unregisterPoolMetrics, err := db.RegisterStoreDBPools(store)
+	if err != nil {
+		logger.Error("register database pool metrics", "error_type", "otel_db_pool")
+		os.Exit(1)
+	}
+	defer func() { _ = unregisterPoolMetrics() }()
 	store.SetHostLLMDemonstrationPolicy(cfg.AssessmentHostLLMDemonstrates)
 	logger.Info("assessment evidence policy", "host_llm_demonstrates", cfg.AssessmentHostLLMDemonstrates)
 	installationProfile := "legacy"
@@ -295,6 +302,10 @@ func main() {
 	} else {
 		memory.ConfigureNarrativeStore(nil)
 		logger.Info("narrative memory backend ready", "backend", cfg.NarrativeMemoryBackend, "enabled", memory.Enabled())
+	}
+	if memory.Enabled() && cfg.ProcessRole != "worker" {
+		stopRepair := startNarrativeIndexRepair(context.Background(), store, logger, cfg.NarrativeMemoryBackend == "database", 30*time.Second)
+		defer stopRepair() // cancel and join before the database's deferred Close
 	}
 	if cfg.ProcessRole == "worker" {
 		runWorkerUntilSignal(store, logger, cfg.SchedulerMode)

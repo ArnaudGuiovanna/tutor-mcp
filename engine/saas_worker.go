@@ -6,13 +6,10 @@ package engine
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -25,16 +22,14 @@ import (
 const (
 	saasWorkerBatchSize          = 100
 	saasWorkerLease              = 2 * time.Minute
-	maxIntegrationResponseLen    = 64 << 10
 	institutionStatisticsTimeout = 10 * time.Minute
 )
 
 type saasWorkerStore interface {
 	RelayOutboxEvent(context.Context, models.TenantScope, string, time.Time, time.Duration) (bool, error)
 	ClaimAsyncJob(context.Context, models.TenantScope, string, time.Time, time.Duration) (*models.AsyncJob, error)
-	FinishAsyncJob(context.Context, models.TenantScope, string, string, bool, time.Time, string) error
+	storeport.AsyncJobAttemptStore
 	BeginIntegrationDelivery(context.Context, models.TenantScope, models.TenantWebhookJob, int, time.Time) (*models.IntegrationDelivery, error)
-	FinishIntegrationDelivery(context.Context, models.TenantScope, string, string, *int, string, string) error
 	PrepareTenantWebhook(context.Context, models.TenantScope, string, string, string, []byte, time.Time) (*models.SignedWebhook, error)
 	ExpireEntitlementReservations(context.Context, models.TenantScope, time.Time, int) (int, error)
 	CompleteTenantDSARExport(context.Context, models.TenantScope, models.WorkerPrincipal, string) error
@@ -59,31 +54,6 @@ func (s *Scheduler) relaySaaSOutbox() scheduledJobResult {
 		}
 	}
 	return scheduledJobSucceeded()
-}
-
-func (s *Scheduler) consumeSaaSJobs() scheduledJobResult {
-	backend, ok := s.store.(saasWorkerStore)
-	if !ok || s.currentTenantScope == nil {
-		return scheduledJobFailed("saas_worker_store_unavailable")
-	}
-	result := scheduledJobSucceeded()
-	for i := 0; i < saasWorkerBatchSize; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), schedulerDBTimeout)
-		leaseOwner := s.owner + "." + newSchedulerOwner()
-		job, err := backend.ClaimAsyncJob(ctx, *s.currentTenantScope, leaseOwner, time.Now().UTC(), saasWorkerLease)
-		cancel()
-		if errors.Is(err, sql.ErrNoRows) {
-			break
-		}
-		if err != nil {
-			result.recordFailure("saas_job_claim_failed")
-			break
-		}
-		if err := s.consumeSaaSJob(backend, job); err != nil && !errors.Is(err, storeport.ErrTenantDSARBlocked) {
-			result.recordFailure("saas_job_partial_failure")
-		}
-	}
-	return result
 }
 
 func (s *Scheduler) expireSaaSReservations() scheduledJobResult {
@@ -130,56 +100,74 @@ func (s *Scheduler) refreshCollectiveWeights() scheduledJobResult {
 	return scheduledJobSucceeded()
 }
 
-func (s *Scheduler) consumeSaaSJob(backend saasWorkerStore, job *models.AsyncJob) (resultErr error) {
-	scope := *s.currentTenantScope
-	if job == nil {
-		return fmt.Errorf("async worker returned a nil job")
+// Every active attempt is bounded well below the two-minute lease, including
+// short database transitions. No goroutine may keep working after its context.
+func (s *Scheduler) consumeSaaSJob(ctx context.Context, backend saasWorkerStore, scope models.TenantScope, job *models.AsyncJob) (outcome models.AsyncJobOutcome, resultErr error) {
+	if job == nil || job.TenantID != scope.TenantID {
+		return "", fmt.Errorf("invalid async worker job")
 	}
 	queueName := "tenant_async_job"
 	if job.Kind == "tenant_dsar" || job.Kind == "tenant_webhook_delivery" {
 		queueName = job.Kind
 	}
 	defer func() {
-		observability.RecordQueueEvent(context.Background(), scope.TenantID, queueName, queueOutcome(resultErr))
+		state := string(outcome)
+		if state == "" {
+			state = "failed"
+		}
+		if errors.Is(resultErr, storeport.ErrTenantDSARBlocked) {
+			state = "blocked"
+		} else if resultErr != nil {
+			state = "failed"
+		} else if outcome == models.AsyncJobCompleted {
+			state = "succeeded"
+		}
+		observability.RecordQueueEvent(ctx, scope.TenantID, queueName, state)
 	}()
-	observability.RecordQueueLag(context.Background(), scope.TenantID, queueName, time.Since(job.CreatedAt))
+	observability.RecordQueueLag(ctx, scope.TenantID, queueName, s.saasTimeNow().Sub(job.CreatedAt))
+	finalize := func(outcome models.AsyncJobOutcome, cause string, delivery *models.AsyncJobDeliveryResult, retryAfter string) (models.AsyncJobOutcome, error) {
+		now := s.saasTimeNow()
+		result := models.AsyncJobAttemptResult{Outcome: outcome, ErrorCode: cause}
+		if outcome == models.AsyncJobRetry {
+			result.AvailableAt = s.saasRetryAt(now, job.AttemptCount, retryAfter)
+		}
+		return backend.FinalizeAsyncJobAttempt(ctx, scope, job.ID, job.LeaseOwner, job.AttemptCount, result, delivery, now)
+	}
 	if job.Kind == "tenant_dsar" {
-		return s.consumeTenantDSARJob(backend, scope, job)
+		return s.consumeTenantDSARJob(ctx, backend, scope, job, finalize)
 	}
 	if job.Kind != "tenant_webhook_delivery" {
-		return backend.FinishAsyncJob(context.Background(), scope, job.ID, job.LeaseOwner, false,
-			time.Now().UTC().Add(integrationRetryDelay(job.AttemptCount)), "unsupported_job_kind")
+		return finalize(models.AsyncJobDeadLetter, "unsupported_job_kind", nil, "")
 	}
 	var payload models.TenantWebhookJob
-	if err := json.Unmarshal([]byte(job.PayloadJSON), &payload); err != nil || payload.IntegrationID == "" ||
-		payload.EventID == "" || payload.EventType == "" || !json.Valid(payload.Payload) {
-		return backend.FinishAsyncJob(context.Background(), scope, job.ID, job.LeaseOwner, false,
-			time.Now().UTC().Add(integrationRetryDelay(job.AttemptCount)), "invalid_job_payload")
+	if json.Unmarshal([]byte(job.PayloadJSON), &payload) != nil || payload.IntegrationID == "" || payload.EventID == "" || payload.EventType == "" || !json.Valid(payload.Payload) {
+		return finalize(models.AsyncJobDeadLetter, "invalid_job_payload", nil, "")
 	}
-
-	now := time.Now().UTC()
-	delivery, err := backend.BeginIntegrationDelivery(context.Background(), scope, payload, job.AttemptCount, now)
+	delivery, err := backend.BeginIntegrationDelivery(ctx, scope, payload, job.AttemptCount, s.saasTimeNow())
 	if err != nil {
-		_ = backend.FinishAsyncJob(context.Background(), scope, job.ID, job.LeaseOwner, false,
-			now.Add(integrationRetryDelay(job.AttemptCount)), "delivery_begin_failed")
-		return err
+		outcome := models.AsyncJobRetry
+		if errors.Is(err, sql.ErrNoRows) {
+			outcome = models.AsyncJobDeadLetter
+		}
+		return finalize(outcome, "delivery_begin_failed", nil, "")
 	}
-	// A prior attempt was durably accepted. This closes the crash window
-	// between recording the 2xx delivery and completing the async job.
+	result := &models.AsyncJobDeliveryResult{DeliveryID: delivery.ID}
 	if delivery.Status == "delivered" {
-		return backend.FinishAsyncJob(context.Background(), scope, job.ID, job.LeaseOwner, true, time.Time{}, "")
+		return finalize(models.AsyncJobCompleted, "", result, "")
 	}
-
-	signed, err := backend.PrepareTenantWebhook(context.Background(), scope, payload.IntegrationID,
-		payload.EventID, payload.EventType, payload.Payload, now)
+	signed, err := backend.PrepareTenantWebhook(ctx, scope, payload.IntegrationID, payload.EventID, payload.EventType, payload.Payload, s.saasTimeNow())
 	if err != nil {
-		return s.failIntegrationAttempt(backend, scope, job, delivery, nil, "integration_unavailable")
+		outcome := models.AsyncJobRetry
+		if errors.Is(err, storeport.ErrWebhookPermanent) {
+			outcome = models.AsyncJobDeadLetter
+		}
+		return finalize(outcome, "integration_unavailable", result, "")
 	}
-	requestCtx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	requestCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, signed.EndpointURL, bytes.NewReader(signed.Payload))
 	if err != nil {
-		return s.failIntegrationAttempt(backend, scope, job, delivery, nil, "request_build_failed")
+		return finalize(models.AsyncJobDeadLetter, "request_build_failed", result, "")
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "tutor-mcp-webhook/1")
@@ -188,106 +176,62 @@ func (s *Scheduler) consumeSaaSJob(backend saasWorkerStore, job *models.AsyncJob
 	req.Header.Set("X-Tutor-Timestamp", strconv.FormatInt(signed.Timestamp, 10))
 	req.Header.Set("X-Tutor-Signature", signed.Signature)
 	req.Header.Set("X-Tutor-Secret-Version", strconv.FormatInt(signed.SecretVersion, 10))
-
 	response, err := s.integrationClient.Do(req)
 	if err != nil {
-		return s.failIntegrationAttempt(backend, scope, job, delivery, nil, "http_transport_failed")
+		return finalize(models.AsyncJobRetry, "http_transport_failed", result, "")
 	}
 	defer response.Body.Close()
-	responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, maxIntegrationResponseLen+1))
-	responseHash := sha256.Sum256(responseBody)
-	hash := hex.EncodeToString(responseHash[:])
 	code := response.StatusCode
-	if readErr != nil {
-		return s.failIntegrationAttemptWithHash(backend, scope, job, delivery, &code, hash, "response_read_failed")
+	if code < 100 || code > 599 {
+		return finalize(models.AsyncJobDeadLetter, "http_invalid_status", result, "")
 	}
-	if len(responseBody) > maxIntegrationResponseLen {
-		return s.failIntegrationAttemptWithHash(backend, scope, job, delivery, &code, hash, "response_too_large")
+	result.ResponseCode = &code
+	// Acceptance is determined by the status line. Reading/hashing an optional
+	// body can fail after acceptance and must never trigger another send.
+	if code >= 200 && code < 300 {
+		return finalize(models.AsyncJobCompleted, "", result, "")
 	}
-	if code < http.StatusOK || code >= http.StatusMultipleChoices {
-		return s.failIntegrationAttemptWithHash(backend, scope, job, delivery, &code, hash, "http_non_2xx")
+	if code == 408 || code == 425 || code == 429 || (code >= 500 && code <= 599) {
+		return finalize(models.AsyncJobRetry, "http_retryable", result, response.Header.Get("Retry-After"))
 	}
-	if err := backend.FinishIntegrationDelivery(context.Background(), scope, delivery.ID, "delivered", &code, hash, ""); err != nil {
-		return err
-	}
-	return backend.FinishAsyncJob(context.Background(), scope, job.ID, job.LeaseOwner, true, time.Time{}, "")
+	return finalize(models.AsyncJobDeadLetter, "http_permanent", result, "")
 }
 
-func queueOutcome(err error) string {
-	if errors.Is(err, storeport.ErrTenantDSARBlocked) {
-		return "blocked"
-	}
-	if err != nil {
-		return "failed"
-	}
-	return "succeeded"
-}
+type asyncAttemptFinalizer func(models.AsyncJobOutcome, string, *models.AsyncJobDeliveryResult, string) (models.AsyncJobOutcome, error)
 
-func (s *Scheduler) consumeTenantDSARJob(backend saasWorkerStore, scope models.TenantScope, job *models.AsyncJob) error {
+func (s *Scheduler) consumeTenantDSARJob(ctx context.Context, backend saasWorkerStore, scope models.TenantScope, job *models.AsyncJob, finalize asyncAttemptFinalizer) (models.AsyncJobOutcome, error) {
 	var payload models.TenantDSARJob
-	if err := json.Unmarshal([]byte(job.PayloadJSON), &payload); err != nil || payload.RequestID == "" ||
-		(payload.Kind != "export" && payload.Kind != "erase") {
-		return backend.FinishAsyncJob(context.Background(), scope, job.ID, job.LeaseOwner, false,
-			time.Now().UTC().Add(integrationRetryDelay(job.AttemptCount)), "invalid_dsar_job")
+	if json.Unmarshal([]byte(job.PayloadJSON), &payload) != nil || payload.RequestID == "" || (payload.Kind != "export" && payload.Kind != "erase") || payload.RequestID != job.IdempotencyKey {
+		return finalize(models.AsyncJobDeadLetter, "invalid_dsar_job", nil, "")
 	}
 	var err error
+	completed := payload.Kind == "export"
 	if payload.Kind == "export" {
-		err = backend.CompleteTenantDSARExport(context.Background(), scope, s.worker, payload.RequestID)
+		err = backend.CompleteTenantDSARExport(ctx, scope, s.worker, payload.RequestID)
 	} else {
-		completed := false
-		for batch := 0; batch < 256 && !completed; batch++ {
-			completed, _, err = backend.ProcessTenantDSARErasureBatch(context.Background(), scope,
-				s.worker, payload.RequestID, 500, time.Now().UTC())
+		// Yield normal progress after a small quantum; a healthy erasure of
+		// arbitrary size must not consume the technical retry budget.
+		for batch := 0; batch < 8 && !completed; batch++ {
+			if err = ctx.Err(); err != nil {
+				break
+			}
+			completed, _, err = backend.ProcessTenantDSARErasureBatch(ctx, scope, s.worker, payload.RequestID, 500, s.saasTimeNow())
 			if err != nil {
 				break
 			}
 		}
-		if err == nil && !completed {
-			err = fmt.Errorf("DSAR erasure batch budget exhausted")
+	}
+	if errors.Is(err, storeport.ErrTenantDSARBlocked) {
+		if parkErr := backend.ParkTenantDSARJob(ctx, scope, job.ID, payload.RequestID, job.LeaseOwner, job.AttemptCount, s.saasTimeNow()); parkErr != nil {
+			return "", parkErr
 		}
+		return "", err
 	}
 	if err != nil {
-		if errors.Is(err, storeport.ErrTenantDSARBlocked) {
-			// Park only this exact lease generation. A stale worker must never
-			// release a replacement worker's lease or undo a completed resume.
-			if parkErr := backend.ParkTenantDSARJob(context.Background(), scope, job.ID, payload.RequestID,
-				job.LeaseOwner, job.AttemptCount, time.Now().UTC()); parkErr != nil {
-				return parkErr
-			}
-			return err
-		}
-		_ = backend.FinishAsyncJob(context.Background(), scope, job.ID, job.LeaseOwner, false,
-			time.Now().UTC().Add(integrationRetryDelay(job.AttemptCount)), "dsar_processing_failed")
-		return err
+		return finalize(models.AsyncJobRetry, "dsar_processing_failed", nil, "")
 	}
-	return backend.FinishAsyncJob(context.Background(), scope, job.ID, job.LeaseOwner, true, time.Time{}, "")
-}
-
-func (s *Scheduler) failIntegrationAttempt(backend saasWorkerStore, scope models.TenantScope, job *models.AsyncJob, delivery *models.IntegrationDelivery, code *int, cause string) error {
-	return s.failIntegrationAttemptWithHash(backend, scope, job, delivery, code, "", cause)
-}
-
-func (s *Scheduler) failIntegrationAttemptWithHash(backend saasWorkerStore, scope models.TenantScope, job *models.AsyncJob, delivery *models.IntegrationDelivery, code *int, responseHash, cause string) error {
-	deliveryStatus := "failed"
-	if job.AttemptCount >= job.MaxAttempts {
-		deliveryStatus = "dead_letter"
+	if !completed {
+		return finalize(models.AsyncJobContinue, "", nil, "")
 	}
-	if err := backend.FinishIntegrationDelivery(context.Background(), scope, delivery.ID, deliveryStatus, code, responseHash, cause); err != nil {
-		return err
-	}
-	if err := backend.FinishAsyncJob(context.Background(), scope, job.ID, job.LeaseOwner, false,
-		time.Now().UTC().Add(integrationRetryDelay(job.AttemptCount)), cause); err != nil {
-		return err
-	}
-	return fmt.Errorf("integration delivery failed: %s", cause)
-}
-
-func integrationRetryDelay(attempt int) time.Duration {
-	if attempt < 1 {
-		attempt = 1
-	}
-	if attempt > 7 {
-		attempt = 7
-	}
-	return time.Minute * time.Duration(1<<(attempt-1))
+	return finalize(models.AsyncJobCompleted, "", nil, "")
 }

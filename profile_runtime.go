@@ -38,7 +38,19 @@ func profileDataDir(profile, override string) (string, error) {
 // openProfileStore holds a short OS lock across key creation, migrations and
 // profile validation. Normal work uses SQLite transactions, not this lock.
 func openProfileStore(ctx context.Context, profile, dir, publicURL string) (*db.Store, profileKeys, error) {
+	return openProfileStoreMode(ctx, profile, dir, publicURL, true, true)
+}
+
+func openProfileStoreMode(ctx context.Context, profile, dir, publicURL string, create, rotate bool) (*db.Store, profileKeys, error) {
 	var keys profileKeys
+	if !create {
+		for _, name := range []string{"keys.json", "runtime.db"} {
+			info, err := os.Lstat(filepath.Join(dir, name))
+			if err != nil || !info.Mode().IsRegular() {
+				return nil, keys, fmt.Errorf("memory-index requires an existing installation with keys.json and runtime.db")
+			}
+		}
+	}
 	if err := privatefs.PrepareDir(dir, true); err != nil {
 		return nil, keys, err
 	}
@@ -51,6 +63,9 @@ func openProfileStore(ctx context.Context, profile, dir, publicURL string) (*db.
 	dbPath := filepath.Join(dir, "runtime.db")
 	err = privatefs.SecureFile(keyPath)
 	if errors.Is(err, os.ErrNotExist) {
+		if !create {
+			return nil, keys, fmt.Errorf("memory-index cannot create installation keys")
+		}
 		for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
 			if _, statErr := os.Lstat(dbPath + suffix); !errors.Is(statErr, os.ErrNotExist) {
 				return nil, keys, fmt.Errorf("keys.json is missing on an existing installation; restore it from backup (keys cannot be regenerated)")
@@ -130,19 +145,34 @@ func openProfileStore(ctx context.Context, profile, dir, publicURL string) (*db.
 	if err != nil {
 		return nil, keys, err
 	}
+	if !create {
+		var installed string
+		if err := database.QueryRowContext(ctx, `SELECT profile FROM installation WHERE singleton=1`).Scan(&installed); err != nil || installed != profile {
+			database.Close()
+			return nil, keys, fmt.Errorf("memory-index requires an initialized %s installation", profile)
+		}
+	}
 	if err = db.MigrateContext(ctx, database); err != nil {
 		database.Close()
 		return nil, keys, err
 	}
-	store := db.NewStore(database)
-	if err = store.EnsureInstallation(ctx, profile); err != nil {
-		store.Close()
+	store, err := db.NewSQLiteStore(database, dbPath)
+	if err != nil {
+		_ = database.Close()
 		return nil, keys, err
 	}
+	if create {
+		if err = store.EnsureInstallation(ctx, profile); err != nil {
+			store.Close()
+			return nil, keys, err
+		}
+	}
 	store.SetIntegrationSecretKeyring(keyring)
-	if _, err = store.RotateNarrativeSecrets(ctx); err != nil {
-		store.Close()
-		return nil, keys, fmt.Errorf("cannot authenticate narrative memory with keys.json: %w", err)
+	if rotate {
+		if _, err = store.RotateNarrativeSecrets(ctx); err != nil {
+			store.Close()
+			return nil, keys, fmt.Errorf("cannot authenticate narrative memory with keys.json: %w", err)
+		}
 	}
 	return store, keys, nil
 }

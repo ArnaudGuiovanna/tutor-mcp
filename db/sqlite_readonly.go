@@ -15,7 +15,8 @@ import (
 // OpenDBReadOnly opens an existing SQLite database without the journal_mode
 // pragma used by OpenDB. mode=ro prevents a TOCTOU disappearance from silently
 // creating a new file; query_only adds a second database-level write guard.
-// This path is intended for diagnostics and retention previews, not migrations.
+// The default pool has one connection for diagnostics/retention previews;
+// NewSQLiteStore expands its owned runtime reader pool to four after migration.
 func OpenDBReadOnly(dbPath string) (*sql.DB, error) {
 	dsn, err := sqliteFilesystemDSN(dbPath, "ro", false,
 		"busy_timeout(5000)", "foreign_keys(ON)", "query_only(ON)",

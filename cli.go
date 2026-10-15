@@ -4,21 +4,27 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"time"
 )
 
 type commandOptions struct {
-	Local      bool
-	Profile    string
-	DataDir    string
-	PublicURL  string
-	Command    string
-	UserAction string
-	LoginName  string
+	Local           bool
+	Profile         string
+	DataDir         string
+	PublicURL       string
+	Command         string
+	UserAction      string
+	LoginName       string
+	IndexTenant     string
+	IndexBatch      int
+	IndexTimeout    time.Duration
+	IndexFilesystem bool
+	IndexRoot       string
 }
 
 func parseCommand(args []string, output io.Writer) (commandOptions, error) {
 	var options commandOptions
-	if len(args) > 0 && (args[0] == "init" || args[0] == "users") {
+	if len(args) > 0 && (args[0] == "init" || args[0] == "users" || args[0] == "memory-index") {
 		options.Command, args = args[0], args[1:]
 		if options.Command == "users" && len(args) > 0 {
 			options.UserAction, args = args[0], args[1:]
@@ -33,8 +39,15 @@ func parseCommand(args []string, output io.Writer) (commandOptions, error) {
 	f.StringVar(&options.Profile, "profile", "", "HTTP installation profile: hobby or institution (no option preserves legacy configuration)")
 	f.StringVar(&options.DataDir, "data-dir", "", "private data directory (default: ~/.tutor-mcp/local or ~/.tutor-mcp/hobby)")
 	f.StringVar(&options.PublicURL, "public-url", "", "canonical HTTPS origin for hobby initialization")
+	if options.Command == "memory-index" {
+		f.StringVar(&options.IndexTenant, "tenant", "", "existing tenant to repair (required for environment-configured databases)")
+		f.IntVar(&options.IndexBatch, "batch-size", 100, "session metadata repair page size (1-100)")
+		f.DurationVar(&options.IndexTimeout, "timeout", 0, "stop repair after this duration; rerun to resume")
+		f.BoolVar(&options.IndexFilesystem, "filesystem", false, "rebuild the legacy filesystem session indexes")
+		f.StringVar(&options.IndexRoot, "memory-root", "", "existing legacy memory root (requires --filesystem)")
+	}
 	f.Usage = func() {
-		fmt.Fprintln(output, "Usage: tutor-mcp [--local | --profile hobby|institution] [--data-dir PATH]\n       tutor-mcp init --profile hobby --public-url https://your-domain [--data-dir PATH]\n       tutor-mcp users invite|list|reset <identifier>|disable <identifier> [--data-dir PATH]\n       tutor-mcp --version\n\nLocal runs until the MCP client disconnects. Background tasks run while a client is connected.\nLocal and VPS data are independent; profile conversion and synchronization are not automatic.")
+		fmt.Fprintln(output, "Usage: tutor-mcp [--local | --profile hobby|institution] [--data-dir PATH]\n       tutor-mcp init --profile hobby --public-url https://your-domain [--data-dir PATH]\n       tutor-mcp users invite|list|reset <identifier>|disable <identifier> [--data-dir PATH]\n       tutor-mcp memory-index [--local | --profile hobby] [--data-dir PATH]\n       tutor-mcp memory-index [--profile institution] --tenant ID\n       tutor-mcp memory-index --filesystem --memory-root PATH\n       tutor-mcp --version\n\nLocal runs until the MCP client disconnects. Background tasks run while a client is connected.\nLocal and VPS data are independent; profile conversion and synchronization are not automatic.\nMemory-index requires an existing installation and its retained keys; PostgreSQL migrations must already be current.")
 		f.PrintDefaults()
 	}
 	if err := f.Parse(args); err != nil {
@@ -43,7 +56,7 @@ func parseCommand(args []string, output io.Writer) (commandOptions, error) {
 	if f.NArg() != 0 {
 		return options, fmt.Errorf("unexpected arguments: %v", f.Args())
 	}
-	if options.Local && (options.Profile != "" || options.Command != "") {
+	if options.Local && (options.Profile != "" || (options.Command != "" && options.Command != "memory-index")) {
 		return options, fmt.Errorf("--local is only available for stdio and cannot be combined with --profile or a subcommand")
 	}
 	if options.Profile != "" && options.Profile != "hobby" && options.Profile != "institution" {
@@ -54,6 +67,20 @@ func parseCommand(args []string, output io.Writer) (commandOptions, error) {
 	}
 	if options.PublicURL != "" && options.Command != "init" {
 		return options, fmt.Errorf("--public-url is only available with init")
+	}
+	if options.Command == "memory-index" {
+		if options.IndexBatch < 1 || options.IndexBatch > 100 || options.IndexTimeout < 0 {
+			return options, fmt.Errorf("memory-index requires --batch-size 1-100 and a nonnegative --timeout")
+		}
+		if options.IndexFilesystem {
+			if options.IndexRoot == "" || options.Local || options.Profile != "" || options.IndexTenant != "" {
+				return options, fmt.Errorf("memory-index --filesystem requires --memory-root and cannot select a database profile or tenant")
+			}
+		} else if options.IndexRoot != "" {
+			return options, fmt.Errorf("--memory-root requires --filesystem")
+		} else if !options.Local && options.Profile != "hobby" && options.IndexTenant == "" {
+			return options, fmt.Errorf("memory-index requires an explicit --tenant")
+		}
 	}
 	if options.Command == "init" && options.Profile != "hobby" {
 		return options, fmt.Errorf("init requires --profile hobby")

@@ -548,7 +548,11 @@ func toolTenantTransactionMiddleware(deps *Deps) mcp.Middleware {
 			}
 			var result mcp.Result
 			var callErr error
-			err := deps.Store.WithTenantTx(ctx, principal.TenantScope(), func(txCtx context.Context, _ storeport.Store) error {
+			transaction := deps.Store.WithTenantTx
+			if readOnlyTools[toolNameFromRequest(req)] {
+				transaction = deps.Store.WithTenantReadTx
+			}
+			err := transaction(ctx, principal.TenantScope(), func(txCtx context.Context, _ storeport.Store) error {
 				result, callErr = next(txCtx, method, req)
 				// MCP application errors normally carry a nil Go error. Nested
 				// store operations share this transaction, so only this boundary

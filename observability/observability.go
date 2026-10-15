@@ -203,8 +203,16 @@ func StartWorkerRun(ctx context.Context, tenantID, job string) (context.Context,
 // DSNs or tenant identifiers. The returned cleanup is idempotent in the OTel
 // implementations used by the service.
 func RegisterDBPool(database *sql.DB) (func() error, error) {
+	return RegisterNamedDBPool(database, "shared")
+}
+
+// RegisterNamedDBPool distinguishes the bounded physical pools of a Store.
+func RegisterNamedDBPool(database *sql.DB, pool string) (func() error, error) {
 	if database == nil {
 		return nil, errors.New("register DB pool: database is nil")
+	}
+	if pool != "shared" && pool != "writer" && pool != "reader" {
+		return nil, errors.New("register DB pool: invalid pool kind")
 	}
 	meter := otel.Meter("tutor-mcp/database")
 	connections, err := meter.Int64ObservableGauge("tutor.db.connections",
@@ -224,12 +232,13 @@ func RegisterDBPool(database *sql.DB) (func() error, error) {
 	}
 	registration, err := meter.RegisterCallback(func(_ context.Context, observer metric.Observer) error {
 		stats := database.Stats()
-		observer.ObserveInt64(connections, int64(stats.MaxOpenConnections), metric.WithAttributes(attribute.String("state", "max_open")))
-		observer.ObserveInt64(connections, int64(stats.OpenConnections), metric.WithAttributes(attribute.String("state", "open")))
-		observer.ObserveInt64(connections, int64(stats.InUse), metric.WithAttributes(attribute.String("state", "in_use")))
-		observer.ObserveInt64(connections, int64(stats.Idle), metric.WithAttributes(attribute.String("state", "idle")))
-		observer.ObserveInt64(waits, stats.WaitCount)
-		observer.ObserveFloat64(waitDuration, stats.WaitDuration.Seconds())
+		poolAttr := attribute.String("pool", pool)
+		observer.ObserveInt64(connections, int64(stats.MaxOpenConnections), metric.WithAttributes(poolAttr, attribute.String("state", "max_open")))
+		observer.ObserveInt64(connections, int64(stats.OpenConnections), metric.WithAttributes(poolAttr, attribute.String("state", "open")))
+		observer.ObserveInt64(connections, int64(stats.InUse), metric.WithAttributes(poolAttr, attribute.String("state", "in_use")))
+		observer.ObserveInt64(connections, int64(stats.Idle), metric.WithAttributes(poolAttr, attribute.String("state", "idle")))
+		observer.ObserveInt64(waits, stats.WaitCount, metric.WithAttributes(poolAttr))
+		observer.ObserveFloat64(waitDuration, stats.WaitDuration.Seconds(), metric.WithAttributes(poolAttr))
 		return nil
 	}, connections, waits, waitDuration)
 	if err != nil {

@@ -710,10 +710,13 @@ type Store interface {
 
 	// Lifecycle methods — implemented on *db.Store in the next task.
 	WithTx(ctx context.Context, fn func(s Store) error) error
-	// WithTenantTx is the only business entry point for tenant-owned data on
+	// WithTenantTx is the writer entry point for tenant-owned data on
 	// PostgreSQL. It binds SET LOCAL settings to one transaction and passes the
 	// transaction context to every nested Store call.
 	WithTenantTx(ctx context.Context, scope models.TenantScope, fn func(context.Context, Store) error) error
+	// WithTenantReadTx uses a database-enforced read-only transaction. Nested
+	// calls inherit the existing transaction and cannot promote a reader.
+	WithTenantReadTx(ctx context.Context, scope models.TenantScope, fn func(context.Context, Store) error) error
 	Migrate(ctx context.Context) error
 	Ping(ctx context.Context) error
 	Close() error

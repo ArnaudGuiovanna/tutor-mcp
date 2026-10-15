@@ -112,6 +112,27 @@ type AsyncJob struct {
 	CompletedAt    *time.Time
 }
 
+type AsyncJobOutcome string
+
+const (
+	AsyncJobCompleted  AsyncJobOutcome = "completed"
+	AsyncJobRetry      AsyncJobOutcome = "retry"
+	AsyncJobDeadLetter AsyncJobOutcome = "dead_letter"
+	AsyncJobContinue   AsyncJobOutcome = "continue"
+)
+
+type AsyncJobAttemptResult struct {
+	Outcome     AsyncJobOutcome
+	AvailableAt time.Time
+	ErrorCode   string
+}
+
+type AsyncJobDeliveryResult struct {
+	DeliveryID   string
+	ResponseCode *int
+	ResponseHash string
+}
+
 type UsageEvent struct {
 	ID             int64
 	TenantID       string

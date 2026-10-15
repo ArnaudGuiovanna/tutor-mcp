@@ -1683,6 +1683,7 @@ END $$;`,
 	{Version: "postgres_0068_institution_statistics", Body: postgresStatisticsMigration},
 	{Version: "postgres_0069_collective_weights", Body: postgresCollectiveWeightsMigration},
 	{Version: "postgres_0070_bkt_calibration_sources", Body: postgresBKTCalibrationMigration},
+	{Version: "postgres_0071_session_narrative_index", Body: sessionNarrativeIndexMigration},
 }
 
 // OpenPostgres opens a PostgreSQL-backed *sql.DB via the pgx database/sql
