@@ -226,7 +226,6 @@ func TestCleanupExpiredData_NoOpOnEmpty(t *testing.T) {
 
 func TestDispatchQueued_UsesQueuedItem(t *testing.T) {
 	allowAnyURL(t)
-	withoutBackoff(t)
 
 	var bodies [][]byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -268,7 +267,6 @@ func TestDispatchQueued_UsesQueuedItem(t *testing.T) {
 
 func TestDispatchQueued_FallbackWhenQueueEmpty(t *testing.T) {
 	allowAnyURL(t)
-	withoutBackoff(t)
 
 	var bodies [][]byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -300,7 +298,6 @@ func TestDispatchQueued_FallbackWhenQueueEmpty(t *testing.T) {
 
 func TestDispatchQueued_DedupSameDay(t *testing.T) {
 	allowAnyURL(t)
-	withoutBackoff(t)
 
 	var hits int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -320,7 +317,6 @@ func TestDispatchQueued_DedupSameDay(t *testing.T) {
 
 func TestDispatchQueued_RequeuesAfterWebhookError(t *testing.T) {
 	allowAnyURL(t)
-	withoutBackoff(t)
 
 	// Always-500 server. A durable claim performs exactly one HTTP request; the
 	// queue item then remains pending until its persisted backoff is due.

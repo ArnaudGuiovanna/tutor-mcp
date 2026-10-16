@@ -1,5 +1,13 @@
 # [6] FadeController — Design (Phase 1)
 
+> **Document historique, non normatif pour le runtime actuel.** `Decide` reste
+> une API autonome de compatibilité ; ses paramètres ne pilotent ni les aides,
+> ni la sélection d'activité, ni la cadence webhook. `REGULATION_FADE` expose
+> seulement des diagnostics descriptifs. Voir les
+> [notes runtime actuelles](../runtime-pedagogique-2026-09.md) et la
+> [configuration](../configuration.md). Les branchements décrits ci-dessous
+> appartiennent à l'ancienne proposition.
+
 > Composant 6/7 du pipeline de regulation. Module **post-decision** :
 > isole de la chaine de selection (Phase FSM -> Concept -> Action ->
 > Gate). Lit `autonomy_score` et `autonomy.Trend` pour produire 4

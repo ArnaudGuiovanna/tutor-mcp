@@ -82,10 +82,15 @@ jobs:
       - name: Run tests
         run: go test -race -count=1 -timeout 30m -covermode=atomic -coverprofile=coverage.out ./...
 
-      - name: Enforce MCP hot-path performance budget
+      - name: Enforce paired-handler microbenchmark budget
         env:
           MCP_PERF_BUDGET: "1"
         run: go test -count=1 -timeout 3m ./tools -run '^TestGetPendingAlertsThenNextActivityP95Budget$'
+
+      - name: Enforce authenticated MCP HTTP budget (SQLite, without race)
+        env:
+          MCP_HTTP_PERF_BUDGET: "1"
+        run: go test -v -count=1 -timeout 3m . -run '^TestMCPHTTPPerformanceBudget$/^sqlite$'
 
       - name: Upload coverage
         if: always()
@@ -134,6 +139,12 @@ jobs:
           # updates, pool starvation and dialect drift under concurrent load.
           TUTOR_LOAD_TEST: "1"
         run: go test -race -count=1 -timeout 35m ./...
+
+      - name: Enforce authenticated MCP HTTP budget (PostgreSQL, without race)
+        env:
+          TUTOR_TEST_PG_DSN: postgres://tutor:tutor_test@localhost:5432/tutor_test?sslmode=disable
+          MCP_HTTP_PERF_BUDGET: "1"
+        run: go test -v -count=1 -timeout 3m . -run '^TestMCPHTTPPerformanceBudget$/^postgres$'
 
   build:
     name: Build (${{ matrix.goos }}/${{ matrix.goarch }})

@@ -37,7 +37,8 @@ func regulationGateEnabled() bool {
 // diagnostics. It does not reduce help or schedule messages from that score.
 // Only the literal "on" enables these additional diagnostics.
 //
-// See docs/regulation-design/06-fade-controller.md.
+// Current policy: docs/runtime-pedagogique-2026-09.md. The earlier proposal in
+// docs/regulation-design/06-fade-controller.md is historical, not runtime wiring.
 func regulationFadeEnabled() bool {
 	return os.Getenv("REGULATION_FADE") == "on"
 }

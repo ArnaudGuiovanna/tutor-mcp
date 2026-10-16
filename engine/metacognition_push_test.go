@@ -169,7 +169,6 @@ func TestEnqueueMirrorWebhook_ObservationsRequireGeneratedMessage(t *testing.T) 
 // rendered into a Discord embed, and posted via the webhook.
 func TestSendMirrorMessages_DispatchesQueuedItem(t *testing.T) {
 	allowAnyURL(t)
-	withoutBackoff(t)
 
 	var bodies [][]byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -240,7 +239,6 @@ func TestSendMirrorMessages_DispatchesQueuedItem(t *testing.T) {
 // daily-motivation dedup contract.
 func TestSendMirrorMessages_DedupSameDay(t *testing.T) {
 	allowAnyURL(t)
-	withoutBackoff(t)
 
 	var hits int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -276,7 +274,6 @@ func TestSendMirrorMessages_DedupSameDay(t *testing.T) {
 // and posts the pending item, while a concurrent scheduler sees no claim.
 func TestEnqueueMirrorWebhook_ThenConcurrentSchedulersPostExactlyOnce(t *testing.T) {
 	allowAnyURL(t)
-	withoutBackoff(t)
 
 	var hits int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

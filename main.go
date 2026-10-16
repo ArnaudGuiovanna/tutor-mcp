@@ -33,11 +33,8 @@ import (
 	"tutor-mcp/db"
 	"tutor-mcp/engine"
 	"tutor-mcp/memory"
-	"tutor-mcp/models"
 	"tutor-mcp/observability"
 	"tutor-mcp/tools"
-
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 var (
@@ -312,35 +309,6 @@ func main() {
 		return
 	}
 
-	// Both transports share tool registration and the same transaction,
-	// idempotency, scope and deadline boundaries.
-	mcpServer := newTutorServer(&tools.Deps{
-		Store: store, Logger: logger, BaseURL: baseURL, Institution: options.Profile == "institution",
-		OAuthGranularScopes: cfg.OAuthGranularScopes,
-	}, cfg.MCPToolCallTimeout)
-
-	// Create MCP handler — disable localhost protection (server is reached via a public reverse proxy)
-	// and allow Claude.ai cross-origin requests
-	cop := http.NewCrossOriginProtection()
-	cop.AddTrustedOrigin("https://claude.ai")
-	rawMCPHandler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
-		return mcpServer
-	}, &mcp.StreamableHTTPOptions{
-		Stateless:                    true,
-		DisableLocalhostProtection:   true,
-		MaxRequestBodyBytes:          cfg.MCPMaxRequestBodyBytes,
-		PropagateRequestCancellation: true,
-	})
-	// Reject untrusted cross-origin POSTs before reading their bodies. Trusted
-	// requests are then bounded once, inspected for a per-tool OAuth step-up,
-	// and finally delegated to the SDK with the same bytes.
-	var mcpHandler http.Handler = cop.Handler(
-		mcpRequestBodyLimitMiddleware(cfg.MCPMaxRequestBodyBytes,
-			tools.OAuthScopeHTTPMiddleware(
-				baseURL, cfg.MCPMaxRequestBodyBytes, cfg.OAuthGranularScopes, rawMCPHandler,
-			),
-		),
-	)
 	logger.Info("MCP transport limits",
 		"mode", "stateless",
 		"max_request_body_bytes", cfg.MCPMaxRequestBodyBytes,
@@ -498,25 +466,13 @@ func main() {
 	// MCP route: per-IP shield before auth, then per-learner limiting after auth.
 	// The body limit runs after both guards so rejected callers cannot make the
 	// process buffer request bodies, while valid POSTs are bounded before the SDK.
-	initialOAuthScope := models.OAuthScopeLearner
-	if cfg.OAuthGranularScopes {
-		initialOAuthScope = models.OAuthScopeLearnerRead
-	}
-	mcpProtectedHandler := auth.RateLimitMiddleware(
-		mcpIPLimiter,
-		auth.BearerMiddlewareWithPrincipalValidator(baseURL, initialOAuthScope, store,
-			auth.LearnerRateLimitMiddleware(mcpLearnerLimiter,
-				mcpConcurrencyLimiter.Middleware(
-					mcpHandler,
-				),
-			),
-		),
-	)
-	// The server keeps a bounded WriteTimeout for ordinary HTTP endpoints, but
-	// streamable MCP responses (notably SSE GETs) must outlive it. Clear only
-	// this response's deadline through ResponseController; requestLogger's
-	// writer exposes Unwrap so the controller can reach net/http's writer.
-	mux.Handle("/mcp", withoutWriteTimeout(mcpProtectedHandler))
+	initialOAuthScope := initialMCPOAuthScope(cfg.OAuthGranularScopes)
+	mux.Handle("/mcp", newMCPHTTPHandler(&tools.Deps{
+		Store: store, Logger: logger, BaseURL: baseURL, Institution: options.Profile == "institution",
+		OAuthGranularScopes: cfg.OAuthGranularScopes,
+	}, cfg.MCPMaxRequestBodyBytes, cfg.MCPToolCallTimeout, mcpHTTPGuards{
+		IP: mcpIPLimiter, Learner: mcpLearnerLimiter, Concurrency: mcpConcurrencyLimiter,
+	}))
 	mountAdmin := func(prefix string, handler http.Handler) {
 		protect := func(authenticate func(http.Handler) http.Handler, next http.Handler) http.Handler {
 			return administrativeHandler(mcpIPLimiter, mcpLearnerLimiter, mcpConcurrencyLimiter, authenticate, next)
@@ -553,14 +509,7 @@ func main() {
 		defer scheduler.Stop()
 	}
 
-	// Wrap with recovery + request logging + security headers + CORS.
-	// Order: recovery outermost so panics in any inner middleware are caught.
-	// CORS: allow chat-side origins (claude.ai, baseURL) by exact match.
-	handler := observability.HTTPHandler(recoveryMiddleware(logger, requestLogger(logger, securityHeaders(baseURL, corsMiddleware(
-		[]string{"https://claude.ai", baseURL},
-		nil,
-		mux,
-	)))))
+	handler := wrapHTTPHandler(logger, baseURL, mux)
 
 	server := &http.Server{
 		Addr:              httpListenAddress(options, port),

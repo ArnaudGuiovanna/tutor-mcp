@@ -2,30 +2,14 @@
 // GitHub: https://github.com/ArnaudGuiovanna
 // SPDX-License-Identifier: MIT
 
-// Package engine — [6] FadeController.
+// Historical standalone FadeController API, retained for compatibility.
+// Decide is pure and deterministic, with no I/O or clock. Its output is not
+// consumed by activity selection, motivation or the webhook scheduler.
+// REGULATION_FADE exposes descriptive diagnostics only; autonomy scores do not
+// withdraw help or alter delivery cadence.
 //
-// FadeController is a post-decision module of the v0.3 regulation
-// pipeline. It maps the learner's autonomy_score and trend to a bundle
-// of "handover" parameters consumed downstream:
-//
-//   - HintLevel              -> engine/motivation.go (verbosity,
-//     hint suppression)
-//   - WebhookFrequency       -> engine/scheduler.go (nudge cadence)
-//   - ZPDAggressiveness      -> engine/action_selector.go (pCorrect
-//     target)
-//   - ProactiveReviewEnabled -> engine/scheduler.go FSRS recall jobs
-//
-// The selection of concept / activity type / difficulty (orchestrator
-// chain: Phase FSM -> Concept -> Action -> Gate) is not affected. Fade
-// runs strictly after engine.Orchestrate and only modulates how the
-// chosen activity is presented and scheduled.
-//
-// Decide is a pure function: deterministic, no I/O, no clock.
-// Wiring (input collection, output application) lives in
-// tools/activity.go behind REGULATION_FADE=on (default OFF).
-//
-// See docs/regulation-design/06-fade-controller.md for the full
-// design (autonomy-tier table, mapping rationale, edge cases).
+// docs/regulation-design/06-fade-controller.md records the historical proposal;
+// docs/runtime-pedagogique-2026-09.md describes the current runtime.
 package engine
 
 // AutonomyTrend mirrors the values produced by
@@ -39,8 +23,8 @@ const (
 	AutonomyTrendDeclining AutonomyTrend = "declining"
 )
 
-// HintLevel controls the verbosity / suppression of the motivation
-// brief and, by extension, the LLM's hinting behaviour.
+// HintLevel describes the historical scaffolding setting returned by Decide.
+// The runtime does not use it to suppress hints or change motivation briefs.
 type HintLevel string
 
 const (
@@ -49,8 +33,8 @@ const (
 	HintLevelNone    HintLevel = "none"
 )
 
-// WebhookFrequency caps how often the scheduler dispatches Discord
-// nudges (daily_motivation, daily_recap, reactivation, reminder).
+// WebhookFrequency describes the historical cadence proposal returned by
+// Decide. It does not control the scheduler's notification policy.
 type WebhookFrequency string
 
 const (
@@ -59,9 +43,8 @@ const (
 	WebhookFrequencyOff    WebhookFrequency = "off"
 )
 
-// ZPDAggressiveness biases the pCorrect target used by the action
-// selector. Gentle keeps the learner safely inside the ZPD; push
-// pulls the cap toward the harder edge.
+// ZPDAggressiveness retains the historical targeting labels returned by Decide.
+// They are neither a calibrated pCorrect target nor an input to live selection.
 type ZPDAggressiveness string
 
 const (
@@ -70,11 +53,9 @@ const (
 	ZPDAggressivenessPush   ZPDAggressiveness = "push"
 )
 
-// FadeParams is the bundle returned by Decide. It is JSON-serialized
-// onto get_next_activity responses (under "fade_params") when
-// REGULATION_FADE=on, so downstream consumers — including the
-// scheduler that reads off of persisted state — can pick it up
-// without a second computation.
+// FadeParams is the standalone bundle returned by Decide. Its public fields
+// and JSON names remain compatible with historical callers/responses. Current
+// get_next_activity calls do not generate this bundle from descriptive scores.
 type FadeParams struct {
 	HintLevel              HintLevel         `json:"hint_level"`
 	WebhookFrequency       WebhookFrequency  `json:"webhook_frequency"`

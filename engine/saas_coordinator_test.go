@@ -22,6 +22,8 @@ type watchedSaaSStore struct {
 	claims      map[string]int
 	sequence    []string
 	lists       int
+	pageSize    int
+	beforeList  func(context.Context, string) error
 	beforeClaim func(context.Context, models.TenantScope, int) error
 	afterClaim  func(models.TenantScope, int, error)
 }
@@ -47,6 +49,14 @@ func (s *watchedSaaSStore) ListWorkerTenantScopes(ctx context.Context, worker mo
 	s.mu.Lock()
 	s.lists++
 	s.mu.Unlock()
+	if s.beforeList != nil {
+		if err := s.beforeList(ctx, after); err != nil {
+			return nil, "", err
+		}
+	}
+	if s.pageSize > 0 && s.pageSize < limit {
+		limit = s.pageSize
+	}
 	return s.Store.ListWorkerTenantScopes(ctx, worker, after, limit)
 }
 
@@ -200,19 +210,43 @@ func TestSaaSConsumerPriorSweepCompletionDoesNotStrandNextJob(t *testing.T) {
 	raw, store := saasConsumerTestStore(t)
 	seedSaaSConsumerTenant(t, raw, store, "a_race", 2)
 	seedSaaSConsumerTenant(t, raw, store, "b_probe", 0)
-	backend := &watchedSaaSStore{Store: store, claims: map[string]int{}}
+	backend := &watchedSaaSStore{Store: store, claims: map[string]int{}, pageSize: 1}
 	release := make(chan struct{})
 	secondClaim := make(chan struct{})
+	httpEntered := make(chan struct{})
+	bPending := make(chan struct{})
+	releasedAfterSkip := make(chan struct{})
 	var releaseOnce, secondOnce sync.Once
-	defer releaseOnce.Do(func() { close(release) })
+	releaseA := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseA()
+	sweep := 0
+	backend.beforeList = func(ctx context.Context, after string) error {
+		if after == "" {
+			sweep++
+		}
+		if sweep == 2 && after == "a_race" {
+			// Real one-row pages put this boundary after A was visited and
+			// skipped in sweep2. B1 is still pending, so only A1's completion
+			// from sweep1 can trigger the fresh sweep that admits A2.
+			for _, barrier := range []<-chan struct{}{httpEntered, bPending} {
+				select {
+				case <-barrier:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			close(releasedAfterSkip)
+			releaseA()
+		}
+		return nil
+	}
 	backend.beforeClaim = func(ctx context.Context, scope models.TenantScope, count int) error {
 		if scope.TenantID == "a_race" && count == 2 {
 			secondOnce.Do(func() { close(secondClaim) })
 		}
-		if scope.TenantID == "b_probe" && count == 2 {
-			// Pass2 skipped A while A1 was in HTTP. Complete A1 now, but
-			// hold B's empty claim until the coordinator revisits A for A2.
-			releaseOnce.Do(func() { close(release) })
+		if scope.TenantID == "b_probe" && count == 1 {
+			// Hold the first empty claim; no second B probe is required.
+			close(bPending)
 			select {
 			case <-secondClaim:
 			case <-ctx.Done():
@@ -224,6 +258,7 @@ func TestSaaSConsumerPriorSweepCompletionDoesNotStrandNextJob(t *testing.T) {
 	s := NewTenantDistributedScheduler(backend, quietLogger(), "consumer-test")
 	s.integrationClient = &http.Client{Transport: webhookRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 		if req.Header.Get("X-Tutor-Event-ID") == "a_race-event-000" {
+			close(httpEntered)
 			select {
 			case <-release:
 			case <-req.Context().Done():
@@ -233,6 +268,7 @@ func TestSaaSConsumerPriorSweepCompletionDoesNotStrandNextJob(t *testing.T) {
 		return webhookResponse(204), nil
 	})}
 	done := startSaaSTestCallback(t, s)
+	t.Cleanup(releaseA) // release before the callback helper joins on Stop
 	select {
 	case result := <-done:
 		if result.failed() {
@@ -240,6 +276,18 @@ func TestSaaSConsumerPriorSweepCompletionDoesNotStrandNextJob(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("prior-sweep completion stranded A2 or waited for an unrelated claim")
+	}
+	for name, barrier := range map[string]<-chan struct{}{
+		"A1 entered HTTP":                    httpEntered,
+		"B1 remained pending":                bPending,
+		"A1 released after sweep2 skipped A": releasedAfterSkip,
+		"A2 admitted":                        secondClaim,
+	} {
+		select {
+		case <-barrier:
+		default:
+			t.Fatalf("missing causal barrier: %s", name)
+		}
 	}
 	var completed int
 	if err := raw.QueryRow(`SELECT COUNT(*) FROM async_jobs WHERE tenant_id='a_race' AND status='completed'`).Scan(&completed); err != nil || completed != 2 {

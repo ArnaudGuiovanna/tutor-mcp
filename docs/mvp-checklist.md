@@ -24,7 +24,7 @@ Source-of-truth tracker for the five MVP categories defined in the agent routine
 
 | Item | Status | Evidence |
 |------|--------|----------|
-| BKT / FSRS / IRT update after `record_interaction` | ✅ | `algorithms/*_test.go`, `tools/interaction_test.go` |
+| BKT / FSRS update after `record_interaction`; legacy theta preserved | ✅ | `algorithms/*_test.go`, `tools/interaction_test.go` |
 | `get_next_activity` cohérent avec l'état cognitif | ✅ | `tools/activity_test.go`, domain-scoped state/history tests, and shared-label routing E2E in `tools/interaction_e2e_test.go` |
 | E2E « créer un domaine → 5 exercices → mastery progresse » | ✅ | `tools/interaction_e2e_test.go::TestEndToEnd_TenSuccessesMoveMastery` |
 | E2E coherence multi-tool (archived/deleted domain, multi-domain, calibration round-trip) | ✅ | `tools/coherence_e2e_test.go`, `tools/manage_domain_test.go`, `tools/negotiation_test.go`, and `tools/interaction_e2e_test.go` |

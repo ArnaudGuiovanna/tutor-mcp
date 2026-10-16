@@ -12,16 +12,16 @@ import (
 	"tutor-mcp/models"
 )
 
-// Issue #38: end-to-end regression guard for the BKT/FSRS/IRT update chain.
+// Issue #38: end-to-end regression guard for the BKT/FSRS update chain.
 // The unit tests on each algorithm cover the math; this test exercises the
 // full tool surface (`init_domain` → `get_next_activity` → `record_interaction`
-// × N) so a re-ordering of the BKT/FSRS/IRT block in interaction_apply.go
+// × N) so a re-ordering of the BKT/FSRS block in interaction_apply.go
 // (which issue #8 explicitly warns is fragile) trips CI immediately.
 //
 // Acceptance: after 10 successful exercises chosen by the runtime, at least
 // one concept's PMastery must move above the default 0.1 bootstrap. If this
-// stalls at 0.1 the chain is broken — most commonly because IRT or FSRS
-// stomps on cs.Reps/Difficulty before BKT had a chance to read them.
+// stalls at 0.1 the BKT/FSRS progression contract is broken. Legacy theta
+// remains persisted but does not participate in this update chain.
 func TestEndToEnd_TenSuccessesMoveMastery(t *testing.T) {
 	store, deps := setupToolsTest(t)
 
@@ -73,7 +73,7 @@ func TestEndToEnd_TenSuccessesMoveMastery(t *testing.T) {
 		}
 	}
 	if movedConcepts == 0 {
-		t.Fatal("no concept's PMastery moved above the 0.1 default after 10 successes — the BKT/FSRS/IRT chain is broken")
+		t.Fatal("no concept's PMastery moved above the 0.1 default after 10 successes — the BKT/FSRS chain is broken")
 	}
 	if totalReps != 10 {
 		t.Errorf("expected sum(cs.Reps)=10 across all concepts (one per recorded success), got %d", totalReps)

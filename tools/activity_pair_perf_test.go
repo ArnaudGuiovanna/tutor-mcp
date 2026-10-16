@@ -30,9 +30,12 @@ const (
 	pairPerfDefaultInteractions   = 24
 )
 
-// TestGetPendingAlertsThenNextActivityP95Budget is an explicit CI/release gate
-// for the first-turn pair expected by the client handoff. It is skipped by
-// default to keep normal unit-test runs resilient to noisy shared runners.
+// TestGetPendingAlertsThenNextActivityP95Budget is the in-process paired-handler
+// microbenchmark gate. It registers two tools directly, without the production
+// HTTP/authentication/transaction middleware chain, and has no encrypted session
+// history. It does not measure the full HTTP path or establish SaaS capacity;
+// TestMCPHTTPPerformanceBudget in the main package covers that bounded path.
+// It is skipped by default to tolerate noisy shared runners.
 //
 // Enable with:
 //

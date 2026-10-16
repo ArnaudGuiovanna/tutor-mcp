@@ -44,17 +44,15 @@ type Scheduler struct {
 	saasJitter        func() float64
 	stopSignal        *sync.Once
 
-	// stopTimeout bounds how long Stop() waits for in-flight cron jobs to
-	// drain before forcing shutdown. Defaults to 25s (5s of margin within
-	// the 30s SIGTERM handler in main.go for database.Close() etc.).
+	// stopTimeout caps the legacy cron drain after the strict SaaS join.
+	// It defaults to 25s and does not bound a non-cooperative SaaS backend.
 	// Overridable via test-only constructors so timeout-path tests don't
 	// need to wait the full production budget.
 	stopTimeout time.Duration
 
-	// stopCh is closed by Stop() to signal in-flight work — notably the
-	// synchronous backoff sleeps in doWithRetry — that the scheduler is
-	// shutting down. A nil stopCh (e.g. in struct-literal test fixtures)
-	// is a never-fires channel, so the abort path is simply inert. See #2.
+	// stopCh signals the webhook and consolidation pools to stop admitting
+	// work. A nil channel in struct-literal test fixtures leaves this signal
+	// inactive; it does not affect persisted delivery backoff.
 	stopCh chan struct{}
 
 	// distributed lets at most one fleet instance claim a scheduled run slot.
@@ -986,10 +984,9 @@ func (s *Scheduler) Stop() {
 	if s.saasDrain != nil {
 		s.saasDrain.stop()
 	}
-	// Signal in-flight webhook backoff sleeps to abort before we start the
-	// drain timer, so a job parked in doWithRetry's exponential schedule
-	// doesn't burn the Stop() budget waiting out 0+1+5+25s. Guard against a
-	// double Stop() (and a nil stopCh from test fixtures).
+	// Signal webhook/consolidation pool admission to stop. cron.Stop below
+	// stops scheduling, including retry polling; the SaaS consumer has already
+	// been canceled and joined. Guard against double Stop() and a nil stopCh.
 	if s.stopCh != nil {
 		if s.stopSignal != nil {
 			s.stopSignal.Do(func() { close(s.stopCh) })
@@ -1514,23 +1511,6 @@ func stripEmoji(value string) string {
 
 // ─── Discord Webhook ─────────────────────────────────────────────────────────
 
-func (s *Scheduler) sendDiscordEmbed(url string, payload discordPayload) error {
-	body, _ := json.Marshal(payload)
-	return s.doWithRetry(url, body)
-}
-
-// sendDiscordEmbedDurable performs exactly one HTTP request. Its caller has
-// claimed a durable queue row, so failures are persisted with a later
-// next_attempt_at rather than retried synchronously in the scheduler tick.
-func (s *Scheduler) sendDiscordEmbedDurable(url string, payload discordPayload) error {
-	body, err := marshalDiscordRequest(url, payload)
-	if err != nil {
-		return err
-	}
-	result := s.doOnceClassified(url, body)
-	return result.err
-}
-
 type webhookHTTPOutcome int
 
 const (
@@ -1544,6 +1524,10 @@ type webhookHTTPResult struct {
 	statusCode int
 	err        error
 }
+
+// safeWebhookURL guards payload preparation and redirects against SSRF.
+// Tests replace the Discord-only allowlist to exercise loopback HTTP servers.
+var safeWebhookURL = webhookurl.IsSafeWebhookURL
 
 func marshalDiscordRequest(url string, payload discordPayload) ([]byte, error) {
 	if !safeWebhookURL(url) {
@@ -1704,94 +1688,6 @@ func (s *Scheduler) prepareDurableWebhook(
 	}
 
 	return &preparedWebhookRequest{url: webhookURL, body: body, reservationID: reservationID}, nil
-}
-
-// retryDelays defines the exponential backoff schedule for doWithRetry.
-// Promoted to a package-level var so tests can shrink delays without
-// changing behavior in production.
-var retryDelays = []time.Duration{0, 1 * time.Second, 5 * time.Second, 25 * time.Second}
-
-// maxRetryAfter caps how long a single 429 Retry-After header is honored. A
-// hostile or misconfigured endpoint can return Retry-After up to 60s; sleeping
-// that long synchronously in the cron goroutine would stall the tick and eat
-// the Stop() drain budget. We honor the header only up to this small bound. (#2)
-const maxRetryAfter = 5 * time.Second
-
-// safeWebhookURL is the SSRF guard used by doWithRetry. It defaults to the
-// production Discord-only allowlist and is overridden in tests so that
-// httptest.NewServer URLs (http://127.0.0.1:...) can be exercised end-to-end.
-var safeWebhookURL = webhookurl.IsSafeWebhookURL
-
-// doWithRetry posts body to url with exponential backoff.
-// 4 attempts: immediate, +1s, +5s, +25s.
-// Stops on 4xx (except 429). Respects Discord Retry-After header on 429.
-func (s *Scheduler) doWithRetry(url string, body []byte) error {
-	if !safeWebhookURL(url) {
-		// Discord webhook paths contain credentials. Never emit the rejected
-		// value: even an invalid URL can still carry a real token in its path.
-		s.logger.Error("webhook blocked: unsafe url")
-		return fmt.Errorf("unsafe webhook url")
-	}
-	delays := retryDelays
-	var lastErr error
-	for attempt, delay := range delays {
-		if delay > 0 {
-			if !s.sleepOrStop(delay) {
-				// Scheduler is shutting down — abandon remaining attempts.
-				return lastErr
-			}
-		}
-		resp, err := s.client.Post(url, "application/json", bytes.NewReader(body))
-		if err != nil {
-			// net/url errors include the full request URL, including Discord's
-			// secret webhook token. Preserve only a stable public category.
-			lastErr = fmt.Errorf("webhook transport error")
-			s.logger.Warn("webhook network error", "attempt", attempt+1, "error_type", fmt.Sprintf("%T", err))
-			continue
-		}
-		resp.Body.Close()
-		if resp.StatusCode < 400 {
-			return nil
-		}
-		lastErr = fmt.Errorf("webhook returned %d", resp.StatusCode)
-		// 429: respect Retry-After
-		if resp.StatusCode == 429 {
-			if ra := resp.Header.Get("Retry-After"); ra != "" {
-				if secs, err := strconv.Atoi(ra); err == nil && secs > 0 && secs <= 60 {
-					wait := time.Duration(secs) * time.Second
-					if wait > maxRetryAfter {
-						wait = maxRetryAfter
-					}
-					s.logger.Warn("webhook rate limited, waiting", "retry_after", secs, "honored", wait.String())
-					if !s.sleepOrStop(wait) {
-						return lastErr
-					}
-				}
-			}
-			continue
-		}
-		// 4xx (not 429): client error, don't retry
-		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-			return lastErr
-		}
-		s.logger.Warn("webhook retry", "attempt", attempt+1, "status", resp.StatusCode)
-	}
-	return lastErr
-}
-
-// sleepOrStop blocks for d, but returns false early (without finishing the
-// sleep) if the scheduler's stopCh is closed first. This keeps doWithRetry's
-// synchronous backoff interruptible so Stop() isn't held hostage by an
-// in-flight webhook retry. A nil stopCh never fires, so the sleep runs in full.
-func (s *Scheduler) sleepOrStop(d time.Duration) bool {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return true
-	case <-s.stopCh:
-		return false
-	}
 }
 
 // ─── OLM (Open Learner Model) Daily Dispatch ────────────────────────────────

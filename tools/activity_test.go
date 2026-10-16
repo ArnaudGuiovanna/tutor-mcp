@@ -682,13 +682,8 @@ func TestGetNextActivity_ReviewIntentNoReviewedConceptDoesNotIntroduce(t *testin
 	}
 }
 
-// TestGetNextActivity_FlagOff_NoFadeFields asserts the byte-equivalence
-// guarantee of the FadeController constraint: with REGULATION_FADE
-// unset (its default), the JSON returned by get_next_activity must
-// contain neither fade_params nor autonomy_score keys, and the
-// motivation_brief must be the legacy output untouched. This is the
-// "FadeController is post-decision and cannot affect orchestrator
-// outputs when the flag is off" invariant from the design doc.
+// With REGULATION_FADE unset, get_next_activity omits fade_params and the
+// opt-in descriptive autonomy_score/autonomy_trend fields.
 func TestGetNextActivity_FlagOff_NoFadeFields(t *testing.T) {
 	// Force flag OFF regardless of caller's environment so this test
 	// is robust to `REGULATION_FADE=on go test ./...` invocations.

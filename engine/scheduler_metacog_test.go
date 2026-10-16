@@ -21,7 +21,6 @@ import (
 // scheduled_alerts so the next tick is a no-op (per-day dedup).
 func TestDispatchMetacognitiveAlerts_EnqueuesAndPostsAffect(t *testing.T) {
 	allowAnyURL(t)
-	withoutBackoff(t)
 
 	var hits int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -102,7 +101,6 @@ func TestDispatchMetacognitiveAlerts_EnqueuesAndPostsAffect(t *testing.T) {
 // the four metacognitive alerts.
 func TestDispatchMetacognitiveAlerts_NoOpWithoutTriggerState(t *testing.T) {
 	allowAnyURL(t)
-	withoutBackoff(t)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("scheduler must not POST when no metacognitive alert is active")
@@ -120,7 +118,6 @@ func TestDispatchMetacognitiveAlerts_NoOpWithoutTriggerState(t *testing.T) {
 // strong learner-facing nudge instead of a bundle of weak Discord messages.
 func TestDispatchMetacognitiveAlerts_SelectsHighestValueKind(t *testing.T) {
 	allowAnyURL(t)
-	withoutBackoff(t)
 
 	var hits int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

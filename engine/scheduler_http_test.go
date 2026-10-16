@@ -4,29 +4,24 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"tutor-mcp/models"
 )
 
-// quietLogger returns an slog.Logger that swallows output, so failed/retry log
-// lines don't spam test output.
+// Shared by the active scheduler tests, including durable delivery paths.
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-// newTestScheduler returns a Scheduler with no DB hooked up (nil store) and a
-// real *http.Client whose timeout is small enough to keep tests fast. The
-// safeWebhookURL guard is bypassed for the duration of the test by the caller.
 func newTestScheduler() *Scheduler {
 	return &Scheduler{
 		store:  nil,
@@ -35,17 +30,6 @@ func newTestScheduler() *Scheduler {
 	}
 }
 
-// withoutBackoff zeroes retryDelays and restores them on cleanup, so tests
-// don't pay the production 1+5+25s exponential schedule.
-func withoutBackoff(t *testing.T) {
-	t.Helper()
-	orig := retryDelays
-	retryDelays = []time.Duration{0, 0, 0, 0}
-	t.Cleanup(func() { retryDelays = orig })
-}
-
-// allowAnyURL replaces the SSRF guard with a permissive function for the test,
-// so httptest URLs (http://127.0.0.1:...) make it past the gate.
 func allowAnyURL(t *testing.T) {
 	t.Helper()
 	orig := safeWebhookURL
@@ -53,310 +37,60 @@ func allowAnyURL(t *testing.T) {
 	t.Cleanup(func() { safeWebhookURL = orig })
 }
 
-// ─── doWithRetry: SSRF guard ────────────────────────────────────────────────
-
-func TestDoWithRetry_RejectsUnsafeURL(t *testing.T) {
-	// Default safeWebhookURL is db.IsSafeWebhookURL; an http URL must be rejected
-	// without ever opening a connection.
-	withoutBackoff(t)
-	s := newTestScheduler()
-
-	err := s.doWithRetry("http://example.com/hook", []byte(`{}`))
-	if err == nil {
-		t.Fatal("expected error for unsafe URL, got nil")
-	}
-	if !strings.Contains(err.Error(), "unsafe webhook url") {
-		t.Errorf("error message = %q, want it to mention 'unsafe webhook url'", err.Error())
-	}
-}
-
-// ─── doWithRetry: success and retries ───────────────────────────────────────
-
-func TestDoWithRetry_SucceedsImmediately(t *testing.T) {
+func TestDispatchQueued_PostsJSONPayload(t *testing.T) {
 	allowAnyURL(t)
-	withoutBackoff(t)
-
-	var hits int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&hits, 1)
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	t.Cleanup(srv.Close)
-
-	s := newTestScheduler()
-	if err := s.doWithRetry(srv.URL, []byte(`{"x":1}`)); err != nil {
-		t.Fatalf("expected success, got %v", err)
-	}
-	if got := atomic.LoadInt32(&hits); got != 1 {
-		t.Errorf("hit count = %d, want exactly 1 (first attempt should succeed)", got)
-	}
-}
-
-func TestSendDiscordEmbedDurable_PerformsOneAttempt(t *testing.T) {
-	allowAnyURL(t)
-	withoutBackoff(t)
-
-	var hits int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&hits, 1)
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	t.Cleanup(srv.Close)
-
-	s := newTestScheduler()
-	err := s.sendDiscordEmbedDurable(srv.URL, discordPayload{})
-	if err == nil {
-		t.Fatal("expected failed durable delivery")
-	}
-	if got := atomic.LoadInt32(&hits); got != 1 {
-		t.Fatalf("durable HTTP attempts = %d, want 1", got)
-	}
-}
-
-func TestDoWithRetry_RetriesUntilSuccess(t *testing.T) {
-	allowAnyURL(t)
-	withoutBackoff(t)
-
-	var hits int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n := atomic.AddInt32(&hits, 1)
-		// Fail with 500 on attempts 1 and 2, succeed on 3.
-		if n < 3 {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(srv.Close)
-
-	s := newTestScheduler()
-	if err := s.doWithRetry(srv.URL, []byte(`{}`)); err != nil {
-		t.Fatalf("expected eventual success, got %v", err)
-	}
-	if got := atomic.LoadInt32(&hits); got != 3 {
-		t.Errorf("hit count = %d, want 3 (2 retries then success)", got)
-	}
-}
-
-func TestDoWithRetry_ExhaustsAndReturnsLastError(t *testing.T) {
-	allowAnyURL(t)
-	withoutBackoff(t)
-
-	var hits int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&hits, 1)
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	t.Cleanup(srv.Close)
-
-	s := newTestScheduler()
-	err := s.doWithRetry(srv.URL, []byte(`{}`))
-	if err == nil {
-		t.Fatal("expected exhaustion error, got nil")
-	}
-	if !strings.Contains(err.Error(), "500") {
-		t.Errorf("err = %q, want it to reference status 500", err.Error())
-	}
-	// 4 attempts in retryDelays
-	if got := atomic.LoadInt32(&hits); got != 4 {
-		t.Errorf("hit count = %d, want 4 (one per retryDelays entry)", got)
-	}
-}
-
-func TestDoWithRetry_StopsOn4xx(t *testing.T) {
-	allowAnyURL(t)
-	withoutBackoff(t)
-
-	var hits int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&hits, 1)
-		w.WriteHeader(http.StatusBadRequest)
-	}))
-	t.Cleanup(srv.Close)
-
-	s := newTestScheduler()
-	err := s.doWithRetry(srv.URL, []byte(`{}`))
-	if err == nil {
-		t.Fatal("expected error for 4xx response")
-	}
-	if got := atomic.LoadInt32(&hits); got != 1 {
-		t.Errorf("hit count = %d, want exactly 1 (4xx must not retry)", got)
-	}
-	if !strings.Contains(err.Error(), "400") {
-		t.Errorf("err = %q, want it to reference status 400", err.Error())
-	}
-}
-
-func TestDoWithRetry_RetriesOn429WithRetryAfter(t *testing.T) {
-	allowAnyURL(t)
-	withoutBackoff(t)
-
-	var hits int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n := atomic.AddInt32(&hits, 1)
-		if n == 1 {
-			// Use an out-of-range Retry-After (>60) so the in-loop sleep is skipped
-			// — the retry must still happen because 429 doesn't short-circuit like 4xx.
-			w.Header().Set("Retry-After", "9999")
-			w.WriteHeader(http.StatusTooManyRequests)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(srv.Close)
-
-	s := newTestScheduler()
-	if err := s.doWithRetry(srv.URL, []byte(`{}`)); err != nil {
-		t.Fatalf("expected success after 429, got %v", err)
-	}
-	if got := atomic.LoadInt32(&hits); got != 2 {
-		t.Errorf("hit count = %d, want 2 (429 then success)", got)
-	}
-}
-
-// TestDoWithRetry_CapsRetryAfter asserts an in-range Retry-After larger than
-// maxRetryAfter is honored only up to the cap, not for the full header value —
-// so a hostile endpoint can't park the cron goroutine for tens of seconds.
-func TestDoWithRetry_CapsRetryAfter(t *testing.T) {
-	allowAnyURL(t)
-	withoutBackoff(t)
-
-	var hits int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n := atomic.AddInt32(&hits, 1)
-		if n == 1 {
-			// In-range (<=60) so it IS honored, but well above maxRetryAfter (5s).
-			w.Header().Set("Retry-After", "60")
-			w.WriteHeader(http.StatusTooManyRequests)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(srv.Close)
-
-	s := newTestScheduler()
-	start := time.Now()
-	if err := s.doWithRetry(srv.URL, []byte(`{}`)); err != nil {
-		t.Fatalf("expected success after 429, got %v", err)
-	}
-	elapsed := time.Since(start)
-	if elapsed >= 30*time.Second {
-		t.Fatalf("doWithRetry honored the full 60s Retry-After (%v) — cap not applied", elapsed)
-	}
-	// Should be ~maxRetryAfter (5s), allow generous slack for CI scheduling.
-	if elapsed > maxRetryAfter+3*time.Second {
-		t.Errorf("Retry-After wait = %v, want it bounded near maxRetryAfter (%v)", elapsed, maxRetryAfter)
-	}
-}
-
-// TestDoWithRetry_AbortsOnStop verifies a closed stopCh interrupts the
-// synchronous backoff sleep so a webhook retry can't hold the Stop() drain
-// budget hostage. The server always 500s, so without an abort the call would
-// pay the full retryDelays schedule.
-func TestDoWithRetry_AbortsOnStop(t *testing.T) {
-	allowAnyURL(t)
-
-	// Use real (non-zero) delays so there is a sleep to interrupt.
-	orig := retryDelays
-	retryDelays = []time.Duration{0, 10 * time.Second, 10 * time.Second, 10 * time.Second}
-	t.Cleanup(func() { retryDelays = orig })
-
-	var hits int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&hits, 1)
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	t.Cleanup(srv.Close)
-
-	s := newTestScheduler()
-	s.stopCh = make(chan struct{})
-	// Signal shutdown shortly after the first attempt enters its backoff sleep.
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		close(s.stopCh)
-	}()
-
-	start := time.Now()
-	_ = s.doWithRetry(srv.URL, []byte(`{}`))
-	elapsed := time.Since(start)
-
-	if elapsed >= 5*time.Second {
-		t.Fatalf("doWithRetry did not abort on stop: took %v (expected sub-second)", elapsed)
-	}
-	// Only the first attempt should have fired before the stop interrupted backoff.
-	if got := atomic.LoadInt32(&hits); got != 1 {
-		t.Errorf("hit count = %d, want 1 (stop must abort before the second attempt)", got)
-	}
-}
-
-func TestDoWithRetry_RetriesOn429WithoutRetryAfter(t *testing.T) {
-	allowAnyURL(t)
-	withoutBackoff(t)
-
-	var hits int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n := atomic.AddInt32(&hits, 1)
-		if n == 1 {
-			// No Retry-After header at all → no inner sleep.
-			w.WriteHeader(http.StatusTooManyRequests)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(srv.Close)
-
-	s := newTestScheduler()
-	if err := s.doWithRetry(srv.URL, []byte(`{}`)); err != nil {
-		t.Fatalf("expected success after 429, got %v", err)
-	}
-	if got := atomic.LoadInt32(&hits); got != 2 {
-		t.Errorf("hit count = %d, want 2", got)
-	}
-}
-
-func TestDoWithRetry_NetworkError(t *testing.T) {
-	allowAnyURL(t)
-	withoutBackoff(t)
-
-	// Start a server, capture its URL, then close so connections are refused.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	url := srv.URL
-	srv.Close()
-
-	s := newTestScheduler()
-	err := s.doWithRetry(url, []byte(`{}`))
-	if err == nil {
-		t.Fatal("expected network error, got nil")
-	}
-}
-
-// ─── sendDiscordEmbed: payload shape ────────────────────────────────────────
-
-func TestSendDiscordEmbed_PostsJSONPayload(t *testing.T) {
-	allowAnyURL(t)
-	withoutBackoff(t)
 
 	type captured struct {
 		method      string
 		contentType string
 		body        []byte
 	}
-	var got captured
+	received := make(chan captured, 2)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got.method = r.Method
-		got.contentType = r.Header.Get("Content-Type")
 		b, _ := io.ReadAll(r.Body)
-		got.body = b
+		select {
+		case received <- captured{method: r.Method, contentType: r.Header.Get("Content-Type"), body: b}:
+		default:
+			t.Error("unexpected additional webhook request")
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	t.Cleanup(srv.Close)
 
-	s := newTestScheduler()
+	raw, store, learnerID := rawTestSetup(t, srv.URL)
 	payload := discordPayload{Embeds: []discordEmbed{{
 		Title: "hello", Description: "world", Color: 0xABCDEF,
 	}}}
-	if err := s.sendDiscordEmbed(srv.URL, payload); err != nil {
-		t.Fatalf("sendDiscordEmbed: %v", err)
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	id, err := store.EnqueueWebhookMessage(context.Background(), learnerID, "daily_motivation", string(encoded), now, now.Add(time.Hour), 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Persist the same structured-payload format used by durable fallbacks.
+	// No fallback is supplied: only this real queued row can produce the POST.
+	if _, err := raw.Exec(`UPDATE webhook_message_queue SET content_format=? WHERE id=?`, models.WebhookContentFormatDiscordPayload, id); err != nil {
+		t.Fatal(err)
+	}
+	s := schedulerForTest(store)
+	if result := s.dispatchQueued("daily_motivation", "DAILY_MOTIVATION", nil); result.failed() {
+		t.Fatal(result)
+	}
+	var got captured
+	select {
+	case got = <-received:
+	default:
+		t.Fatal("queued delivery produced no HTTP request")
+	}
+	if len(received) != 0 {
+		t.Fatal("queued delivery produced multiple HTTP requests")
+	}
+	var status string
+	if err := raw.QueryRow(`SELECT status FROM webhook_message_queue WHERE id=?`, id).Scan(&status); err != nil || status != models.WebhookStatusSent {
+		t.Fatalf("queue status=%q err=%v; want sent", status, err)
 	}
 
 	if got.method != "POST" {
@@ -378,8 +112,6 @@ func TestSendDiscordEmbed_PostsJSONPayload(t *testing.T) {
 		t.Errorf("decoded embed = %+v, want title/desc/color preserved", emb)
 	}
 }
-
-// ─── queueKindTitle / queueKindColor ────────────────────────────────────────
 
 func TestQueueKindTitleAndColor(t *testing.T) {
 	cases := []struct {
@@ -408,8 +140,6 @@ func TestQueueKindTitleAndColor(t *testing.T) {
 	}
 }
 
-// ─── fallbackDailyMotivation / fallbackDailyRecap ──────────────────────────
-
 func TestFallbackPayloads(t *testing.T) {
 	p := fallbackDailyMotivation(&models.Learner{ID: "L1"})
 	if len(p.Embeds) != 1 || !strings.Contains(p.Embeds[0].Title, "Good morning") {
@@ -430,8 +160,6 @@ func TestFallbackPayloads(t *testing.T) {
 		t.Errorf("fallbackDailyRecap color = %#x, want 0x57F287", p2.Embeds[0].Color)
 	}
 }
-
-// ─── NewScheduler / Stop ────────────────────────────────────────────────────
 
 func TestNewSchedulerAndStop(t *testing.T) {
 	s := NewScheduler(nil, quietLogger())
@@ -460,34 +188,5 @@ func TestNewSchedulerRejectsUnsafeWebhookRedirect(t *testing.T) {
 	safe := httptest.NewRequest(http.MethodGet, "https://discord.com/api/webhooks/123/token", nil)
 	if err := s.client.CheckRedirect(safe, []*http.Request{{}}); err != nil {
 		t.Fatalf("safe Discord redirect was rejected: %v", err)
-	}
-}
-
-// Sanity guard: doWithRetry still returns the *last* status when all attempts fail.
-// Differentiates 502 from 500 so we know the latest response is reflected.
-func TestDoWithRetry_LastStatusReflected(t *testing.T) {
-	allowAnyURL(t)
-	withoutBackoff(t)
-
-	var hits int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n := atomic.AddInt32(&hits, 1)
-		// Vary status across attempts; the final one should win.
-		switch n {
-		case 1, 2, 3:
-			w.WriteHeader(http.StatusInternalServerError)
-		default:
-			w.WriteHeader(http.StatusBadGateway)
-		}
-	}))
-	t.Cleanup(srv.Close)
-
-	s := newTestScheduler()
-	err := s.doWithRetry(srv.URL, []byte(`{}`))
-	if err == nil {
-		t.Fatal("expected error after exhaustion")
-	}
-	if !strings.Contains(err.Error(), fmt.Sprintf("%d", http.StatusBadGateway)) {
-		t.Errorf("err = %q, want it to mention final status %d", err.Error(), http.StatusBadGateway)
 	}
 }

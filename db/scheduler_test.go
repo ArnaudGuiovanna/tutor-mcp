@@ -11,11 +11,11 @@ import (
 	"time"
 )
 
-// TestClaimJobRunExactlyOnce proves the distributed-scheduler lease: when N
-// goroutines race to claim the same (name, window_key), exactly one wins. This
-// runs on SQLite by default and on Postgres when TUTOR_TEST_PG_DSN is set
-// (setupTestDB is dialect-aware), so the ON CONFLICT DO NOTHING + RowsAffected
-// contract is verified on both dialects.
+// TestClaimJobRunExactlyOnce covers the historical single-shot ClaimJobRun
+// helper: ON CONFLICT DO NOTHING and RowsAffected admit exactly one insert per
+// (name, window_key) under concurrent callers. Dialect-aware setupTestDB checks
+// SQLite by default and PostgreSQL with TUTOR_TEST_PG_DSN. Current distributed
+// scheduling uses renewable leases and fencing, covered by separate tests.
 func TestClaimJobRunExactlyOnce(t *testing.T) {
 	store := setupTestDB(t)
 	ctx := context.Background()

@@ -51,7 +51,7 @@ func normalizeConceptParam(concept, legacyConceptID string) (string, error) {
 }
 
 // validateUnitInterval rejects NaN/Inf and any value outside [0, 1].
-// Used for probabilities & confidence-style scores fed into BKT/FSRS/IRT
+// Used for probabilities & confidence-style scores fed into BKT/FSRS
 // chains where silent clamping has historically corrupted estimator state
 // (issue #25). The error names the offending field so the calling LLM
 // can self-correct.
@@ -157,7 +157,7 @@ func validateEnum(field, value string, allowed []string) error {
 // allowedActivityTypes is the evidence-bearing subset accepted by
 // record_interaction. REST, SETUP_DOMAIN and CLOSE_SESSION are orchestration
 // events, not learner responses; accepting them here would incorrectly advance
-// BKT, FSRS and IRT.
+// BKT and FSRS; legacy theta is preserved independently.
 var allowedActivityTypes = []string{
 	string(models.ActivityRecall),           // RECALL_EXERCISE
 	string(models.ActivityNewConcept),       // NEW_CONCEPT

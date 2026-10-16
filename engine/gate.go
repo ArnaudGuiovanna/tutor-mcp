@@ -177,8 +177,8 @@ func newAllowResult(concepts []string, restrictions map[string][]models.Activity
 //
 //   - DIAGNOSTIC bypasses *only* the prereq filter — the diagnostic
 //     phase is allowed to test concepts with formally-missing prereqs
-//     to calibrate IRT theta. OVERLOAD, misconception, and anti-rep
-//     remain active in DIAGNOSTIC.
+//     to collect cold concept evidence before teaching. OVERLOAD,
+//     misconception, and anti-rep remain active in DIAGNOSTIC.
 //
 //     Why misconception stays in DIAGNOSTIC : a live misconception is
 //     a strong pedagogical signal we don't leave dangling. UX caveat:

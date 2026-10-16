@@ -13,7 +13,7 @@ import (
 	"tutor-mcp/models"
 )
 
-// Issue #1: applyInteraction holds the BKT → FSRS → IRT read-modify-write
+// Issue #1: applyInteraction holds the BKT → FSRS read-modify-write
 // core but is only covered indirectly (via record_interaction handler tests)
 // or under concurrency (TestRecordInteraction_NoLostUpdateUnderConcurrency).
 // These focused unit tests exercise the success and failure paths directly
@@ -250,7 +250,7 @@ func TestApplyInteraction_NonEvidenceActivitiesDoNotMutateCognitiveState(t *test
 				got.CardState != seed.CardState ||
 				got.LastReview == nil ||
 				!got.LastReview.Equal(lastReview) {
-				t.Fatalf("non-evidence activity mutated BKT/FSRS/IRT: before=%+v after=%+v", seed, got)
+				t.Fatalf("non-evidence activity mutated BKT/FSRS or legacy theta: before=%+v after=%+v", seed, got)
 			}
 
 			interactions, err := store.GetRecentInteractionsByLearner(context.Background(), "L_owner", 5)

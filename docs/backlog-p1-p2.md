@@ -313,8 +313,10 @@
   transport après la frontière HTTP passe en `delivery_unknown` sans retry
   automatique. La réconciliation et la résolution opérateur sont documentées
   dans `docs/webhook-delivery-operations.md`.
-- **Problème :** un crash après succès HTTP mais avant `MarkWebhookSent` peut
-  provoquer une duplication.
+- **Problème historique :** l'ancienne frontière `MarkWebhookSent` permettait
+  une duplication après succès HTTP suivi d'un crash. Le runtime actuel garde
+  `dispatching` jusqu'à la complétion atomique et met son résultat incertain en
+  quarantaine `delivery_unknown`.
 - **Actions :** `event_id` interne stable, backoff, DLQ, historique de livraison
   et état `delivery_unknown`. Utiliser une idempotency key uniquement lorsqu'un
   destinataire ou un relais contrôlé la supporte. Discord direct ne sait ni

@@ -18,8 +18,8 @@ import (
 )
 
 // TestPostgresMCPProgressionPath proves that the real MCP handlers and the
-// BKT/FSRS/IRT mutation chain obey the same contract on PostgreSQL as on the
-// default SQLite test profile.
+// BKT/FSRS mutation chain obey the same contract on PostgreSQL as on the
+// default SQLite test profile, preserving legacy theta.
 func TestPostgresMCPProgressionPath(t *testing.T) {
 	baseDSN := os.Getenv("TUTOR_TEST_PG_DSN")
 	if baseDSN == "" {

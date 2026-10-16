@@ -6,6 +6,10 @@ package algorithms
 
 import "math"
 
+// The IRT functions in this file form a historical standalone API. Generated
+// tasks have no calibrated item parameters, so live interaction updates and
+// activity selection do not call this API. Persisted legacy theta is retained.
+
 const (
 	// irtBasePriorPrecision anchors the online estimate to the previously
 	// persisted theta. Without a prior, the MLE for one binary response is at

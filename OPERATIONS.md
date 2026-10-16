@@ -394,20 +394,24 @@ traffic.
 ## Webhook retry and dead-letter lifecycle
 
 Webhook delivery state is durable in `webhook_message_queue`; a process restart
-does not reset its retry budget. A claim increments `attempt_count`. A transport
-failure returns the row to `pending` with `next_attempt_at` set using the fixed
-backoff sequence 1 minute, 5 minutes, 30 minutes, 2 hours, then 12 hours. The
+does not reset its retry budget. A claim increments `attempt_count`. A known
+non-2xx HTTP failure returns the row to `pending` with `next_attempt_at` set
+using the fixed backoff sequence 1 minute, 5 minutes, 30 minutes, 2 hours, then
+12 hours. The
 last delay is reused if a caller explicitly configures more than the default
-five attempts. A policy/consent denial releases the claim and restores the
-counter because no delivery was attempted.
+five attempts. A transport error after the durable `dispatching` boundary is
+ambiguous and moves to `delivery_unknown`, without an automatic retry. A
+policy/consent denial releases the claim and restores the counter because no
+delivery was attempted.
 
-Once `max_attempts` is reached, the existing terminal `failed` state is the
-dead-letter queue; `dead_lettered_at` and a bounded, sanitized `last_error` code
+Once `max_attempts` is reached after a known failure, the terminal `failed`
+state is the dead-letter queue; `dead_lettered_at` and a bounded, sanitized `last_error` code
 are retained for diagnosis. Expiration wins over retry/DLQ: an expired message
 becomes `expired` and is never dispatched again. The hourly cleanup also
-recovers `processing` claims older than 15 minutes, applying the same
-expiry/backoff/DLQ rules. Do not persist webhook URLs, credentials, or raw
-response bodies in `last_error`.
+recovers stale pre-HTTP `processing` claims using the expiry/backoff/DLQ rules.
+Stale `dispatching` claims instead become `delivery_unknown`: the remote
+service might already have accepted the request. Do not persist webhook URLs,
+credentials, or raw response bodies in `last_error`.
 
 For a metadata-only DLQ check (intentionally omit the sensitive `content`
 column):
@@ -422,9 +426,13 @@ ORDER BY dead_lettered_at DESC;
 
 Retries are picked up when the dispatcher for that message kind runs and the
 stored `next_attempt_at` is due. Row-level claims prevent two workers from
-dispatching the same attempt concurrently, but delivery remains at-least-once:
-a crash after the remote service accepts a request and before `sent` is stored
-can cause a later retry. Terminal queue retention also applies to DLQ rows and
+dispatching the same attempt concurrently. A crash after remote acceptance but
+before the completion transaction leaves `dispatching`, which is quarantined
+as `delivery_unknown` on reconciliation. It is not automatically replayed.
+Discord direct does not deduplicate the internal event ID; resolution needs
+independent evidence, as described in the [delivery runbook](docs/webhook-delivery-operations.md).
+The signed SaaS integration contract is distinct and described in that runbook.
+Terminal queue retention also applies to DLQ rows and
 uses `dead_lettered_at`, so investigate/export required metadata before the
 configured `--webhook-days` cutoff.
 

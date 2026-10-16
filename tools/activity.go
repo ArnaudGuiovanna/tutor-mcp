@@ -523,7 +523,7 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 		if len(degradedComponents) > 0 {
 			extra["degraded_components"] = degradedComponents
 		}
-		contract := buildPedagogicalContract(activity, intent, evidenceQuality, uncertainty, typedTransferProfile, goalRelevanceStatus, extra["fade_params"], episodicContext, activeMisconceptionCount, olmSnapshot)
+		contract := buildPedagogicalContract(activity, intent, evidenceQuality, uncertainty, typedTransferProfile, goalRelevanceStatus, episodicContext, activeMisconceptionCount, olmSnapshot)
 		if err := freezePedagogicalDecision(ctx, deps, learnerID, learningSession.ID, domain, &contract, activity, now,
 			map[string]any{"concept_state": selectedState, "evidence_quality": evidenceQuality, "uncertainty": uncertainty, "intent": intent}); err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to freeze pedagogical decision", err)
@@ -698,7 +698,6 @@ func buildPedagogicalContract(
 	uncertainty engine.MasteryUncertainty,
 	transferProfile engine.TransferProfile,
 	goalStatus models.GoalRelevanceStatus,
-	fadeValue any,
 	episodicContext *memory.EpisodicContext,
 	activeMisconceptionCount int,
 	olmSnapshot *engine.OLMSnapshot,
@@ -746,7 +745,6 @@ func buildPedagogicalContract(
 			CanProposeNegotiation:            activity.Type != models.ActivityCloseSession,
 			CannotMarkMasteryWithoutEvidence: true,
 		},
-		FadeGuidance:       fadeGuidance(fadeValue),
 		EpisodicContext:    contractEpisodicContext(episodicContext),
 		LearnerExplanation: learnerExplanation(activity),
 		AuditRationale:     activity.Rationale,
@@ -884,37 +882,5 @@ func learnerExplanation(activity models.Activity) string {
 		return "We need to set up the learning domain before choosing an activity."
 	default:
 		return "We will consolidate this concept before moving to the next step."
-	}
-}
-
-func fadeGuidance(value any) *models.PedagogicalFadeGuidance {
-	var params engine.FadeParams
-	switch v := value.(type) {
-	case engine.FadeParams:
-		params = v
-	case *engine.FadeParams:
-		if v == nil {
-			return nil
-		}
-		params = *v
-	default:
-		return nil
-	}
-
-	instruction := "Use normal scaffolding."
-	switch params.HintLevel {
-	case engine.HintLevelFull:
-		instruction = "Offer explicit scaffolding and check understanding before increasing difficulty."
-	case engine.HintLevelPartial:
-		instruction = "Keep scaffolding concise and let the learner make the next move."
-	case engine.HintLevelNone:
-		instruction = "Avoid unsolicited hints; ask only brief clarifying questions when needed."
-	}
-	return &models.PedagogicalFadeGuidance{
-		HintLevel:              string(params.HintLevel),
-		WebhookFrequency:       string(params.WebhookFrequency),
-		ZPDAggressiveness:      string(params.ZPDAggressiveness),
-		ProactiveReviewEnabled: params.ProactiveReviewEnabled,
-		Instruction:            instruction,
 	}
 }
