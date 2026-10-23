@@ -3,16 +3,37 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
 import zipfile
 
-from third_party_notices import collect, copy_component, source_comments, verify_archive
+from third_party_notices import collect, copy_component, run_json, source_comments, verify_archive
 
 
 class NoticeTests(unittest.TestCase):
+    def test_go_json_utf8_survives_windows_cp1252_default(self):
+        documents = [{'Dir': 'C:/Users/Zoë/学習', 'Doc': '“MCP” — apprendre'},
+                     {'ImportPath': 'example.org/日本語', 'Doc': 'Deuxième document'}]
+        payload = '\n'.join(json.dumps(item, ensure_ascii=False) for item in documents).encode('utf-8')
+        emitter = 'import os; os.write(1, bytes.fromhex(' + repr(payload.hex()) + '))'
+        real_popen = subprocess.Popen
+
+        def windows_default_popen(*args, **kwargs):
+            if kwargs.get('text') and kwargs.get('encoding') is None:
+                kwargs['encoding'] = 'cp1252'
+            return real_popen(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as root, patch('third_party_notices.subprocess.Popen', side_effect=windows_default_popen):
+            # Verify that the simulated Windows default really rejects the
+            # emitter's UTF-8 bytes (including undefined cp1252 byte 0x9d).
+            with self.assertRaises(UnicodeDecodeError):
+                subprocess.check_output([sys.executable, '-c', emitter], cwd=root, text=True)
+            self.assertEqual(run_json(sys.executable, ['-c', emitter], root), documents)
+
     def test_original_terms_nested_notices_and_generated_source_attribution(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -43,7 +43,8 @@ def json_stream(value):
 
 
 def run_json(go, args, root, env=None):
-    output = subprocess.check_output([go, *args], cwd=root, env=env, text=True)
+    # Go emits UTF-8 JSON independently of the host's console/code page.
+    output = subprocess.check_output([go, *args], cwd=root, env=env, text=True, encoding='utf-8')
     return list(json_stream(output))
 
 
@@ -169,7 +170,7 @@ def collect(binary, output, root, go, tags='', ca_certificates=False):
             records.append({'source': str(path), 'file': destination.as_posix(),
                             'sha256': hashlib.sha256(data).hexdigest()})
         package_version = subprocess.check_output(
-            ['dpkg-query', '-W', '-f=${Version}', 'ca-certificates'], text=True).strip()
+            ['dpkg-query', '-W', '-f=${Version}', 'ca-certificates'], text=True, encoding='utf-8').strip()
         if not package_version:
             raise ValueError('missing container CA package version')
         components.append({'path': 'Debian ca-certificates', 'version': package_version,
