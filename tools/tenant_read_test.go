@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"tutor-mcp/auth"
@@ -54,6 +55,17 @@ func TestTenantToolReadRoutesAreExplicitAndEnforced(t *testing.T) {
 		t.Run(map[bool]string{false: "missing_state", true: "legacy_domain"}[legacy], func(t *testing.T) {
 			persistence, deps := setupToolsTest(t)
 			deps.Institution = true
+			ownerScope := models.LegacyPrincipal("L_owner").TenantScope()
+			if _, err := persistence.SetMembershipAuthorization(t.Context(), ownerScope, models.MembershipStatusActive, []string{models.RoleOwner, models.RoleLearner}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := persistence.RecordMembershipMFAVerification(t.Context(), ownerScope, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			owner, err := persistence.GetPrincipalForLearner(t.Context(), "L_owner", []string{models.OAuthScopeLearner})
+			if err != nil {
+				t.Fatal(err)
+			}
 			wrapped := &routedToolStore{Store: persistence}
 			deps.Store = wrapped
 			domainID := "missing"
@@ -64,12 +76,11 @@ func TestTenantToolReadRoutesAreExplicitAndEnforced(t *testing.T) {
 				for _, name := range names {
 					t.Run(name, func(t *testing.T) {
 						beforeR, beforeW := wrapped.reads, wrapped.writes
-						p := models.LegacyPrincipal("L_owner")
+						p := owner
 						grant := models.OAuthScopeLearner
 						// Discovering institutional records is authorized at middleware;
 						// absent records/legacy enrollment may still return not_found.
 						if progressTool(name) || formationTool(name) {
-							p.Roles = []string{models.RoleOwner, models.RoleLearner}
 							if progressTool(name) {
 								grant = models.OAuthScopeProgressRead
 							} else {

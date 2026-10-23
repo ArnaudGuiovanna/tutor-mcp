@@ -358,9 +358,15 @@ func (s *Store) EnrollMembership(ctx context.Context, actor models.Principal, co
 		}
 		var formationVersionID, userID string
 		var learnerID sql.NullString
-		if err := txs.queryRow(txCtx, `SELECT c.formation_version_id, tm.user_id, tm.learner_id
+		membershipQuery := `SELECT c.formation_version_id, tm.user_id, tm.learner_id
             FROM cohorts c JOIN tenant_memberships tm ON tm.tenant_id = c.tenant_id
-            WHERE c.tenant_id = ? AND c.id = ? AND tm.id = ? AND tm.status = 'active'`,
+			WHERE c.tenant_id = ? AND c.id = ? AND tm.id = ? AND tm.status = 'active'`
+		if txs.dialect == DialectPostgres {
+			// Erasure revokes this row before touching learner data. A staff
+			// enrollment must either finish first or observe that revocation.
+			membershipQuery += ` FOR SHARE OF tm`
+		}
+		if err := txs.queryRow(txCtx, membershipQuery,
 			actor.TenantID, cohortID, membershipID).Scan(&formationVersionID, &userID, &learnerID); err != nil {
 			return fmt.Errorf("enroll membership: cohort or membership not found: %w", err)
 		}

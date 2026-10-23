@@ -4,7 +4,7 @@ Provider logo SVGs used in the project README to indicate MCP-client compatibili
 
 ## Source and licence
 
-These icons are sourced from [LobeHub / lobe-icons](https://github.com/lobehub/lobe-icons) and are distributed under the MIT licence.
+These icons are sourced from [LobeHub / lobe-icons](https://github.com/lobehub/lobe-icons) and are distributed under the MIT licence. The complete original copyright and permission notice is preserved in [LICENSE](LICENSE), copied verbatim from the [upstream licence](https://github.com/lobehub/lobe-icons/blob/master/LICENSE).
 
 ```
 MIT License — Copyright (c) 2023 LobeHub

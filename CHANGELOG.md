@@ -8,6 +8,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- Binary archives and the final Docker image retain the original third-party
+  licence and attribution texts, an inventory tied to the actual binary and
+  target, and Go runtime notices. Installers verify and preserve the notices;
+  unchanged v0.6.1 archives use separately checksummed supplements reproduced
+  from their exact source and toolchain. See `docs/distribution-notices.md`.
 - Complete learner erasure. Requests now also remove the canonical enrollment
   learning state, calibration records, queued work, cached tool responses and
   every credential and grant of the learner; their domains and enrollments are
@@ -118,6 +123,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Security
 
+- Build with Go 1.26.10 to include the compromised-intermediate-certificate
+  mitigation in `crypto/x509` (GO-2026-6809 / CVE-2026-111943). CI, Docker and
+  release packaging use the patched toolchain. Existing binaries require a
+  rebuild; supplemental licence files do not change their executable code.
 - Build with Go 1.26.9 and `golang.org/x/net` v0.60.0 to include the October 8,
   2026 security fixes for HTTP, TLS, MIME parsing and HTML templates. CI,
   release packaging and Docker use the patched compiler. Existing binaries
@@ -155,6 +164,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Fixed
 
+- Tenant learner erasure revokes the affected membership before deleting data,
+  preserves the shared account and its other institutions, and releases cohort
+  seats transactionally. An additive migration repairs old reservation counters.
+  MCP calls recheck authorization inside their transaction; PostgreSQL writers
+  hold the membership lock until commit so in-flight calls cannot recreate
+  erased learning data. Re-apply `deploy/postgres-roles.sql` after migration for
+  the worker's bounded, non-secret credential selectors.
+- Tenant restore verification hashes the complete contents of the inventoried
+  tables in one consistent snapshot, including mastery, permissions, narrative
+  ciphertext and encryption metadata. Checksums use the `content-v2` format;
+  old key/count manifests must be recaptured with the upgraded verifier.
+- Publication requires `Deployment (institution)` as well as the hobby smoke.
+  A regression test checks that an institutional deployment failure blocks
+  promotion to `main`.
 - Native institution personal-domain creation now explicitly uses the learner's
   institution instead of the legacy tenant default, inside the enrollment
   transaction and under the existing free-domain policy.

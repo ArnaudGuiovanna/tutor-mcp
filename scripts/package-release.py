@@ -12,6 +12,14 @@ import tempfile
 import zipfile
 from datetime import datetime, timezone
 
+from third_party_notices import collect, verify_archive
+
+
+def archive_files(binary, root, notices):
+    return [(binary, binary.name), (root / 'LICENSE', 'LICENSE')] + [
+        (path, 'THIRD_PARTY_NOTICES/' + path.relative_to(notices).as_posix())
+        for path in sorted(notices.rglob('*')) if path.is_file()]
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -38,12 +46,15 @@ def main():
                 subprocess.run([go, 'build', '-trimpath', '-buildvcs=false', '-ldflags',
                                 f'-s -w -X main.version={args.version} -X main.commit={commit} -X main.buildDate={build_date}',
                                 '-o', str(binary), '.'], cwd=root, env=env, check=True)
+                notices = Path(temp) / 'THIRD_PARTY_NOTICES'
+                collect(binary, notices, root, go)
+                files = archive_files(binary, root, notices)
                 suffix = 'zip' if goos == 'windows' else 'tar.gz'
                 asset = output / f'tutor-mcp_{goos}_{goarch}.{suffix}'
                 if suffix == 'zip':
                     with zipfile.ZipFile(asset, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
-                        for source in (binary, root / 'LICENSE'):
-                            info = zipfile.ZipInfo(source.name, datetime.fromtimestamp(max(epoch, 315532800), timezone.utc).timetuple()[:6])
+                        for source, name in files:
+                            info = zipfile.ZipInfo(name, datetime.fromtimestamp(max(epoch, 315532800), timezone.utc).timetuple()[:6])
                             info.compress_type = zipfile.ZIP_DEFLATED
                             info.external_attr = (0o755 if source == binary else 0o644) << 16
                             archive.writestr(info, source.read_bytes())
@@ -52,14 +63,15 @@ def main():
                     import gzip
                     with asset.open('wb') as raw, gzip.GzipFile(filename='', mode='wb', fileobj=raw, mtime=epoch) as compressed:
                         with tarfile.open(fileobj=compressed, mode='w') as archive:
-                            for source in (binary, root / 'LICENSE'):
-                                info = archive.gettarinfo(str(source), arcname=source.name)
+                            for source, name in files:
+                                info = archive.gettarinfo(str(source), arcname=name)
                                 info.uid = info.gid = 0
                                 info.uname = info.gname = ''
                                 info.mtime = epoch
                                 info.mode = 0o755 if source == binary else 0o644
                                 with source.open('rb') as data:
                                     archive.addfile(info, data)
+                verify_archive(asset)
                 checksums.append(f'{hashlib.sha256(asset.read_bytes()).hexdigest()}  {asset.name}\n')
                 print(asset.name, flush=True)
     (output / 'SHA256SUMS').write_text(''.join(sorted(checksums)), encoding='ascii')

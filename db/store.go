@@ -64,9 +64,10 @@ type Store struct {
 }
 
 type tenantTransactionContext struct {
-	root  *sql.DB
-	tx    *sql.Tx
-	scope models.TenantScope
+	root     *sql.DB
+	tx       *sql.Tx
+	scope    models.TenantScope
+	readOnly bool
 }
 
 type tenantTransactionContextKey struct{}
@@ -375,7 +376,7 @@ func (s *Store) withTenantTransaction(ctx context.Context, scope models.TenantSc
 	}
 	copyScope := scope
 	txStore := &Store{db: tx, root: nil, dialect: s.dialect, secretKeyring: s.secretKeyring, hostLLMDemonstrates: s.hostLLMDemonstrates, tenantScope: &copyScope}
-	txCtx := context.WithValue(ctx, tenantTransactionContextKey{}, &tenantTransactionContext{root: s.root, tx: tx, scope: scope})
+	txCtx := context.WithValue(ctx, tenantTransactionContextKey{}, &tenantTransactionContext{root: s.root, tx: tx, scope: scope, readOnly: readOnly})
 	txCtx, err = memory.WithNarrativeTenantScope(txCtx, scope)
 	if err != nil {
 		return err

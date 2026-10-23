@@ -10,6 +10,8 @@
    separate OAuth grant and live cohort assignments. Clone, migrate and archive
    exercise the formation lifecycle and historical report isolation.
 3. A second institution is created through self-service signup.
+4. An authorized owner request is queued by a test-only bridge; the real
+   least-privilege worker erases the learner, revokes access and releases seats.
 
 Standard library only.
 """
@@ -25,6 +27,7 @@ import os
 import re
 import secrets
 import struct
+import subprocess
 import sys
 import time
 from urllib.parse import urlencode, urlsplit, parse_qs
@@ -533,6 +536,37 @@ def main():
     status, _, page = founder.get('/console')
     check(status == 200 and 'Beta School' in page, f'founder console {status}')
     print('PASS: self-service institution signup with email confirmation and TOTP')
+
+    # 4. There is no public erasure endpoint. The disposable bridge derives and
+    # validates the live owner principal using api_login, then only enqueues a
+    # request. All deletion is performed by the worker process started by the
+    # shell harness, with the delivered worker privileges and real async queue.
+    with subprocess.Popen([os.environ['SMOKE_DSAR_HELPER'], TENANT, claims(bob_token)['learner_id']],
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as erasure:
+        def erasure_event(expected):
+            line = erasure.stdout.readline()
+            if not line:
+                check(False, 'erasure bridge failed: ' + erasure.stderr.read()[-600:])
+            event = json.loads(line)
+            check(event.get('event') == expected, f'erasure event {event}, expected {expected}')
+
+        erasure_event('queued')
+        erasure_event('revoked')
+        status, _, _ = Browser().request('POST', '/mcp', json.dumps({
+            'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+            'params': {'name': 'get_learner_context', 'arguments': {}}}), 'application/json', bob_token)
+        check(status == 401, f'old bearer survived worker access revocation: {status}')
+        status, path, _ = bob_browser.get('/learn')
+        check(status == 200 and path.startswith('/learn/login'), 'learner browser survived erasure revocation')
+        erasure_event('completed')
+        check(erasure.wait(timeout=10) == 0, 'erasure bridge validation failed')
+
+    status, cohorts = console_api(manager, 'GET', '/admin/catalog/cohorts')
+    check(status == 200 and next(c['reserved_seats'] for c in cohorts['items'] if c['id'] == cohort_id) == 0,
+          'erasure left a ghost seat in the original cohort')
+    tool(mcp_client(learner_token), 'get_learner_context', {})
+    print('PASS: real worker completed queued erasure with documented grants, revoked bearer/browser access, '
+          'deleted learning state and credentials, and released seats without revoking another learner')
 
 
 if __name__ == '__main__':

@@ -135,7 +135,7 @@ func (s *Store) ValidatePrincipal(ctx context.Context, principal models.Principa
 	}
 	var rolesJSON string
 	var version int64
-	err := s.queryRow(ctx, `SELECT tm.roles_json, tm.version
+	query := `SELECT tm.roles_json, tm.version
         FROM tenant_memberships tm
         JOIN tenants t ON t.id = tm.tenant_id AND t.status = 'active'
         JOIN users u ON u.id = tm.user_id AND u.status = 'active'
@@ -145,7 +145,15 @@ func (s *Store) ValidatePrincipal(ctx context.Context, principal models.Principa
           AND tm.status = 'active'
 		  AND (tm.mfa_required = 0 OR tm.mfa_verified_at IS NOT NULL)
           AND tm.version = ?
-          AND ((? = '' AND tm.learner_id IS NULL) OR tm.learner_id = ?)`,
+          AND ((? = '' AND tm.learner_id IS NULL) OR tm.learner_id = ?)`
+	if tx, ok := ctx.Value(tenantTransactionContextKey{}).(*tenantTransactionContext); ok &&
+		s.dialect == DialectPostgres && !tx.readOnly {
+		// Keep authorization valid until this write transaction commits.
+		// Revocation (including DSAR erasure) updates the same membership row,
+		// so it waits for in-flight writes and fences every later writer.
+		query += ` FOR SHARE OF tm`
+	}
+	err := s.queryRow(ctx, query,
 		principal.TenantID, principal.MembershipID, principal.UserID,
 		principal.TokenVersion, principal.LearnerID, principal.LearnerID,
 	).Scan(&rolesJSON, &version)

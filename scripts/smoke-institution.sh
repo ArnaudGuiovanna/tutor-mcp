@@ -97,6 +97,205 @@ super tutor -f deploy/postgres-roles-superuser.sql
 super tutor -c "CREATE ROLE api_login LOGIN PASSWORD 'api-pw' IN ROLE tutor_api;"
 super tutor -c "CREATE ROLE worker_login LOGIN PASSWORD 'worker-pw' IN ROLE tutor_worker;"
 
+# Test-only request bridge: there is deliberately no public erasure endpoint.
+# This helper uses the API login and the real, live owner principal to enqueue
+# an authorized request. Only the separately running production worker may
+# process its batches. No production CLI/API surface is added for the smoke.
+cat > "$work/dsar-helper.go" <<'EOF_DSAR'
+package main
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"time"
+
+	"tutor-mcp/db"
+	"tutor-mcp/models"
+)
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "institution erasure smoke:", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	if len(os.Args) != 3 {
+		return errors.New("expected institution and learner identifiers")
+	}
+	tenant, learner := os.Args[1], os.Args[2]
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+	defer cancel()
+	pool, err := db.OpenPostgres(os.Getenv("SMOKE_DSAR_DATABASE_URL"), 2)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	store := db.NewStoreWithDialect(pool, db.DialectPostgres)
+	owner, err := store.GetLocalUserByEmail(ctx, "owner@acme.test")
+	if err != nil {
+		return err
+	}
+	memberships, err := store.ListActiveMembershipsForUser(ctx, owner.ID)
+	if err != nil {
+		return err
+	}
+	var actor models.Principal
+	for _, membership := range memberships {
+		if membership.TenantID == tenant {
+			actor, err = store.GetPrincipal(ctx, models.TenantScope{TenantID: tenant, UserID: owner.ID,
+				MembershipID: membership.ID, LearnerID: membership.LearnerID}, []string{models.OAuthScopeLearner})
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if err := store.ValidatePrincipal(ctx, actor); err != nil {
+		return err
+	}
+	if !actor.Authorize(models.PermissionTenantManage, models.AuthorizationResource{TenantID: tenant}) {
+		return errors.New("owner lacks live tenant-management permission")
+	}
+	// Inspection uses the same API login and transaction-local tenant binding;
+	// it never changes data or borrows the migrator's privileges.
+	read := func(fn func(*sql.Tx) error) error {
+		tx, err := pool.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		for setting, value := range map[string]string{"app.current_tenant": tenant,
+			"app.current_user": actor.UserID, "app.current_membership": actor.MembershipID} {
+			if _, err := tx.ExecContext(ctx, `SELECT set_config($1, $2, true)`, setting, value); err != nil {
+				return err
+			}
+		}
+		if err := fn(tx); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	seats := func(tx *sql.Tx) (map[string]int, error) {
+		rows, err := tx.QueryContext(ctx, `SELECT c.id, c.reserved_seats - SUM(e.seat_reserved)
+		 FROM cohorts c JOIN enrollments e ON e.tenant_id = c.tenant_id AND e.cohort_id = c.id
+		 WHERE e.tenant_id = $1 AND e.learner_id = $2 GROUP BY c.id, c.reserved_seats`, tenant, learner)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		out := map[string]int{}
+		for rows.Next() {
+			var id string
+			var count int
+			if err := rows.Scan(&id, &count); err != nil {
+				return nil, err
+			}
+			out[id] = count
+		}
+		return out, rows.Err()
+	}
+	var expectedSeats map[string]int
+	if err := read(func(tx *sql.Tx) error {
+		var err error
+		expectedSeats, err = seats(tx)
+		if err != nil {
+			return err
+		}
+		for _, table := range []string{"interactions", "learner_concept_states", "refresh_tokens"} {
+			var count int
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table+` WHERE tenant_id = $1 AND learner_id = $2`, tenant, learner).Scan(&count); err != nil {
+				return err
+			}
+			if count == 0 {
+				return fmt.Errorf("erasure fixture has no %s", table)
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	request, err := store.RequestTenantDSAR(ctx, actor, learner, "erase", "disposable institution smoke")
+	if err != nil {
+		return err
+	}
+	emit := func(event string) error {
+		return json.NewEncoder(os.Stdout).Encode(map[string]string{"event": event, "request_id": request.ID})
+	}
+	if err := emit("queued"); err != nil {
+		return err
+	}
+	revoked := false
+	for {
+		var requestStatus, jobStatus, revokeStatus string
+		if err := read(func(tx *sql.Tx) error {
+			return tx.QueryRowContext(ctx, `SELECT r.status, j.status, COALESCE(p.status, '')
+			 FROM tenant_dsar_requests r JOIN async_jobs j ON j.tenant_id = r.tenant_id
+			  AND j.kind = 'tenant_dsar' AND j.idempotency_key = r.id
+			 LEFT JOIN tenant_dsar_phases p ON p.tenant_id = r.tenant_id AND p.request_id = r.id AND p.phase = 'revoke_access'
+			 WHERE r.tenant_id = $1 AND r.id = $2`, tenant, request.ID).Scan(&requestStatus, &jobStatus, &revokeStatus)
+		}); err != nil {
+			return err
+		}
+		if requestStatus == "failed" || requestStatus == "blocked" || jobStatus == "dead_letter" {
+			return fmt.Errorf("worker request=%s job=%s", requestStatus, jobStatus)
+		}
+		if revokeStatus == "completed" && !revoked {
+			if err := emit("revoked"); err != nil {
+				return err
+			}
+			revoked = true
+		}
+		if requestStatus == "completed" && jobStatus == "completed" {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return errors.New("production worker did not complete erasure before deadline")
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	if !revoked {
+		return errors.New("worker completed without access-revocation checkpoint")
+	}
+	if err := read(func(tx *sql.Tx) error {
+		for _, table := range []string{"refresh_tokens", "oauth_codes", "login_challenges", "account_tokens",
+			"learner_approved_clients", "tool_call_idempotency", "concept_bkt_estimates", "collective_weight_applications",
+			"learning_badges", "learning_badge_evidence", "webhook_delivery_transitions", "webhook_push_log",
+			"webhook_message_queue", "narrative_mutations", "narrative_objects", "pedagogical_snapshots", "transfer_records",
+			"interactions", "learning_events", "assessment_adjudications", "assessment_reviews", "curriculum_review_opinions",
+			"assessment_attempts", "pedagogical_decisions", "affect_states", "implementation_intentions", "learning_sessions",
+			"concept_states", "learner_concept_states", "calibration_records", "pending_consolidations", "scheduled_alerts", "availability"} {
+			var count int
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table+` WHERE tenant_id = $1 AND learner_id = $2`, tenant, learner).Scan(&count); err != nil {
+				return err
+			}
+			if count != 0 {
+				return fmt.Errorf("worker left %d rows in %s", count, table)
+			}
+		}
+		actual, err := seats(tx)
+		if err != nil {
+			return err
+		}
+		for cohort, expected := range expectedSeats {
+			if actual[cohort] != expected {
+				return fmt.Errorf("cohort reservation mismatch: expected %d, got %d", expected, actual[cohort])
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	return emit("completed")
+}
+EOF_DSAR
+go build -o "$work/dsar-helper" "$work/dsar-helper.go"
+
 # ── Secrets ─────────────────────────────────────────────────────────────────
 mkdir -p "$work/keygen"
 cat > "$work/keygen/main.go" <<'EOF'
@@ -225,7 +424,8 @@ DATABASE_URL="$owner_dsn" "$work/tutor-control-plane" -action=plan-upsert -plan=
 PROCESS_ROLE=worker DATABASE_URL="postgres://worker_login:worker-pw@localhost:$port/tutor?$tls" \
     "$work/tutor-mcp" --profile institution >"$work/worker.log" 2>&1 &
 worker_pid=$!
-PROCESS_ROLE=api DATABASE_URL="postgres://api_login:api-pw@localhost:$port/tutor?$tls" \
+api_dsn="postgres://api_login:api-pw@localhost:$port/tutor?$tls"
+PROCESS_ROLE=api DATABASE_URL="$api_dsn" \
     BASE_URL=https://tutor.localhost PORT="$api_port" OAUTH_DCR_MODE=token \
     SMTP_ADDR=127.0.0.1:2525 SMTP_SERVER_NAME=localhost SMTP_FROM=tutor@tutor.localhost \
     SSL_CERT_FILE="$work/tls/ca.pem" TRUSTED_PROXY_CIDRS=127.0.0.1/32 \
@@ -257,4 +457,5 @@ unset DATABASE_URL
 
 SMOKE_BASE_URL=https://tutor.localhost SMOKE_CONNECT="127.0.0.1:$api_port" SMOKE_TENANT="$tenant" \
     SMOKE_OWNER_LINK="$owner_link" SMOKE_MAIL_DIR="$work/mail" \
+    SMOKE_DSAR_HELPER="$work/dsar-helper" SMOKE_DSAR_DATABASE_URL="$api_dsn" \
     python3 scripts/smoke-institution.py || fail "institution journey"

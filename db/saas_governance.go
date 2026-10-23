@@ -5,9 +5,7 @@ package db
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -190,103 +188,6 @@ func (s *Store) ListTenantRetentionPolicies(ctx context.Context, actor models.Pr
 	return policies, err
 }
 
-type tenantChecksumSpec struct{ table, keyExpression string }
-
-var tenantChecksumSpecs = []tenantChecksumSpec{
-	{"concept_bkt_estimates", "enrollment_id || ':' || formation_version_id || ':' || formation_concept_id || ':' || learner_id || ':' || curriculum_version || ':' || reference_policy_version || ':' || policy_version || ':' || p_learn || ':' || p_forget || ':' || p_slip || ':' || p_guess || ':' || admissible_observations || ':' || last_interaction_id || ':' || evidence_hash"},
-	{"concept_collective_weights", "formation_concept_id || ':' || version"},
-	{"collective_weight_applications", "enrollment_id || ':' || formation_concept_id"},
-	{"learning_badges", "id"},
-	{"learning_badge_evidence", "badge_id || ':' || attempt_id"},
-	// Learning record: what a restore must bring back for the tutor to continue.
-	{"interactions", "CAST(id AS TEXT)"},
-	{"concept_states", "learner_id || ':' || domain_id || ':' || concept"},
-	{"assessment_attempts", "id"},
-	{"assessment_reviews", "CAST(id AS TEXT)"},
-	{"assessment_adjudications", "CAST(id AS TEXT)"},
-	{"learning_events", "CAST(id AS TEXT)"},
-	{"learning_sessions", "CAST(id AS TEXT)"},
-	{"pedagogical_decisions", "id"},
-	{"transfer_records", "CAST(id AS TEXT)"},
-	{"affect_states", "CAST(id AS TEXT)"},
-	{"calibration_records", "prediction_id"},
-	{"domains", "id"},
-	{"curriculum_versions", "domain_id || ':' || CAST(version AS TEXT)"},
-	// Institution structure and access.
-	{"formation_modules", "id"},
-	{"formation_concepts", "id"},
-	{"concept_prerequisites", "formation_version_id || ':' || concept_id || ':' || prerequisite_id"},
-	{"formation_trainers", "formation_id || ':' || membership_id"},
-	{"cohort_trainers", "cohort_id || ':' || membership_id"},
-	{"formation_admissions", "cohort_id || ':' || membership_id"},
-	{"enrollment_migrations", "source_enrollment_id"},
-	{"tenant_memberships", "id"},
-	{"cohorts", "id"},
-	{"enrollments", "id"},
-	{"formation_versions", "id"},
-	{"formations", "id"},
-	{"integration_deliveries", "id"},
-	{"learner_concept_states", "enrollment_id || ':' || formation_concept_id"},
-	{"narrative_objects", "enrollment_id || ':' || scope || ':' || domain_id || ':' || object_key || ':' || checksum"},
-	{"usage_events", "CAST(id AS TEXT) || ':' || event_key || ':' || CAST(quantity AS TEXT)"},
-}
-
-func (s *Store) ComputeTenantChecksums(ctx context.Context, actor models.ControlPlanePrincipal, tenantID string) (string, string, error) {
-	if !actor.Validate() || tenantID == "" {
-		return "", "", fmt.Errorf("compute tenant checksums: invalid authority")
-	}
-	tableChecksums := make(map[string]string, len(tenantChecksumSpecs))
-	objectChecksums := make(map[string]string)
-	err := s.withTenantControlTx(ctx, tenantID, actor.ActorID, func(txs *Store) error {
-		for _, spec := range tenantChecksumSpecs {
-			rows, err := txs.query(ctx, `SELECT `+spec.keyExpression+` FROM `+spec.table+` WHERE tenant_id = ? ORDER BY 1`, tenantID)
-			if err != nil {
-				return fmt.Errorf("checksum %s: %w", spec.table, err)
-			}
-			h := sha256.New()
-			count := int64(0)
-			for rows.Next() {
-				var key string
-				if err := rows.Scan(&key); err != nil {
-					rows.Close()
-					return err
-				}
-				_, _ = h.Write([]byte(key))
-				_, _ = h.Write([]byte{0})
-				count++
-			}
-			if err := rows.Err(); err != nil {
-				rows.Close()
-				return err
-			}
-			if err := rows.Close(); err != nil {
-				return err
-			}
-			tableChecksums[spec.table] = fmt.Sprintf("%d:%s", count, hex.EncodeToString(h.Sum(nil)))
-		}
-		rows, err := txs.query(ctx, `SELECT enrollment_id || ':' || scope || ':' || domain_id || ':' || object_key,
-			checksum FROM narrative_objects WHERE tenant_id = ? ORDER BY 1`, tenantID)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var key, checksum string
-			if err := rows.Scan(&key, &checksum); err != nil {
-				return err
-			}
-			objectChecksums[key] = checksum
-		}
-		return rows.Err()
-	})
-	if err != nil {
-		return "", "", err
-	}
-	tablesJSON, _ := json.Marshal(tableChecksums)
-	objectsJSON, _ := json.Marshal(objectChecksums)
-	return string(tablesJSON), string(objectsJSON), nil
-}
-
 func (s *Store) RequestTenantRestoreVerification(ctx context.Context, actor models.ControlPlanePrincipal, tenantID, backupID, expectedTablesJSON, expectedObjectsJSON string) (*models.TenantRestoreManifest, error) {
 	if !actor.Validate() || tenantID == "" || backupID == "" || !json.Valid([]byte(expectedTablesJSON)) || !json.Valid([]byte(expectedObjectsJSON)) {
 		return nil, fmt.Errorf("request tenant restore verification: invalid input")
@@ -316,19 +217,23 @@ func (s *Store) VerifyTenantRestore(ctx context.Context, actor models.ControlPla
 	if !actor.Validate() || tenantID == "" || manifestID == "" {
 		return false, fmt.Errorf("verify tenant restore: invalid input")
 	}
-	actualTables, actualObjects, err := s.ComputeTenantChecksums(ctx, actor, tenantID)
-	if err != nil {
-		return false, err
-	}
 	matched := false
-	err = s.withTenantControlTx(ctx, tenantID, actor.ActorID, func(txs *Store) error {
+	err := s.withTenantRestoreSnapshot(ctx, tenantID, actor.ActorID, false, func(txs *Store) error {
 		var expectedTables, expectedObjects, status string
-		if err := txs.queryRow(ctx, `SELECT table_checksums_json, object_checksums_json, status
-			FROM tenant_restore_manifests WHERE tenant_id = ? AND id = ?`, tenantID, manifestID).Scan(&expectedTables, &expectedObjects, &status); err != nil {
+		query := `SELECT table_checksums_json, object_checksums_json, status
+			FROM tenant_restore_manifests WHERE tenant_id = ? AND id = ?`
+		if txs.dialect == DialectPostgres {
+			query += ` FOR UPDATE`
+		}
+		if err := txs.queryRow(ctx, query, tenantID, manifestID).Scan(&expectedTables, &expectedObjects, &status); err != nil {
 			return err
 		}
 		if status != "requested" {
 			return fmt.Errorf("verify tenant restore: manifest is terminal")
+		}
+		actualTables, actualObjects, err := txs.computeTenantChecksums(ctx, tenantID)
+		if err != nil {
+			return err
 		}
 		matched = canonicalJSONEqual(expectedTables, actualTables) && canonicalJSONEqual(expectedObjects, actualObjects)
 		newStatus := "failed"
@@ -336,7 +241,7 @@ func (s *Store) VerifyTenantRestore(ctx context.Context, actor models.ControlPla
 			newStatus = "verified"
 		}
 		now := time.Now().UTC()
-		_, err := txs.exec(ctx, `UPDATE tenant_restore_manifests SET status = ?, verified_at = ?
+		_, err = txs.exec(ctx, `UPDATE tenant_restore_manifests SET status = ?, verified_at = ?
 			WHERE tenant_id = ? AND id = ? AND status = 'requested'`, newStatus, now, tenantID, manifestID)
 		if err != nil {
 			return err
@@ -566,7 +471,8 @@ func (s *Store) ResumeTenantDSAR(ctx context.Context, actor models.Principal, re
 // the minimum relational identity skeleton are retained, while pedagogical
 // evidence, narrative content and direct learner profile data are removed.
 var dsarErasurePhases = []string{
-	// Credentials first: an erasure request ends every session and grant at once.
+	// Revoke live access before deleting even the first credential or data row.
+	"revoke_access",
 	"refresh_tokens", "oauth_codes", "login_challenges", "account_tokens", "learner_approved_clients",
 	"concept_bkt_estimates", "collective_weight_applications", "learning_badge_evidence", "learning_badges",
 	"webhook_delivery_transitions", "webhook_push_log", "webhook_message_queue",
@@ -602,6 +508,7 @@ var dsarLearnerTables = map[string]string{
 
 // dsarLatePhases are appended to requests created before they existed.
 var dsarLatePhases = []string{
+	"revoke_access",
 	"refresh_tokens", "oauth_codes", "login_challenges", "account_tokens", "learner_approved_clients",
 	"learner_concept_states", "calibration_records", "pending_consolidations", "tool_call_idempotency",
 }
@@ -692,7 +599,12 @@ func (s *Store) ProcessTenantDSARErasureBatch(ctx context.Context, scope models.
 			return err
 		}
 		phaseComplete := false
-		if phase == "scrub_learner" {
+		if phase == "revoke_access" {
+			if err := txs.revokeErasedLearnerAccess(txCtx, scope.TenantID, learnerID, now); err != nil {
+				return err
+			}
+			phaseComplete = true
+		} else if phase == "scrub_learner" {
 			anon := "erased+" + opaqueTokenHash(scope.TenantID + ":" + learnerID)[:24] + "@invalid.local"
 			var membershipID sql.NullString
 			if err := txs.queryRow(txCtx, `SELECT membership_id FROM learners WHERE tenant_id = ? AND id = ?`,
@@ -728,8 +640,7 @@ func (s *Store) ProcessTenantDSARErasureBatch(ctx context.Context, scope models.
 			if err != nil {
 				return err
 			}
-			if _, err := txs.exec(txCtx, `UPDATE enrollments SET status = 'cancelled', seat_reserved = 0,
-				objectives_json = '{}', updated_at = ? WHERE tenant_id = ? AND learner_id = ?`, now, scope.TenantID, learnerID); err != nil {
+			if err := txs.cancelErasedLearnerEnrollments(txCtx, scope.TenantID, learnerID, now); err != nil {
 				return err
 			}
 			// Derived aggregates must stop including the learner immediately,
@@ -746,12 +657,24 @@ func (s *Store) ProcessTenantDSARErasureBatch(ctx context.Context, scope models.
 				return fmt.Errorf("process tenant DSAR erasure: unknown phase")
 			}
 			selector := "rowid"
+			projection := selector
 			if txs.dialect == DialectPostgres {
 				selector = "ctid"
+				if dsarCredentialTables[phase] {
+					selector = "erasure_row_id"
+				} else if phase == "narrative_mutations" {
+					selector = "(enrollment_id, mutation_id)"
+				} else if phase == "implementation_intentions" || phase == "pedagogical_snapshots" || phase == "learning_sessions" {
+					selector = "id"
+				}
+				projection = selector
+				if phase == "narrative_mutations" {
+					projection = "enrollment_id, mutation_id"
+				}
 			}
-			result, err := txs.exec(txCtx, `DELETE FROM `+phase+` WHERE `+selector+` IN
-				(SELECT `+selector+` FROM `+phase+` WHERE tenant_id = ? AND `+column+` = ? LIMIT ?)`,
-				scope.TenantID, learnerID, limit)
+			result, err := txs.exec(txCtx, `DELETE FROM `+phase+` WHERE tenant_id = ? AND `+column+` = ? AND `+selector+` IN
+				(SELECT `+projection+` FROM `+phase+` WHERE tenant_id = ? AND `+column+` = ? LIMIT ?)`,
+				scope.TenantID, learnerID, scope.TenantID, learnerID, limit)
 			if err != nil {
 				return err
 			}

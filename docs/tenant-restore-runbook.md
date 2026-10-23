@@ -77,15 +77,38 @@ trafic avant réapplication des effacements/rétentions postérieurs.
 
 ## Couverture de la vérification de restauration
 
-La vérification (`ComputeTenantChecksums` / `VerifyTenantRestore`) compare des
-empreintes de tables : formations, inscriptions, état d'apprentissage canonique,
-interactions, évaluations, événements, sessions, décisions, domaines, curriculum,
-badges et poids collectifs, notamment. Un test impose que toute table portant
-`tenant_id` soit empreinte ou listée comme exemptée avec sa raison (données
-dérivées, identifiants éphémères, files, routage, finance, conformité). Les
-statistiques de cohorte sont dérivées : le worker les recalcule après une
-restauration. Un manifeste demandé avant une mise à jour qui ajoute des tables
-ne correspondra plus : en demander un nouveau après la mise à jour.
+La vérification (`ComputeTenantChecksums` / `VerifyTenantRestore`) compare le
+contenu complet des tables couvertes : formations, inscriptions, état
+d'apprentissage canonique, interactions, évaluations, événements, sessions,
+décisions, domaines, curriculum, badges et poids collectifs, notamment. Chaque
+colonne participe, y compris maîtrise, dates, rôles, statut, texte, ciphertext et
+métadonnées de chiffrement. Une empreinte ne repose plus seulement sur les clés
+et les effectifs. Les noms des colonnes et les valeurs typées sont encodés sans
+ambiguïté ; `NULL`, texte vide et nombres sont distincts. L'ordre physique des
+lignes et leur collation ne changent pas le résultat.
+
+La capture utilise un seul instantané PostgreSQL `REPEATABLE READ` ou une
+transaction SQLite. La lecture du manifeste, la capture et le verdict de
+vérification sont dans la même transaction ; un manifeste terminal ne peut pas
+être réutilisé. Cela vérifie un état à un instant donné : la cible doit rester
+isolée et sans trafic pendant l'exercice et jusqu'à sa validation.
+
+Un test impose que toute table portant `tenant_id` soit empreinte ou listée
+comme exemptée avec sa raison dans `db/restore_coverage_test.go`. Les exclusions
+restent au niveau des tables : données dérivées, identifiants éphémères, files,
+routage, finance, conformité et journaux. Aucune colonne des tables couvertes
+n'est exclue. Les statistiques de cohorte sont dérivées : le worker les
+recalcule après une restauration. Ces empreintes ne remplacent pas la
+réconciliation des credentials, holds, DSAR et journaux exclus.
+
+Les valeurs d'empreinte utilisent le format `content-v2:<effectif>:<sha256>`.
+Les anciens manifestes de clés/effectifs sont refusés, même si leurs clés
+correspondent. Recapturer les empreintes après la mise à jour à partir d'une
+copie vérifiée de la sauvegarde, avec la même version de schéma et le même
+backend que la cible. Ne pas utiliser les données altérées de la cible comme
+nouvelle référence. L'ajout d'une colonne ou d'une table couverte change aussi
+les empreintes ; la comparaison SQLite vers PostgreSQL n'est pas un contrat de
+migration entre moteurs.
 
 ## Archive logique d'un tenant
 

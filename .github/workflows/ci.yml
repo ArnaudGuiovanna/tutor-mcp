@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GO_VERSION: 1.26.9
+  GO_VERSION: 1.26.10
   GOTOOLCHAIN: local
 
 jobs:
@@ -58,6 +58,11 @@ jobs:
 
       - name: Test learning policy analysis (offline)
         run: python3 -B -m unittest discover -s scripts -p test_evaluate_learning_policies.py
+
+      - name: Test release notices and installers (offline)
+        run: |
+          python3 -B -m unittest discover -s scripts -p test_third_party_notices.py
+          python3 -B -m unittest discover -s scripts -p test_installers.py
 
       - name: Staticcheck
         run: |
@@ -182,7 +187,16 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-        run: go build -trimpath -o tutor-mcp .
+          CGO_ENABLED: "0"
+        run: |
+          destination="$RUNNER_TEMP/tutor-distribution"
+          mkdir -p "$destination"
+          binary=tutor-mcp
+          if [ "$GOOS" = windows ]; then binary=tutor-mcp.exe; fi
+          go build -trimpath -o "$destination/$binary" .
+          cp LICENSE "$destination/LICENSE"
+          python3 -B scripts/third_party_notices.py --binary "$destination/$binary" --output "$destination/THIRD_PARTY_NOTICES"
+          python3 -B scripts/third_party_notices.py --verify-tree "$destination"
 
   local-native:
     name: Local (${{ matrix.os }})

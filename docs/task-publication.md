@@ -77,6 +77,9 @@ La publication :
    ce SHA précis, émis par l'application GitHub Actions indiquée dans ce fichier.
    Un contrôle absent reste en attente ; un échec, une annulation ou un contrôle
    ignoré bloque la promotion. L'attente est limitée à une heure.
+   Les scénarios `Deployment (hobby)` et `Deployment (institution)` sont tous
+   deux obligatoires ; le second exerce PostgreSQL TLS et les rôles minimaux
+   réellement livrés, et ne peut pas être remplacé par la seule suite SQL.
 6. Recharge les références et vérifie que `staging` et l'index n'ont pas changé,
    puis fusionne le commit dans `main` avec `--ff-only` et le pousse sans force.
 7. Vérifie les deux références distantes, conserve un reçu local avec les

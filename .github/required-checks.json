@@ -16,6 +16,7 @@
     "Local (ubuntu-latest)",
     "Local (macos-latest)",
     "Local (windows-latest)",
-    "Deployment (hobby)"
+    "Deployment (hobby)",
+    "Deployment (institution)"
   ]
 }

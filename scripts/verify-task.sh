@@ -20,6 +20,8 @@ export PYTHONDONTWRITEBYTECODE=1
 git diff --cached --check
 python3 -m unittest discover -s scripts -p 'test_finish_task.py'
 python3 -m unittest discover -s scripts -p 'test_evaluate_learning_policies.py'
+python3 -m unittest discover -s scripts -p 'test_third_party_notices.py'
+python3 -m unittest discover -s scripts -p 'test_installers.py'
 "$task_go_bin" build ./...
 "$task_go_bin" vet ./...
 TUTOR_GO_BIN="$task_go_bin" bash scripts/check-vulnerabilities.sh

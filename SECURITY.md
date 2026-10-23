@@ -66,12 +66,13 @@ locally and waits for the required GitHub checks before promoting a commit to
 the protected `main` branch.
 
 Run the same Go scan locally with `bash scripts/check-vulnerabilities.sh`.
-`TUTOR_GO_BIN` selects the Go executable; CI uses Go 1.26.9. The scanner reports
+`TUTOR_GO_BIN` selects the Go executable; CI uses Go 1.26.10. The scanner reports
 reachable vulnerable symbols separately from advisories in unimported packages
 of required modules.
 
-Builds use Go 1.26.9 and `golang.org/x/net` v0.60.0 for the
-[October 8, 2026 security fixes](https://go.dev/doc/devel/release#go1.26.0).
+Builds use Go 1.26.10 and `golang.org/x/net` v0.60.0 for the
+[October 8, 2026 security fixes](https://go.dev/doc/devel/release#go1.26.0)
+and the [compromised-intermediate-certificate mitigation, GO-2026-6809](https://pkg.go.dev/vuln/GO-2026-6809).
 Rebuild existing binaries with a patched Go toolchain: updating a module alone
 does not replace vulnerable standard-library code already compiled into a binary.
 

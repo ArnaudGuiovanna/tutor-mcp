@@ -18,6 +18,13 @@ compose build
 compose run --rm --no-deps tutor init --profile hobby --data-dir /data/hobby \
     --public-url https://tutor.localhost > "$work/invitation"
 compose up -d
+# Check the final scratch image, not just files left in the builder stage.
+mkdir "$work/distribution"
+container="$(compose ps -q tutor)"
+docker cp "$container:/usr/local/bin/tutor-mcp" "$work/distribution/tutor-mcp"
+docker cp "$container:/usr/share/doc/tutor-mcp/." "$work/distribution/"
+docker cp "$container:/etc/ssl/certs/ca-certificates.crt" "$work/ca-certificates.crt"
+python3 -B scripts/third_party_notices.py --verify-tree "$work/distribution" --ca-bundle "$work/ca-certificates.crt"
 address="$(compose port caddy 443)"
 ready() {
     attempts=0

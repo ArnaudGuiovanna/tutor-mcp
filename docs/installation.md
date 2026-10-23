@@ -24,6 +24,13 @@ selects Linux or macOS and amd64 or arm64, and verifies the archive against
 request sudo. To build from source, use the Go version in `go.mod` and run
 `go build -o tutor-mcp .`.
 
+The installer also verifies and keeps licence texts in `tutor-mcp-notices/`
+beside the executable. For the unchanged v0.6.1 archives it downloads the
+matching notice supplement and `THIRD_PARTY_NOTICES_SHA256SUMS` from that release;
+it checks the supplement against the exact archive, binary and platform. Missing
+or mismatched notices stop installation before replacing an existing binary.
+See [binary distribution notices](distribution-notices.md).
+
 ## Windows
 
 Download [install.ps1](../scripts/install.ps1), inspect it, then run it from
@@ -39,8 +46,14 @@ Restart the MCP client to pick up the new PATH. `-InstallDir` selects another
 directory and `-NoPathUpdate` leaves PATH unchanged. Follow your organization's
 PowerShell execution policy; the installer does not modify it.
 
+Licence texts are kept under `tutor-mcp-notices` in that installation directory.
+The installer verifies the inventory and notice files, using the separately
+checked v0.6.1 supplement when needed. It needs neither Python nor Go.
+
 Alternatively, unpack the matching Windows ZIP from the release, verify its
-checksum, and use the full path to `tutor-mcp.exe` in your client configuration.
+checksum, retain its licence texts and use the full path to `tutor-mcp.exe` in
+your client configuration. For v0.6.1, use the updated installer to obtain and
+verify the corresponding notice supplement as well.
 No WSL, Docker, SMTP server or account is required for local stdio.
 
 ## Local client configuration

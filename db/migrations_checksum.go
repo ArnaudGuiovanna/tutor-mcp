@@ -1968,6 +1968,7 @@ END;`,
 	out = append(out, migration{Version: "0077_collective_weights", Body: collectiveWeightsMigration})
 	out = append(out, migration{Version: "0078_bkt_calibration_sources", Body: bktCalibrationMigration})
 	out = append(out, migration{Version: "0079_session_narrative_index", Body: sessionNarrativeIndexMigration})
+	out = append(out, migration{Version: "0080_tenant_erasure_identity", Body: sqliteErasureIdentityMigration})
 	markRemovedAlterColumns(out)
 	return out
 }

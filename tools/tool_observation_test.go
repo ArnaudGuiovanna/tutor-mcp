@@ -108,6 +108,13 @@ type observedTransactionStore struct {
 	delay               time.Duration
 }
 
+func (s *observedTransactionStore) ValidatePrincipal(ctx context.Context, principal models.Principal) error {
+	if s.Store != nil {
+		return s.Store.ValidatePrincipal(ctx, principal)
+	}
+	return nil // This test double models an authorized caller and SQL failures.
+}
+
 func (s *observedTransactionStore) WithTenantTx(ctx context.Context, _ models.TenantScope, fn func(context.Context, storeport.Store) error) error {
 	return s.observeTransaction(ctx, fn)
 }

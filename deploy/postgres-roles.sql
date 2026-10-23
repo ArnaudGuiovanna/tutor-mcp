@@ -37,9 +37,12 @@ GRANT SELECT ON tenants, plans, schema_migrations, installation TO tutor_worker;
 -- worker cannot read global users, password/MFA/service/support credentials.
 -- Erasure (DSAR) reaches the learner's credentials by identifier only: column
 -- grants expose no token or secret value, only what a DELETE needs to match.
-GRANT SELECT (tenant_id, learner_id) ON
+GRANT SELECT (tenant_id, learner_id, erasure_row_id) ON
     refresh_tokens, oauth_codes, login_challenges, account_tokens, learner_approved_clients, tool_call_idempotency
 TO tutor_worker;
+GRANT SELECT (tenant_id, learner_id, id) ON
+    implementation_intentions, pedagogical_snapshots, learning_sessions TO tutor_worker;
+GRANT SELECT (tenant_id, learner_id, enrollment_id, mutation_id) ON narrative_mutations TO tutor_worker;
 GRANT SELECT ON
     learner_concept_states,
     learning_badges, learning_badge_evidence,
@@ -77,6 +80,10 @@ GRANT SELECT, UPDATE ON tenant_dsar_requests, tenant_dsar_phases TO tutor_worker
 -- Resume pre-upgrade erasure requests by appending newly introduced checkpoints.
 GRANT INSERT ON tenant_dsar_phases TO tutor_worker;
 GRANT UPDATE ON learners TO tutor_worker;
+-- Erasure revokes only the institution membership, before deleting any data.
+GRANT SELECT (tenant_id, learner_id, status, version), UPDATE (status, version, updated_at)
+    ON tenant_memberships TO tutor_worker;
+GRANT UPDATE (reserved_seats, version, updated_at) ON cohorts TO tutor_worker;
 GRANT UPDATE (rubric_score_json) ON assessment_reviews TO tutor_worker;
 GRANT UPDATE (findings_json) ON curriculum_review_opinions TO tutor_worker;
 -- Erasure scrubs learner-authored text and cancels the erased learner's enrollments.

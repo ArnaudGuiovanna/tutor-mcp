@@ -552,7 +552,13 @@ func toolTenantTransactionMiddleware(deps *Deps) mcp.Middleware {
 			if readOnlyTools[toolNameFromRequest(req)] {
 				transaction = deps.Store.WithTenantReadTx
 			}
-			err := transaction(ctx, principal.TenantScope(), func(txCtx context.Context, _ storeport.Store) error {
+			err := transaction(ctx, principal.TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {
+				// HTTP authentication can precede a concurrent membership
+				// revocation. Recheck within the transaction that owns the effect;
+				// PostgreSQL writers keep the membership locked until commit.
+				if err := scoped.ValidatePrincipal(txCtx, principal); err != nil {
+					return err
+				}
 				result, callErr = next(txCtx, method, req)
 				// MCP application errors normally carry a nil Go error. Nested
 				// store operations share this transaction, so only this boundary
@@ -563,6 +569,11 @@ func toolTenantTransactionMiddleware(deps *Deps) mcp.Middleware {
 				return callErr
 			})
 			if err != nil {
+				if errors.Is(err, storeport.ErrInvalidPrincipal) {
+					failure, _ := errorResult("authenticated tenant principal is no longer valid")
+					markToolCallDenied(ctx, failure)
+					return failure, nil
+				}
 				if callErr != nil {
 					return nil, callErr
 				}

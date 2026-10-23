@@ -3,7 +3,103 @@
 
 package db
 
-import "context"
+import (
+	"context"
+	"fmt"
+	"time"
+)
+
+// These stores expose only routing identifiers to the worker. PostgreSQL's
+// system ctid needs table-wide SELECT, so credential erasure uses a dedicated
+// non-secret row identifier instead of widening access to token values.
+var dsarCredentialTables = map[string]bool{
+	"refresh_tokens": true, "oauth_codes": true, "login_challenges": true,
+	"account_tokens": true, "learner_approved_clients": true, "tool_call_idempotency": true,
+}
+
+func (s *Store) revokeErasedLearnerAccess(ctx context.Context, tenant, learner string, now time.Time) error {
+	// The membership row is also the lock used by authenticated write
+	// transactions. Wait for those to finish before the first erasure phase,
+	// then make every existing bearer/browser session fail its live check.
+	if _, err := s.exec(ctx, `UPDATE tenant_memberships SET status = 'revoked', version = version + 1, updated_at = ?
+ WHERE tenant_id = ? AND learner_id = ? AND status <> 'revoked'`, now, tenant, learner); err != nil {
+		return err
+	}
+	// Domain-before-enrollment locking matches leave/version migration. Closing
+	// access at the start also prevents a staff migration from recreating state
+	// after an earlier data phase has already deleted it.
+	if _, err := s.exec(ctx, `UPDATE domains SET archived = 1 WHERE tenant_id = ? AND learner_id = ?`, tenant, learner); err != nil {
+		return err
+	}
+	cohorts, err := s.erasedLearnerCohorts(ctx, tenant, learner)
+	if err != nil {
+		return err
+	}
+	if err := s.cancelErasedLearnerEnrollments(ctx, tenant, learner, now); err != nil {
+		return err
+	}
+	for _, cohort := range cohorts {
+		if err := s.recomputeCohortStatistics(ctx, tenant, cohort[0], cohort[1], now.UTC()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Release only reservations actually held by these enrollments. Both the
+// enrollment flag and cohort counter commit together; concurrent workers and
+// retries cannot release a place twice.
+func (s *Store) cancelErasedLearnerEnrollments(ctx context.Context, tenant, learner string, now time.Time) error {
+	query := `SELECT id, cohort_id, seat_reserved FROM enrollments
+ WHERE tenant_id = ? AND learner_id = ? ORDER BY cohort_id, id`
+	if s.dialect == DialectPostgres {
+		query += ` FOR UPDATE`
+	}
+	rows, err := s.query(ctx, query, tenant, learner)
+	if err != nil {
+		return err
+	}
+	counts := map[string]int{}
+	var cohorts []string
+	for rows.Next() {
+		var id, cohort string
+		var reserved int
+		if err := rows.Scan(&id, &cohort, &reserved); err != nil {
+			rows.Close()
+			return err
+		}
+		if reserved == 1 {
+			if counts[cohort] == 0 {
+				cohorts = append(cohorts, cohort)
+			}
+			counts[cohort]++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, cohort := range cohorts {
+		count := counts[cohort]
+		result, err := s.exec(ctx, `UPDATE cohorts SET reserved_seats = reserved_seats - ?,
+ version = version + 1, updated_at = ? WHERE tenant_id = ? AND id = ? AND reserved_seats >= ?`,
+			count, now, tenant, cohort, count)
+		if err != nil {
+			return err
+		}
+		if changed, err := result.RowsAffected(); err != nil {
+			return err
+		} else if changed != 1 {
+			return fmt.Errorf("erase learner: inconsistent cohort reservations")
+		}
+	}
+	_, err = s.exec(ctx, `UPDATE enrollments SET status = 'cancelled', seat_reserved = 0,
+ objectives_json = '{}', updated_at = ? WHERE tenant_id = ? AND learner_id = ?`, now, tenant, learner)
+	return err
+}
 
 // erasedLearnerCohorts lists the published institutional cohorts whose
 // aggregates include the learner, as (cohort, version) pairs.
