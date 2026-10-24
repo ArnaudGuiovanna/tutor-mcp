@@ -551,10 +551,38 @@ fn node_invocation(script: &Path, paths: &[PathBuf]) -> Result<LaunchSpec, Strin
         .ok_or_else(|| "Node.js est requis pour cet adaptateur JavaScript. Installez Node.js ou choisissez l’exécutable autonome de l’adaptateur.".to_string())?;
     Ok(LaunchSpec {
         program: node.to_string_lossy().into_owned(),
-        args: vec![script.to_string_lossy().into_owned()],
+        args: vec![node_script_argument(script)],
         env: vec![],
         cwd: None,
     })
+}
+
+fn node_script_argument(script: &Path) -> String {
+    // canonicalize() returns an extended Windows path. Node 24.13's entry
+    // loader fails while resolving its drive root (nodejs/node#62446, #65378).
+    // Keep canonical paths for package containment; use the ordinary spelling
+    // only at this external argv boundary, and only if it resolves identically.
+    #[cfg(windows)]
+    if let Some(text) = script.to_str() {
+        use std::path::{Component, Prefix};
+        let ordinary = match script.components().next() {
+            Some(Component::Prefix(prefix)) => match prefix.kind() {
+                Prefix::VerbatimDisk(_) => text.get(4..).map(str::to_owned),
+                Prefix::VerbatimUNC(_, _) => text.get(8..).map(|rest| format!(r"\\{rest}")),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(ordinary) = ordinary.filter(|path| Path::new(path).is_absolute()) {
+            if matches!(
+                (script.canonicalize(), Path::new(&ordinary).canonicalize()),
+                (Ok(original), Ok(candidate)) if original == candidate
+            ) {
+                return ordinary;
+            }
+        }
+    }
+    script.to_string_lossy().into_owned()
 }
 
 fn npm_package_bin(shim: &Path, package: &str, command: &str) -> Result<PathBuf, String> {
@@ -1409,14 +1437,10 @@ mod tests {
         let spec =
             adapter_invocation(&root.join("codex-acp.cmd"), std::slice::from_ref(&root)).unwrap();
         assert_eq!(spec.program, node.to_string_lossy());
+        assert_eq!(spec.args.len(), 1);
         assert_eq!(
-            spec.args,
-            vec![package
-                .join("dist/index.js")
-                .canonicalize()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned()]
+            Path::new(&spec.args[0]).canonicalize().unwrap(),
+            package.join("dist/index.js").canonicalize().unwrap()
         );
         std::fs::write(
             package.join("package.json"),
@@ -1431,5 +1455,75 @@ mod tests {
         )
         .is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_node_executes_a_canonical_script_with_unicode_and_literal_arguments() {
+        use std::path::{Component, Prefix};
+
+        let root = tempfile::Builder::new()
+            .prefix("tutor Node espace élève ")
+            .tempdir()
+            .unwrap();
+        let script = root.path().join("agent 'manuel' 日本語.cjs");
+        std::fs::write(
+            &script,
+            "process.stdout.write(JSON.stringify(process.argv.slice(2)));",
+        )
+        .unwrap();
+        let canonical = script.canonicalize().unwrap();
+        assert!(matches!(
+            canonical.components().next(),
+            Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::VerbatimDisk(_))
+        ));
+        let arguments = vec![
+            "quoted ' value $(not executed)".into(),
+            "élève 日本語".into(),
+        ];
+        let mut target = wsl_target();
+        target.environment = "native".into();
+        let spec = command_spec(
+            &target,
+            canonical.to_str().unwrap(),
+            &arguments,
+            root.path().to_str().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(!spec.args[0].starts_with(r"\\?\"));
+        assert_eq!(Path::new(&spec.args[0]).canonicalize().unwrap(), canonical);
+        let output = run_probe(spec, Duration::from_secs(5)).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Vec<String>>(&output).unwrap(),
+            arguments
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_node_path_conversion_preserves_distinct_extended_filenames() {
+        let root = tempfile::tempdir().unwrap();
+        let canonical_root = root.path().canonicalize().unwrap();
+        let ordinary = canonical_root.join("distinct.cjs");
+        let extended_only = canonical_root.join("distinct.cjs.");
+        std::fs::write(&ordinary, "ordinary").unwrap();
+        std::fs::write(&extended_only, "extended only").unwrap();
+        assert_ne!(
+            ordinary.canonicalize().unwrap(),
+            extended_only.canonicalize().unwrap()
+        );
+        // Removing the namespace would trim the final dot and select the other
+        // file. The identity check must preserve the extended spelling.
+        assert_eq!(
+            node_script_argument(&extended_only),
+            extended_only.to_string_lossy()
+        );
+        let missing = canonical_root.join("missing.cjs");
+        assert_eq!(node_script_argument(&missing), missing.to_string_lossy());
+        assert_eq!(
+            node_script_argument(Path::new(r"\\?\GLOBALROOT\Device\example")),
+            r"\\?\GLOBALROOT\Device\example"
+        );
     }
 }

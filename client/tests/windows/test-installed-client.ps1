@@ -18,7 +18,7 @@ try {
     if ($installation.ExitCode -ne 0) { throw "Installation NSIS refusée : $($installation.ExitCode)." }
     $binary = Join-Path $installRoot 'tutor-client.exe'
     if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw "Le binaire du client est absent de l’installation." }
-    foreach ($helper in @('tutor-client-qualify.exe', 'tutor-client-smoke-learning.exe')) {
+    foreach ($helper in @('tutor-client-qualify.exe', 'tutor-client-smoke.exe')) {
         if (Test-Path -LiteralPath (Join-Path $installRoot $helper)) { throw "Un outil de qualification a été incorporé à l’installation : $helper" }
     }
     $noticeVerifier = (Resolve-Path (Join-Path $PSScriptRoot '../../scripts/collect-notices.py')).Path

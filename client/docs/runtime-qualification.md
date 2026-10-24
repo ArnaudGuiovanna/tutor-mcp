@@ -43,6 +43,16 @@ d’une formation, rejeu idempotent, ouverture d’une séance, arrêt et redém
 puis vérification des objets persistés. Ces appels MCP sont directs ; ils ne
 prouvent pas que Codex les invoque correctement pendant un tutorat.
 
+Le lancement JavaScript conserve les chemins canoniques pour vérifier les
+limites du paquet npm, puis transmet à Node le chemin Windows ordinaire quand
+celui-ci désigne exactement le même fichier. Cette conversion contourne une
+[erreur du chargeur Node sur les entrées `\\?\C:\…`](https://github.com/nodejs/node/issues/62446),
+présente notamment dans la version 24.13.0 utilisée par la CI. Le
+[correctif amont](https://github.com/nodejs/node/pull/65378) décrit la résolution
+incorrecte de la racine du lecteur. Les tests Windows lancent réellement un
+script canonique avec espaces et Unicode et vérifient que les noms étendus
+distincts restent inchangés.
+
 ## WSL2 réel
 
 Une machine Windows disposant déjà d’une distribution WSL2 et de l’adaptateur

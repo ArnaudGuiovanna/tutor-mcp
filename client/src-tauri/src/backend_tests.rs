@@ -26,6 +26,89 @@ fn fixture_target() -> AgentTarget {
     }
 }
 
+// Capture diagnostics only from this deterministic, repository-owned fixture.
+// Production ACP stderr can contain credentials and remains private. Launch the
+// same canonical script through discovery, without depending on the RPC reader
+// that otherwise turns a Node loader failure into a generic connection EOF.
+async fn fixture_startup_diagnostic(directory: &Path) -> Result<(), String> {
+    use std::time::Duration;
+    use tokio::io::AsyncReadExt;
+
+    const LIMIT: u64 = 4096;
+    let target = fixture_target();
+    let mut spec = discovery::launch_spec(&target, directory.to_str().unwrap()).await?;
+    spec.args.push("--self-test".into());
+    let invocation = format!(
+        "program={:?}, args={:?}, cwd={:?}",
+        spec.program, spec.args, spec.cwd
+    );
+    let mut command = tokio::process::Command::new(&spec.program);
+    command
+        .args(&spec.args)
+        .env_remove("CODEX_PATH")
+        .envs(spec.env)
+        .current_dir(directory)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW, as in production.
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("{invocation}: {error}"))?;
+    let mut stdout = child.stdout.take().unwrap().take(LIMIT + 1);
+    let mut stderr = child.stderr.take().unwrap().take(LIMIT + 1);
+    let capture = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut output = Vec::new();
+        let mut diagnostic = Vec::new();
+        let (status, out, err) = tokio::join!(
+            child.wait(),
+            stdout.read_to_end(&mut output),
+            stderr.read_to_end(&mut diagnostic)
+        );
+        (status, out, err, output, diagnostic)
+    })
+    .await;
+    let (status, out, err, output, diagnostic) = match capture {
+        Ok(capture) => capture,
+        Err(_) => {
+            let _ = child.start_kill();
+            let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
+            return Err(format!("Fixture Node timed out: {invocation}"));
+        }
+    };
+    let details = format!(
+        "{invocation}; status={status:?}; stdout={:?}; fixture stderr={:?}",
+        String::from_utf8_lossy(&output[..output.len().min(LIMIT as usize)]),
+        String::from_utf8_lossy(&diagnostic[..diagnostic.len().min(LIMIT as usize)])
+    );
+    if output.len() > LIMIT as usize
+        || diagnostic.len() > LIMIT as usize
+        || out.is_err()
+        || err.is_err()
+        || !status.is_ok_and(|status| status.success())
+    {
+        return Err(details);
+    }
+    let value: Value = serde_json::from_slice(&output).map_err(|_| details.clone())?;
+    if value["fixture"] != "tutor-client-backend"
+        || value["cwd"]
+            .as_str()
+            .and_then(|cwd| Path::new(cwd).canonicalize().ok())
+            != directory.canonicalize().ok()
+    {
+        return Err(details);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn canonical_node_fixture_starts_through_the_production_launcher() {
+    let directory = tempfile::tempdir().unwrap();
+    fixture_startup_diagnostic(directory.path()).await.unwrap();
+}
+
 async fn connected(
     directory: &Path,
 ) -> (Arc<Backend>, tokio::sync::mpsc::UnboundedReceiver<Value>) {
@@ -50,10 +133,15 @@ async fn connected(
         },
     };
     backend.save_settings(settings).await.unwrap();
-    backend
+    if let Err(error) = backend
         .connect_agent(target, directory.to_string_lossy().into_owned())
         .await
-        .unwrap();
+    {
+        panic!(
+            "ACP fixture connection failed: {error}; fixture-only startup diagnostic: {:?}",
+            fixture_startup_diagnostic(directory).await
+        );
+    }
     backend.tutor_overview().await.unwrap();
     (backend, receiver)
 }

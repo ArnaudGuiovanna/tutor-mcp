@@ -4,6 +4,10 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const readline = require('node:readline');
+if (process.argv.includes('--self-test')) {
+  process.stdout.write(`${JSON.stringify({fixture:'tutor-client-backend',cwd:process.cwd()})}\n`);
+  process.exit(0);
+}
 const local = process.argv.includes('--local');
 const sessionFile = path.join(process.cwd(), 'fixture-agent-sessions.json');
 let sessions = fs.existsSync(sessionFile) ? JSON.parse(fs.readFileSync(sessionFile, 'utf8')) : {};
