@@ -53,6 +53,16 @@ incorrecte de la racine du lecteur. Les tests Windows lancent réellement un
 script canonique avec espaces et Unicode et vérifient que les noms étendus
 distincts restent inchangés.
 
+Les exécutables de tests Tauri sous MSVC reçoivent aussi le manifeste Windows
+Common-Controls v6. Le `build.rs` applique la
+[solution utilisée par Tauri](https://github.com/tauri-apps/tauri/issues/13419)
+à tous les artefacts, car le manifeste ajouté aux seuls binaires applicatifs
+ne couvre pas `cargo test --lib`. Sans lui, le chargeur peut retourner
+`STATUS_ENTRYPOINT_NOT_FOUND` avant le premier test. Le fichier
+`client/src-tauri/windows-app-manifest.xml` conserve intégralement le manifeste
+par défaut de `tauri-build 2.7.4` ; sa comparaison fait partie de la revue lors
+d’une mise à jour de cette dépendance.
+
 ## WSL2 réel
 
 Une machine Windows disposant déjà d’une distribution WSL2 et de l’adaptateur
