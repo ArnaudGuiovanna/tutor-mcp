@@ -54,6 +54,8 @@ var tenantArchiveGlobalTables = []string{
 	"external_identities",
 	"mfa_credentials",
 	"mfa_recovery_codes",
+	"native_identities",
+	"native_identity_keys",
 	"oauth_clients",
 	"plans",
 	"users",
@@ -124,6 +126,10 @@ func (s *Store) captureTenantLogicalArchive(ctx context.Context, tenantID string
 		Tables:        make(map[string]json.RawMessage, len(tables)),
 	}
 	for _, table := range tables {
+		if table == "native_challenges" || table == "native_sessions" {
+			archive.Tables[table] = json.RawMessage("[]")
+			continue // A restored backup must require a fresh native signature.
+		}
 		rows, err := s.exportPostgresRows(ctx, table, `t.tenant_id = ?`, tenantID)
 		if err != nil {
 			return nil, err
@@ -131,11 +137,13 @@ func (s *Store) captureTenantLogicalArchive(ctx context.Context, tenantID string
 		archive.Tables[table] = rows
 	}
 	globalPredicates := map[string]string{
-		"users":               `t.id IN (SELECT user_id FROM tenant_memberships WHERE tenant_id = ?)`,
-		"external_identities": `t.user_id IN (SELECT user_id FROM tenant_memberships WHERE tenant_id = ?)`,
-		"mfa_credentials":     `t.user_id IN (SELECT user_id FROM tenant_memberships WHERE tenant_id = ?)`,
-		"mfa_recovery_codes":  `t.user_id IN (SELECT user_id FROM tenant_memberships WHERE tenant_id = ?)`,
-		"plans":               `t.id IN (SELECT plan_id FROM tenant_subscriptions WHERE tenant_id = ?)`,
+		"users":                `t.id IN (SELECT user_id FROM tenant_memberships WHERE tenant_id = ?)`,
+		"external_identities":  `t.user_id IN (SELECT user_id FROM tenant_memberships WHERE tenant_id = ?)`,
+		"mfa_credentials":      `t.user_id IN (SELECT user_id FROM tenant_memberships WHERE tenant_id = ?)`,
+		"mfa_recovery_codes":   `t.user_id IN (SELECT user_id FROM tenant_memberships WHERE tenant_id = ?)`,
+		"native_identities":    `t.user_id IN (SELECT user_id FROM tenant_memberships WHERE tenant_id = ?)`,
+		"native_identity_keys": `t.identity_id IN (SELECT n.id FROM native_identities n JOIN tenant_memberships tm ON tm.user_id=n.user_id WHERE tm.tenant_id = ?)`,
+		"plans":                `t.id IN (SELECT plan_id FROM tenant_subscriptions WHERE tenant_id = ?)`,
 		"oauth_clients": `t.client_id IN (
 			SELECT client_id FROM learner_approved_clients WHERE tenant_id = ?
 			UNION SELECT client_id FROM service_accounts WHERE tenant_id = ?

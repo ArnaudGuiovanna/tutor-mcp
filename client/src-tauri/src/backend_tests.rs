@@ -649,15 +649,43 @@ async fn api_server(handler: impl Fn(&str) -> Value + Send + Sync + 'static) -> 
     }
 }
 
-fn api_credentials(origin: &str) -> OAuthCredentials {
-    OAuthCredentials {
+fn api_credentials(origin: &str) -> Session {
+    let keys = nostr::Keys::generate();
+    Session {
         origin: origin.into(),
-        client_id: "test-client".into(),
         access_token: "test-token".into(),
-        refresh_token: "test-refresh".into(),
         expires_at: chrono::Utc::now().timestamp() + 3600,
-        token_endpoint: format!("{origin}/token"),
-        resource: format!("{origin}/mcp"),
+        institution: native_auth::Institution {
+            version: 1,
+            institution_id: "tenant1".into(),
+            name: "Test".into(),
+            issuer: origin.into(),
+            mcp_url: format!("{origin}/mcp"),
+            identity: native_auth::IdentityEndpoints {
+                scheme: "nostr-nip98".into(),
+                challenge_url: format!("{origin}/api/client/v1/identity/challenge"),
+                session_url: format!("{origin}/api/client/v1/identity/session"),
+                rotate_url: format!("{origin}/api/client/v1/identity/rotate"),
+                recover_url: format!("{origin}/api/client/v1/identity/recover"),
+                logout_url: format!("{origin}/api/client/v1/identity/logout"),
+                event_kind: 27235,
+                challenge_ttl_seconds: 120,
+            },
+        },
+        session_id: "session-test".into(),
+        identity: native_auth::RemoteIdentity {
+            public_key: keys.public_key().to_hex(),
+            recovery_public_key: nostr::Keys::generate().public_key().to_hex(),
+            key_version: 1,
+        },
+        principal: native_auth::Principal {
+            user_id: "user1".into(),
+            tenant_id: "tenant1".into(),
+            membership_id: "member1".into(),
+            learner_id: "learner1".into(),
+            roles: vec!["learner".into()],
+        },
+        allowed_scopes: vec![],
         scope: "learner:read learner:write".into(),
     }
 }
@@ -753,75 +781,216 @@ async fn pagination_rejects_repeated_cursors_account_changes_and_excessive_pages
 }
 
 #[tokio::test]
-async fn logout_invalidates_a_callback_before_it_can_replace_the_vault() {
+async fn native_login_requires_backup_and_preserves_legacy_credentials() {
     let directory = tempfile::tempdir().unwrap();
-    let server = api_server(|_| overview_page()).await;
+    crate::workspace::private_write(
+        &directory.path().join("oauth-credentials.json"),
+        b"legacy preserved",
+    )
+    .unwrap();
+    let backend = Backend::new(directory.path(), Arc::new(|_, _| {})).unwrap();
+    backend.create_identity(None).await.unwrap();
+    let mut settings = backend.store.lock().await.data.settings.clone();
+    settings.tutor.mode = "remote".into();
+    settings.tutor.url = "https://institution.example".into();
+    backend.save_settings(settings).await.unwrap();
+    let error = backend
+        .connect_tutor("https://institution.example".into(), false)
+        .await
+        .unwrap_err();
+    assert!(error.contains("sauvegarde"));
+    assert!(backend.tutor.lock().await.credentials.is_none());
+    assert_eq!(
+        std::fs::read(directory.path().join("oauth-credentials.json")).unwrap(),
+        b"legacy preserved"
+    );
+    assert!(backend.snapshot().await["identity"].get("secret").is_none());
+}
+#[test]
+fn staff_authoring_prompt_never_invents_a_learner() {
+    let conversation = Conversation {
+        id: "staff-session".into(),
+        title: "Formation institution".into(),
+        intent_id: None,
+        agent_session_id: None,
+        target_id: "target".into(),
+        tutor_binding: "binding".into(),
+        runtime_binding: String::new(),
+        created_at: String::new(),
+        updated_at: String::new(),
+        messages: vec![],
+    };
+    let overview = json!({"identity":{"tenantId":"tenant1","userId":"owner","membershipId":"owner-member","learnerId":"","roles":["owner"]},"capabilities":{"formationAuthoring":true}});
+    let prompt = pedagogical_prompt(
+        None,
+        &conversation,
+        "Concevoir une formation",
+        Some(&overview),
+    );
+    assert!(prompt.contains("ne demande jamais get_learner_context"));
+    assert!(!prompt.contains("Commence par get_learner_context"));
+    assert!(prompt.contains("ne publie qu’après confirmation humaine explicite"));
+    assert!(prompt.contains("draft_formation puis add_formation_concepts"));
+    assert!(!prompt.contains("Pour une nouvelle formation personnelle"));
+}
+
+#[tokio::test]
+async fn authored_catalog_has_an_independent_cursor_and_no_fake_learner() {
+    let server=api_server(|path| {
+        let params=page_parameters(path);let mut page=overview_page();page["identity"]["learnerId"]=json!("");
+        let (id,next)=match params.get("authored_after").map(String::as_str){Some("authored-1")=>("draft-1","authored-2"),Some("authored-2")=>("published-2",""),_=>("draft-0","authored-1")};
+        page["authoredFormations"]=json!({"items":[{"id":id,"status":if next.is_empty(){"published"}else{"draft"}}],"next_after":next});page
+    }).await;
+    let result = remote_overview(&api_credentials(&server.origin))
+        .await
+        .unwrap();
+    assert_eq!(
+        result["authoredFormations"]["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(result["identity"]["learnerId"], "");
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[1].contains("authored_after=authored-1"));
+    assert!(!requests[1].contains("available_after"));
+}
+
+#[tokio::test]
+async fn mcp_permission_changes_reload_headers_and_never_replay_user_turns() {
+    for supports_load in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let (backend, _) = connected(directory.path()).await;
+        let conversation = backend.start_conversation(None, None).await.unwrap();
+        if !supports_load {
+            backend.agent.lock().await.as_mut().unwrap().capabilities["loadSession"] = json!(false);
+        }
+        // Change the configuration fingerprint as a credential reauthentication
+        // does, while preserving the same pedagogical identity and transcript.
+        backend
+            .agent
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .mcp_configurations
+            .insert(
+                conversation.agent_session_id.clone().unwrap(),
+                "prior-short-lived-token".into(),
+            );
+        backend
+            .send_prompt(conversation.id.clone(), "Une seule requête humaine".into())
+            .await
+            .unwrap();
+        let state = backend.snapshot().await;
+        let messages = state["conversations"][0]["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["text"], "Une seule requête humaine");
+        assert_eq!(messages[1]["text"], "Bonjour, élève.");
+        let id = state["conversations"][0]["agentSessionId"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            id == conversation.agent_session_id.as_deref().unwrap(),
+            supports_load
+        );
+        let captured: Value = serde_json::from_slice(
+            &std::fs::read(directory.path().join("fixture-agent-sessions.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(captured[id]["mcpServers"][0]["name"], "tutor");
+        assert!(!messages.iter().any(|message| message["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("ANCIEN TEXTE"))));
+        backend.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn expiring_native_session_signs_again_and_installs_new_mcp_headers_before_prompt() {
+    let directory = tempfile::tempdir().unwrap();
     let (backend, _) = connected(directory.path()).await;
+    let pair = KeyPair::generate();
+    backend.identity.lock().await.install(&pair).unwrap();
+    let server_origin = Arc::new(std::sync::Mutex::new(String::new()));
+    let origin_copy = server_origin.clone();
+    let public = pair.primary.public_key().to_hex();
+    let recovery = pair.recovery.public_key().to_hex();
+    let server=api_server(move |path| {
+        let origin=origin_copy.lock().unwrap().clone();let mut session=api_credentials(&origin);session.identity.public_key=public.clone();session.identity.recovery_public_key=recovery.clone();
+        match path {
+            "/.well-known/tutor-institution"=>serde_json::to_value(session.institution).unwrap(),
+            "/api/client/v1/identity/challenge"=>{
+                let body=json!({"challenge":"B".repeat(43),"tenant_id":"tenant1","public_key":public,"action":"session","scope":"learner:read learner:write","key_version":1}).to_string();
+                json!({"challenge":"B".repeat(43),"expires_at":chrono::Utc::now().timestamp()+120,"key_version":1,"url":format!("{origin}/api/client/v1/identity/session"),"method":"POST","payload_hash":format!("{:x}",Sha256::digest(body.as_bytes())),"request_body":body,"tenant_id":"tenant1","public_key":public,"action":"session","scope":"learner:read learner:write"})
+            },
+            "/api/client/v1/identity/session"=>json!({"access_token":"new-native-session-token","token_type":"Bearer","expires_in":1800,"scope":session.scope,"session_id":session.session_id,"identity":session.identity,"principal":session.principal,"allowed_scopes":[]}),
+            _=>overview_page(),
+        }
+    }).await;
+    *server_origin.lock().unwrap() = server.origin.clone();
     let mut settings = backend.store.lock().await.data.settings.clone();
     settings.tutor.mode = "remote".into();
     settings.tutor.url = server.origin.clone();
     backend.save_settings(settings).await.unwrap();
-    backend.tutor.lock().await.login_generation = "old-browser-flow".into();
-    let operation = backend.operation.lock().await;
-    let callback = tokio::spawn({
-        let backend = backend.clone();
-        let credentials = api_credentials(&server.origin);
-        async move {
-            backend
-                .complete_tutor_login("old-browser-flow", Ok(credentials))
-                .await
-        }
-    });
-    tokio::task::yield_now().await;
-    let logout = tokio::spawn({
-        let backend = backend.clone();
-        async move { backend.disconnect_tutor().await }
-    });
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            if backend.tutor.lock().await.login_generation != "old-browser-flow" {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
-    drop(operation);
-    callback.await.unwrap();
-    logout.await.unwrap().unwrap();
-    assert!(backend.tutor.lock().await.credentials.is_none());
-    assert!(crate::vault::load_credentials(directory.path())
-        .unwrap()
-        .is_none());
-    assert!(server.requests.lock().unwrap().is_empty());
-    backend.shutdown().await;
-}
-
-#[tokio::test]
-async fn changing_institution_invalidates_success_and_error_from_an_old_login() {
-    let directory = tempfile::tempdir().unwrap();
-    let (backend, _) = connected(directory.path()).await;
-    let mut settings = backend.store.lock().await.data.settings.clone();
-    settings.tutor.mode = "remote".into();
-    settings.tutor.url = "https://first.example".into();
-    backend.save_settings(settings.clone()).await.unwrap();
-    backend.tutor.lock().await.login_generation = "first-login".into();
-    settings.tutor.url = "https://second.example".into();
-    backend.save_settings(settings).await.unwrap();
     backend
-        .complete_tutor_login("first-login", Ok(api_credentials("https://first.example")))
-        .await;
-    backend
-        .complete_tutor_login(
-            "first-login",
-            Err("Ancienne erreur qui ne doit pas remplacer le nouvel état".into()),
+        .connect_agent(
+            fixture_target(),
+            directory.path().to_string_lossy().into_owned(),
         )
-        .await;
-    assert!(backend.tutor.lock().await.credentials.is_none());
-    assert!(backend.tutor.lock().await.status.message.is_none());
-    assert!(crate::vault::load_credentials(directory.path())
+        .await
+        .unwrap();
+    let mut session = api_credentials(&server.origin);
+    session.access_token = "initial-native-session-token".into();
+    session.identity.public_key = pair.primary.public_key().to_hex();
+    session.identity.recovery_public_key = pair.recovery.public_key().to_hex();
+    backend.tutor.lock().await.credentials = Some(session);
+    let conversation = backend.start_conversation(None, None).await.unwrap();
+    backend
+        .tutor
+        .lock()
+        .await
+        .credentials
+        .as_mut()
         .unwrap()
-        .is_none());
+        .expires_at = 0;
+    backend
+        .send_prompt(conversation.id.clone(), "Continuer une seule fois".into())
+        .await
+        .unwrap();
+    let captured: Value = serde_json::from_slice(
+        &std::fs::read(directory.path().join("fixture-agent-sessions.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        captured[conversation.agent_session_id.unwrap()]["mcpServers"][0]["headers"][0]["value"],
+        "Bearer new-native-session-token"
+    );
+    let state = backend.snapshot().await;
+    assert_eq!(
+        state["conversations"][0]["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(!state.to_string().contains("native-session-token"));
+    assert_eq!(
+        server
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|path| *path == "/api/client/v1/identity/session")
+            .count(),
+        1
+    );
+    let credential: NativeCredential = crate::vault::load(directory.path(), "native-session.json")
+        .unwrap()
+        .unwrap();
+    let NativeCredential::NativeIdentity(saved) = credential;
+    assert_eq!(saved.access_token, "new-native-session-token");
     backend.shutdown().await;
 }

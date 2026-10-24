@@ -4,8 +4,9 @@
 pub mod acp;
 pub mod backend;
 pub mod discovery;
+pub mod identity;
 pub mod launch;
-pub mod oauth;
+pub mod native_auth;
 pub mod vault;
 pub mod workspace;
 

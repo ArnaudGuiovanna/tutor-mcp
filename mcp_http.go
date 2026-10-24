@@ -18,6 +18,10 @@ import (
 type mcpHTTPGuards struct {
 	IP, Learner *auth.RateLimiter
 	Concurrency *auth.PrincipalConcurrencyLimiter
+	// NativeOnly requires a current key-authenticated, revocable session.
+	// It prevents historical password/OAuth grants from entering a key-only
+	// institution even when their membership is otherwise still active.
+	NativeOnly bool
 }
 
 func initialMCPOAuthScope(granular bool) string {
@@ -43,9 +47,18 @@ func newMCPHTTPHandler(deps *tools.Deps, maxBodyBytes int64, timeout time.Durati
 	// consume the same bounded bytes only after both identity guards.
 	handler := cop.Handler(mcpRequestBodyLimitMiddleware(maxBodyBytes,
 		tools.OAuthScopeHTTPMiddleware(deps.BaseURL, maxBodyBytes, deps.OAuthGranularScopes, raw)))
-	protected := auth.RateLimitMiddleware(guards.IP,
-		auth.BearerMiddlewareWithPrincipalValidator(deps.BaseURL, initialMCPOAuthScope(deps.OAuthGranularScopes), deps.Store,
-			auth.LearnerRateLimitMiddleware(guards.Learner, guards.Concurrency.Middleware(handler))))
+	authenticated := auth.LearnerRateLimitMiddleware(guards.Learner, guards.Concurrency.Middleware(handler))
+	var protected http.Handler
+	if guards.NativeOnly {
+		validator, ok := deps.Store.(auth.NativePrincipalValidator)
+		if !ok {
+			panic("native institution store does not validate key sessions")
+		}
+		protected = auth.BearerMiddlewareWithNativePrincipalValidator(deps.BaseURL, initialMCPOAuthScope(deps.OAuthGranularScopes), validator, authenticated)
+	} else {
+		protected = auth.BearerMiddlewareWithPrincipalValidator(deps.BaseURL, initialMCPOAuthScope(deps.OAuthGranularScopes), deps.Store, authenticated)
+	}
+	protected = auth.RateLimitMiddleware(guards.IP, protected)
 	// Ordinary endpoints retain the server WriteTimeout. Only this response's
 	// deadline is cleared; the outer logging writer exposes Unwrap.
 	return withoutWriteTimeout(protected)

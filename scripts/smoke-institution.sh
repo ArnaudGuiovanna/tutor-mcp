@@ -1,14 +1,9 @@
 #!/usr/bin/env bash
-# Disposable end-to-end acceptance of the institution profile with real
-# production constraints: PostgreSQL over verify-full TLS, separate migrator,
-# API and worker processes, least-privilege runtime logins applied with the
-# repository's own grant scripts, DCR in token mode, a local STARTTLS mail sink,
-# and the account journeys driven over HTTP: operator-provisioned and
-# self-service institutions, console with TOTP, invitations, OAuth, the admin
-# catalog and MCP.
-#
-# Requirements: Go, openssl, python3 and PostgreSQL server binaries
-# (initdb/pg_ctl). Nothing outside a temporary directory is modified.
+# Disposable real Rust client -> HTTPS -> Go institution acceptance.
+# PostgreSQL verify-full TLS, separate least-privilege API/worker processes,
+# operator bootstrap by public key, encrypted backup, recovery, authoring,
+# tutoring and queued worker erasure. No mailbox or password service.
+# Requirements: Go, Rust 1.93, openssl, python3 and PostgreSQL server binaries.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 repo="$(pwd)"
@@ -35,9 +30,9 @@ if [[ "$(id -u)" -eq 0 ]]; then
     pg_user=postgres
     as_pg() { runuser -u postgres -- "$@"; }
 fi
-api_pid="" worker_pid="" sink_pid=""
+api_pid="" worker_pid="" proxy_pid=""
 cleanup() {
-    [[ -n "$sink_pid" ]] && kill "$sink_pid" 2>/dev/null || true
+    [[ -n "$proxy_pid" ]] && kill "$proxy_pid" 2>/dev/null || true
     [[ -n "$api_pid" ]] && kill "$api_pid" 2>/dev/null || true
     [[ -n "$worker_pid" ]] && kill "$worker_pid" 2>/dev/null || true
     as_pg "$pg_bin/pg_ctl" -D "$work/pg" -m fast stop >/dev/null 2>&1 || true
@@ -47,6 +42,8 @@ trap cleanup EXIT HUP INT TERM
 
 port="${SMOKE_PG_PORT:-55499}"
 api_port="${SMOKE_API_PORT:-3099}"
+public_port="${SMOKE_HTTPS_PORT:-3100}"
+go_bin="${TUTOR_GO_BIN:-go}"
 
 # ── TLS for verify-full ─────────────────────────────────────────────────────
 mkdir -p "$work/tls"
@@ -88,8 +85,8 @@ super tutor -c "ALTER SCHEMA public OWNER TO tutor_owner;"
 super postgres -c "ALTER ROLE tutor_owner CREATEROLE;"
 
 # ── Build, migrate, grant ───────────────────────────────────────────────────
-go build -o "$work/tutor-mcp" .
-go build -o "$work/tutor-control-plane" ./cmd/tutor-control-plane
+"$go_bin" build -o "$work/tutor-mcp" .
+"$go_bin" build -o "$work/tutor-control-plane" ./cmd/tutor-control-plane
 owner_dsn="postgres://tutor_owner:owner-pw@localhost:$port/tutor?$tls"
 PROCESS_ROLE=migrator DATABASE_URL="$owner_dsn" "$work/tutor-mcp" --profile institution >"$work/migrator.log" 2>&1
 owner -f deploy/postgres-roles.sql
@@ -125,8 +122,8 @@ func main() {
 }
 
 func run() error {
-	if len(os.Args) != 3 {
-		return errors.New("expected institution and learner identifiers")
+	if len(os.Args) != 4 {
+		return errors.New("expected institution, learner and owner public key identifiers")
 	}
 	tenant, learner := os.Args[1], os.Args[2]
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
@@ -137,23 +134,14 @@ func run() error {
 	}
 	defer pool.Close()
 	store := db.NewStoreWithDialect(pool, db.DialectPostgres)
-	owner, err := store.GetLocalUserByEmail(ctx, "owner@acme.test")
+	identity, err := store.GetNativeIdentity(ctx, tenant, os.Args[3], "session")
 	if err != nil {
 		return err
 	}
-	memberships, err := store.ListActiveMembershipsForUser(ctx, owner.ID)
+	actor, err := store.GetPrincipal(ctx, models.TenantScope{TenantID: tenant, UserID: identity.UserID,
+		MembershipID: identity.MembershipID}, []string{models.OAuthScopeFormationRead})
 	if err != nil {
 		return err
-	}
-	var actor models.Principal
-	for _, membership := range memberships {
-		if membership.TenantID == tenant {
-			actor, err = store.GetPrincipal(ctx, models.TenantScope{TenantID: tenant, UserID: owner.ID,
-				MembershipID: membership.ID, LearnerID: membership.LearnerID}, []string{models.OAuthScopeLearner})
-			if err != nil {
-				return err
-			}
-		}
 	}
 	if err := store.ValidatePrincipal(ctx, actor); err != nil {
 		return err
@@ -206,7 +194,7 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		for _, table := range []string{"interactions", "learner_concept_states", "refresh_tokens"} {
+		for _, table := range []string{"interactions", "learner_concept_states", "native_sessions"} {
 			var count int
 			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table+` WHERE tenant_id = $1 AND learner_id = $2`, tenant, learner).Scan(&count); err != nil {
 				return err
@@ -263,7 +251,7 @@ func run() error {
 		return errors.New("worker completed without access-revocation checkpoint")
 	}
 	if err := read(func(tx *sql.Tx) error {
-		for _, table := range []string{"refresh_tokens", "oauth_codes", "login_challenges", "account_tokens",
+		for _, table := range []string{"native_challenges", "native_sessions", "refresh_tokens", "oauth_codes", "login_challenges", "account_tokens",
 			"learner_approved_clients", "tool_call_idempotency", "concept_bkt_estimates", "collective_weight_applications",
 			"learning_badges", "learning_badge_evidence", "webhook_delivery_transitions", "webhook_push_log",
 			"webhook_message_queue", "narrative_mutations", "narrative_objects", "pedagogical_snapshots", "transfer_records",
@@ -294,168 +282,90 @@ func run() error {
 	return emit("completed")
 }
 EOF_DSAR
-go build -o "$work/dsar-helper" "$work/dsar-helper.go"
+"$go_bin" build -o "$work/dsar-helper" "$work/dsar-helper.go"
 
-# ── Secrets ─────────────────────────────────────────────────────────────────
-mkdir -p "$work/keygen"
-cat > "$work/keygen/main.go" <<'EOF'
-package main
-
-import (
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/base64"
-	"encoding/json"
-	"fmt"
-)
-
-func main() {
-	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	keys, _ := json.Marshal([]map[string]any{{"kid": "smoke-1", "public_key": base64.StdEncoding.EncodeToString(pub), "private_key": base64.StdEncoding.EncodeToString(priv.Seed()), "active": true}})
-	secret, iat := make([]byte, 32), make([]byte, 32)
-	rand.Read(secret)
-	rand.Read(iat)
-	fmt.Printf("export JWT_ED25519_KEYS='%s'\n", keys)
-	fmt.Printf("export INTEGRATION_SECRET_KEYS=primary:%s\n", base64.StdEncoding.EncodeToString(secret))
-	fmt.Println("export INTEGRATION_SECRET_CURRENT_KEY_ID=primary")
-	fmt.Printf("export OAUTH_DCR_INITIAL_ACCESS_TOKEN=%s\n", base64.RawURLEncoding.EncodeToString(iat))
+# ── Real client identities, generated only by the Rust client ────────────────
+if [[ -n "${SMOKE_NATIVE_CLIENT_BIN:-}" ]]; then
+    native_client="$SMOKE_NATIVE_CLIENT_BIN"
+else
+    cargo build --manifest-path client/src-tauri/Cargo.toml --locked \
+        --no-default-features --features qualification --bin tutor-client-native-qualify
+    native_client="$repo/client/src-tauri/target/debug/tutor-client-native-qualify"
+fi
+"$native_client" prepare "$work/client"
+public_key() {
+    python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]][sys.argv[3]])' \
+        "$work/client/public-keys.json" "$1" "$2"
 }
-EOF
-(cd "$work/keygen" && printf 'module keygen\n\ngo 1.26\n' > go.mod && go run . > "$work/keys.env")
+
+# Server signing/encryption keys are independent of the client identities.
+mkdir -p "$work/keygen"
+cat > "$work/keygen/main.go" <<'EOF_KEYS'
+package main
+import (
+    "crypto/ed25519"
+    "crypto/rand"
+    "encoding/base64"
+    "encoding/json"
+    "fmt"
+)
+func main() {
+    pub, priv, err := ed25519.GenerateKey(rand.Reader)
+    if err != nil { panic(err) }
+    keys, err := json.Marshal([]map[string]any{{"kid":"smoke-1","public_key":base64.StdEncoding.EncodeToString(pub),"private_key":base64.StdEncoding.EncodeToString(priv.Seed()),"active":true}})
+    if err != nil { panic(err) }
+    secret := make([]byte,32)
+    if _, err := rand.Read(secret); err != nil { panic(err) }
+    fmt.Printf("export JWT_ED25519_KEYS='%s'\n",keys)
+    fmt.Printf("export INTEGRATION_SECRET_KEYS=primary:%s\n",base64.StdEncoding.EncodeToString(secret))
+    fmt.Println("export INTEGRATION_SECRET_CURRENT_KEY_ID=primary")
+}
+EOF_KEYS
+"$go_bin" run "$work/keygen/main.go" > "$work/keys.env"
+chmod 600 "$work/keys.env"
 # shellcheck disable=SC1091
 source "$work/keys.env"
 export RATELIMIT_BACKEND=postgres SCHEDULER_MODE=distributed \
     TENANT_INTEGRATION_ALLOWED_HOSTS=discord.com TUTOR_MCP_MEMORY_ROOT="$work/memory"
 
-# ── Mail sink: STARTTLS with the smoke CA, one file per message ─────────────
-mkdir -p "$work/mailsink" "$work/mail"
-cat > "$work/mailsink/main.go" <<'EOF_SINK'
-package main
-
-import (
-	"bufio"
-	"crypto/tls"
-	"fmt"
-	"net"
-	"os"
-	"path/filepath"
-	"strings"
-	"sync/atomic"
-)
-
-var count atomic.Int64
-
-func main() {
-	cert, err := tls.LoadX509KeyPair(os.Args[2], os.Args[3])
-	if err != nil {
-		panic(err)
-	}
-	listener, err := net.Listen("tcp", os.Args[1])
-	if err != nil {
-		panic(err)
-	}
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			return
-		}
-		go serve(conn, &tls.Config{Certificates: []tls.Certificate{cert}}, os.Args[4])
-	}
-}
-
-func serve(conn net.Conn, config *tls.Config, dir string) {
-	defer conn.Close()
-	reader, writer := bufio.NewReader(conn), bufio.NewWriter(conn)
-	reply := func(line string) { writer.WriteString(line + "\r\n"); writer.Flush() }
-	reply("220 smoke ESMTP")
-	for {
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			return
-		}
-		command := strings.ToUpper(strings.TrimSpace(line))
-		switch {
-		case strings.HasPrefix(command, "EHLO"), strings.HasPrefix(command, "HELO"):
-			reply("250-smoke")
-			reply("250 STARTTLS")
-		case command == "STARTTLS":
-			reply("220 ready")
-			tlsConn := tls.Server(conn, config)
-			if tlsConn.Handshake() != nil {
-				return
-			}
-			conn = tlsConn
-			reader, writer = bufio.NewReader(conn), bufio.NewWriter(conn)
-		case command == "DATA":
-			reply("354 end with .")
-			var message strings.Builder
-			for {
-				data, err := reader.ReadString('\n')
-				if err != nil {
-					return
-				}
-				if data == ".\r\n" {
-					break
-				}
-				message.WriteString(data)
-			}
-			name := filepath.Join(dir, fmt.Sprintf("%03d.eml", count.Add(1)))
-			os.WriteFile(name+".tmp", []byte(message.String()), 0o644)
-			os.Rename(name+".tmp", name)
-			reply("250 queued")
-		case command == "QUIT":
-			reply("221 bye")
-			return
-		default:
-			reply("250 ok")
-		}
-	}
-}
-EOF_SINK
-(cd "$work/mailsink" && printf 'module mailsink\n\ngo 1.26\n' > go.mod && go build -o "$work/mailsink-bin" .)
-"$work/mailsink-bin" 127.0.0.1:2525 "$work/tls/server.crt" "$work/tls/server.key" "$work/mail" &
-sink_pid=$!
-
-# The signup plan must exist before the API validates SIGNUP_PLAN.
 DATABASE_URL="$owner_dsn" "$work/tutor-control-plane" -action=plan-upsert -plan=smoke -name=Smoke -status=active \
     -entitlements='{"active_learners":50,"mcp_calls_month":100000}' -reason=smoke -request-id=S1 >/dev/null
+export DATABASE_URL="$owner_dsn"
+tenant="$("$work/tutor-control-plane" -action=provision -slug=acme -name='Acme Academy' -region=local \
+    -plan=smoke -reason=smoke -request-id=S2 | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["ID"])')"
+"$work/tutor-control-plane" -action=bootstrap-owner -tenant="$tenant" -name='Test owner' \
+    -owner-npub="$(public_key owner npub)" -recovery-npub="$(public_key owner recoveryNpub)" \
+    -reason=smoke -request-id=S3 >/dev/null
+"$work/tutor-control-plane" -action=add-key-member -tenant="$tenant" -name='Test learner' \
+    -npub="$(public_key learner npub)" -recovery-npub="$(public_key learner recoveryNpub)" \
+    -roles=learner -reason=smoke -request-id=S4 >/dev/null
+unset DATABASE_URL
 
-# ── Worker then API with least-privilege logins ─────────────────────────────
 PROCESS_ROLE=worker DATABASE_URL="postgres://worker_login:worker-pw@localhost:$port/tutor?$tls" \
     "$work/tutor-mcp" --profile institution >"$work/worker.log" 2>&1 &
 worker_pid=$!
 api_dsn="postgres://api_login:api-pw@localhost:$port/tutor?$tls"
 PROCESS_ROLE=api DATABASE_URL="$api_dsn" \
-    BASE_URL=https://tutor.localhost PORT="$api_port" OAUTH_DCR_MODE=token \
-    SMTP_ADDR=127.0.0.1:2525 SMTP_SERVER_NAME=localhost SMTP_FROM=tutor@tutor.localhost \
-    SSL_CERT_FILE="$work/tls/ca.pem" TRUSTED_PROXY_CIDRS=127.0.0.1/32 \
-    INSTITUTION_SIGNUP=open SIGNUP_PLAN=smoke \
+    BASE_URL="https://localhost:$public_port" PORT="$api_port" INSTITUTION_ID="$tenant" INSTITUTION_NAME='Acme Academy' \
+    TRUSTED_PROXY_CIDRS=127.0.0.1/32 \
     "$work/tutor-mcp" --profile institution >"$work/api.log" 2>&1 &
 api_pid=$!
-for _ in $(seq 1 60); do
-    curl -sf --noproxy '*' "http://127.0.0.1:$api_port/ready" >/dev/null && break
-    sleep 1
-done
+python3 scripts/native-test-proxy.py --port "$public_port" --upstream "$api_port" \
+    --certificate "$work/tls/server.crt" --key "$work/tls/server.key" >"$work/proxy.log" 2>&1 &
+proxy_pid=$!
 fail() {
     echo "FAIL: $1" >&2
-    echo "--- api.log"; tail -20 "$work/api.log" >&2
-    echo "--- worker.log"; tail -20 "$work/worker.log" >&2
+    tail -n 20 -- "$work/api.log" "$work/worker.log" "$work/proxy.log" >&2
     exit 1
 }
-curl -sf --noproxy '*' "http://127.0.0.1:$api_port/ready" >/dev/null || fail "API never became ready"
-sleep 3
-kill -0 "$worker_pid" 2>/dev/null || fail "worker exited during startup with the documented grants"
-echo "PASS: migrator, documented grants, least-privilege API and worker"
-
-# ── Operator-provisioned tenant and its owner invitation ────────────────────
-export DATABASE_URL="$owner_dsn"
-tenant="$("$work/tutor-control-plane" -action=provision -slug=acme -name='Acme Academy' -region=local \
-    -plan=smoke -reason=smoke -request-id=S2 | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["ID"])')"
-owner_link="$("$work/tutor-control-plane" -action=invite-owner -tenant="$tenant" -email=owner@acme.test \
-    -base-url=https://tutor.localhost -reason=smoke -request-id=S3 | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["invitation_url"])')"
-unset DATABASE_URL
-
-SMOKE_BASE_URL=https://tutor.localhost SMOKE_CONNECT="127.0.0.1:$api_port" SMOKE_TENANT="$tenant" \
-    SMOKE_OWNER_LINK="$owner_link" SMOKE_MAIL_DIR="$work/mail" \
-    SMOKE_DSAR_HELPER="$work/dsar-helper" SMOKE_DSAR_DATABASE_URL="$api_dsn" \
-    python3 scripts/smoke-institution.py || fail "institution journey"
+for _ in $(seq 1 60); do
+    curl -sf --noproxy '*' --cacert "$work/tls/ca.pem" "https://localhost:$public_port/ready" >/dev/null && break
+    kill -0 "$api_pid" 2>/dev/null || fail 'API exited during startup'
+    sleep 1
+done
+curl -sf --noproxy '*' --cacert "$work/tls/ca.pem" "https://localhost:$public_port/ready" >/dev/null || fail 'API never became ready'
+kill -0 "$worker_pid" 2>/dev/null || fail 'worker exited with the documented grants'
+echo 'PASS: TLS PostgreSQL, migrator, documented grants, separate API and worker; no SMTP'
+SSL_CERT_FILE="$work/tls/ca.pem" SMOKE_DSAR_HELPER="$work/dsar-helper" SMOKE_DSAR_DATABASE_URL="$api_dsn" \
+    "$native_client" verify "$work/client" "https://localhost:$public_port" || fail 'native institution journey'
+kill -0 "$worker_pid" 2>/dev/null || fail 'worker exited during qualification'

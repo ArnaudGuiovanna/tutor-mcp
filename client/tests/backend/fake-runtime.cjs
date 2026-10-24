@@ -30,6 +30,8 @@ readline.createInterface({input:process.stdin}).on('line', (line) => {
     result(request,{sessionId});
   } else if (request.method === 'session/load') {
     if (!sessions[params.sessionId]) return send({jsonrpc:'2.0',id:request.id,error:{code:-32602,message:'Unknown session'}});
+    sessions[params.sessionId] = params;
+    fs.writeFileSync(sessionFile, JSON.stringify(sessions));
     chunk(params.sessionId,'ANCIEN TEXTE À NE PAS RÉAJOUTER');
     result(request,{});
   } else if (request.method === 'session/prompt') {

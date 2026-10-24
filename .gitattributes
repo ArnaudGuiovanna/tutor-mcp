@@ -9,3 +9,6 @@ client/scripts/notices-supplements/microsoft-webview2-sdk-1.0.3800.47/LICENSE.tx
 # This script is executed by Linux Bash from a Windows checkout.
 client/tests/windows/setup-wsl-runtime.sh text eol=lf
 client/scripts/notices-supplements/nsis-3.13/COPYING -whitespace
+# Original upstream license files end with a blank line; keep their exact bytes.
+client/scripts/notices-supplements/bitcoin-io-0.1.3/LICENSE -whitespace
+client/scripts/notices-supplements/bitcoin_hashes-0.14.0/LICENSE -whitespace

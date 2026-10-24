@@ -77,7 +77,18 @@ func (api *API) Handler() http.Handler {
 
 func principalFor(r *http.Request, requiredScope string) (models.Principal, bool) {
 	principal, ok := auth.GetPrincipal(r.Context())
-	if !ok || principal.Validate() != nil || !auth.HasOAuthScope(r.Context(), requiredScope) {
+	allowed := auth.HasOAuthScope(r.Context(), requiredScope)
+	if strings.HasPrefix(r.URL.Path, "/admin/catalog/") {
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			allowed = allowed || auth.HasOAuthScope(r.Context(), models.OAuthScopeFormationRead)
+			if strings.HasSuffix(r.URL.Path, "/report") {
+				allowed = allowed || auth.HasOAuthScope(r.Context(), models.OAuthScopeProgressRead)
+			}
+		} else {
+			allowed = allowed || auth.HasOAuthScope(r.Context(), models.OAuthScopeFormationWrite)
+		}
+	}
+	if !ok || principal.Validate() != nil || !allowed {
 		return models.Principal{}, false
 	}
 	return principal, true

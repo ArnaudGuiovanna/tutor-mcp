@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -20,7 +19,8 @@ import (
 type options struct {
 	action, tenantID, slug, name, region, planID, status string
 	flagKey, hostname, verificationToken, entitlements   string
-	email, baseURL                                       string
+	ownerNpub, memberNpub, recoveryNpub, roles           string
+	userID                                               string
 	periodStart, periodEnd, graceUntil                   string
 	enabled                                              bool
 	reason, requestID                                    string
@@ -28,7 +28,7 @@ type options struct {
 
 func main() {
 	var opts options
-	flag.StringVar(&opts.action, "action", "", "provision, invite-owner, status, flag, domain-begin, domain-complete, plan-upsert, or plan-assign")
+	flag.StringVar(&opts.action, "action", "", "provision, bootstrap-owner, add-key-member, bind-key-member, status, flag, domain-begin, domain-complete, plan-upsert, or plan-assign")
 	flag.StringVar(&opts.tenantID, "tenant", "", "exact tenant ID")
 	flag.StringVar(&opts.slug, "slug", "", "tenant slug")
 	flag.StringVar(&opts.name, "name", "", "tenant or plan name")
@@ -43,8 +43,11 @@ func main() {
 	flag.StringVar(&opts.periodStart, "period-start", "", "subscription period start RFC3339")
 	flag.StringVar(&opts.periodEnd, "period-end", "", "subscription period end RFC3339")
 	flag.StringVar(&opts.graceUntil, "grace-until", "", "optional grace deadline RFC3339")
-	flag.StringVar(&opts.email, "email", "", "owner email for invite-owner")
-	flag.StringVar(&opts.baseURL, "base-url", os.Getenv("BASE_URL"), "public server URL for invite-owner links (default BASE_URL)")
+	flag.StringVar(&opts.ownerNpub, "owner-npub", "", "owner public npub or hex key for bootstrap-owner")
+	flag.StringVar(&opts.memberNpub, "npub", "", "member public npub or hex key for add-key-member")
+	flag.StringVar(&opts.recoveryNpub, "recovery-npub", "", "distinct offline recovery public npub or hex key")
+	flag.StringVar(&opts.roles, "roles", "learner", "comma-separated roles for add-key-member; owner is reserved for bootstrap-owner")
+	flag.StringVar(&opts.userID, "user", "", "exact existing global user ID for audited bind-key-member migration")
 	flag.StringVar(&opts.reason, "reason", "", "operator-approved reason")
 	flag.StringVar(&opts.requestID, "request-id", "", "change/ticket identifier")
 	flag.Parse()
@@ -72,12 +75,18 @@ func main() {
 	switch opts.action {
 	case "provision":
 		output, err = store.ProvisionTenant(ctx, actor, opts.slug, opts.name, opts.region, opts.planID)
-	case "invite-owner":
-		var token string
-		token, err = store.CreateOwnerInvitation(ctx, actor, opts.tenantID, opts.email, time.Now().Add(7*24*time.Hour))
-		output = map[string]any{"tenant_id": opts.tenantID, "email": strings.ToLower(strings.TrimSpace(opts.email)),
-			"invitation_url":  strings.TrimRight(opts.baseURL, "/") + "/invite?token=" + url.QueryEscape(token),
-			"expires_in_days": 7}
+	case "bootstrap-owner", "add-key-member", "bind-key-member":
+		request, requestErr := opts.nativeProvision()
+		if requestErr != nil {
+			fatal(requestErr.Error())
+		}
+		if opts.action == "bind-key-member" {
+			output, err = store.BindNativeIdentity(ctx, actor, opts.userID, request)
+		} else if opts.action == "bootstrap-owner" {
+			output, err = store.BootstrapNativeOwner(ctx, actor, request)
+		} else {
+			output, err = store.ProvisionNativeMember(ctx, actor, request, opts.nativeRoles())
+		}
 	case "status":
 		err = store.SetTenantStatus(ctx, actor, opts.tenantID, opts.status)
 		output = map[string]any{"tenant_id": opts.tenantID, "status": opts.status}
@@ -135,11 +144,30 @@ func (opts options) validate() error {
 			return fmt.Errorf("provision requires -slug, -name, -region and -plan")
 		}
 	case "invite-owner":
-		if !require(opts.tenantID, opts.email, opts.baseURL) {
-			return fmt.Errorf("invite-owner requires -tenant, -email and -base-url (or BASE_URL)")
+		return fmt.Errorf("invite-owner was replaced by bootstrap-owner -tenant ID -owner-npub NPUB -recovery-npub NPUB; no email or private key is accepted")
+	case "bootstrap-owner", "add-key-member", "bind-key-member":
+		if _, err := opts.nativeProvision(); err != nil {
+			return err
 		}
-		if parsed, err := url.Parse(opts.baseURL); err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
-			return fmt.Errorf("-base-url must be an absolute http(s) URL")
+		if opts.action == "bind-key-member" && strings.TrimSpace(opts.userID) == "" {
+			return fmt.Errorf("bind-key-member requires -user with the exact existing user ID; addresses are never matched")
+		}
+		if opts.action == "add-key-member" {
+			seen := map[string]bool{}
+			for _, role := range opts.nativeRoles() {
+				switch role {
+				case models.RoleLearner, models.RoleAdmin, models.RolePedagogyManager, models.RoleTrainer, models.RoleAuditor, models.RoleBillingAdmin:
+				default:
+					return fmt.Errorf("unsupported native member role %q", role)
+				}
+				if seen[role] {
+					return fmt.Errorf("duplicate member role %q", role)
+				}
+				seen[role] = true
+			}
+			if len(seen) == 0 {
+				return fmt.Errorf("add-key-member requires -roles (default learner)")
+			}
 		}
 	case "status":
 		if !require(opts.tenantID, opts.status) {
@@ -169,6 +197,46 @@ func (opts options) validate() error {
 		return fmt.Errorf("unsupported -action %q", opts.action)
 	}
 	return nil
+}
+
+func (opts options) nativeRoles() []string {
+	if strings.TrimSpace(opts.roles) == "" {
+		return nil
+	}
+	roles := strings.Split(opts.roles, ",")
+	for i := range roles {
+		roles[i] = strings.TrimSpace(roles[i])
+	}
+	return roles
+}
+
+func (opts options) nativeProvision() (models.NativeOwnerProvision, error) {
+	public := opts.ownerNpub
+	if opts.action == "add-key-member" {
+		public = opts.memberNpub
+	}
+	if strings.TrimSpace(opts.tenantID) == "" || public == "" || opts.recoveryNpub == "" {
+		return models.NativeOwnerProvision{}, fmt.Errorf("%s requires -tenant, %s and -recovery-npub", opts.action, map[bool]string{true: "-npub", false: "-owner-npub"}[opts.action == "add-key-member"])
+	}
+	key, err := db.NormalizeNativePublicKey(public)
+	if err != nil {
+		return models.NativeOwnerProvision{}, err
+	}
+	recovery, err := db.NormalizeNativePublicKey(opts.recoveryNpub)
+	if err != nil {
+		return models.NativeOwnerProvision{}, err
+	}
+	if key == recovery {
+		return models.NativeOwnerProvision{}, fmt.Errorf("identity and recovery public keys must differ")
+	}
+	name := strings.TrimSpace(opts.name)
+	if name == "" {
+		name = "Membre"
+		if opts.action == "bootstrap-owner" {
+			name = "Propriétaire"
+		}
+	}
+	return models.NativeOwnerProvision{TenantID: opts.tenantID, DisplayName: name, PublicKey: key, RecoveryPublicKey: recovery}, nil
 }
 
 func writeJSON(value any) {

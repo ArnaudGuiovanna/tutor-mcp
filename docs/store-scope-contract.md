@@ -95,3 +95,25 @@ new read transactions and the same transaction-local tenant/user/membership
 settings and RLS. Pool telemetry labels physical pools as `writer` and `reader`
 for configured SQLite, or `shared` for PostgreSQL and rawDB compatibility;
 it never counts the shared PostgreSQL pool twice.
+
+Native public-key authentication also runs before a principal exists. These six
+reviewed methods extend the frozen compatibility surface; they are internal
+ports for the Nostr HTTP verifier, never agent tools or public provisioning:
+
+| Method | Authority and durable boundary |
+| --- | --- |
+| `GetNativeIdentity` | The configured institution and signing public key resolve an existing active user and membership; this creates no account or role. Recovery resolves the separately registered public key. |
+| `CreateNativeChallenge` | The stored identity, exact tenant, signing key, action and key version must match. Nonce hashes bind the HTTP URL, method, payload and requested scope, expire within two minutes and have a per-identity limit. |
+| `ConsumeNativeChallenge` | The exact SHA-256 digest selects one unexpired nonce and consumes it with a single conditional update. PostgreSQL binds only that digest before a tenant is known. Signature verification and action binding remain mandatory in the HTTP verifier. |
+| `CreateNativeSession` | The verified challenge supplies the exact identity/membership tuple. The transaction locks the identity and membership, validates the active membership and allowed scopes, and persists a grant of at most 30 minutes with a per-identity limit. |
+| `RotateNativeIdentity` | The verifier first proves the currently registered recovery key (and the identity key for ordinary rotation). A compare-and-swap on key version replaces both keys, reserves retired keys, revokes all native sessions/challenges and increments every membership version of the authenticated global user. |
+| `RevokeNativeSession` | The verifier binds the signed logout to the current identity and one session. Only that identity's grant can be revoked. |
+
+`ValidateNativeSession` additionally requires a typed `models.Principal` and
+checks its exact persisted scopes, lifetime, revocation, current key version and
+live membership. Bootstrap, native member provisioning and exact-user migration
+require `models.ControlPlanePrincipal`; HTTP authentication cannot create an
+owner or choose membership roles. Native staff have no fabricated learner.
+Legacy email/username/local accounts retain their existing MFA requirements;
+only explicitly provisioned or operator-migrated public-key accounts use the
+native authentication policy.

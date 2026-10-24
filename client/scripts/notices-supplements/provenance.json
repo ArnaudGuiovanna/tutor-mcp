@@ -65,6 +65,36 @@
           "source": "https://www.mozilla.org/media/MPL/2.0/index.f75d2927d3c1.txt"
         }
       ]
+    },
+    "bitcoin-io@0.1.3": {
+      "vcsCommit": "78edf1331eb92878bfba0ae0db45613b47d9d64d",
+      "files": [
+        {
+          "file": "bitcoin-io-0.1.3/LICENSE",
+          "sha256": "7179683e8000e6bdc9bbc60d85edf0a4ac8e76f951857f54fcb775d5886f1309",
+          "source": "https://github.com/rust-bitcoin/rust-bitcoin/blob/78edf1331eb92878bfba0ae0db45613b47d9d64d/LICENSE"
+        }
+      ]
+    },
+    "bitcoin_hashes@0.14.0": {
+      "vcsCommit": "9df59639cec214bd9363d426335923611a304119",
+      "files": [
+        {
+          "file": "bitcoin_hashes-0.14.0/LICENSE",
+          "sha256": "7179683e8000e6bdc9bbc60d85edf0a4ac8e76f951857f54fcb775d5886f1309",
+          "source": "https://github.com/rust-bitcoin/rust-bitcoin/blob/9df59639cec214bd9363d426335923611a304119/LICENSE"
+        }
+      ]
+    },
+    "nostr@0.44.8": {
+      "vcsCommit": "a86ce27c3b4d0dcab186a707336237653a01b114",
+      "files": [
+        {
+          "file": "nostr-0.44.8/LICENSE",
+          "sha256": "a333d394b9f31b6ca64d08f3048a8a38125c181d68d3d376c4ddf988cffd12d2",
+          "source": "https://github.com/rust-nostr/nostr/blob/a86ce27c3b4d0dcab186a707336237653a01b114/LICENSE"
+        }
+      ]
     }
   },
   "microsoftWebView2Sdk": {

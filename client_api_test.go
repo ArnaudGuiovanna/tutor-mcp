@@ -176,6 +176,65 @@ func clientAPIOwner(t *testing.T, f *mcpHTTPFixture, slug string) models.Princip
 	return principal
 }
 
+func TestClientAPIStaffOverviewNeedsExplicitFormationGrantAndNoLearner(t *testing.T) {
+	configureMCPHTTPTestJWT(t)
+	for _, backend := range []string{"sqlite", "postgres"} {
+		t.Run(backend, func(t *testing.T) {
+			f := newMCPHTTPFixture(t, backend)
+			learners := f.seedTenant(t, "client-staff", 1)
+			owner := clientAPIOwner(t, f, "client-staff")
+			if owner.LearnerID != "" {
+				t.Fatal("staff fixture unexpectedly owns a learner profile")
+			}
+			for i := range 3 {
+				if _, _, err := f.admin.CreateFormationDraft(t.Context(), owner, fmt.Sprintf("Draft %d", i), "Staff catalogue"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			server := startClientAPIFixture(t, f.runtime)
+			for _, grant := range []string{models.OAuthScopeFormationRead, models.OAuthScopeFormationRead + " " + models.OAuthScopeFormationWrite} {
+				status, _, body := clientAPIRequest(t, server, &owner, grant, http.MethodGet, "")
+				var response clientapi.Overview
+				if status != http.StatusOK || json.Unmarshal(body, &response) != nil {
+					t.Fatalf("staff overview status=%d", status)
+				}
+				if response.Identity.UserID != owner.UserID || response.Identity.TenantID != owner.TenantID || len(response.Identity.Roles) == 0 || response.Identity.LearnerID != "" || response.Context.Learner.ID != "" || len(response.Context.Domains) != 0 || response.Capabilities.Learning {
+					t.Fatalf("staff identity was replaced by a learner: %+v", response)
+				}
+				if response.Capabilities.FormationAuthoring != strings.Contains(grant, models.OAuthScopeFormationWrite) {
+					t.Fatal("write capability does not match the explicit delegated grant")
+				}
+				if len(response.AuthoredFormations.Items) != 3 {
+					t.Fatal("staff overview did not expose actual drafts")
+				}
+			}
+			after, seen := "", map[string]bool{}
+			for page := range 3 {
+				status, _, body := clientAPIRequest(t, server, &owner, models.OAuthScopeFormationRead, http.MethodGet, "?limit=1&authored_after="+url.QueryEscape(after))
+				var response clientapi.Overview
+				if status != http.StatusOK || json.Unmarshal(body, &response) != nil || len(response.AuthoredFormations.Items) != 1 {
+					t.Fatalf("staff draft page %d unavailable: %d", page, status)
+				}
+				formation := response.AuthoredFormations.Items[0]
+				if seen[formation.ID] || formation.TenantID != owner.TenantID {
+					t.Fatal("staff pagination repeated or leaked a formation")
+				}
+				seen[formation.ID] = true
+				after = response.AuthoredFormations.NextAfter
+				if (page < 2) != (after != "") {
+					t.Fatal("staff pagination cursor ended at the wrong page")
+				}
+			}
+			if status, _, _ := clientAPIRequest(t, server, &owner, models.OAuthScopeLearner, http.MethodGet, ""); status != http.StatusForbidden {
+				t.Fatalf("staff accepted an unrelated learner grant: %d", status)
+			}
+			if status, _, _ := clientAPIRequest(t, server, &learners[0], models.OAuthScopeFormationRead+" "+models.OAuthScopeFormationWrite, http.MethodGet, ""); status != http.StatusForbidden {
+				t.Fatalf("learner acquired staff capabilities: %d", status)
+			}
+		})
+	}
+}
+
 func TestClientAPIOverviewCatalogPaginationAndOwnEnrollments(t *testing.T) {
 	configureMCPHTTPTestJWT(t)
 	for _, backend := range []string{"sqlite", "postgres"} {

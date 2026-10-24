@@ -53,6 +53,12 @@ exige que la version et le commit `.cargo_vcs_info.json` du paquet correspondent
 au supplément examiné. Une mise à jour de dépendance ne réutilise donc pas
 silencieusement le texte d’une autre version.
 
+Les archives `nostr 0.44.8`, `bitcoin_hashes 0.14.0` et `bitcoin-io 0.1.3`
+omettent leur licence de dépôt. Leurs suppléments conservent les fichiers MIT/CC0
+originaux aux commits exacts de `.cargo_vcs_info.json`. Les versions des deux
+paquets Bitcoin restent verrouillées dans Cargo.lock ; le collecteur refuse une
+archive sans source de licence vérifiable.
+
 Pour `selectors 0.38.0`, les en-têtes de l’archive désignent explicitement
 [MPL 2.0 chez Mozilla](https://www.mozilla.org/MPL/2.0/). Le supplément conserve
 le texte officiel référencé ; les en-têtes et l’archive source originale sont

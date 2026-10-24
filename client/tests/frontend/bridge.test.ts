@@ -27,7 +27,14 @@ describe('Le contrat IPC du bridge Tauri', () => {
     await bridge.answerPermission(7, 'allow-once');
     await bridge.answerPermission('permission-8', null);
     await bridge.disconnectAgent();
-    await bridge.beginTutorLogin(settings.tutor.url, 'public-client', 'registration-token');
+    await bridge.createIdentity();
+    await bridge.backupIdentity('phrase privée de sauvegarde');
+    await bridge.confirmIdentityBackup();
+    await bridge.restoreIdentity('phrase privée de sauvegarde');
+    await bridge.discoverInstitution(settings.tutor.url);
+    await bridge.connectTutor(settings.tutor.url, false);
+    await bridge.rotateIdentity('ancienne phrase privée', 'nouvelle phrase privée');
+    await bridge.recoverIdentity(settings.tutor.url, 'ancienne phrase privée', 'nouvelle phrase privée');
     await bridge.disconnectTutor();
     await bridge.tutorOverview();
     expect(calls).toEqual([
@@ -43,7 +50,14 @@ describe('Le contrat IPC du bridge Tauri', () => {
       { command: 'answer_permission', args: { requestId: 7, optionId: 'allow-once' } },
       { command: 'answer_permission', args: { requestId: 'permission-8', optionId: null } },
       { command: 'disconnect_agent', args: {} },
-      { command: 'begin_tutor_login', args: { url: settings.tutor.url, clientId: 'public-client', initialAccessToken: 'registration-token' } },
+      { command: 'create_identity', args: {} },
+      { command: 'backup_identity', args: { passphrase: 'phrase privée de sauvegarde' } },
+      { command: 'confirm_identity_backup', args: {} },
+      { command: 'restore_identity', args: { passphrase: 'phrase privée de sauvegarde' } },
+      { command: 'discover_institution', args: { url: settings.tutor.url } },
+      { command: 'connect_tutor', args: { url: settings.tutor.url, authoring: false } },
+      { command: 'rotate_identity', args: { oldPassphrase: 'ancienne phrase privée', newPassphrase: 'nouvelle phrase privée' } },
+      { command: 'recover_identity', args: { url: settings.tutor.url, oldPassphrase: 'ancienne phrase privée', newPassphrase: 'nouvelle phrase privée' } },
       { command: 'disconnect_tutor', args: {} },
       { command: 'tutor_overview', args: {} },
     ]);

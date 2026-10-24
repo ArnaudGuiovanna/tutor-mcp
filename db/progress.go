@@ -112,7 +112,7 @@ const progressHistoricalState = `NOT EXISTS (SELECT 1 FROM enrollment_migrations
  WHERE em.tenant_id = s.tenant_id AND em.source_enrollment_id = s.enrollment_id AND s.updated_at >= em.created_at)`
 
 func (s *Store) progressLearners(ctx context.Context, tenant, cohort, enrollment, after string, limit int, now time.Time) ([]models.LearnerProgressSummary, string, error) {
-	query := `SELECT e.id, u.email, e.status, e.created_at,
+	query := `SELECT e.id, COALESCE(u.email,''), e.status, e.created_at,
  (SELECT COUNT(*) FROM formation_concepts fc WHERE fc.tenant_id = e.tenant_id AND fc.formation_version_id = e.formation_version_id),
  COUNT(CASE WHEN ` + progressObserved + ` THEN 1 END),
  COUNT(CASE WHEN ` + progressObserved + ` AND s.p_mastery >= ? THEN 1 END),

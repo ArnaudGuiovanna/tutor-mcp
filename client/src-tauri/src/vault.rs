@@ -5,13 +5,13 @@
 //! DPAPI. The Unix development build uses a private 0600 file, not an encrypted
 //! desktop credential store. No credential object crosses the UI bridge.
 
-use crate::oauth::OAuthCredentials;
 use base64::{engine::general_purpose::STANDARD, Engine};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::Path;
+use zeroize::Zeroizing;
 
-const FILENAME: &str = "oauth-credentials.json";
 const MAX_VAULT_BYTES: u64 = 64 * 1024;
 
 #[derive(Serialize, Deserialize)]
@@ -21,12 +21,11 @@ struct Envelope {
     payload: String,
 }
 
-pub fn save_credentials(directory: &Path, credentials: &OAuthCredentials) -> Result<(), String> {
-    credentials.validate()?;
-    let mut plain =
-        serde_json::to_vec(credentials).map_err(|_| "Impossible de préparer les accès Tutor.")?;
+pub fn save<T: Serialize>(directory: &Path, name: &str, value: &T) -> Result<(), String> {
+    let plain = Zeroizing::new(
+        serde_json::to_vec(value).map_err(|_| "Impossible de préparer le coffre Tutor.")?,
+    );
     let protected = protect(&plain);
-    plain.fill(0);
     let envelope = Envelope {
         version: 1,
         protection: protection_name().into(),
@@ -34,11 +33,11 @@ pub fn save_credentials(directory: &Path, credentials: &OAuthCredentials) -> Res
     };
     let bytes =
         serde_json::to_vec(&envelope).map_err(|_| "Impossible de préparer le coffre Tutor.")?;
-    crate::workspace::private_write(&directory.join(FILENAME), &bytes)
+    crate::workspace::private_write(&directory.join(name), &bytes)
 }
 
-pub fn load_credentials(directory: &Path) -> Result<Option<OAuthCredentials>, String> {
-    let path = directory.join(FILENAME);
+pub fn load<T: DeserializeOwned>(directory: &Path, name: &str) -> Result<Option<T>, String> {
+    let path = directory.join(name);
     let metadata = match std::fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -70,16 +69,15 @@ pub fn load_credentials(directory: &Path) -> Result<Option<OAuthCredentials>, St
     let protected = STANDARD
         .decode(envelope.payload)
         .map_err(|_| "Le coffre Tutor est corrompu.")?;
-    let mut plain = unprotect(&protected)?;
-    let decoded = serde_json::from_slice::<OAuthCredentials>(&plain);
-    plain.fill(0);
-    let credentials = decoded.map_err(|_| "Le coffre Tutor contient des accès invalides.")?;
-    credentials.validate()?;
-    Ok(Some(credentials))
+    let plain = Zeroizing::new(unprotect(&protected)?);
+    let value = serde_json::from_slice::<T>(&plain).map_err(|_| {
+        "Le coffre Tutor contient des données invalides. Son contenu a été conservé."
+    })?;
+    Ok(Some(value))
 }
 
-pub fn delete_credentials(directory: &Path) -> Result<(), String> {
-    match std::fs::remove_file(directory.join(FILENAME)) {
+pub fn delete(directory: &Path, name: &str) -> Result<(), String> {
+    match std::fs::remove_file(directory.join(name)) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(_) => Err("Impossible de retirer les accès Tutor de cet appareil.".into()),
@@ -112,7 +110,7 @@ fn crypt(input: &[u8], encrypt: bool) -> Result<Vec<u8>, String> {
         cbData: length,
         pbData: input.as_ptr() as *mut u8,
     };
-    let entropy_bytes = b"Tutor-Client/OAuth/v1";
+    let entropy_bytes = b"Tutor-Client/Native-Identity/v1";
     let entropy = CRYPT_INTEGER_BLOB {
         cbData: entropy_bytes.len() as u32,
         pbData: entropy_bytes.as_ptr() as *mut u8,
@@ -187,43 +185,20 @@ fn unprotect(bytes: &[u8]) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn credentials() -> OAuthCredentials {
-        OAuthCredentials {
-            origin: "https://institution.example".into(),
-            client_id: "public-client".into(),
-            access_token: "test-access-secret".into(),
-            refresh_token: "test-refresh-secret".into(),
-            expires_at: 2_000_000_000,
-            token_endpoint: "https://institution.example/token".into(),
-            resource: "https://institution.example/mcp".into(),
-            scope: "learner:read learner:write".into(),
-        }
-    }
-
     #[test]
-    fn credentials_survive_restart_rotation_and_explicit_deletion() {
+    fn private_roundtrip_corruption_and_replacement() {
         let directory = tempfile::tempdir().unwrap();
-        assert!(load_credentials(directory.path()).unwrap().is_none());
-        let mut original = credentials();
-        save_credentials(directory.path(), &original).unwrap();
-        let restored = load_credentials(directory.path()).unwrap().unwrap();
-        assert_eq!(restored.refresh_token, original.refresh_token);
-        assert_eq!(restored.origin, original.origin);
-        original.refresh_token = "rotated-secret".into();
-        save_credentials(directory.path(), &original).unwrap();
+        let name = "identity-test.json";
+        save(directory.path(), name, &"secret-primary").unwrap();
         assert_eq!(
-            load_credentials(directory.path())
-                .unwrap()
-                .unwrap()
-                .refresh_token,
-            "rotated-secret"
+            load::<String>(directory.path(), name).unwrap().unwrap(),
+            "secret-primary"
         );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(
-                std::fs::metadata(directory.path().join(FILENAME))
+                std::fs::metadata(directory.path().join(name))
                     .unwrap()
                     .permissions()
                     .mode()
@@ -233,75 +208,43 @@ mod tests {
         }
         #[cfg(windows)]
         {
-            let bytes = std::fs::read(directory.path().join(FILENAME)).unwrap();
-            assert!(!String::from_utf8_lossy(&bytes).contains("rotated-secret"));
-            let envelope: Envelope = serde_json::from_slice(&bytes).unwrap();
-            let cipher = STANDARD.decode(envelope.payload).unwrap();
-            assert!(!String::from_utf8_lossy(&cipher).contains("rotated-secret"));
-            assert!(!String::from_utf8_lossy(&cipher).contains("test-access-secret"));
-        }
-        delete_credentials(directory.path()).unwrap();
-        delete_credentials(directory.path()).unwrap();
-        assert!(load_credentials(directory.path()).unwrap().is_none());
-    }
-
-    #[test]
-    fn corrupted_or_foreign_format_is_preserved_instead_of_overwritten() {
-        let directory = tempfile::tempdir().unwrap();
-        for bytes in [
-            b"broken-json".to_vec(),
-            serde_json::to_vec(&Envelope {
-                version: 99,
-                protection: protection_name().into(),
-                payload: "invalid".into(),
-            })
-            .unwrap(),
-        ] {
-            crate::workspace::private_write(&directory.path().join(FILENAME), &bytes).unwrap();
-            assert!(load_credentials(directory.path()).is_err());
-            assert_eq!(
-                std::fs::read(directory.path().join(FILENAME)).unwrap(),
-                bytes
+            let env: Envelope =
+                serde_json::from_slice(&std::fs::read(directory.path().join(name)).unwrap())
+                    .unwrap();
+            assert!(
+                !String::from_utf8_lossy(&STANDARD.decode(env.payload).unwrap())
+                    .contains("secret-primary")
             );
         }
-    }
-
-    #[test]
-    fn invalid_replacement_cannot_destroy_an_existing_connection() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut value = credentials();
-        save_credentials(directory.path(), &value).unwrap();
-        value.token_endpoint = "https://attacker.example/token".into();
-        assert!(save_credentials(directory.path(), &value).is_err());
+        crate::workspace::private_write(&directory.path().join(name), b"corrupt").unwrap();
+        assert!(load::<String>(directory.path(), name).is_err());
         assert_eq!(
-            load_credentials(directory.path())
-                .unwrap()
-                .unwrap()
-                .token_endpoint,
-            "https://institution.example/token"
+            std::fs::read(directory.path().join(name)).unwrap(),
+            b"corrupt"
         );
+        delete(directory.path(), name).unwrap();
+        assert!(load::<String>(directory.path(), name).unwrap().is_none());
     }
-
     #[cfg(unix)]
     #[test]
-    fn unix_development_vault_refuses_world_readable_files_and_symbolic_links() {
+    fn rejects_world_readable_and_symlink() {
         use std::os::unix::fs::{symlink, PermissionsExt};
         let directory = tempfile::tempdir().unwrap();
-        save_credentials(directory.path(), &credentials()).unwrap();
-        let path = directory.path().join(FILENAME);
+        let name = "identity.json";
+        save(directory.path(), name, &"secret").unwrap();
+        let path = directory.path().join(name);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(load_credentials(directory.path()).is_err());
+        assert!(load::<String>(directory.path(), name).is_err());
         std::fs::rename(&path, directory.path().join("original")).unwrap();
         symlink(directory.path().join("original"), &path).unwrap();
-        assert!(load_credentials(directory.path()).is_err());
+        assert!(load::<String>(directory.path(), name).is_err());
     }
-
     #[cfg(windows)]
     #[test]
-    fn windows_dpapi_rejects_modified_ciphertext() {
-        let mut protected = protect(b"an-oauth-secret-that-must-be-authenticated").unwrap();
-        let position = protected.len() / 2;
-        protected[position] ^= 0x20;
-        assert!(unprotect(&protected).is_err());
+    fn dpapi_rejects_modified_ciphertext() {
+        let mut cipher = protect(b"native-primary-key").unwrap();
+        let index = cipher.len() / 2;
+        cipher[index] ^= 1;
+        assert!(unprotect(&cipher).is_err());
     }
 }

@@ -332,7 +332,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	if options.Profile == "institution" && (cfg.ProcessRole == "api" || cfg.ProcessRole == "all") {
+	if options.Profile == "institution" && !cfg.NativeIdentity && (cfg.ProcessRole == "api" || cfg.ProcessRole == "all") {
 		institutionCfg, err := loadInstitutionAccountConfig()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -362,7 +362,18 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("dynamic client registration policy", "mode", cfg.OAuthDCRMode)
-	if smtpAddress := strings.TrimSpace(os.Getenv("SMTP_ADDR")); smtpAddress != "" {
+	var nativeIdentity *auth.NativeIdentityServer
+	if cfg.NativeIdentity {
+		nativeIdentity, err = auth.NewNativeIdentityServer(store, auth.NativeIdentityOptions{
+			BaseURL: baseURL, InstitutionID: cfg.InstitutionID, InstitutionName: cfg.InstitutionName,
+		})
+		if err != nil {
+			logger.Error("configure native key identity", "err", err)
+			os.Exit(1)
+		}
+		logger.Info("institution identity ready", "method", "nostr-key")
+	}
+	if smtpAddress := strings.TrimSpace(os.Getenv("SMTP_ADDR")); !cfg.NativeIdentity && smtpAddress != "" {
 		emailSender, err := auth.NewSMTPEmailSender(auth.SMTPConfig{
 			Address:    smtpAddress,
 			ServerName: strings.TrimSpace(os.Getenv("SMTP_SERVER_NAME")),
@@ -376,7 +387,7 @@ func main() {
 		}
 		oauthServer.SetEmailSender(emailSender)
 		logger.Info("account email delivery enabled", "transport", "smtp_starttls")
-	} else if options.Profile != "hobby" {
+	} else if !cfg.NativeIdentity && options.Profile != "hobby" {
 		logger.Warn("account email delivery disabled; public registration and password recovery cannot complete")
 	}
 
@@ -401,6 +412,9 @@ func main() {
 	registerLimiter := auth.NewRateLimiterWithNamespace("oauth_register", 5.0/60, 5)     // dynamic client registration
 	accountLimiter := auth.NewRateLimiterWithNamespace("oauth_account", 5.0/60, 5)       // verification and recovery
 	consoleLimiter := auth.NewRateLimiterWithNamespace("console", 60.0/60, 20)           // signed-in console actions
+	// Native ceremonies prove a key rather than a guessable password. A normal
+	// connection, grant change or logout each needs a challenge and a signature.
+	nativeLimiter := auth.NewRateLimiterWithNamespace("native_identity", 30.0/60, 20)
 	mcpRatePerMinute := envFloat("MCP_RATE_LIMIT_PER_MIN", 60)
 	mcpBurst := envInt("MCP_RATE_LIMIT_BURST", 60)
 	mcpIPLimiter := auth.NewRateLimiterWithNamespace("mcp_ip", mcpRatePerMinute/60, mcpBurst)
@@ -420,6 +434,7 @@ func main() {
 		registerLimiter.SetBackend(rlBackend)
 		accountLimiter.SetBackend(rlBackend)
 		consoleLimiter.SetBackend(rlBackend)
+		nativeLimiter.SetBackend(rlBackend)
 		mcpIPLimiter.SetBackend(rlBackend)
 		mcpLearnerLimiter.SetBackend(rlBackend)
 		oauthServer.SetLoginFailureBackend(db.NewLoginFailureBackend(store))
@@ -434,23 +449,28 @@ func main() {
 	defer registerLimiter.Stop()
 	defer accountLimiter.Stop()
 	defer consoleLimiter.Stop()
+	defer nativeLimiter.Stop()
 	defer mcpIPLimiter.Stop()
 	defer mcpLearnerLimiter.Stop()
 
 	// OAuth routes — rate-limit sensitive endpoints
-	mux.HandleFunc("GET /.well-known/oauth-authorization-server", oauthServer.HandleAuthServerMetadata)
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource", oauthServer.HandleProtectedResourceMetadata)
 	mux.HandleFunc("GET /.well-known/jwks.json", auth.HandleJWKS)
-	mux.Handle("GET /authorize", auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleAuthorizeGet)))
-	mux.Handle("POST /authorize", auth.RateLimitMiddleware(loginLimiter, http.HandlerFunc(oauthServer.HandleAuthorizePost)))
-	mux.Handle("POST /token", auth.RateLimitMiddleware(tokenLimiter, http.HandlerFunc(oauthServer.HandleToken)))
-	mountDynamicClientRegistration(mux, cfg.OAuthDCRMode, oauthServer, registerLimiter)
-	if options.Profile == "hobby" {
+	if nativeIdentity != nil {
+		mountNativeIdentity(mux, nativeIdentity, authorizeLimiter, nativeLimiter)
+	} else {
+		mux.HandleFunc("GET /.well-known/oauth-authorization-server", oauthServer.HandleAuthServerMetadata)
+		mux.Handle("GET /authorize", auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleAuthorizeGet)))
+		mux.Handle("POST /authorize", auth.RateLimitMiddleware(loginLimiter, http.HandlerFunc(oauthServer.HandleAuthorizePost)))
+		mux.Handle("POST /token", auth.RateLimitMiddleware(tokenLimiter, http.HandlerFunc(oauthServer.HandleToken)))
+		mountDynamicClientRegistration(mux, cfg.OAuthDCRMode, oauthServer, registerLimiter)
+	}
+	if !cfg.NativeIdentity && options.Profile == "hobby" {
 		for _, path := range []string{"/account/invite", "/account/reset"} {
 			mux.Handle("GET "+path, auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleHobbyAccountGet)))
 			mux.Handle("POST "+path, auth.RateLimitMiddleware(accountLimiter, http.HandlerFunc(oauthServer.HandleHobbyAccountPost)))
 		}
-	} else {
+	} else if !cfg.NativeIdentity {
 		mux.Handle("GET /verify-email", auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleVerifyEmailGet)))
 		mux.Handle("POST /verify-email", auth.RateLimitMiddleware(accountLimiter, http.HandlerFunc(oauthServer.HandleVerifyEmailPost)))
 		mux.Handle("GET /recover", auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleRecoverGet)))
@@ -474,9 +494,11 @@ func main() {
 		OAuthGranularScopes: cfg.OAuthGranularScopes,
 	}, cfg.MCPMaxRequestBodyBytes, cfg.MCPToolCallTimeout, mcpHTTPGuards{
 		IP: mcpIPLimiter, Learner: mcpLearnerLimiter, Concurrency: mcpConcurrencyLimiter,
+		NativeOnly: cfg.NativeIdentity,
 	}))
 	mountClientAPI(mux, store, logger, baseURL, mcpHTTPGuards{
 		IP: mcpIPLimiter, Learner: mcpLearnerLimiter, Concurrency: mcpConcurrencyLimiter,
+		NativeOnly: cfg.NativeIdentity,
 	})
 	mountAdmin := func(prefix string, handler http.Handler) {
 		protect := func(authenticate func(http.Handler) http.Handler, next http.Handler) http.Handler {
@@ -487,6 +509,11 @@ func main() {
 			mux.Handle(prefix, auth.RateLimitMiddleware(mcpIPLimiter, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "administrative API requires a console session", http.StatusForbidden)
 			})))
+		} else if cfg.NativeIdentity {
+			mux.Handle(prefix, protect(func(next http.Handler) http.Handler {
+				return auth.BearerMiddlewareWithNativePrincipalValidator(baseURL, initialOAuthScope, store,
+					nativeAdministrativeScope(prefix, next))
+			}, handler))
 		} else {
 			mux.Handle(prefix, protect(func(next http.Handler) http.Handler {
 				return auth.BearerMiddlewareWithPrincipalValidator(baseURL, initialOAuthScope, store, next)
@@ -561,6 +588,13 @@ func mountClientAPI(mux *http.ServeMux, backend storeport.Store, logger *slog.Lo
 	mux.Handle("/api/client/v1/", clientapi.NoStore(administrativeHandler(
 		guards.IP, guards.Learner, guards.Concurrency,
 		func(next http.Handler) http.Handler {
+			if guards.NativeOnly {
+				validator, ok := backend.(auth.NativePrincipalValidator)
+				if !ok {
+					panic("native client store does not validate key sessions")
+				}
+				return auth.BearerMiddlewareWithNativePrincipalValidator(baseURL, clientapi.RequiredScope, validator, next)
+			}
 			return auth.BearerMiddlewareWithPrincipalValidator(baseURL, clientapi.RequiredScope, backend, next)
 		}, clientapi.New(backend, logger).Handler(),
 	)))

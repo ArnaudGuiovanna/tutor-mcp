@@ -1,6 +1,6 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { AgentConnection, AgentTarget, Conversation, Intent, JsonRecord, Settings, Snapshot, TutorOverview, TutorStatus } from './types';
+import type { AgentConnection, AgentTarget, Conversation, Intent, Institution, PublicIdentity, JsonRecord, Settings, Snapshot, TutorOverview, TutorStatus } from './types';
 
 function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (!isTauri()) {
@@ -21,7 +21,14 @@ export const bridge = {
   cancelPrompt: (conversationId: string) => call<void>('cancel_prompt', { conversationId }),
   answerPermission: (requestId: unknown, optionId: string | null) => call<void>('answer_permission', { requestId, optionId }),
   disconnectAgent: () => call<void>('disconnect_agent'),
-  beginTutorLogin: (url: string, clientId?: string, initialAccessToken?: string) => call<{ authorizationUrl: string }>('begin_tutor_login', { url, clientId, initialAccessToken }),
+  createIdentity: (nsec?: string) => call<PublicIdentity>('create_identity', { nsec }),
+  backupIdentity: (passphrase: string) => call<void>('backup_identity', { passphrase }),
+  confirmIdentityBackup: () => call<PublicIdentity>('confirm_identity_backup'),
+  restoreIdentity: (passphrase: string) => call<PublicIdentity>('restore_identity', { passphrase }),
+  discoverInstitution: (url: string) => call<Institution>('discover_institution', { url }),
+  connectTutor: (url: string, authoring: boolean) => call<Snapshot>('connect_tutor', { url, authoring }),
+  rotateIdentity: (oldPassphrase: string, newPassphrase: string) => call<PublicIdentity>('rotate_identity', { oldPassphrase, newPassphrase }),
+  recoverIdentity: (url: string, oldPassphrase: string, newPassphrase: string) => call<PublicIdentity>('recover_identity', { url, oldPassphrase, newPassphrase }),
   disconnectTutor: () => call<Snapshot>('disconnect_tutor'),
   tutorOverview: () => call<TutorOverview>('tutor_overview'),
   listenAgent: (callback: (event: JsonRecord) => void) => listen<JsonRecord>('acp:event', (event) => callback(event.payload)),

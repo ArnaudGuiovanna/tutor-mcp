@@ -606,12 +606,14 @@ func (s *Store) scanLearner(row *sql.Row) (*models.Learner, error) {
 	var lastActive sql.NullTime
 	var emailVerifiedAt sql.NullTime
 	var profileJSON sql.NullString
+	var email, passwordHash sql.NullString
 	err := row.Scan(
-		&l.ID, &l.Email, &l.PasswordHash, &l.Objective, &profileJSON, &l.CreatedAt, &lastActive, &emailVerifiedAt, &l.IdentityMode,
+		&l.ID, &email, &passwordHash, &l.Objective, &profileJSON, &l.CreatedAt, &lastActive, &emailVerifiedAt, &l.IdentityMode,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("scan learner: %w", err)
 	}
+	l.Email, l.PasswordHash = email.String, passwordHash.String
 	if l.IdentityMode != "email" {
 		l.Email = ""
 	}

@@ -7,7 +7,7 @@ use crate::workspace::{LearningIntent, Settings};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
-use tauri_plugin_opener::OpenerExt;
+use tauri_plugin_dialog::DialogExt;
 
 type AppBackend<'a> = State<'a, Arc<Backend>>;
 
@@ -84,21 +84,121 @@ async fn disconnect_agent(backend: AppBackend<'_>) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn begin_tutor_login<R: tauri::Runtime>(
+async fn create_identity(
+    backend: AppBackend<'_>,
+    nsec: Option<String>,
+) -> Result<crate::identity::PublicIdentity, String> {
+    backend.create_identity(nsec).await
+}
+async fn select_backup<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    save: bool,
+) -> Result<std::path::PathBuf, String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let dialog = app
+        .dialog()
+        .file()
+        .add_filter("Sauvegarde d’identité Tutor", &["json"]);
+    if save {
+        dialog
+            .set_file_name("tutor-identite-sauvegarde.json")
+            .save_file(move |file| {
+                let _ = sender.send(file);
+            });
+    } else {
+        dialog.pick_file(move |file| {
+            let _ = sender.send(file);
+        });
+    }
+    receiver
+        .await
+        .map_err(|_| "La sélection de fichier a été interrompue.")?
+        .ok_or("Aucun fichier sélectionné.")?
+        .into_path()
+        .map_err(|_| "Choisissez un fichier local.".into())
+}
+#[tauri::command]
+async fn backup_identity<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    backend: AppBackend<'_>,
+    passphrase: String,
+) -> Result<(), String> {
+    let passphrase = zeroize::Zeroizing::new(passphrase);
+    let path = select_backup(&app, true).await?;
+    backend.backup_identity(path, passphrase.to_string()).await
+}
+#[tauri::command]
+async fn confirm_identity_backup(
+    backend: AppBackend<'_>,
+) -> Result<crate::identity::PublicIdentity, String> {
+    backend.confirm_identity_backup().await
+}
+#[tauri::command]
+async fn restore_identity<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    backend: AppBackend<'_>,
+    passphrase: String,
+) -> Result<crate::identity::PublicIdentity, String> {
+    let passphrase = zeroize::Zeroizing::new(passphrase);
+    let path = select_backup(&app, false).await?;
+    backend.restore_identity(path, passphrase.to_string()).await
+}
+#[tauri::command]
+async fn discover_institution(
+    backend: AppBackend<'_>,
+    url: String,
+) -> Result<crate::native_auth::Institution, String> {
+    backend.discover_institution(url).await
+}
+#[tauri::command]
+async fn connect_tutor(
+    backend: AppBackend<'_>,
+    url: String,
+    authoring: bool,
+) -> Result<Value, String> {
+    backend.connect_tutor(url, authoring).await
+}
+#[tauri::command]
+async fn rotate_identity<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    backend: AppBackend<'_>,
+    old_passphrase: String,
+    new_passphrase: String,
+) -> Result<crate::identity::PublicIdentity, String> {
+    let old_passphrase = zeroize::Zeroizing::new(old_passphrase);
+    let new_passphrase = zeroize::Zeroizing::new(new_passphrase);
+    let old = select_backup(&app, false).await?;
+    let new = select_backup(&app, true).await?;
+    backend
+        .rotate_identity(
+            old,
+            old_passphrase.to_string(),
+            new,
+            new_passphrase.to_string(),
+        )
+        .await
+}
+#[tauri::command]
+async fn recover_identity<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     backend: AppBackend<'_>,
     url: String,
-    client_id: Option<String>,
-    initial_access_token: Option<String>,
-) -> Result<Value, String> {
-    let authorization_url = backend
-        .inner()
-        .begin_tutor_login(url, client_id, initial_access_token)
-        .await?;
-    // The URL comes only from the validated OAuth flow, never from model output.
-    // Returning it also allows an explicit copy/open fallback on this device.
-    let _ = app.opener().open_url(&authorization_url, None::<&str>);
-    Ok(json!({"authorizationUrl": authorization_url}))
+    old_passphrase: String,
+    new_passphrase: String,
+) -> Result<crate::identity::PublicIdentity, String> {
+    let old_passphrase = zeroize::Zeroizing::new(old_passphrase);
+    let new_passphrase = zeroize::Zeroizing::new(new_passphrase);
+    let old = select_backup(&app, false).await?;
+    let new = select_backup(&app, true).await?;
+    backend
+        .recover_identity(
+            url,
+            old,
+            old_passphrase.to_string(),
+            new,
+            new_passphrase.to_string(),
+        )
+        .await
 }
 
 #[tauri::command]
@@ -125,7 +225,14 @@ fn command_handler<R: tauri::Runtime>(
         cancel_prompt,
         answer_permission,
         disconnect_agent,
-        begin_tutor_login,
+        create_identity,
+        backup_identity,
+        confirm_identity_backup,
+        restore_identity,
+        discover_institution,
+        connect_tutor,
+        rotate_identity,
+        recover_identity,
         disconnect_tutor,
         tutor_overview
     ]
@@ -134,6 +241,7 @@ fn command_handler<R: tauri::Runtime>(
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let directory = app.path().app_data_dir()?;
             let handle = app.handle().clone();
@@ -196,7 +304,15 @@ mod tests {
             .deserialize()
             .unwrap()
         };
-        assert_eq!(call("load_state", json!({}))["agentConnected"], false);
+        let initial = call("load_state", json!({}));
+        assert_eq!(initial["agentConnected"], false);
+        assert_eq!(initial["identity"]["exists"], false);
+        let public = call("create_identity", json!({"nsec":null}));
+        assert!(public["npub"].as_str().unwrap().starts_with("npub1"));
+        assert_ne!(public["npub"], public["recoveryNpub"]);
+        assert_eq!(public["backupConfirmed"], false);
+        assert!(public.get("secret").is_none());
+        assert_eq!(call("load_state", json!({}))["identity"]["exists"], true);
         let adapter = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../tests/backend/fake-runtime.cjs")
             .canonicalize()
@@ -253,7 +369,15 @@ mod tests {
         );
         call("disconnect_agent", json!({}));
         call("disconnect_tutor", json!({}));
-        assert_eq!(call("load_state", json!({}))["agentConnected"], false);
+        let initial = call("load_state", json!({}));
+        assert_eq!(initial["agentConnected"], false);
+        assert_eq!(initial["identity"]["exists"], false);
+        let public = call("create_identity", json!({"nsec":null}));
+        assert!(public["npub"].as_str().unwrap().starts_with("npub1"));
+        assert_ne!(public["npub"], public["recoveryNpub"]);
+        assert_eq!(public["backupConfirmed"], false);
+        assert!(public.get("secret").is_none());
+        assert_eq!(call("load_state", json!({}))["identity"]["exists"], true);
         let reopened = Backend::new(directory.path(), Arc::new(|_, _| {})).unwrap();
         assert_eq!(
             tauri::async_runtime::block_on(reopened.snapshot())["conversations"][0]["messages"]

@@ -18,11 +18,11 @@ func sqliteCurriculumRebuildPending(ctx context.Context, conn *sql.Conn) (bool, 
 		return false, err
 	}
 	if tables != 2 {
-		return false, nil
-	} // fresh schema: no referenced rows to move
+		return true, nil
+	} // A fresh schema still needs legacy rename mode for dependent triggers.
 	var applied int
-	err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version = '0065_curriculum_reconciliation'`).Scan(&applied)
-	return applied == 0, err
+	err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM schema_migrations WHERE version IN ('0065_curriculum_reconciliation','0081_native_identities')`).Scan(&applied)
+	return applied != 2, err
 }
 
 func checkSQLiteForeignKeys(ctx context.Context, conn *sql.Conn) error {
@@ -32,7 +32,7 @@ func checkSQLiteForeignKeys(ctx context.Context, conn *sql.Conn) error {
 	}
 	defer rows.Close()
 	if rows.Next() {
-		return fmt.Errorf("foreign_key_check failed after curriculum table rebuild; migration rolled back")
+		return fmt.Errorf("foreign_key_check failed after table rebuild; migration rolled back")
 	}
 	return rows.Err()
 }

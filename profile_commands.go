@@ -18,8 +18,21 @@ import (
 func configureProfileCommand(ctx context.Context, options commandOptions, output io.Writer) (bool, error) {
 	if options.Profile == "institution" {
 		// Reuse every production configuration gate, including separate runtime
-		// roles, PostgreSQL credentials, asymmetric keys, SMTP and proxy policy.
+		// roles, PostgreSQL credentials, asymmetric keys and proxy policy.
+		// Institutional users authenticate by a local cryptographic identity;
+		// mailbox/password workflows are not part of this profile.
 		if err := os.Setenv("DEPLOYMENT_PROFILE", "production"); err != nil {
+			return false, err
+		}
+		if err := os.Setenv("TUTOR_NATIVE_IDENTITY", "on"); err != nil {
+			return false, err
+		}
+		if strings.TrimSpace(os.Getenv("OAUTH_DCR_MODE")) == "" {
+			if err := os.Setenv("OAUTH_DCR_MODE", "disabled"); err != nil {
+				return false, err
+			}
+		}
+		if err := os.Setenv("OAUTH_GRANULAR_SCOPES", "on"); err != nil {
 			return false, err
 		}
 		return false, os.Setenv("DB_DRIVER", "postgres")

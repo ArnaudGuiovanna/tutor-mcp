@@ -63,6 +63,7 @@ export interface TutorStatus {
 
 export interface Snapshot {
   settings: Settings;
+  identity: PublicIdentity;
   intents: Intent[];
   conversations: Conversation[];
   activeConversationId?: string;
@@ -97,10 +98,30 @@ export interface ToolActivity {
   status: string;
 }
 
+export interface PublicIdentity {
+  exists: boolean;
+  npub?: string;
+  recoveryNpub?: string;
+  backupConfirmed: boolean;
+  needsBackup: boolean;
+}
+
+export interface Institution {
+  version: number;
+  institution_id: string;
+  name: string;
+  issuer: string;
+  mcp_url: string;
+}
+
 export interface TutorOverview {
+  identity?: { tenantId: string; userId: string; membershipId: string; learnerId?: string; roles?: string[] };
+  capabilities?: { formationAuthoring?: boolean };
+  session?: { scope: string; allowedScopes: string[] };
   context: unknown;
   formations: unknown;
   availableFormations: unknown;
+  authoredFormations?: unknown;
 }
 
 export type JsonRecord = Record<string, unknown>;

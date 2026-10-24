@@ -234,7 +234,7 @@ jobs:
   deployment-institution:
     name: Deployment (institution)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Set up Go
@@ -246,5 +246,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends postgresql postgresql-contrib
-      - name: TLS PostgreSQL, least-privilege roles, tenant OAuth, catalog and MCP
+      - name: Set up Rust for the real native identity client
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+        with:
+          toolchain: 1.93.0
+      - name: Native keys, verified HTTPS/PostgreSQL, authoring, recovery and worker erasure
         run: bash scripts/smoke-institution.sh

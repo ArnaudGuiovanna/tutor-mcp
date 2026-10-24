@@ -10,7 +10,7 @@ const intent: Intent = { id: 'intent-1', title: 'Comprendre les constellations',
 const conversation: Conversation = { id: 'conversation-1', title: 'Les constellations', intentId: intent.id, agentSessionId: 'agent-1', targetId: target.id, tutorBinding: 'local', createdAt: '2026-10-24T10:00:00Z', updatedAt: '2026-10-24T10:20:00Z', messages: [{ id: 'message-old', role: 'assistant', text: 'Commençons par observer la Grande Ourse.', createdAt: '2026-10-24T10:00:00Z', status: 'complete' }] };
 
 function initialState(connected = false): Snapshot {
-  return { settings: { targetId: target.id, cwd: '/home/lea/apprendre', tutor: { mode: 'local', url: '', command: '/home/lea/bin/tutor-mcp', args: ['--local'] } }, intents: [], conversations: [], agentConnected: connected, tutorStatus: { connected, label: connected ? 'Tutor local' : 'Tutor non connecté' } };
+  return { identity: { exists: false, backupConfirmed: false, needsBackup: false }, settings: { targetId: target.id, cwd: '/home/lea/apprendre', tutor: { mode: 'local', url: '', command: '/home/lea/bin/tutor-mcp', args: ['--local'] } }, intents: [], conversations: [], agentConnected: connected, tutorStatus: { connected, label: connected ? 'Tutor local' : 'Tutor non connecté' } };
 }
 
 function client(initial = initialState()) {
@@ -29,7 +29,14 @@ function client(initial = initialState()) {
     cancelPrompt: vi.fn(async () => {}),
     answerPermission: vi.fn(async () => {}),
     disconnectAgent: vi.fn(async () => { state.agentConnected = false; }),
-    beginTutorLogin: vi.fn(async () => ({ authorizationUrl: 'https://institution.example/authorize' })),
+    createIdentity: vi.fn(async () => { state.identity = { exists: true, npub: 'npub1test', recoveryNpub: 'npub1recovery', backupConfirmed: false, needsBackup: true }; return structuredClone(state.identity); }),
+    backupIdentity: vi.fn(async () => {}),
+    confirmIdentityBackup: vi.fn(async () => { state.identity.backupConfirmed = true; state.identity.needsBackup = false; return structuredClone(state.identity); }),
+    restoreIdentity: vi.fn(async () => { state.identity = { exists: true, npub: 'npub1restored', recoveryNpub: 'npub1offline', backupConfirmed: true, needsBackup: false }; return structuredClone(state.identity); }),
+    discoverInstitution: vi.fn(async () => ({ version: 1, institution_id: 'tenant-1', name: 'Institution de test', issuer: 'https://institution.example', mcp_url: 'https://institution.example/mcp' })),
+    connectTutor: vi.fn(async () => { state.tutorStatus = { connected: true, label: 'Institution de test' }; return structuredClone(state); }),
+    rotateIdentity: vi.fn(async () => structuredClone(state.identity)),
+    recoverIdentity: vi.fn(async () => structuredClone(state.identity)),
     disconnectTutor: vi.fn(async () => { state.tutorStatus.connected = false; return structuredClone(state); }),
     tutorOverview: vi.fn(async () => ({ context: { domains: [] }, formations: { items: [] }, availableFormations: { items: [] } })),
     listenAgent: vi.fn(async (callback) => { agentListener = callback; return () => { agentListener = () => {}; }; }),
@@ -176,21 +183,56 @@ describe('Le parcours de l’apprenant', () => {
     expect(screen.getByRole('alert')).toHaveProperty('textContent', expect.stringContaining('La réponse n’a pas pu être enregistrée.'));
   });
 
-  it('propose le lien validé du navigateur et une copie lorsque la connexion Tutor est en attente', async () => {
-    const user = userEvent.setup();
-    const initial = initialState(); initial.settings.tutor.mode = 'remote'; initial.settings.tutor.url = 'https://institution.example';
-    const { api } = client(initial);
-    const authorizationUrl = 'https://institution.example/authorize?state=native-state&code_challenge=pkce-challenge';
-    vi.mocked(api.beginTutorLogin).mockResolvedValue({ authorizationUrl });
-    await ready(api);
-    await user.click(screen.getByRole('button', { name: 'Connexions' }));
-    await user.click(screen.getByRole('button', { name: 'Se connecter à Tutor' }));
-    const link = await screen.findByRole('link', { name: 'Ouvrir la connexion dans le navigateur' });
-    expect(link.getAttribute('href')).toBe(authorizationUrl);
-    expect((screen.getByLabelText('Lien de connexion Tutor') as HTMLInputElement).readOnly).toBe(true);
-    await user.click(screen.getByRole('button', { name: 'Copier le lien' }));
-    await screen.findByText('Lien copié.');
-    expect(await navigator.clipboard.readText()).toBe(authorizationUrl);
-    expect(api.saveSettings).toHaveBeenCalledWith(expect.not.objectContaining({ authorizationUrl }));
+  it('bloque la connexion avant sauvegarde, puis signe avec les permissions explicitement choisies', async () => {
+    const user = userEvent.setup(); const initial = initialState(); initial.settings.tutor.mode = 'remote'; initial.settings.tutor.url = 'https://institution.example';
+    const { api } = client(initial); await ready(api); await user.click(screen.getByRole('button', { name: 'Connexions' }));
+    await user.click(screen.getByRole('button', { name: 'Vérifier l’institution' })); await screen.findByRole('region', { name: 'Institution vérifiée' });
+    expect((screen.getByRole('button', { name: 'Connecter avec ma clé' }) as HTMLButtonElement).disabled).toBe(true);
+    await user.click(screen.getByRole('button', { name: 'Créer mon identité' })); await screen.findByLabelText('Identité publique (npub)');
+    expect(api.connectTutor).not.toHaveBeenCalled();
+    await user.type(screen.getByLabelText(/^Phrase pour chiffrer la sauvegarde/), 'une phrase longue et privée');
+    await user.type(screen.getByLabelText('Confirmer la phrase de sauvegarde'), 'une phrase longue et privée');
+    await user.click(screen.getByRole('button', { name: 'Chiffrer et exporter la sauvegarde' }));
+    await screen.findByRole('button', { name: 'Confirmer ma sauvegarde' });
+    expect(api.confirmIdentityBackup).not.toHaveBeenCalled();
+    expect((screen.getByLabelText(/^Phrase pour chiffrer la sauvegarde/) as HTMLInputElement).value).toBe('');
+    expect((screen.getByRole('button', { name: 'Confirmer ma sauvegarde' }) as HTMLButtonElement).disabled).toBe(true);
+    await user.click(screen.getByRole('checkbox', { name: 'J’ai conservé le fichier hors ligne et sa phrase séparément.' }));
+    await user.click(screen.getByRole('button', { name: 'Confirmer ma sauvegarde' }));
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Connecter avec ma clé' }) as HTMLButtonElement).disabled).toBe(false));
+    await user.click(screen.getByRole('checkbox', { name: 'Demander la création et la publication de formations' }));
+    await user.click(screen.getByRole('button', { name: 'Connecter avec ma clé' }));
+    await waitFor(() => expect(api.connectTutor).toHaveBeenCalledWith('https://institution.example', true));
+    expect(screen.queryByLabelText(/Identifiant du client OAuth/)).toBeNull(); expect(screen.queryByText(/dans votre navigateur/)).toBeNull();
   });
+
+  it('restaure localement une sauvegarde sans compte e-mail', async () => {
+    const user = userEvent.setup(); const { api } = client(); await ready(api); await user.click(screen.getByRole('button', { name: 'Connexions' }));
+    await user.click(screen.getByText('Restaurer une sauvegarde Tutor'));
+    const restore = screen.getByRole('button', { name: 'Choisir et restaurer la sauvegarde' });
+    await user.type(screen.getByLabelText('Phrase de la sauvegarde existante'), 'ancienne phrase privée'); await user.click(restore);
+    await waitFor(() => expect(api.restoreIdentity).toHaveBeenCalledWith('ancienne phrase privée')); await screen.findByDisplayValue('npub1restored');
+    expect(api.connectTutor).not.toHaveBeenCalled(); expect(api.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('présente les droits réels du propriétaire sans inscription apprenant et demande une session d’écriture', async () => {
+    const user = userEvent.setup(); const initial = initialState(true); initial.identity = { exists: true, npub: 'npub1owner', recoveryNpub: 'npub1recovery', backupConfirmed: true, needsBackup: false };
+    const { api } = client(initial); vi.mocked(api.tutorOverview).mockResolvedValue({ identity: { tenantId: 'tenant', userId: 'owner', membershipId: 'staff', learnerId: '', roles: ['owner'] }, capabilities: { formationAuthoring: true }, session: { scope: 'formation:read', allowedScopes: ['formation:read', 'formation:write'] }, context: {}, formations: { items: [] }, availableFormations: { items: [] } });
+    await ready(api); await user.click(screen.getByRole('button', { name: 'Mes formations' }));
+    await screen.findByRole('region', { name: 'Création de formations' });
+    expect((screen.getByRole('button', { name: 'Préparer une formation' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText('Votre rôle d’équipe ne crée pas de profil apprenant.')).toBeTruthy();
+    expect(api.sendPrompt).not.toHaveBeenCalled();
+  });
+  it('n’annonce aucune sauvegarde après un échec d’écriture et efface les phrases du formulaire', async () => {
+    const user = userEvent.setup(); const initial = initialState(); initial.identity = { exists: true, npub: 'npub1active', recoveryNpub: 'npub1offline', backupConfirmed: false, needsBackup: true };
+    const { api } = client(initial); vi.mocked(api.backupIdentity).mockRejectedValue(new Error('Le support de sauvegarde est inaccessible.'));
+    await ready(api); await user.click(screen.getByRole('button', { name: 'Connexions' }));
+    await user.type(screen.getByLabelText(/^Phrase pour chiffrer la sauvegarde/), 'une phrase pour mon fichier'); await user.type(screen.getByLabelText('Confirmer la phrase de sauvegarde'), 'une phrase pour mon fichier');
+    await user.click(screen.getByRole('button', { name: 'Chiffrer et exporter la sauvegarde' }));
+    expect(await screen.findByRole('alert')).toHaveProperty('textContent', expect.stringContaining('support de sauvegarde est inaccessible'));
+    expect(screen.queryByRole('button', { name: 'Confirmer ma sauvegarde' })).toBeNull(); expect(api.confirmIdentityBackup).not.toHaveBeenCalled();
+    expect((screen.getByLabelText(/^Phrase pour chiffrer la sauvegarde/) as HTMLInputElement).value).toBe(''); expect((screen.getByLabelText('Confirmer la phrase de sauvegarde') as HTMLInputElement).value).toBe('');
+  });
+
 });

@@ -7,7 +7,7 @@ transactions and idempotency protections.
 |---|---|---|---|
 | Individual, on their own machine | `tutor-mcp --local` | Automatic profile, no password | SQLite |
 | Personal or small-group VPS | `tutor-mcp --profile hobby` | Username and password, SSH invitations | SQLite, one HTTP server |
-| Institution | `tutor-mcp --profile institution` | Accounts with verified email | PostgreSQL, separate API/worker/migrator roles |
+| Institution | `tutor-mcp --profile institution` | Client-generated public keys | PostgreSQL, separate API/worker/migrator roles |
 
 Without these options, the existing environment-based configuration remains
 available. `--help` explains the options. Profiles are never converted or
@@ -86,9 +86,9 @@ do not publish TUTOR's port directly. Trusted proxy CIDRs are explicit, with
 loopback defaults for native installations. A lock limits each hobby
 installation to one HTTP server. SSH commands remain available while it runs.
 
-## OAuth and institutional deployments
+## Remote authentication
 
-For a remote client, paste the HTTPS URL, sign in, then authorize the displayed
+For a hobby OAuth client, paste the HTTPS URL, sign in, then authorize the displayed
 client. HTTPS does not replace OAuth. Discovery, PKCE S256, consent, audience
 validation and refresh token rotation remain active. CIMD identifies clients
 without manually copying a client secret; bounded DCR remains available in hobby.
@@ -101,12 +101,16 @@ containing only the legacy field remain supported. See the
 [OpenAI documentation](https://developers.openai.com/plugins/build/auth#client-registration)
 and [Claude documentation](https://claude.com/docs/connectors/building/authentication).
 
-`--profile institution` applies all existing production validation: PostgreSQL,
-separate process roles, verified email and SMTP, asymmetric keys, encrypted
-memory storage, isolation, audit and strict proxy configuration. The `token`
-and `disabled` DCR policies remain available. Reapply
-`deploy/postgres-roles.sql` after migration, including the worker's permission
-to read the installation marker.
+`--profile institution` uses client-generated secp256k1 identities and signed
+one-use challenges, with distinct offline recovery keys. It requires PostgreSQL,
+separate process roles, asymmetric server signing keys, encrypted memory,
+isolation, audit and strict proxy configuration. It requires no mailbox or
+server password. Operator bootstrap binds the owner's two public npubs;
+`INSTITUTION_ID` publishes the selected tenant to the native client. Formation
+writing needs explicit delegation. Email/OAuth login and the cookie console are
+closed in this profile. Follow the [institutional setup](installation.md#institutional-deployment),
+including encrypted client backup and recovery. Reapply
+`deploy/postgres-roles.sql` after every schema upgrade.
 
 Automated fixtures cover Hermes/DCR and Claude/ChatGPT/CIMD. They do not replace
 acceptance tests in the actual products. Compatibility must only be described
@@ -120,4 +124,5 @@ the entire directory, including `runtime.db`, any WAL/SHM files and
 under the service's operating-system owner, then restart with the same profile.
 Do not copy only the main file of an open WAL database. Backups contain secrets
 and must remain private. Institutional deployments retain their PostgreSQL
-procedures and separate key-manager backups.
+procedures and separate server-key backups. Members retain their own encrypted
+identity backups; tenant archives exclude native challenges and session grants.

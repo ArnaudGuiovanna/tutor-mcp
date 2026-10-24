@@ -233,3 +233,14 @@ details > .form-grid { margin-top: 17px; }
   .intent-input { font-size: 17px; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; scroll-behavior: auto !important; } }
+
+.identity-card .public-keys, .identity-backup, .institution-preview { display: grid; gap: 14px; margin-top: 20px; }
+.identity-card .public-keys input { font-size: 12px; width: 100%; }
+.identity-backup, .institution-preview { background: var(--surface-soft, #f7f6fa); padding: 20px; border-radius: 12px; }
+.identity-backup h3, .institution-preview h3 { margin: 0; font-size: 16px; }
+.identity-card details { margin-top: 22px; }
+.identity-card details > .button-row, .identity-card details > button { margin-top: 16px; }
+.identity-card .confirmation, .institution-preview .confirmation { display: flex; align-items: flex-start; gap: 9px; font-size: 13px; line-height: 1.6; }
+.identity-card .confirmation input, .institution-preview .confirmation input { margin-top: 4px; flex: none; }
+.authoring-panel { margin-bottom: 24px; }
+.authoring-panel h2 { font-size: 21px; }

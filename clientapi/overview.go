@@ -57,10 +57,11 @@ func (api *API) Handler() http.Handler {
 }
 
 type Identity struct {
-	TenantID     string `json:"tenantId"`
-	UserID       string `json:"userId"`
-	MembershipID string `json:"membershipId"`
-	LearnerID    string `json:"learnerId"`
+	TenantID     string   `json:"tenantId"`
+	UserID       string   `json:"userId"`
+	MembershipID string   `json:"membershipId"`
+	LearnerID    string   `json:"learnerId"`
+	Roles        []string `json:"roles"`
 }
 
 type Learner struct {
@@ -104,7 +105,9 @@ type Context struct {
 }
 
 type Capabilities struct {
-	CommonCatalog bool `json:"commonCatalog"`
+	CommonCatalog      bool `json:"commonCatalog"`
+	Learning           bool `json:"learning"`
+	FormationAuthoring bool `json:"formationAuthoring"`
 	// The current read port does not expose the institution's personal-domain
 	// policy. Unknown is omitted rather than announced as an authorization.
 	PersonalLearning *bool `json:"personalLearning,omitempty"`
@@ -116,6 +119,7 @@ type Overview struct {
 	Context             Context                     `json:"context"`
 	Formations          models.LearnerFormationPage `json:"formations"`
 	AvailableFormations models.LearnerFormationPage `json:"availableFormations"`
+	AuthoredFormations  models.FormationPage        `json:"authoredFormations"`
 	Capabilities        Capabilities                `json:"capabilities"`
 }
 
@@ -134,8 +138,11 @@ func (api *API) handle(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "authentication_required")
 		return
 	}
-	if !auth.HasOAuthScope(r.Context(), RequiredScope) || actor.LearnerID == "" ||
-		!actor.Authorize(models.PermissionLearningSelf, models.AuthorizationResource{TenantID: actor.TenantID, OwnerUserID: actor.UserID}) {
+	canLearn := auth.HasOAuthScope(r.Context(), RequiredScope) && actor.LearnerID != "" &&
+		actor.Authorize(models.PermissionLearningSelf, models.AuthorizationResource{TenantID: actor.TenantID, OwnerUserID: actor.UserID})
+	canViewAuthoring := auth.HasOAuthScope(r.Context(), models.OAuthScopeFormationRead) &&
+		actor.Authorize(models.PermissionFormationWrite, models.AuthorizationResource{TenantID: actor.TenantID})
+	if !canLearn && !canViewAuthoring {
 		w.Header().Set("WWW-Authenticate", `Bearer error="insufficient_scope", scope="learner:read"`)
 		writeError(w, http.StatusForbidden, "forbidden")
 		return
@@ -147,13 +154,21 @@ func (api *API) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	result := Overview{
 		ContractVersion:     1,
-		Identity:            Identity{TenantID: actor.TenantID, UserID: actor.UserID, MembershipID: actor.MembershipID, LearnerID: actor.LearnerID},
+		Identity:            Identity{TenantID: actor.TenantID, UserID: actor.UserID, MembershipID: actor.MembershipID, LearnerID: actor.LearnerID, Roles: append([]string{}, actor.Roles...)},
+		Context:             Context{Domains: []Domain{}, ConceptStates: []ConceptState{}, TodayInteractions: []InteractionCount{}},
 		Formations:          models.LearnerFormationPage{Items: []models.LearnerFormation{}},
 		AvailableFormations: models.LearnerFormationPage{Items: []models.LearnerFormation{}},
+		AuthoredFormations:  models.FormationPage{Items: []models.Formation{}},
+		Capabilities:        Capabilities{Learning: canLearn, FormationAuthoring: canViewAuthoring && auth.HasOAuthScope(r.Context(), models.OAuthScopeFormationWrite)},
 	}
 	err = api.store.WithTenantReadTx(r.Context(), actor.TenantScope(), func(ctx context.Context, scoped storeport.Store) error {
 		if err := scoped.ValidatePrincipal(ctx, actor); err != nil {
 			return err
+		}
+		// Staff identities need no synthetic learner profile. Their formation
+		// authoring operates through the permission-checked MCP tools.
+		if !canLearn {
+			return nil
 		}
 		overview, err := scoped.GetLearnerContextOverview(ctx, actor.LearnerID, time.Now().UTC())
 		if err != nil {
@@ -171,6 +186,18 @@ func (api *API) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		return nil
 	})
+	if err == nil && canViewAuthoring {
+		if catalogue, ok := api.store.(interface {
+			ListFormations(context.Context, models.Principal, string, int) (models.FormationPage, error)
+		}); ok {
+			// The catalogue validates the current principal again inside its
+			// own tenant transaction and applies owner/assignment visibility.
+			result.AuthoredFormations, err = catalogue.ListFormations(r.Context(), actor, params.authoredAfter, params.limit)
+			if result.AuthoredFormations.Items == nil {
+				result.AuthoredFormations.Items = []models.Formation{}
+			}
+		}
+	}
 	if errors.Is(err, storeport.ErrInvalidPrincipal) {
 		writeError(w, http.StatusUnauthorized, "authentication_required")
 		return
@@ -212,8 +239,8 @@ func projectContext(source *storeport.LearnerContextOverview) Context {
 }
 
 type pageParams struct {
-	after, availableAfter string
-	limit                 int
+	after, availableAfter, authoredAfter string
+	limit                                int
 }
 
 func parsePageParams(raw string) (pageParams, error) {
@@ -226,7 +253,7 @@ func parsePageParams(raw string) (pageParams, error) {
 		return result, err
 	}
 	for key, values := range query {
-		if len(values) != 1 || (key != "after" && key != "available_after" && key != "limit") {
+		if len(values) != 1 || (key != "after" && key != "available_after" && key != "authored_after" && key != "limit") {
 			return result, errors.New("unknown or repeated parameter")
 		}
 		value := values[0]
@@ -242,8 +269,10 @@ func parsePageParams(raw string) (pageParams, error) {
 		}
 		if key == "after" {
 			result.after = value
-		} else {
+		} else if key == "available_after" {
 			result.availableAfter = value
+		} else {
+			result.authoredAfter = value
 		}
 	}
 	return result, nil

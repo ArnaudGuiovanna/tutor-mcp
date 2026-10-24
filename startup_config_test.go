@@ -349,6 +349,29 @@ func TestProductionProfileAcceptsTokenDCR(t *testing.T) {
 	}
 }
 
+func TestNativeInstitutionNeedsPublishedIdentityAndNoMailbox(t *testing.T) {
+	clearStartupEnv(t)
+	for key, value := range productionEnv() {
+		t.Setenv(key, value)
+	}
+	t.Setenv("TUTOR_NATIVE_IDENTITY", "on")
+	t.Setenv("SMTP_ADDR", "")
+	t.Setenv("SMTP_FROM", "")
+	if _, err := loadStartupConfig("3000"); err == nil || !strings.Contains(err.Error(), "INSTITUTION_ID") {
+		t.Fatalf("native API accepted an unidentified institution: %v", err)
+	}
+	t.Setenv("INSTITUTION_ID", "tenant_operator_provisioned")
+	cfg, err := loadStartupConfig("3000")
+	if err != nil || !cfg.NativeIdentity || cfg.InstitutionID != "tenant_operator_provisioned" {
+		t.Fatalf("key-only production configuration requires mailbox: %+v %v", cfg, err)
+	}
+	// Replacing the identity mechanism does not relax the database/TLS boundary.
+	t.Setenv("DATABASE_URL", "postgres://db.example/tutor?sslmode=disable")
+	if _, err := loadStartupConfig("3000"); err == nil || !strings.Contains(err.Error(), "sslmode=verify-full") {
+		t.Fatalf("native API accepted a TLS downgrade: %v", err)
+	}
+}
+
 func TestProductionMigratorNeedsOnlyDatabaseAuthority(t *testing.T) {
 	clearStartupEnv(t)
 	t.Setenv("DEPLOYMENT_PROFILE", "production")
@@ -470,6 +493,9 @@ func clearStartupEnv(t *testing.T) {
 	for _, name := range []string{
 		"BASE_URL",
 		"DEPLOYMENT_PROFILE",
+		"TUTOR_NATIVE_IDENTITY",
+		"INSTITUTION_ID",
+		"INSTITUTION_NAME",
 		"PROCESS_ROLE",
 		"DB_DRIVER",
 		"DATABASE_URL",

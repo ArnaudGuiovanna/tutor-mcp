@@ -30,6 +30,9 @@ const (
 
 type startupConfig struct {
 	DeploymentProfile        string
+	NativeIdentity           bool
+	InstitutionID            string
+	InstitutionName          string
 	ProcessRole              string
 	DBDriver                 string
 	DBPath                   string
@@ -65,6 +68,16 @@ func loadStartupConfig(port string) (startupConfig, error) {
 		DBPath:            strings.TrimSpace(os.Getenv("DB_PATH")),
 		SchedulerMode:     normalizedEnv("SCHEDULER_MODE", "inprocess"),
 		RateLimitBackend:  normalizedEnv("RATELIMIT_BACKEND", "memory"),
+		InstitutionID:     strings.TrimSpace(os.Getenv("INSTITUTION_ID")),
+		InstitutionName:   strings.TrimSpace(os.Getenv("INSTITUTION_NAME")),
+	}
+	nativeIdentity, err := onOffEnv("TUTOR_NATIVE_IDENTITY", false)
+	if err != nil {
+		return startupConfig{}, err
+	}
+	cfg.NativeIdentity = nativeIdentity
+	if cfg.NativeIdentity && (cfg.ProcessRole == "api" || cfg.ProcessRole == "all") && cfg.InstitutionID == "" {
+		return startupConfig{}, fmt.Errorf("native institution API requires INSTITUTION_ID from the operator bootstrap")
 	}
 	if raw := strings.TrimSpace(os.Getenv("TUTOR_MCP_MEMORY_BACKEND")); raw != "" {
 		cfg.NarrativeMemoryBackend = strings.ToLower(raw)
@@ -248,7 +261,7 @@ func validateProductionConfig(cfg startupConfig) error {
 	if cfg.ProcessRole == "worker" && cfg.SchedulerMode != "distributed" {
 		return fmt.Errorf("production worker requires SCHEDULER_MODE=distributed")
 	}
-	if strings.TrimSpace(os.Getenv("SMTP_ADDR")) == "" || strings.TrimSpace(os.Getenv("SMTP_FROM")) == "" {
+	if !cfg.NativeIdentity && (strings.TrimSpace(os.Getenv("SMTP_ADDR")) == "" || strings.TrimSpace(os.Getenv("SMTP_FROM")) == "") {
 		if cfg.ProcessRole == "api" {
 			return fmt.Errorf("production API requires SMTP_ADDR and SMTP_FROM")
 		}

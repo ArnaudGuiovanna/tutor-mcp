@@ -3,14 +3,16 @@ import type { FormEvent, ReactNode } from 'react';
 import { bridge } from './bridge';
 import type { ClientBridge } from './bridge';
 import { Icon } from './icons';
-import { availableFormationViews, blankIntent, chunkFromEvent, displayDate, errorMessage, formationViews, permissionFromEvent, permissionLabel, record, safeAuthorizationUrl, statusLabel, text, toolFromEvent, validateIntent } from './model';
+import { IdentityPanel } from './IdentityPanel';
+import { authoredFormationViews, availableFormationViews, blankIntent, chunkFromEvent, displayDate, errorMessage, formationViews, permissionFromEvent, permissionLabel, record, statusLabel, text, toolFromEvent, validateIntent } from './model';
 import type { FormationView } from './model';
-import type { AgentConnection, AgentTarget, Conversation, Intent, PermissionRequest, Settings, Snapshot, ToolActivity, TutorOverview } from './types';
+import type { AgentConnection, AgentTarget, Conversation, Intent, Institution, PermissionRequest, Settings, Snapshot, ToolActivity, TutorOverview } from './types';
 
 type Page = 'today' | 'formations' | 'session' | 'connections';
 const pageLabels: Record<Page, string> = { today: 'Aujourd’hui', formations: 'Mes formations', session: 'Ma séance', connections: 'Connexions' };
 const emptyState: Snapshot = {
   settings: { targetId: '', cwd: '', tutor: { mode: 'remote', url: '', command: 'tutor-mcp', args: ['--local'] } },
+  identity: { exists: false, backupConfirmed: false, needsBackup: false },
   intents: [], conversations: [], tutorStatus: { connected: false, label: 'Tutor non connecté' }, agentConnected: false,
 };
 
@@ -43,7 +45,6 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   const [activeConversationId, setActiveConversationId] = useState<string | undefined>();
   const [readyConversationId, setReadyConversationId] = useState<string | undefined>();
   const [permissionBusy, setPermissionBusy] = useState(false);
-  const [authorizationUrl, setAuthorizationUrl] = useState<string>();
 
   const conversation = snapshot.conversations.find((item) => item.id === (activeConversationId || snapshot.activeConversationId));
   const currentIntent = page === 'session'
@@ -52,6 +53,10 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   const lastConversation = [...snapshot.conversations].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
   const formations = formationViews(overview);
   const availableFormations = availableFormationViews(overview);
+  const authoredFormations = authoredFormationViews(overview);
+  const staff = !!overview?.identity && !overview.identity.learnerId;
+  const canAuthor = overview?.capabilities?.formationAuthoring === true;
+  const authoringGrant = overview?.session?.scope.split(' ').includes('formation:write') === true;
   const learningReady = snapshot.agentConnected && snapshot.tutorStatus.connected;
   const conversationReady = learningReady && !!conversation && readyConversationId === conversation.id;
 
@@ -104,7 +109,6 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
 
   useEffect(() => {
     if (!snapshot.tutorStatus.connected) { setOverview(null); setOverviewError(''); return; }
-    setAuthorizationUrl(undefined);
     let live = true;
     api.tutorOverview().then((value) => { if (live) { setOverview(value); setOverviewError(''); } }).catch((reason) => { if (live) setOverviewError(errorMessage(reason)); });
     return () => { live = false; };
@@ -129,7 +133,6 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   }
 
   async function saveSettings(settings: Settings) {
-    setAuthorizationUrl(undefined);
     return perform('Enregistrement des connexions…', async () => {
       const state = await api.saveSettings(settings);
       setSnapshot(state);
@@ -139,7 +142,6 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   }
 
   async function connect(target: AgentTarget, settings: Settings) {
-    setAuthorizationUrl(undefined);
     await perform('Connexion à Codex…', async () => {
       setSnapshot(await api.saveSettings(settings));
       const connection = await api.connectAgent(target, settings.cwd);
@@ -165,27 +167,25 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
     });
   }
 
-  async function connectTutor(settings: Settings, clientId: string, initialAccessToken: string) {
-    setAuthorizationUrl(undefined);
-    await perform('Connexion à Tutor…', async () => {
+  async function connectTutor(settings: Settings, authoring: boolean) {
+    await perform('Connexion signée à Tutor…', async () => {
       setSnapshot(await api.saveSettings(settings));
       if (settings.tutor.mode === 'remote') {
-        const result = await api.beginTutorLogin(settings.tutor.url, clientId.trim() || undefined, initialAccessToken.trim() || undefined);
-        const safeUrl = safeAuthorizationUrl(result.authorizationUrl, settings.tutor.url);
-        if (!safeUrl) throw new Error('Le lien de connexion retourné par Tutor n’est pas valide. Relancez la connexion.');
-        setAuthorizationUrl(safeUrl);
-        setNotice('Terminez la connexion Tutor dans votre navigateur. L’application recevra automatiquement le résultat.');
+        setSnapshot(await api.connectTutor(settings.tutor.url, authoring));
+        setNotice('Identité vérifiée par l’institution. Connectez Codex pour commencer une séance.');
       } else {
-        const value = await api.tutorOverview();
-        setOverview(value);
+        setOverview(await api.tutorOverview());
         setSnapshot(await api.loadState());
         setNotice('Tutor local répond.');
       }
+      await refreshOverview();
     });
+  }
+  async function identityAction(label: string, operation: () => Promise<unknown>): Promise<boolean> {
+    return (await perform(label, async () => { await operation(); setSnapshot(await api.loadState()); return true; })) === true;
   }
 
   async function disconnectTutor() {
-    setAuthorizationUrl(undefined);
     await perform('Déconnexion de Tutor…', async () => { setSnapshot(await api.disconnectTutor()); setOverview(null); });
   }
 
@@ -258,7 +258,9 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   }
 
   function openFormation(formation: FormationView) {
-    const prompt = formation.domainId
+    const prompt = formation.kind === 'authored'
+      ? `Examine la formation institutionnelle « ${formation.name} » (formation_id ${formation.formationId}) et ses versions avec les outils MCP autorisés. Présente son état réel et propose les prochaines modifications. Ne publie aucune version et ne crée aucune inscription sans ma confirmation explicite. Mon rôle d’équipe ne requiert pas de profil apprenant.`
+      : formation.domainId
       ? `Je souhaite reprendre ma formation « ${formation.name} » (domaine ${formation.domainId}). Consulte mon état pédagogique enregistré et propose la prochaine activité adaptée, sans modifier mes critères validés.`
       : `Présente-moi la formation « ${formation.name} » (cohorte ${formation.cohortId || ''}) et ses conditions d’accès. Attends ma confirmation explicite avant toute inscription.`;
     void startLearning(undefined, undefined, prompt);
@@ -330,8 +332,10 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
         {page === 'formations' && <>
           <div className="page-heading-row"><PageHeading eyebrow="Votre bibliothèque" title="Des parcours qui vous ressemblent." description="Retrouvez les formations enregistrées dans Tutor et les intentions préparées sur cet appareil." /><button className="button secondary" onClick={() => editIntent()}><Icon name="plus" size={15} />Nouvelle intention</button></div>
           {overviewError && <Notice kind="error">{overviewError}</Notice>}
+          {staff && <section className="card authoring-panel" aria-label="Création de formations"><div className="formation-meta"><span className="tag purple">Équipe de l’institution</span><span className="section-caption">{overview?.identity?.roles?.join(' · ')}</span></div><h2>Concevoir une formation pour votre institution</h2><p>{canAuthor ? 'Votre rôle autorise la création de formations. Préparez une intention, puis co-concevez un brouillon réel avec Codex. La publication demande votre confirmation.' : 'Cette session donne accès à la lecture. La création reste soumise aux permissions de votre institution.'}</p>{canAuthor && !authoringGrant && <p className="subtle-note">Pour écrire, reconnectez Tutor en activant « Demander la création et la publication de formations ».</p>}<button className="button primary" disabled={!canAuthor || !authoringGrant || !!busy} onClick={() => editIntent()}>Préparer une formation<Icon name="plus" size={14} /></button><p className="subtle-note">Votre rôle d’équipe ne crée pas de profil apprenant.</p></section>}
           <div className="section-heading"><h2>Mes formations</h2><button className="link-button" disabled={!snapshot.tutorStatus.connected || !!busy} onClick={() => void refreshOverview()}><Icon name="refresh" size={13} />Actualiser</button></div>
           {formations.length ? <div className="formation-grid">{formations.map((formation) => <FormationCard key={formation.id} formation={formation} onOpen={() => openFormation(formation)} disabled={!!busy || !!pendingConversationId} />)}</div> : <EmptyState icon="book" title={snapshot.tutorStatus.connected ? 'Aucune formation enregistrée' : 'Retrouvez vos formations'} description={snapshot.tutorStatus.connected ? 'Commencez par une intention personnelle ou explorez les formations accessibles dans votre institution.' : 'Connectez Tutor pour lire vos parcours. Les données de votre institution restent la référence.'} action={!snapshot.tutorStatus.connected ? <button className="button secondary" onClick={() => setPage('connections')}>Connecter Tutor<Icon name="arrow" size={14} /></button> : undefined} />}
+          {!!authoredFormations.length && <><div className="section-heading"><h2>Formations de l’institution</h2><span className="section-caption">Brouillons et publications autorisés</span></div><div className="formation-grid">{authoredFormations.map((formation) => <FormationCard key={formation.id} formation={formation} onOpen={() => openFormation(formation)} disabled={!!busy || !!pendingConversationId} />)}</div></>}
           {!!snapshot.intents.length && <><div className="section-heading"><h2>Mes intentions</h2><span className="section-caption">Conservées sur cet appareil</span></div><div className="formation-grid">{snapshot.intents.map((intent) => <section className="card formation-card" key={intent.id}><div className="formation-meta"><span className="tag purple">Intention personnelle</span><span className="section-caption">Révision {intent.revision}</span></div><h3>{intent.title}</h3>{intent.goals && <p>{intent.goals}</p>}<div className="button-row"><button className="button secondary small" onClick={() => editIntent(intent)}>Examiner et modifier</button><button className="button primary small" disabled={!!busy || !!pendingConversationId || !intent.validated} onClick={() => void startLearning(intent, undefined, 'Retrouvons mon intention validée et l’état enregistré dans Tutor. Aide-moi à poursuivre la conception ou l’apprentissage, en distinguant les étapes déjà confirmées des propositions à valider.')}>Poursuivre<Icon name="arrow" size={13} /></button></div></section>)}</div></>}
           {!!availableFormations.length && <><div className="section-heading"><h2>Formations accessibles</h2><span className="section-caption">Catalogue de votre institution</span></div><div className="formation-grid">{availableFormations.map((formation) => <FormationCard key={formation.id} formation={formation} onOpen={() => openFormation(formation)} disabled={!!busy || !!pendingConversationId} catalog />)}</div></>}
           <p className="subtle-note">Les inscriptions, les versions et la progression proviennent de Tutor. Une intention enregistrée ici devient un parcours lorsque sa conception est effectivement enregistrée dans le moteur.</p>
@@ -360,7 +364,7 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
           </div>
         </>}
 
-        {page === 'connections' && <Connections settings={snapshot.settings} targets={targets} connected={snapshot.agentConnected} tutorStatus={snapshot.tutorStatus} connection={agentConnection} authorizationUrl={authorizationUrl} busy={!!busy || !!pendingConversationId} onDiscover={() => void discover()} onSave={(settings) => void saveSettings(settings)} onConnect={(target, settings) => void connect(target, settings)} onAuthenticate={(methodId) => void authenticate(methodId)} onDisconnectAgent={() => void disconnectAgent()} onConnectTutor={(settings, clientId, token) => void connectTutor(settings, clientId, token)} onDisconnectTutor={() => void disconnectTutor()} />}
+        {page === 'connections' && <Connections settings={snapshot.settings} targets={targets} connected={snapshot.agentConnected} tutorStatus={snapshot.tutorStatus} connection={agentConnection} identity={snapshot.identity} api={api} onIdentityAction={identityAction} busy={!!busy || !!pendingConversationId} onDiscover={() => void discover()} onSave={(settings) => void saveSettings(settings)} onConnect={(target, settings) => void connect(target, settings)} onAuthenticate={(methodId) => void authenticate(methodId)} onDisconnectAgent={() => void disconnectAgent()} onConnectTutor={(settings, authoring) => void connectTutor(settings, authoring)} onDisconnectTutor={() => void disconnectTutor()} />}
       </main>
     </div>
   </div>;
@@ -403,7 +407,7 @@ function IntentEditor({ draft, setDraft, onSubmit, busy }: { draft: Intent; setD
 }
 
 function FormationCard({ formation, onOpen, disabled, catalog = false }: { formation: FormationView; onOpen: () => void; disabled: boolean; catalog?: boolean }) {
-  return <section className="card formation-card"><div className="formation-meta"><span className={`tag ${formation.kind === 'personal' ? 'purple' : ''}`}>{formation.kind === 'personal' ? 'Parcours personnel' : 'Formation commune'}</span>{formation.version !== undefined && <span className="section-caption">Version {formation.version}</span>}</div><h3>{formation.name}</h3>{formation.description && <p>{formation.description}</p>}{formation.conceptCount !== undefined && <div className="data-pair"><span>Concepts du parcours</span><strong>{formation.conceptCount}</strong></div>}{formation.enrollmentStatus && <div className="data-pair"><span>Votre inscription</span><strong>{statusLabel(formation.enrollmentStatus)}</strong></div>}<div className="button-row"><button className="button secondary small" disabled={disabled} onClick={onOpen}>{catalog || !formation.domainId ? 'Découvrir avec mon tuteur' : 'Reprendre mon parcours'}<Icon name="arrow" size={13} /></button></div></section>;
+  return <section className="card formation-card"><div className="formation-meta"><span className={`tag ${formation.kind === 'personal' ? 'purple' : ''}`}>{formation.kind === 'personal' ? 'Parcours personnel' : formation.kind === 'authored' ? 'Formation institutionnelle' : 'Formation commune'}</span>{formation.version !== undefined && <span className="section-caption">Version {formation.version}</span>}</div><h3>{formation.name}</h3>{formation.description && <p>{formation.description}</p>}{formation.conceptCount !== undefined && <div className="data-pair"><span>Concepts du parcours</span><strong>{formation.conceptCount}</strong></div>}{formation.publicationStatus && <div className="data-pair"><span>État du serveur</span><strong>{statusLabel(formation.publicationStatus)}</strong></div>}{formation.enrollmentStatus && <div className="data-pair"><span>Votre inscription</span><strong>{statusLabel(formation.enrollmentStatus)}</strong></div>}<div className="button-row"><button className="button secondary small" disabled={disabled} onClick={onOpen}>{formation.kind === 'authored' ? 'Examiner avec Codex' : catalog || !formation.domainId ? 'Découvrir avec mon tuteur' : 'Reprendre mon parcours'}<Icon name="arrow" size={13} /></button></div></section>;
 }
 
 function ConversationMessages({ conversation, streamText, streaming }: { conversation?: Conversation; streamText: string; streaming: boolean }) {
@@ -430,9 +434,9 @@ function PermissionCard({ permission, disabled, onAnswer }: { permission: Permis
 }
 
 interface ConnectionsProps {
-  settings: Settings; targets: AgentTarget[]; connected: boolean; tutorStatus: Snapshot['tutorStatus']; connection: AgentConnection | null; authorizationUrl?: string; busy: boolean;
+  settings: Settings; targets: AgentTarget[]; connected: boolean; tutorStatus: Snapshot['tutorStatus']; connection: AgentConnection | null; identity: Snapshot['identity']; api: ClientBridge; onIdentityAction: (label: string, action: () => Promise<unknown>) => Promise<boolean>; busy: boolean;
   onDiscover: () => void; onSave: (settings: Settings) => void; onConnect: (target: AgentTarget, settings: Settings) => void; onAuthenticate: (methodId: string) => void; onDisconnectAgent: () => void;
-  onConnectTutor: (settings: Settings, clientId: string, token: string) => void; onDisconnectTutor: () => void;
+  onConnectTutor: (settings: Settings, authoring: boolean) => void; onDisconnectTutor: () => void;
 }
 
 function Connections(props: ConnectionsProps) {
@@ -445,11 +449,10 @@ function Connections(props: ConnectionsProps) {
   const [distribution, setDistribution] = useState(props.settings.manualTarget?.distribution || '');
   const [wslUser, setWslUser] = useState(props.settings.manualTarget?.wslUser || '');
   const [methodId, setMethodId] = useState('');
-  const [clientId, setClientId] = useState('');
-  const [initialAccessToken, setInitialAccessToken] = useState('');
+  const [institution, setInstitution] = useState<Institution | null>(null);
+  const [authoring, setAuthoring] = useState(false);
   const [argsText, setArgsText] = useState(JSON.stringify(props.settings.tutor.args));
   const [argsError, setArgsError] = useState('');
-  const [copyStatus, setCopyStatus] = useState('');
   const selected = targets.find((target) => target.id === settings.targetId);
 
   function preparedSettings(): Settings | null {
@@ -473,9 +476,10 @@ function Connections(props: ConnectionsProps) {
   }
 
   return <>
+    <IdentityPanel identity={props.identity} api={props.api} busy={busy} connected={tutorStatus.connected && settings.tutor.mode === 'remote'} institutionUrl={settings.tutor.url} run={props.onIdentityAction} />
     <PageHeading eyebrow="Votre environnement" title="Vos outils, réunis dans Tutor." description="Connectez votre agent IA et votre moteur pédagogique. Chacun conserve son rôle et son propre accès." />
     <section className="card connection-card">
-      <div className="connection-heading"><div className="connection-heading-main"><span className="connection-number">01</span><div><h2 className="card-title">Votre agent Codex</h2><p>Une installation Windows ou WSL2, accessible par son adaptateur ACP.</p></div></div><span className={`tag ${connected ? 'green' : ''}`}>{connected ? 'Connecté' : 'À connecter'}</span></div>
+      <div className="connection-heading"><div className="connection-heading-main"><span className="connection-number">02</span><div><h2 className="card-title">Votre agent Codex</h2><p>Une installation Windows ou WSL2, accessible par son adaptateur ACP.</p></div></div><span className={`tag ${connected ? 'green' : ''}`}>{connected ? 'Connecté' : 'À connecter'}</span></div>
       <div className="button-row" style={{ marginBottom: 18 }}><button className="button secondary" disabled={busy || connected} onClick={props.onDiscover}><Icon name="refresh" size={14} />Rechercher les installations</button><span className="inline-status">Windows natif et distributions WSL2</span></div>
       {!!targets.length && <fieldset style={{ border: 0, padding: 0, margin: 0 }}><legend className="visually-hidden">Installation de Codex</legend><div className="target-list">{targets.map((target) => <label className="target-option" key={target.id}><input type="radio" name="target" checked={!manual && settings.targetId === target.id} disabled={busy || connected || !target.available} onChange={() => { setManual(false); setSettings({ ...settings, targetId: target.id }); }} /><div className="target-option-main"><strong>{target.label}</strong><small>{target.detail}{target.codexVersion ? ` · Codex ${target.codexVersion}` : ''}{target.adapterVersion ? ` · Adaptateur ${target.adapterVersion}` : ''}</small></div><span className={`tag ${target.available ? 'green' : ''}`}>{target.available ? 'Disponible' : 'À compléter'}</span></label>)}</div></fieldset>}
       <div className="form-grid"><label className="field full">Dossier de travail<input value={settings.cwd} onChange={(event) => setSettings({ ...settings, cwd: event.target.value })} disabled={busy || connected} placeholder={selected?.environment === 'wsl' || (manual && manualEnvironment === 'wsl') ? '/home/vous/apprentissages' : 'C:\\Users\\vous\\Tutor'} /><small>Un dossier existant dans l’environnement choisi. Codex utilisera ce dossier pour la séance.</small></label></div>
@@ -491,20 +495,14 @@ function Connections(props: ConnectionsProps) {
     </section>
 
     <section className="card connection-card">
-      <div className="connection-heading"><div className="connection-heading-main"><span className="connection-number">02</span><div><h2 className="card-title">Votre moteur Tutor</h2><p>Le serveur qui conserve vos formations et votre progression.</p></div></div><span className={`tag ${tutorStatus.connected ? 'green' : ''}`}>{tutorStatus.connected ? 'Connecté' : 'À connecter'}</span></div>
+      <div className="connection-heading"><div className="connection-heading-main"><span className="connection-number">03</span><div><h2 className="card-title">Votre moteur Tutor</h2><p>Le serveur qui conserve vos formations et votre progression.</p></div></div><span className={`tag ${tutorStatus.connected ? 'green' : ''}`}>{tutorStatus.connected ? 'Connecté' : 'À connecter'}</span></div>
       <div className="form-grid"><label className="field full">Emplacement<select value={settings.tutor.mode} disabled={busy || tutorStatus.connected} onChange={(event) => setSettings({ ...settings, tutor: { ...settings.tutor, mode: event.target.value as 'remote' | 'local' } })}><option value="remote">Institution ou serveur distant</option><option value="local">Tutor local sur cet ordinateur</option></select></label>
-        {settings.tutor.mode === 'remote' ? <label className="field full">Adresse de Tutor<input type="url" value={settings.tutor.url} disabled={busy || tutorStatus.connected} onChange={(event) => setSettings({ ...settings, tutor: { ...settings.tutor, url: event.target.value } })} placeholder="https://tutor.votre-institution.fr" /><small>La connexion et les autorisations se font dans votre navigateur.</small></label> : <><label className="field full">Programme Tutor<input value={settings.tutor.command} disabled={busy || tutorStatus.connected} onChange={(event) => setSettings({ ...settings, tutor: { ...settings.tutor, command: event.target.value } })} placeholder="tutor-mcp" /><small>Le programme doit être disponible dans le même environnement que Codex : Windows ou la distribution WSL choisie.</small></label><label className="field full">Arguments du programme<input className="mono" value={argsText} disabled={busy || tutorStatus.connected} onChange={(event) => setArgsText(event.target.value)} placeholder={'["--local"]'} /><small>Tableau JSON : chaque élément correspond à un argument distinct.</small></label></>}
+        {settings.tutor.mode === 'remote' ? <label className="field full">Adresse de Tutor<input type="url" value={settings.tutor.url} disabled={busy || tutorStatus.connected} onChange={(event) => { setSettings({ ...settings, tutor: { ...settings.tutor, url: event.target.value } }); setInstitution(null); setAuthoring(false); }} placeholder="https://tutor.votre-institution.fr" /><small>Votre application signera un défi unique. L’institution doit avoir autorisé vos clés publiques ; aucun compte par e-mail n’est créé ici.</small></label> : <><label className="field full">Programme Tutor<input value={settings.tutor.command} disabled={busy || tutorStatus.connected} onChange={(event) => setSettings({ ...settings, tutor: { ...settings.tutor, command: event.target.value } })} placeholder="tutor-mcp" /><small>Le programme doit être disponible dans le même environnement que Codex : Windows ou la distribution WSL choisie.</small></label><label className="field full">Arguments du programme<input className="mono" value={argsText} disabled={busy || tutorStatus.connected} onChange={(event) => setArgsText(event.target.value)} placeholder={'["--local"]'} /><small>Tableau JSON : chaque élément correspond à un argument distinct.</small></label></>}
       </div>
-      {settings.tutor.mode === 'remote' && <details><summary>Configuration avancée de l’institution</summary><div className="form-grid"><label className="field full">Identifiant du client OAuth <span className="field-optional">si fourni par l’institution</span><input value={clientId} disabled={busy} onChange={(event) => setClientId(event.target.value)} autoComplete="off" /><small>Sinon, Tutor tente l’enregistrement dynamique proposé par le serveur.</small></label><label className="field full">Jeton d’enregistrement initial <span className="field-optional">si requis</span><input type="password" value={initialAccessToken} disabled={busy} onChange={(event) => setInitialAccessToken(event.target.value)} autoComplete="off" /><small>Utilisé uniquement pour cette connexion. Il n’est pas enregistré avec les réglages.</small></label></div></details>}
+      {settings.tutor.mode === 'remote' && !tutorStatus.connected && <><button className="button secondary" disabled={busy || !settings.tutor.url.trim()} onClick={() => void props.onIdentityAction('Vérification de l’institution…', async () => { setInstitution(await props.api.discoverInstitution(settings.tutor.url)); })}>Vérifier l’institution</button>{institution && <section className="institution-preview" aria-label="Institution vérifiée"><h3>{institution.name}</h3><p className="mono">{institution.issuer}</p><p className="subtle-note">Institution : {institution.institution_id}</p><label className="confirmation"><input type="checkbox" checked={authoring} disabled={busy} onChange={(event) => setAuthoring(event.target.checked)} />Demander la création et la publication de formations</label><p className="subtle-note">Accès réservé aux rôles autorisés par l’institution. Sans cette option, la session demande uniquement les permissions habituelles de votre rôle.</p></section>}</>}
       {argsError && <p role="alert" className="notice error" style={{ marginTop: 15 }}>{argsError}</p>}
       {tutorStatus.message && <p className="subtle-note">{tutorStatus.message}</p>}
-      {props.authorizationUrl && settings.tutor.mode === 'remote' && safeAuthorizationUrl(props.authorizationUrl, settings.tutor.url) && !tutorStatus.connected && <section className="login-fallback" aria-label="Connexion Tutor en attente">
-        <p>Si le navigateur ne s’est pas ouvert, utilisez ce lien pour terminer votre connexion.</p>
-        <a className="button secondary small" href={props.authorizationUrl} target="_blank" rel="noopener noreferrer"><Icon name="external" size={13} />Ouvrir la connexion dans le navigateur</a>
-        <label className="field" style={{ marginTop: 12 }}>Lien de connexion Tutor<input readOnly value={props.authorizationUrl} onFocus={(event) => event.currentTarget.select()} /></label>
-        <div className="button-row" style={{ marginTop: 10 }}><button className="button secondary small" onClick={() => { void navigator.clipboard?.writeText(props.authorizationUrl!).then(() => setCopyStatus('Lien copié.')).catch(() => setCopyStatus('Sélectionnez le lien puis utilisez Ctrl + C.')); if (!navigator.clipboard) setCopyStatus('Sélectionnez le lien puis utilisez Ctrl + C.'); }}>Copier le lien</button><span className="inline-status" role="status">{copyStatus}</span></div>
-      </section>}
-      <div className="connection-actions"><span className="inline-status">Votre accès Tutor est distinct de votre compte Codex.</span>{tutorStatus.connected ? <button className="button secondary" disabled={busy} onClick={props.onDisconnectTutor}>Déconnecter Tutor</button> : <button className="button primary" disabled={busy || (settings.tutor.mode === 'remote' ? !settings.tutor.url.trim() : !settings.tutor.command.trim() || !settings.cwd.trim())} onClick={() => { const next = preparedSettings(); if (next) { props.onConnectTutor(next, clientId, initialAccessToken); setInitialAccessToken(''); } }}>{settings.tutor.mode === 'remote' ? <><Icon name="external" size={14} />Se connecter à Tutor</> : <>Vérifier Tutor local<Icon name="arrow" size={14} /></>}</button>}</div>
+      <div className="connection-actions"><span className="inline-status">Votre accès Tutor est distinct de votre compte Codex.</span>{tutorStatus.connected ? <button className="button secondary" disabled={busy} onClick={props.onDisconnectTutor}>Déconnecter Tutor</button> : <button className="button primary" disabled={busy || (settings.tutor.mode === 'remote' ? !settings.tutor.url.trim() || !institution || !props.identity.backupConfirmed : !settings.tutor.command.trim() || !settings.cwd.trim())} onClick={() => { const next = preparedSettings(); if (next) { props.onConnectTutor(next, authoring); } }}>{settings.tutor.mode === 'remote' ? <>Connecter avec ma clé<Icon name="arrow" size={14} /></> : <>Vérifier Tutor local<Icon name="arrow" size={14} /></>}</button>}</div>
     </section>
     <div className="button-row"><button className="button secondary" disabled={busy} onClick={() => { const next = preparedSettings(); if (next) props.onSave(next); }}><Icon name="check" size={14} />Enregistrer les réglages</button></div>
     <p className="subtle-note">Codex et son adaptateur doivent être compatibles. Les fonctionnalités réellement disponibles sont vérifiées à la connexion ; une installation détectée ne garantit pas encore le fonctionnement complet d’une séance.</p>

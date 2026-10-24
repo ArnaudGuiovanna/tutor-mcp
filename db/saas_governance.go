@@ -474,6 +474,7 @@ var dsarErasurePhases = []string{
 	// Revoke live access before deleting even the first credential or data row.
 	"revoke_access",
 	"refresh_tokens", "oauth_codes", "login_challenges", "account_tokens", "learner_approved_clients",
+	"native_challenges", "native_sessions",
 	"concept_bkt_estimates", "collective_weight_applications", "learning_badge_evidence", "learning_badges",
 	"webhook_delivery_transitions", "webhook_push_log", "webhook_message_queue",
 	"narrative_mutations", "narrative_objects", "pedagogical_snapshots",
@@ -504,10 +505,12 @@ var dsarLearnerTables = map[string]string{
 	"pending_consolidations": "learner_id", "tool_call_idempotency": "learner_id",
 	"refresh_tokens": "learner_id", "oauth_codes": "learner_id", "login_challenges": "learner_id",
 	"account_tokens": "learner_id", "learner_approved_clients": "learner_id",
+	"native_challenges": "learner_id", "native_sessions": "learner_id",
 }
 
 // dsarLatePhases are appended to requests created before they existed.
 var dsarLatePhases = []string{
+	"native_challenges", "native_sessions",
 	"revoke_access",
 	"refresh_tokens", "oauth_codes", "login_challenges", "account_tokens", "learner_approved_clients",
 	"learner_concept_states", "calibration_records", "pending_consolidations", "tool_call_idempotency",
@@ -611,7 +614,8 @@ func (s *Store) ProcessTenantDSARErasureBatch(ctx context.Context, scope models.
 				scope.TenantID, learnerID).Scan(&membershipID); err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return err
 			}
-			result, err := txs.exec(txCtx, `UPDATE learners SET email = ?, password_hash = 'erased', objective = '',
+			result, err := txs.exec(txCtx, `UPDATE learners SET email = CASE WHEN identity_mode='pubkey' THEN NULL ELSE ? END,
+				password_hash = CASE WHEN identity_mode='pubkey' THEN NULL ELSE 'erased' END, objective = '',
 				profile_json = '{}', webhook_url = '', email_verified_at = NULL WHERE tenant_id = ? AND id = ?`,
 				anon, scope.TenantID, learnerID)
 			if err != nil {

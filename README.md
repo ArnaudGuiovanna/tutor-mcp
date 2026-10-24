@@ -62,7 +62,7 @@ Choose where your learning data lives. Every profile uses the same learning engi
 |---|---|---|
 | **Local** | Learning on your own computer | One binary + `--local`. Your MCP client starts it; SQLite stores your history. No account or server setup. [Local setup](docs/installation.md#local-client-configuration) |
 | **Hobby** | A personal VPS or a small group | `--profile hobby`, SQLite and an HTTPS proxy. Invite users over SSH; they sign in with a username and password. [Native installation](docs/installation.md#native-hobby-vps-binary-systemd-and-caddy) · [Docker Compose](docs/installation.md#hobby-vps-with-docker-compose) |
-| **Institution** | An organization running a shared service | `--profile institution`, PostgreSQL, verified email and separate API/worker/migrator roles. [Institutional setup](docs/installation.md#institutional-deployment) |
+| **Institution** | An organization running a shared service | `--profile institution`, public-key identities, PostgreSQL and separate API/worker/migrator roles. [Institutional setup](docs/installation.md#institutional-deployment) |
 
 Binaries target **Linux, macOS and Windows**, on amd64 and arm64. Profiles require **v0.6.0+**; install the [v0.6.1 patch release](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/v0.6.1) for the latest fixes. See [installation details](docs/installation.md) for installers, service configuration and backups.
 

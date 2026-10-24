@@ -24,7 +24,9 @@ export interface FormationView {
   id: string;
   name: string;
   description: string;
-  kind: 'personal' | 'common';
+  kind: 'personal' | 'common' | 'authored';
+  formationId?: string;
+  publicationStatus?: string;
   domainId?: string;
   cohortId?: string;
   version?: number;
@@ -65,6 +67,15 @@ export function formationViews(overview: TutorOverview | null): FormationView[] 
     });
   }
   return result;
+}
+
+export function authoredFormationViews(overview: TutorOverview | null): FormationView[] {
+  const result = record(unwrapToolResult(overview?.authoredFormations));
+  if (!Array.isArray(result.items)) return [];
+  return result.items.map(record).filter((item) => !!text(item.id)).map((item) => ({
+    id: `authored:${text(item.id)}`, formationId: text(item.id), kind: 'authored',
+    name: text(item.name) || 'Formation de l’institution', description: text(item.description), publicationStatus: text(item.status),
+  }));
 }
 
 export function availableFormationViews(overview: TutorOverview | null): FormationView[] {
@@ -124,7 +135,7 @@ export function permissionLabel(kind: string, name: string): string {
 }
 
 export function statusLabel(status: string): string {
-  const labels: Record<string, string> = { pending: 'En attente', in_progress: 'En cours', completed: 'Terminé', failed: 'Échec', active: 'Inscription active', invited: 'Invitation reçue', left: 'Inscription quittée', revoked: 'Accès révoqué', approved: 'Admission approuvée', rejected: 'Admission refusée', requested: 'Admission demandée' };
+  const labels: Record<string, string> = { draft: 'Brouillon', published: 'Publiée', archived: 'Archivée', pending: 'En attente', in_progress: 'En cours', completed: 'Terminé', failed: 'Échec', active: 'Inscription active', invited: 'Invitation reçue', left: 'Inscription quittée', revoked: 'Accès révoqué', approved: 'Admission approuvée', rejected: 'Admission refusée', requested: 'Admission demandée' };
   return labels[status] || status;
 }
 
@@ -135,14 +146,4 @@ export function errorMessage(error: unknown): string {
 export function displayDate(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? '' : new Intl.DateTimeFormat('fr', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(date);
-}
-
-export function safeAuthorizationUrl(raw: string, institution: string): string | undefined {
-  try {
-    const url = new URL(raw);
-    const origin = new URL(institution);
-    const loopback = url.hostname === 'localhost' || url.hostname === '[::1]' || /^127\.(\d{1,3}\.){2}\d{1,3}$/.test(url.hostname);
-    if (url.origin !== origin.origin || url.username || url.password || url.hash || (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback))) return undefined;
-    return url.href;
-  } catch { return undefined; }
 }

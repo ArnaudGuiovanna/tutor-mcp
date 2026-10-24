@@ -81,7 +81,7 @@ func (s *Store) progressAssignments(ctx context.Context, p models.Principal, out
 		return err
 	}
 	out.CanManageAssignments = true
-	rows, err := s.query(ctx, `SELECT tm.id, u.email FROM cohort_trainers ct
+	rows, err := s.query(ctx, `SELECT tm.id, COALESCE(u.email,'') FROM cohort_trainers ct
  JOIN tenant_memberships tm ON tm.tenant_id = ct.tenant_id AND tm.id = ct.membership_id
  JOIN users u ON u.id = tm.user_id WHERE ct.tenant_id = ? AND ct.cohort_id = ? ORDER BY u.email LIMIT 101`, p.TenantID, out.Cohort.CohortID)
 	if err != nil {

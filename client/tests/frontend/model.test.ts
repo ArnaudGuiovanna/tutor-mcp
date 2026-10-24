@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { availableFormationViews, formationViews, safeAuthorizationUrl } from '../../src/model';
+import { authoredFormationViews, availableFormationViews, formationViews } from '../../src/model';
 
 describe('Les objets pédagogiques retournés par Tutor', () => {
+  it('présente les vrais brouillons du personnel sans inventer une inscription ou une progression', () => {
+    const views = authoredFormationViews({ context: {}, formations: { items: [] }, availableFormations: { items: [] }, authoredFormations: { items: [{ id: 'formation1', name: 'Astronomie institutionnelle', description: 'Objectifs partagés', status: 'draft', owner_membership_id: 'staff1' }] } });
+    expect(views).toEqual([{ id: 'authored:formation1', formationId: 'formation1', name: 'Astronomie institutionnelle', description: 'Objectifs partagés', kind: 'authored', publicationStatus: 'draft' }]);
+    expect(views[0].domainId).toBeUndefined(); expect(views[0].enrollmentStatus).toBeUndefined();
+  });
   it('relie une inscription à son domaine sans dupliquer le parcours et conserve les versions réelles', () => {
     const views = formationViews({
       context: { content: [{ type: 'text', text: JSON.stringify({ domains: [{ domain_id: 'domain-shared', name: 'Astronomie', concept_count: 8 }, { domain_id: 'domain-personal', name: 'Histoire des cartes', concept_count: 4 }] }) }] },
@@ -28,10 +33,4 @@ describe('Les objets pédagogiques retournés par Tutor', () => {
     expect(views).toEqual([{ id: 'personal:native-active', name: 'Les constellations', description: '', kind: 'personal', domainId: 'native-active', conceptCount: 7 }]);
   });
 
-  it('n’expose que le retour de connexion HTTPS ou loopback de l’institution choisie', () => {
-    expect(safeAuthorizationUrl('https://institution.example/authorize?state=abc', 'https://institution.example')).toBe('https://institution.example/authorize?state=abc');
-    expect(safeAuthorizationUrl('http://127.0.0.1:8080/authorize?state=abc', 'http://127.0.0.1:8080')).toBe('http://127.0.0.1:8080/authorize?state=abc');
-    for (const invalid of ['javascript:alert(1)', 'https://attacker.example/authorize', 'https://user:password@institution.example/authorize', 'https://institution.example/authorize#fragment']) expect(safeAuthorizationUrl(invalid, 'https://institution.example')).toBeUndefined();
-    expect(safeAuthorizationUrl('http://institution.example/authorize', 'http://institution.example')).toBeUndefined();
-  });
 });

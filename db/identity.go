@@ -298,7 +298,10 @@ func (s *Store) SetMembershipAuthorization(ctx context.Context, scope models.Ten
 	}
 	var version int64
 	err = s.queryRow(ctx, `UPDATE tenant_memberships
-		SET status = ?, roles_json = ?, mfa_required = ?,
+		SET status = ?, roles_json = ?, mfa_required = CASE WHEN EXISTS (
+		 SELECT 1 FROM users u
+		 WHERE u.id=tenant_memberships.user_id AND u.identity_mode='pubkey'
+		) THEN 0 ELSE ? END,
 		    version = version + 1, updated_at = ?
 		WHERE tenant_id = ? AND id = ? AND user_id = ?
 		RETURNING version`, status, string(rolesJSON), mfaRequired, now,

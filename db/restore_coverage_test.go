@@ -20,6 +20,7 @@ var restoreChecksumExempt = map[string]string{
 	"usage_rollups": "derived from usage_events, which is checksummed",
 	// Short-lived credentials and sessions: a restore must not resurrect them.
 	"account_tokens": "transient credential", "console_sessions": "transient credential", "login_challenges": "transient credential",
+	"native_challenges": "transient signature challenge, excluded from archives", "native_sessions": "transient native grant, excluded from archives",
 	"oauth_codes": "transient credential", "refresh_tokens": "transient credential", "learner_approved_clients": "re-consented after restore",
 	"tool_call_idempotency": "transient replay cache",
 	// Queues and delivery state: re-drained or re-run after a restore.

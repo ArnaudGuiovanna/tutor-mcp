@@ -21,7 +21,11 @@ import (
 // force an explicit review and fingerprint update. Contract/control-plane
 // exceptions (migrations, health and test-only RawDB) are intentionally part
 // of the frozen set and documented in docs/store-scope-contract.md.
-const legacyUnscopedStoreMethodSetSHA256 = "697aa807218b7c2b468944a60f307aec318868e3f058621c5e0116d8f7275b18"
+// Native authentication adds six reviewed pre-principal methods:
+// GetNativeIdentity, CreateNativeChallenge, ConsumeNativeChallenge,
+// CreateNativeSession, RotateNativeIdentity, RevokeNativeSession. Their narrow
+// proof/nonce boundaries and tenant binding are documented in the contract.
+const legacyUnscopedStoreMethodSetSHA256 = "62821b0f6c413e8d15c5ed43ef9f10d8aea28b8d9e596f7c21600469207ce430"
 
 func TestNoNewUnscopedStoreMethods(t *testing.T) {
 	fset := token.NewFileSet()

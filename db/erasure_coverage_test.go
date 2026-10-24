@@ -39,6 +39,7 @@ var erasureRetainedByDesign = map[string]string{
 // account can serve other organizations and is deleted with the account
 // itself, not by an organization's request.
 var identityOutsideTenantErasure = map[string]string{
+	"native_identities":        "global public-key identity shared across organizations; tenant challenges/sessions are erased",
 	"users":                    "global account identity shared across organizations",
 	"mfa_credentials":          "second factor of the global account",
 	"mfa_recovery_codes":       "second factor of the global account",

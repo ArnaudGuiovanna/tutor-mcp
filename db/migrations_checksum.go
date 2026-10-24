@@ -31,6 +31,9 @@ type migration struct {
 	Version       string
 	Body          string
 	AlterIfNeeded bool
+	// RebuildKeepsAlterColumns marks a rebuild which copies all live columns;
+	// its DROP TABLE must not suppress repair of historical ADD COLUMNs.
+	RebuildKeepsAlterColumns bool
 	// removedLater is set by buildMigrations when a later migration removes
 	// the column this ADD COLUMN creates; such a migration is never repaired.
 	removedLater bool
@@ -1969,6 +1972,7 @@ END;`,
 	out = append(out, migration{Version: "0078_bkt_calibration_sources", Body: bktCalibrationMigration})
 	out = append(out, migration{Version: "0079_session_narrative_index", Body: sessionNarrativeIndexMigration})
 	out = append(out, migration{Version: "0080_tenant_erasure_identity", Body: sqliteErasureIdentityMigration})
+	out = append(out, migration{Version: "0081_native_identities", Body: sqliteNativeIdentityMigration, RebuildKeepsAlterColumns: true})
 	markRemovedAlterColumns(out)
 	return out
 }
@@ -2014,7 +2018,10 @@ func findRemovedAlterColumns(migrations []migration) map[string]bool {
 			" DROP TABLE IF EXISTS " + table + " ",
 			" ALTER TABLE " + table + " DROP COLUMN " + column + " ",
 		}
-		for _, later := range tokens[i+1:] {
+		for position, later := range tokens[i+1:] {
+			if migrations[i+1+position].RebuildKeepsAlterColumns {
+				continue
+			}
 			for _, needle := range needles {
 				if strings.Contains(later, needle) {
 					removed[m.Version] = true

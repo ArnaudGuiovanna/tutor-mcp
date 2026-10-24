@@ -72,27 +72,71 @@ La connexion fournisseur et son éventuel coût restent distincts du service Tut
 chemin Windows pour un agent natif. Pour choisir un profil, ajouter
 `--data-dir CHEMIN_ABSOLU`. Plusieurs processus Tutor partagent ce profil durable.
 
-**Distant** : saisir l’origine HTTPS de l’institution, sans suffixe `/mcp`.
-Le client ouvre le navigateur pour OAuth avec PKCE S256 et un retour loopback.
-Il utilise le compte et les invitations actuellement disponibles sur le serveur.
-L’identité native par clé décrite dans la vision institutionnelle constitue un
-contrat serveur distinct et n’est pas simulée par cette application.
+**Institution** : créez une identité locale (ou importez une clé Nostr `nsec`),
+exportez sa sauvegarde chiffrée, puis confirmez sa conservation hors ligne.
+L’identité utilise secp256k1 et les signatures BIP340, comme Buzz. L’application
+présente uniquement les clés publiques `npub` de l’identité et de sa récupération.
+L’administrateur autorise ces deux clés publiques dans l’institution ; le client
+ne crée pas de compte par e-mail et ne demande pas de mot de passe de compte.
 
-Le serveur doit fournir [l’API de lecture du client](../clientapi/README.md).
-Les écrans lisent `/api/client/v1/overview` ; l’agent utilise `/mcp` avec les accès
-apprenant. Une institution qui restreint l’enregistrement OAuth peut fournir un
-jeton initial DCR ou un identifiant de client public préenregistré. Dans ce dernier
-cas, enregistrer exactement `http://127.0.0.1:47823/oauth/callback`.
+Saisissez l’origine HTTPS de l’institution, sans `/mcp`, puis vérifiez son nom et
+son origine. Le client découvre `/.well-known/tutor-institution` et signe un défi
+NIP-98 unique valable 120 secondes. La clé privée reste dans Rust, protégée pour
+l’utilisateur Windows par DPAPI. La variante Unix de développement utilise des
+fichiers privés `0600`, sans prétendre les chiffrer sur le poste.
 
-Les jetons Tutor ne passent pas dans l’interface. Le jeton de rafraîchissement
-reste dans la couche Rust et le coffre local ; seul le jeton d’accès apprenant
-est délégué à l’agent pour ses appels MCP. Sous Windows, DPAPI chiffre le coffre
-pour l’utilisateur Windows courant. La variante Unix sert au
-développement et protège son fichier par des droits `0600`, sans prétendre le
-chiffrer. Le rafraîchissement renouvelle les accès sans élargir leurs permissions.
-La déconnexion retire les accès locaux et ferme l’agent. Le serveur actuel
-n’annonce pas d’endpoint de révocation OAuth ; le client le signale et ne prétend
-pas annuler à distance un jeton déjà émis.
+La sauvegarde portable est une enveloppe `tutor-identity-nip49` version 1 avec
+**deux clés chiffrées séparément au format standard NIP-49 `ncryptsec`**. Scrypt
+(logN 16, 64 Mio), normalisation NFKC et XChaCha20-Poly1305 sont implémentés par
+la bibliothèque Nostr. La phrase chiffre la sauvegarde et ne sert pas à se
+connecter. Conservez le fichier hors ligne et sa phrase séparément. La clé privée
+de récupération ne reste pas dans le coffre actif après confirmation ; son
+équivalent public permet à l’institution de vérifier une récupération future.
+Avant cette confirmation, aucune session institutionnelle ne peut être ouverte.
+
+Le serveur retourne une session révocable de 30 minutes. Aucun jeton permanent
+de rafraîchissement n’est conservé : l’application signe un nouveau défi à
+l’approche de l’expiration. Seul le jeton d’accès temporaire de la session MCP est
+délégué à l’agent. La clé privée, la sauvegarde et sa phrase ne passent jamais dans
+ses paramètres, son environnement ou ses prompts. Une déconnexion révoque la
+session distante et retire son accès local ; les erreurs de révocation sont
+signalées. Les anciens coffres OAuth sont conservés sans être réutilisés.
+
+Le rôle d’équipe ne crée aucun apprenant. La lecture est le grant par défaut ;
+la case « Demander la création et la publication de formations » demande
+explicitement `formation:read formation:write`, accordé uniquement si le serveur
+l’autorise. La création passe par les vrais outils MCP et un brouillon ; la
+publication reste soumise à confirmation humaine.
+
+La rotation exige l’approbation de la clé de récupération actuelle, lue
+temporairement depuis la sauvegarde hors ligne. Une clé active volée ne peut donc
+pas remplacer à elle seule la récupération. La rotation crée une nouvelle paire et son fichier de sauvegarde avant de
+révoquer l’ancienne paire dans l’institution sélectionnée. La récupération signe
+avec l’ancienne clé hors ligne et installe une paire neuve. Gardez les deux
+sauvegardes jusqu’à la reconnexion réussie ; une erreur réseau après envoi peut
+rendre l’issue distante incertaine. Un échec d’écriture locale n’efface pas
+l’ancien coffre. Une récupération confirmée impose une nouvelle connexion.
+
+### Identité depuis le terminal
+
+Le binaire Rust `tutor-client-identity` est utilisable sans interface graphique.
+Les secrets sont lus **sur stdin**, jamais dans les arguments ni les sorties.
+Utilisez un gestionnaire de secrets ou un terminal privé (la saisie stdin brute
+peut être visible dans un terminal). Exemple, phrase fournie par votre outil de
+secrets :
+
+```bash
+cargo run --manifest-path client/src-tauri/Cargo.toml --no-default-features \
+  --bin tutor-client-identity -- identity generate \
+  --directory /chemin/prive/coffre --file /support-hors-ligne/identite.json
+```
+
+Sous-commandes : `generate` crée la paire et peut exporter/confirmer avec `--file` ;
+`exportpub` exige une sauvegarde confirmée ; `backup --file FICHIER_NEUF` termine
+une création non sauvegardée ; `import --file FICHIER` restaure une sauvegarde
+(phrase sur stdin) ; `import --nsec` importe la clé privée lue sur stdin puis
+exige une sauvegarde. Une identité différente ne remplace jamais implicitement
+un coffre existant. Chaque commande affiche seulement l’état et les clés publiques.
 
 Les intentions et conversations sont enregistrées dans `workspace.json`, dans
 le dossier de données utilisateur Tauri (`fr.aguiovanna.tutor`). Elles peuvent

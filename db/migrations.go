@@ -364,6 +364,24 @@ func MigrateContext(ctx context.Context, db *sql.DB) (resultErr error) {
 	}
 	var foreignKeys int
 	if rebuild {
+		var legacyAlter int
+		if err := conn.QueryRowContext(ctx, `PRAGMA legacy_alter_table`).Scan(&legacyAlter); err != nil {
+			return err
+		}
+		// External legacy triggers refer to users/learners between DROP and
+		// RENAME. Keep their references unchanged during this documented rebuild.
+		if _, err := conn.ExecContext(ctx, `PRAGMA legacy_alter_table = ON`); err != nil {
+			return err
+		}
+		defer func() {
+			setting := `PRAGMA legacy_alter_table = OFF`
+			if legacyAlter != 0 {
+				setting = `PRAGMA legacy_alter_table = ON`
+			}
+			if _, err := conn.ExecContext(context.Background(), setting); err != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("migrate: restore legacy alter mode: %w", err))
+			}
+		}()
 		if err := conn.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
 			return err
 		}
@@ -409,7 +427,7 @@ func MigrateContext(ctx context.Context, db *sql.DB) (resultErr error) {
 			return fmt.Errorf("migrate: %w", err)
 		}
 	}
-	if rebuild && foreignKeys != 0 {
+	if rebuild {
 		if err := checkSQLiteForeignKeys(ctx, conn); err != nil {
 			return err
 		}
