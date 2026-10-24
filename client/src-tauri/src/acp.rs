@@ -93,10 +93,15 @@ impl AcpClient {
         }
         #[cfg(windows)]
         {
-            // No console window; the adapter still has piped stdin/stdout.
+            // The first user thread must not run or spawn descendants before
+            // its job is attached. Piped stdio does not require a console.
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            command.creation_flags(CREATE_NO_WINDOW);
+            command.creation_flags(
+                CREATE_NO_WINDOW | windows_sys::Win32::System::Threading::CREATE_SUSPENDED,
+            );
         }
+        #[cfg(windows)]
+        let windows_job = windows_job::WindowsJob::new()?;
 
         let mut child = command
             .spawn()
@@ -104,6 +109,16 @@ impl AcpClient {
         let pid = child
             .id()
             .ok_or_else(|| "Le processus de l’agent n’a pas d’identifiant.".to_string())?;
+        #[cfg(windows)]
+        if let Err(message) = windows_job.assign_and_resume(&child, pid) {
+            // No ACP request is sent and no agent user code is allowed to run
+            // if its job/thread setup fails. Dropping the job kills any process
+            // already assigned to it; kill_on_drop is an additional fallback.
+            drop(windows_job);
+            let _ = child.start_kill();
+            let _ = timeout(Duration::from_secs(3), child.wait()).await;
+            return Err(message);
+        }
         let stdin = child
             .stdin
             .take()
@@ -204,7 +219,10 @@ impl AcpClient {
                     }
                     let graceful = timeout(Duration::from_millis(400), child.wait()).await;
                     if graceful.is_err() {
+                        #[cfg(unix)]
                         terminate_tree(pid).await;
+                        #[cfg(windows)]
+                        let _ = windows_job.terminate();
                         let _ = child.start_kill();
                         let _ = timeout(Duration::from_secs(3), child.wait()).await;
                     } else {
@@ -212,6 +230,17 @@ impl AcpClient {
                         terminate_tree(pid).await;
                     }
                 }
+            }
+            #[cfg(windows)]
+            if let Err(message) = windows_job.finish().await {
+                if let Some(inner) = supervisor_inner.upgrade() {
+                    let _ = inner
+                        .events
+                        .send(json!({"type":"connection","status":"error","message":message}));
+                }
+                // Keep exited=false. stop() must report the failed cleanup,
+                // rather than treating a disconnected watch as confirmation.
+                return;
             }
             let _ = exit_tx.send(true);
         });
@@ -376,13 +405,15 @@ impl AcpClient {
         let mut exited = self.inner.exited.clone();
         timeout(STOP_TIMEOUT, async {
             while !*exited.borrow() {
-                if exited.changed().await.is_err() {
-                    break;
-                }
+                exited
+                    .changed()
+                    .await
+                    .map_err(|_| "L’arrêt complet de l’agent n’a pas été confirmé.".to_string())?;
             }
+            Ok::<(), String>(())
         })
         .await
-        .map_err(|_| "L’arrêt de l’agent n’a pas été confirmé.".to_string())?;
+        .map_err(|_| "L’arrêt de l’agent n’a pas été confirmé.".to_string())??;
         Ok(())
     }
 }
@@ -707,6 +738,7 @@ fn fail(inner: &Inner, status: &str, message: &str) {
     }
 }
 
+#[cfg(unix)]
 async fn terminate_tree(pid: u32) {
     #[cfg(unix)]
     {
@@ -733,21 +765,167 @@ async fn terminate_tree(pid: u32) {
         )
         .await;
     }
-    #[cfg(windows)]
-    {
-        // /T includes adapter/Codex/MCP descendants on Windows. For WSL,
-        // closing the wsl.exe pipe additionally closes the Linux adapter's
-        // stdin; the adapter must release its own children on stdin EOF.
-        let _ = timeout(
-            Duration::from_secs(4),
-            Command::new("taskkill.exe")
-                .args(["/PID", &pid.to_string(), "/T", "/F"])
-                .creation_flags(0x0800_0000)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status(),
-        )
-        .await;
+}
+
+#[cfg(windows)]
+mod windows_job {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::time::Duration;
+
+    use tokio::process::Child;
+    use windows_sys::Win32::Foundation::{ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    };
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
+        JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+        TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+
+    pub(super) struct WindowsJob(OwnedHandle);
+
+    fn error(context: &str) -> String {
+        format!("{context} : {}", std::io::Error::last_os_error())
+    }
+
+    impl WindowsJob {
+        pub(super) fn new() -> Result<Self, String> {
+            // Null security attributes make this an unnamed, non-inheritable
+            // handle. An agent must never inherit a handle that keeps its own
+            // KILL_ON_JOB_CLOSE job alive after the client exits.
+            let raw = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if raw.is_null() {
+                return Err(error("Impossible de créer le groupe Windows de l’agent"));
+            }
+            // SAFETY: CreateJobObjectW returned a fresh valid owned handle.
+            let job = Self(unsafe { OwnedHandle::from_raw_handle(raw) });
+            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // SAFETY: the handle and initialized structure remain live for the
+            // call; the supplied byte size matches the information class.
+            let configured = unsafe {
+                SetInformationJobObject(
+                    job.0.as_raw_handle(),
+                    JobObjectExtendedLimitInformation,
+                    std::ptr::from_ref(&limits).cast(),
+                    std::mem::size_of_val(&limits) as u32,
+                )
+            };
+            if configured == 0 {
+                return Err(error("Impossible de protéger le groupe Windows de l’agent"));
+            }
+            Ok(job)
+        }
+
+        pub(super) fn assign_and_resume(&self, child: &Child, pid: u32) -> Result<(), String> {
+            let process = child
+                .raw_handle()
+                .ok_or("Le processus Windows suspendu est indisponible.")?;
+            // SAFETY: Tokio owns this live process handle. The primary thread
+            // was created suspended, so no agent code can race the assignment.
+            if unsafe { AssignProcessToJobObject(self.0.as_raw_handle(), process) } == 0 {
+                return Err(error("Impossible d’associer l’agent à son groupe Windows"));
+            }
+            // Rust 1.93 does not expose the initial thread handle on stable.
+            // Enumerating threads uses documented Win32 APIs and avoids
+            // nightly attributes or undocumented NtResumeProcess calls.
+            let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+            if snapshot == INVALID_HANDLE_VALUE || snapshot.is_null() {
+                return Err(error("Impossible de trouver le thread initial de l’agent"));
+            }
+            // SAFETY: the snapshot is a fresh valid owned handle.
+            let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
+            let mut entry = THREADENTRY32 {
+                dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+                ..Default::default()
+            };
+            let mut threads = Vec::new();
+            // SAFETY: entry is initialized and has the required dwSize.
+            if unsafe { Thread32First(snapshot.as_raw_handle(), &mut entry) } == 0 {
+                return Err(error("Impossible de lire le thread initial de l’agent"));
+            }
+            loop {
+                if entry.th32OwnerProcessID == pid {
+                    threads.push(entry.th32ThreadID);
+                }
+                entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+                // SAFETY: snapshot and entry remain live during enumeration.
+                if unsafe { Thread32Next(snapshot.as_raw_handle(), &mut entry) } == 0 {
+                    if std::io::Error::last_os_error().raw_os_error()
+                        != Some(ERROR_NO_MORE_FILES as i32)
+                    {
+                        return Err(error("L’énumération des threads de l’agent a échoué"));
+                    }
+                    break;
+                }
+            }
+            if threads.len() != 1 {
+                return Err(
+                    "Le thread initial suspendu de l’agent est introuvable ou ambigu.".into(),
+                );
+            }
+            // SAFETY: only the unique thread belonging to our suspended child
+            // is opened, with the minimum right needed to resume it.
+            let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, threads[0]) };
+            if thread.is_null() {
+                return Err(error("Impossible d’ouvrir le thread initial de l’agent"));
+            }
+            // SAFETY: OpenThread returned a fresh valid owned handle.
+            let thread = unsafe { OwnedHandle::from_raw_handle(thread) };
+            // SAFETY: the handle has THREAD_SUSPEND_RESUME access. Exactly one
+            // suspension is expected from CREATE_SUSPENDED; any other result
+            // fails closed and the caller terminates the newly assigned job.
+            if unsafe { ResumeThread(thread.as_raw_handle()) } != 1 {
+                return Err(
+                    "Impossible de reprendre de façon sûre le thread initial de l’agent.".into(),
+                );
+            }
+            Ok(())
+        }
+
+        pub(super) fn terminate(&self) -> Result<(), String> {
+            // SAFETY: this handle belongs only to the private job created for
+            // this agent; no whole-machine or WSL-distribution action occurs.
+            if unsafe { TerminateJobObject(self.0.as_raw_handle(), 1) } == 0 {
+                return Err(error("Impossible d’arrêter le groupe Windows de l’agent"));
+            }
+            Ok(())
+        }
+
+        pub(super) async fn finish(self) -> Result<(), String> {
+            self.terminate()?;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+            loop {
+                let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+                // SAFETY: the output structure and byte size match this class.
+                if unsafe {
+                    QueryInformationJobObject(
+                        self.0.as_raw_handle(),
+                        JobObjectBasicAccountingInformation,
+                        std::ptr::from_mut(&mut accounting).cast(),
+                        std::mem::size_of_val(&accounting) as u32,
+                        std::ptr::null_mut(),
+                    )
+                } == 0
+                {
+                    return Err(error("Impossible de vérifier l’arrêt du groupe Windows"));
+                }
+                if accounting.ActiveProcesses == 0 {
+                    return Ok(());
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(
+                        "Des processus de l’agent Windows sont encore actifs après l’arrêt.".into(),
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            // The owned job handle closes on every return and on cancellation,
+            // enforcing KILL_ON_JOB_CLOSE even if the supervisor is dropped.
+        }
     }
 }
 
@@ -1042,6 +1220,142 @@ mod tests {
                     .is_some_and(|tail| tail.starts_with('Z')),
             "a descendant must not continue running after stop"
         );
+    }
+
+    #[cfg(windows)]
+    struct WindowsDescendant(std::os::windows::io::OwnedHandle);
+
+    #[cfg(windows)]
+    impl WindowsDescendant {
+        fn open(pid: u32) -> Self {
+            use std::os::windows::io::FromRawHandle;
+            use windows_sys::Win32::System::Threading::{
+                OpenProcess, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+            };
+            // SAFETY: the PID comes from the private fake agent's own child.
+            let raw = unsafe { OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_TERMINATE, 0, pid) };
+            assert!(
+                !raw.is_null(),
+                "must observe the actual live descendant: {}",
+                std::io::Error::last_os_error()
+            );
+            // SAFETY: OpenProcess returned a fresh owned handle. Holding the
+            // handle also prevents PID reuse from making this test pass.
+            let child = Self(unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(raw) });
+            use std::os::windows::io::AsRawHandle;
+            assert_eq!(
+                unsafe {
+                    windows_sys::Win32::System::Threading::WaitForSingleObject(
+                        child.0.as_raw_handle(),
+                        0,
+                    )
+                },
+                windows_sys::Win32::Foundation::WAIT_TIMEOUT
+            );
+            child
+        }
+
+        async fn assert_stopped(&self) {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+            use windows_sys::Win32::System::Threading::WaitForSingleObject;
+            timeout(Duration::from_secs(5), async {
+                loop {
+                    // SAFETY: the handle is owned by this observer; zero is a
+                    // nonblocking poll, keeping the Tokio supervisor runnable.
+                    match unsafe { WaitForSingleObject(self.0.as_raw_handle(), 0) } {
+                        WAIT_OBJECT_0 => return,
+                        WAIT_TIMEOUT => tokio::time::sleep(Duration::from_millis(20)).await,
+                        other => panic!("cannot inspect descendant process: {other}"),
+                    }
+                }
+            })
+            .await
+            .expect("a real Windows descendant survived its agent");
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for WindowsDescendant {
+        fn drop(&mut self) {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
+            // Clean up this test-created process even if an assertion fails.
+            // This guard never targets a PID supplied by a real agent/user.
+            if unsafe { WaitForSingleObject(self.0.as_raw_handle(), 0) }
+                == windows_sys::Win32::Foundation::WAIT_TIMEOUT
+            {
+                unsafe {
+                    TerminateProcess(self.0.as_raw_handle(), 1);
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    async fn windows_child(client: &AcpClient) -> WindowsDescendant {
+        let response = client.request("test/child", json!({})).await.unwrap();
+        WindowsDescendant::open(response["pid"].as_u64().unwrap() as u32)
+    }
+
+    #[cfg(windows)]
+    async fn connection_closed(events: &mut mpsc::UnboundedReceiver<Value>) {
+        timeout(Duration::from_secs(5), async {
+            while let Some(event) = events.recv().await {
+                if event["type"] == "connection" && event["status"] == "closed" {
+                    return;
+                }
+            }
+            panic!("missing connection-closed event");
+        })
+        .await
+        .unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_stop_terminates_descendants_after_graceful_stdin_eof() {
+        let (client, _events) = client().await;
+        let descendant = windows_child(&client).await;
+        client.stop().await.unwrap();
+        descendant.assert_stopped().await;
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_graceful_agent_exit_terminates_descendants_without_manual_stop() {
+        let (client, mut events) = client().await;
+        let descendant = windows_child(&client).await;
+        assert_eq!(
+            client
+                .request("test/final_response", json!({}))
+                .await
+                .unwrap()["saved"],
+            true
+        );
+        connection_closed(&mut events).await;
+        descendant.assert_stopped().await;
+        client.stop().await.unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_agent_crash_terminates_descendants_without_manual_stop() {
+        let (client, mut events) = client().await;
+        let descendant = windows_child(&client).await;
+        assert!(client.request("test/crash", json!({})).await.is_err());
+        connection_closed(&mut events).await;
+        descendant.assert_stopped().await;
+        client.stop().await.unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_last_handle_drop_terminates_agent_and_descendants() {
+        let (client, _events) = client().await;
+        let descendant = windows_child(&client).await;
+        drop(client);
+        descendant.assert_stopped().await;
     }
 
     /// Explicitly enabled real-adapter acceptance test; never invokes a model

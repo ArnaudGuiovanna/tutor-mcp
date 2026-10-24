@@ -19,6 +19,10 @@ sans texte original identifiable bloque la construction. Un dossier de sortie
 existant n’est remplacé qu’après vérification de son inventaire et préparation
 complète du nouveau dossier.
 
+Les notices du runtime demandent le composant du même outil Rust :
+`rustup component add rust-docs`. La CI l’installe explicitement, y compris avec
+un profil Rust minimal.
+
 ## Périmètre conservé
 
 - Dépendances npm de production verrouillées et transitives, plus Vite pour

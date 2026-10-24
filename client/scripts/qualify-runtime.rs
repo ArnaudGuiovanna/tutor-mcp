@@ -70,15 +70,14 @@ impl TemporaryDirectory {
             "tutor-client-qualification-{}",
             uuid::Uuid::new_v4()
         ));
-        let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
-        {
+        let result = {
             use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        builder
-            .create(&path)
-            .map_err(|error| format!("Création du dossier temporaire impossible : {error}"))?;
+            std::fs::DirBuilder::new().mode(0o700).create(&path)
+        };
+        #[cfg(not(unix))]
+        let result = std::fs::create_dir(&path);
+        result.map_err(|error| format!("Création du dossier temporaire impossible : {error}"))?;
         Ok(Self(path))
     }
 }
