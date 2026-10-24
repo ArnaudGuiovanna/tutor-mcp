@@ -1,0 +1,32 @@
+import { invoke, isTauri } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+import type { AgentConnection, AgentTarget, Conversation, Intent, JsonRecord, Settings, Snapshot, TutorOverview, TutorStatus } from './types';
+
+function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  if (!isTauri()) {
+    return Promise.reject(new Error('Ouvrez Tutor depuis son application installée. La prévisualisation web ne peut pas lancer Codex ni accéder à vos connexions.'));
+  }
+  return invoke<T>(command, args);
+}
+
+export const bridge = {
+  loadState: () => call<Snapshot>('load_state'),
+  discoverAgents: () => call<AgentTarget[]>('discover_agents'),
+  saveSettings: (settings: Settings) => call<Snapshot>('save_settings', { settings }),
+  saveIntent: (intent: Intent) => call<Snapshot>('save_intent', { intent }),
+  connectAgent: (target: AgentTarget, cwd: string) => call<AgentConnection>('connect_agent', { target, cwd }),
+  authenticateAgent: (methodId: string) => call<unknown>('authenticate_agent', { methodId }),
+  startConversation: (intentId?: string, resumeId?: string) => call<Conversation>('start_conversation', { intentId, resumeId }),
+  sendPrompt: (conversationId: string, text: string) => call<{ stopReason: string }>('send_prompt', { conversationId, text }),
+  cancelPrompt: (conversationId: string) => call<void>('cancel_prompt', { conversationId }),
+  answerPermission: (requestId: unknown, optionId: string | null) => call<void>('answer_permission', { requestId, optionId }),
+  disconnectAgent: () => call<void>('disconnect_agent'),
+  beginTutorLogin: (url: string, clientId?: string, initialAccessToken?: string) => call<{ authorizationUrl: string }>('begin_tutor_login', { url, clientId, initialAccessToken }),
+  disconnectTutor: () => call<Snapshot>('disconnect_tutor'),
+  tutorOverview: () => call<TutorOverview>('tutor_overview'),
+  listenAgent: (callback: (event: JsonRecord) => void) => listen<JsonRecord>('acp:event', (event) => callback(event.payload)),
+  listenState: (callback: (snapshot: Snapshot) => void) => listen<Snapshot>('client:state', (event) => callback(event.payload)),
+  listenTutor: (callback: (status: TutorStatus) => void) => listen<TutorStatus>('tutor:status', (event) => callback(event.payload)),
+};
+
+export type ClientBridge = typeof bridge;

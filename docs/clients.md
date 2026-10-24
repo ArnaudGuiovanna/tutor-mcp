@@ -8,6 +8,7 @@ Tutor MCP exposes the same learning tools over local **stdio** and remote
 | Client | Connection | Setup |
 |---|---|---|
 | **Claude Code** | Local stdio or remote HTTPS | [Local command](installation.md#claude-code) · [Official MCP guide](https://code.claude.com/docs/en/mcp) |
+| **Tutor desktop** | Windows Tauri client; Codex via ACP, native or WSL2 | [Client installation and development](../client/README.md) · [Runtime qualification](../client/docs/runtime-qualification.md) |
 | **Claude Desktop** | Local stdio; remote connectors where available | [Local JSON configuration](installation.md#claude-desktop) · [Official local-server guide](https://modelcontextprotocol.io/docs/develop/connect-local-servers) |
 | **Claude on the web** | Remote HTTPS with OAuth | Add your VPS `/mcp` URL as a custom connector. [Claude connector documentation](https://claude.com/docs/connectors/building/authentication) |
 | **ChatGPT** | Remote HTTPS with OAuth | Add your VPS `/mcp` URL through the MCP app/developer-mode flow available to your account. [Official guide](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt-beta) |

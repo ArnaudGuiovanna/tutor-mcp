@@ -1,0 +1,135 @@
+name: Client
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - staging
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: client-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Client (Windows)
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+      GOTOOLCHAIN: local
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.13.0
+          cache: npm
+          cache-dependency-path: |
+            client/package-lock.json
+            client/scripts/adapter/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+        with:
+          toolchain: 1.93.0
+          components: rustfmt, clippy
+
+      - name: Set up Python fixtures
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+
+      - name: Set up Go for actual Tutor MCP
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: 1.26.10
+          cache: true
+
+      - name: Install locked client and adapter dependencies
+        shell: pwsh
+        run: |
+          npm ci --prefix client
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm ci --prefix client/scripts/adapter --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify interface, native core, and real ACP handshake
+        shell: bash
+        run: bash scripts/verify-client.sh --real-adapter
+
+      - name: Build actual Tutor executable
+        shell: pwsh
+        run: |
+          go build -o "$env:RUNNER_TEMP/tutor-client-test-server.exe" .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Qualify native discovery and persistent Tutor MCP
+        shell: pwsh
+        run: |
+          ./client/tests/windows/qualify-runtime.ps1 `
+            -Environment native `
+            -Adapter "$env:GITHUB_WORKSPACE/client/scripts/adapter/node_modules/.bin/codex-acp.cmd" `
+            -TutorBinary "$env:RUNNER_TEMP/tutor-client-test-server.exe" `
+            -Report "$env:RUNNER_TEMP/tutor-client-runtime.json"
+
+      - name: Qualify actual Codex discovery and ACP over WSL2
+        shell: pwsh
+        run: |
+          ./client/tests/windows/qualify-wsl-ci.ps1 `
+            -Report "$env:RUNNER_TEMP/tutor-client-wsl-runtime.json"
+
+      - name: Collect and verify original distribution notices
+        shell: pwsh
+        run: |
+          cargo fetch --manifest-path client/src-tauri/Cargo.toml --locked --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python client/scripts/collect-notices.py collect --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python client/scripts/collect-notices.py verify-tree client/THIRD_PARTY_NOTICES
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify actual Tauri IPC command contract
+        shell: pwsh
+        run: |
+          cargo test --manifest-path client/src-tauri/Cargo.toml --locked --lib desktop::tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build Windows installer
+        working-directory: client
+        shell: pwsh
+        run: |
+          npm run tauri -- build --bundles nsis --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify actual installer tools
+        shell: pwsh
+        run: |
+          python client/scripts/collect-notices.py verify-installer-tools --inventory client/THIRD_PARTY_NOTICES --cache "$env:LOCALAPPDATA/tauri/NSIS"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Install and start the packaged application
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem 'client/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe')
+          if ($installers.Count -ne 1) { throw 'Expected exactly one Windows installer.' }
+          ./client/tests/windows/test-installed-client.ps1 -Installer $installers[0].FullName
+
+      - name: Retain Windows installer and qualification report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tutor-client-windows-x64-${{ github.sha }}
+          path: |
+            client/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+            ${{ runner.temp }}/tutor-client-runtime.json
+            ${{ runner.temp }}/tutor-client-wsl-runtime.json
+          if-no-files-found: error
+          retention-days: 14

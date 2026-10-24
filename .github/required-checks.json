@@ -17,6 +17,7 @@
     "Local (macos-latest)",
     "Local (windows-latest)",
     "Deployment (hobby)",
-    "Deployment (institution)"
+    "Deployment (institution)",
+    "Client (Windows)"
   ]
 }

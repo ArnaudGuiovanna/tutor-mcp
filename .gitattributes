@@ -1,0 +1,11 @@
+# Stable source line endings for Windows builds and Linux WSL scripts.
+client/** text eol=lf
+client/src-tauri/icons/*.png -text
+client/src-tauri/icons/*.ico -text
+# Preserve the SDK's original legal text, including its original trailing space.
+client/scripts/notices-supplements/** -text
+client/scripts/notices-supplements/nsis-3.13/** whitespace=cr-at-eol
+client/scripts/notices-supplements/microsoft-webview2-sdk-1.0.3800.47/LICENSE.txt -whitespace
+# This script is executed by Linux Bash from a Windows checkout.
+client/tests/windows/setup-wsl-runtime.sh text eol=lf
+client/scripts/notices-supplements/nsis-3.13/COPYING -whitespace

@@ -51,6 +51,11 @@ on an unseen debugging scenario, and the outcome is recorded against the frozen 
 
 ## Installation
 
+The repository also contains the [Tutor desktop client](client/README.md), built
+with Tauri for Windows. It connects Codex through ACP, detects native and WSL2
+installations, and uses the same persistent learning engine locally or remotely.
+Its Windows workflow produces an installer and records the tested runtime.
+
 Choose where your learning data lives. Every profile uses the same learning engine.
 
 | Profile | Best for | Setup |

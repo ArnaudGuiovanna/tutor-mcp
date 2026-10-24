@@ -387,6 +387,21 @@ class GitHubCheckGateTests(unittest.TestCase):
             checks[-1]["conclusion"] = "success"
             self.assertEqual(self.publisher.wait_for_checks("candidate")["conclusion"], "success")
 
+    def test_repository_policy_blocks_failed_windows_client(self):
+        policy = json.loads((Path(__file__).resolve().parents[1] /
+                             ".github/required-checks.json").read_text())
+        self.assertIn("Client (Windows)", policy["contexts"])
+        self.policy.write_text(json.dumps(policy))
+        checks = [self.check(name, app={"id": policy["app_id"]})
+                  for name in policy["contexts"] if name != "Client (Windows)"]
+        checks.append(self.check("Client (Windows)", conclusion="failure",
+                                 app={"id": policy["app_id"]}))
+        with patch.object(self.publisher, "github_check_runs", return_value=checks):
+            with self.assertRaisesRegex(FinishError, "Client \\(Windows\\)"):
+                self.publisher.wait_for_checks("candidate")
+            checks[-1]["conclusion"] = "success"
+            self.assertEqual(self.publisher.wait_for_checks("candidate")["conclusion"], "success")
+
     def test_missing_checks_time_out(self):
         with (patch.object(self.publisher, "github_check_runs", return_value=[]),
               patch("finish_task.time.monotonic", side_effect=[0, 3600])):

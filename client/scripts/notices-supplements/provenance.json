@@ -1,0 +1,188 @@
+{
+  "formatVersion": 1,
+  "components": {
+    "alloc-stdlib@0.3.0": {
+      "vcsCommit": "0a81fd6928ea3b33c8cd484aa4575d50ffb98012",
+      "files": [
+        {
+          "file": "alloc-stdlib-0.3.0/LICENSE",
+          "sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae",
+          "source": "https://github.com/dropbox/rust-alloc-no-stdlib/blob/0a81fd6928ea3b33c8cd484aa4575d50ffb98012/LICENSE"
+        }
+      ]
+    },
+    "tauri-plugin@2.7.2": {
+      "vcsCommit": "59b63ab500da9859f12d8888c3298bc29bba0b92",
+      "files": [
+        {
+          "file": "tauri-plugin-2.7.2/LICENSE-APACHE-2.0",
+          "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594",
+          "source": "https://github.com/tauri-apps/tauri/blob/59b63ab500da9859f12d8888c3298bc29bba0b92/LICENSE-APACHE-2.0"
+        },
+        {
+          "file": "tauri-plugin-2.7.2/LICENSE-MIT",
+          "sha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d",
+          "source": "https://github.com/tauri-apps/tauri/blob/59b63ab500da9859f12d8888c3298bc29bba0b92/LICENSE-MIT"
+        }
+      ]
+    },
+    "webview2-com@0.39.1": {
+      "vcsCommit": "edc2caf886175ccaebe86078c9cfe1ae2a187328",
+      "files": [
+        {
+          "file": "webview2-com-0.39.1/LICENSE",
+          "sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73",
+          "source": "https://github.com/wravery/webview2-rs/blob/edc2caf886175ccaebe86078c9cfe1ae2a187328/LICENSE"
+        }
+      ]
+    },
+    "webview2-com-macros@0.8.1": {
+      "vcsCommit": "dffa41a8a46d3f5565eefbff2de57d38d399f158",
+      "files": [
+        {
+          "file": "webview2-com-macros-0.8.1/LICENSE",
+          "sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73",
+          "source": "https://github.com/wravery/webview2-rs/blob/dffa41a8a46d3f5565eefbff2de57d38d399f158/LICENSE"
+        }
+      ]
+    },
+    "webview2-com-sys@0.39.1": {
+      "vcsCommit": "edc2caf886175ccaebe86078c9cfe1ae2a187328",
+      "files": [
+        {
+          "file": "webview2-com-sys-0.39.1/LICENSE",
+          "sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73",
+          "source": "https://github.com/wravery/webview2-rs/blob/edc2caf886175ccaebe86078c9cfe1ae2a187328/LICENSE"
+        }
+      ]
+    },
+    "selectors@0.38.0": {
+      "vcsCommit": "572ecba2d1600e7c3d490586692a209faf703baa",
+      "files": [
+        {
+          "file": "selectors-0.38.0/LICENSE-MPL-2.0",
+          "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04",
+          "source": "https://www.mozilla.org/media/MPL/2.0/index.f75d2927d3c1.txt"
+        }
+      ]
+    }
+  },
+  "microsoftWebView2Sdk": {
+    "version": "1.0.3800.47",
+    "source": "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.3800.47/microsoft.web.webview2.1.0.3800.47.nupkg",
+    "archiveSha256": "56c9f26bdd07916a2d1949fb58a5c7e434dfa1173577dca879206050c4e718db",
+    "crate": "webview2-com-sys@0.39.1",
+    "loaders": {
+      "x64": "89c6b872783b8f6c3cedbff618adb42082d455c615453ae10cfc753f1e8f25d8",
+      "x86": "0513f7e61304321f2d91e1851475be07e091042aa3640597e660608f72521e6c",
+      "arm64": "4a1ca4b518337c508aa0d778b220c6e59558fce21f4fd0d79a6ea944dd9d5208"
+    },
+    "files": [
+      {
+        "file": "microsoft-webview2-sdk-1.0.3800.47/LICENSE.txt",
+        "sha256": "0af8f1b807512aae39c2ac1aa4d0cae65cabecb6fd554b8439a5162a0d6eca55",
+        "source": "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.3800.47/microsoft.web.webview2.1.0.3800.47.nupkg#LICENSE.txt"
+      },
+      {
+        "file": "microsoft-webview2-sdk-1.0.3800.47/NOTICE.txt",
+        "sha256": "106423785c5b7eba0a8e61d1837f2132e9c828e20ad530f565d981c1df60dd90",
+        "source": "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.3800.47/microsoft.web.webview2.1.0.3800.47.nupkg#NOTICE.txt"
+      }
+    ]
+  },
+  "installer": {
+    "tauriCliVersion": "2.12.4",
+    "tauriCliCommit": "993038c49185307dfc895ab7657d77ca0d5ed7c7",
+    "configurationSource": "https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.12.4/crates/tauri-bundler/src/bundle/windows/nsis/mod.rs",
+    "components": [
+      {
+        "name": "NSIS",
+        "version": "3.13",
+        "source": "https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.13/nsis-3.13.zip",
+        "binarySha1": "db14f8af2ea346b786c6ae19343f61aaf5e09b8e",
+        "binarySha256": "ba63dffc4410ee89193e1cb5a41989991bd77c61068da17e3156d136b7b0b3d8",
+        "files": [
+          {
+            "file": "nsis-3.13/COPYING",
+            "sha256": "388357c1215ff403c5ebde3a5ecd273e68f8b79a579996775245d1ee65442aba",
+            "source": "https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.13/nsis-3.13.zip#nsis-3.13/COPYING"
+          },
+          {
+            "file": "nsis-3.13/Docs/Modern UI/License.txt",
+            "sha256": "c762b5c6f3baf0e034794926cdb11e7e7df7a042dc1cf9a4fd60e5366f10e508",
+            "source": "https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.13/nsis-3.13.zip#nsis-3.13/Docs/Modern UI/License.txt"
+          },
+          {
+            "file": "nsis-3.13/Docs/Modern UI 2/License.txt",
+            "sha256": "36608f72902ac188e45eab9bf6f673df72dd76f871f61d0c6d60592dfc15461c",
+            "source": "https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.13/nsis-3.13.zip#nsis-3.13/Docs/Modern UI 2/License.txt"
+          },
+          {
+            "file": "nsis-3.13/Docs/NSISdl/License.txt",
+            "sha256": "326e587f36ca58e14bd09cca153f9e69f1c5ed701189aa47d2d0627af7e16280",
+            "source": "https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.13/nsis-3.13.zip#nsis-3.13/Docs/NSISdl/License.txt"
+          },
+          {
+            "file": "nsis-3.13/Docs/makensisw/License.txt",
+            "sha256": "5ab8e53598d27d3d06eda02ac0b42d462e9ff6f81ca406273004ebf53cd9ad42",
+            "source": "https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.13/nsis-3.13.zip#nsis-3.13/Docs/makensisw/License.txt"
+          }
+        ]
+      },
+      {
+        "name": "nsis-tauri-utils",
+        "version": "0.5.3",
+        "source": "https://github.com/tauri-apps/nsis-tauri-utils/tree/13d9edd27b69310e108d6fbd49f90992f8a05390",
+        "binarySha1": "75197fee3c6a814fe035788d1c34ead39349b860",
+        "binarySha256": "5ba143b5db4a87d32d6e7802e033330aae56cbceabe0d1e3ba41948385ad4709",
+        "files": [
+          {
+            "file": "nsis-tauri-utils-0.5.3/LICENSE_APACHE-2.0",
+            "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594",
+            "source": "https://github.com/tauri-apps/nsis-tauri-utils/tree/13d9edd27b69310e108d6fbd49f90992f8a05390#nsis-tauri-utils-0.5.3/LICENSE_APACHE-2.0"
+          },
+          {
+            "file": "nsis-tauri-utils-0.5.3/LICENSE_MIT",
+            "sha256": "1c1020fa10a6bf318717e82c911bcc54ebdfb9bb280460ae332bcb2f82f57fbe",
+            "source": "https://github.com/tauri-apps/nsis-tauri-utils/tree/13d9edd27b69310e108d6fbd49f90992f8a05390#nsis-tauri-utils-0.5.3/LICENSE_MIT"
+          }
+        ]
+      }
+    ],
+    "compression": "zlib",
+    "toolFiles": [
+      {
+        "file": "NSIS.exe",
+        "sha256": "78e17de55fa013be7620487e85b6676c204c6c51d7ebabb74ee8a9cfce6252a0"
+      },
+      {
+        "file": "makensis.exe",
+        "sha256": "4ec390d0f96f9728507fbc2f4e91311dd90bfc6c8ddfe2159357b3651ae151c0"
+      },
+      {
+        "file": "Stubs/zlib-x86-unicode",
+        "sha256": "577beebf93003432c0104641d8a7e49ca8366253eece062dd5bec8ad2ad87a09"
+      },
+      {
+        "file": "Plugins/x86-unicode/NSISdl.dll",
+        "sha256": "d3e61c4df837625ac0503cea5b6765a04d37fc35399899a5503b53a3108bfbf6"
+      },
+      {
+        "file": "Plugins/x86-unicode/StartMenu.dll",
+        "sha256": "39870682e7d1c026cd2b33ca25591db28250dde17de7eb1feec404222d534ffc"
+      },
+      {
+        "file": "Plugins/x86-unicode/System.dll",
+        "sha256": "afe032f942e2ed0bf7494ec08ba813f5739fb522c640bde81d30ecaf9f894432"
+      },
+      {
+        "file": "Plugins/x86-unicode/nsDialogs.dll",
+        "sha256": "9c76f4d53ceee2a471c936e0899688405e1009ce962d140e9acb49ed68d114cb"
+      },
+      {
+        "file": "Plugins/x86-unicode/additional/nsis_tauri_utils.dll",
+        "sha256": "5ba143b5db4a87d32d6e7802e033330aae56cbceabe0d1e3ba41948385ad4709"
+      }
+    ]
+  }
+}

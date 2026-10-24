@@ -30,10 +30,12 @@ import (
 	"tutor-mcp/adminapi"
 	"tutor-mcp/auth"
 	"tutor-mcp/certification"
+	"tutor-mcp/clientapi"
 	"tutor-mcp/db"
 	"tutor-mcp/engine"
 	"tutor-mcp/memory"
 	"tutor-mcp/observability"
+	storeport "tutor-mcp/store"
 	"tutor-mcp/tools"
 )
 
@@ -473,6 +475,9 @@ func main() {
 	}, cfg.MCPMaxRequestBodyBytes, cfg.MCPToolCallTimeout, mcpHTTPGuards{
 		IP: mcpIPLimiter, Learner: mcpLearnerLimiter, Concurrency: mcpConcurrencyLimiter,
 	}))
+	mountClientAPI(mux, store, logger, baseURL, mcpHTTPGuards{
+		IP: mcpIPLimiter, Learner: mcpLearnerLimiter, Concurrency: mcpConcurrencyLimiter,
+	})
 	mountAdmin := func(prefix string, handler http.Handler) {
 		protect := func(authenticate func(http.Handler) http.Handler, next http.Handler) http.Handler {
 			return administrativeHandler(mcpIPLimiter, mcpLearnerLimiter, mcpConcurrencyLimiter, authenticate, next)
@@ -547,6 +552,18 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("server stopped cleanly")
+}
+
+// The native client view and MCP tools are two interfaces of the same OAuth
+// resource. Tokens retain their /mcp audience; reading this view does not grant
+// the independent browser-console administrative capabilities.
+func mountClientAPI(mux *http.ServeMux, backend storeport.Store, logger *slog.Logger, baseURL string, guards mcpHTTPGuards) {
+	mux.Handle("/api/client/v1/", clientapi.NoStore(administrativeHandler(
+		guards.IP, guards.Learner, guards.Concurrency,
+		func(next http.Handler) http.Handler {
+			return auth.BearerMiddlewareWithPrincipalValidator(baseURL, clientapi.RequiredScope, backend, next)
+		}, clientapi.New(backend, logger).Handler(),
+	)))
 }
 
 // rotatesSecretsAtStartup reports whether this process re-encrypts stored

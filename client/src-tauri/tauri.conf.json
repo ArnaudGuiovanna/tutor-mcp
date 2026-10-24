@@ -1,0 +1,34 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Tutor",
+  "version": "0.1.0",
+  "identifier": "fr.aguiovanna.tutor",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [{
+      "title": "Tutor",
+      "width": 1240,
+      "height": 840,
+      "minWidth": 900,
+      "minHeight": 640
+    }],
+    "security": {
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-src 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "icon": ["icons/icon.png", "icons/icon.ico"],
+    "resources": { "../THIRD_PARTY_NOTICES/": "THIRD_PARTY_NOTICES/" },
+    "targets": ["nsis"],
+    "publisher": "Arnaud Guiovanna",
+    "shortDescription": "Votre apprentissage, avec votre agent IA",
+    "category": "Education",
+    "windows": {"nsis": {"languages": ["French", "English"], "displayLanguageSelector": true, "compression": "zlib"}}
+  }
+}

@@ -26,3 +26,5 @@ tutor-mcp
 *.exe
 deploy/*.env
 deploy/secrets
+# The desktop application and its build caches are not server image inputs.
+/client

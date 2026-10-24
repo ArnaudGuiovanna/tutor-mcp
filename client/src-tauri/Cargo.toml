@@ -1,0 +1,57 @@
+[package]
+name = "tutor-client"
+version = "0.1.0"
+description = "Tutor desktop client for Agent Client Protocol"
+authors = ["Arnaud Guiovanna"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.93"
+
+[lib]
+name = "tutor_client"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[[bin]]
+name = "tutor-client"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[[bin]]
+name = "tutor-client-qualify"
+path = "../scripts/qualify-runtime.rs"
+required-features = ["qualification"]
+
+[[bin]]
+name = "tutor-client-smoke"
+path = "../scripts/smoke-learning.rs"
+required-features = ["qualification"]
+
+[features]
+default = ["desktop"]
+desktop = ["dep:tauri", "dep:tauri-build", "dep:tauri-plugin-opener"]
+qualification = []
+
+[build-dependencies]
+tauri-build = { version = "2", features = [], optional = true }
+
+[dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+rand = "0.9"
+reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tauri = { version = "2", features = [], optional = true }
+tauri-plugin-opener = { version = "2", optional = true }
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Memory", "Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[target.'cfg(windows)'.dev-dependencies]
+tauri = { version = "2", features = ["test"] }

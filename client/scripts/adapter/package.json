@@ -1,0 +1,13 @@
+{
+  "name": "@tutor-mcp/qualified-codex-adapter",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pinned Codex ACP runtime used by Tutor acceptance checks",
+  "license": "MIT",
+  "dependencies": {
+    "@agentclientprotocol/codex-acp": "2.2.2"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

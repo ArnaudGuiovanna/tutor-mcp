@@ -22,6 +22,10 @@ python3 -m unittest discover -s scripts -p 'test_finish_task.py'
 python3 -m unittest discover -s scripts -p 'test_evaluate_learning_policies.py'
 python3 -m unittest discover -s scripts -p 'test_third_party_notices.py'
 python3 -m unittest discover -s scripts -p 'test_installers.py'
+task_client_changes=$(git diff --cached --name-only -- client/ clientapi/ client_api_test.go .github/workflows/client.yml scripts/verify-client.sh)
+if [[ -n "$task_client_changes" ]]; then
+    bash scripts/verify-client.sh --real-adapter
+fi
 "$task_go_bin" build ./...
 "$task_go_bin" vet ./...
 TUTOR_GO_BIN="$task_go_bin" bash scripts/check-vulnerabilities.sh

@@ -32,6 +32,12 @@ en lecture aux contrôles du dépôt. Le scan Go utilise la base publique des
 vulnérabilités et peut télécharger son outil épinglé. Les permissions ordinaires restent
 applicables ; le script ne configure ni identifiants ni dérogation au sandbox.
 
+Un lot qui modifie le client ou son API doit aussi disposer de Node.js et Rust,
+avec les dépendances verrouillées installées par
+`bash scripts/verify-client.sh --install --real-adapter`. Sa vérification locale
+inclut ensuite les contrôles du client et l’adaptateur réel. La construction et
+l’essai de l’installateur Windows sont réalisés par le contrôle `Client (Windows)`.
+
 Avant une nouvelle tâche, avec un arbre suivi propre :
 
 ```bash

@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- Tutor desktop client in `client/`: a Windows Tauri application with a Rust
+  ACP runtime, native/WSL2 Codex discovery, browser OAuth and a DPAPI credential
+  vault, validated learning intentions, real learner views, streamed sessions,
+  human permissions, cancellation and persistent restart. The Windows CI builds
+  and exercises its installer; runtime qualification distinguishes real protocol
+  and Tutor tool checks from actual model calls.
+- Learner-owned native API `GET /api/client/v1/overview`, using the existing
+  Tutor OAuth resource and learner scopes, live membership checks and tenant
+  read transactions. It supplies structured views independently of agent chat.
 - Binary archives and the final Docker image retain the original third-party
   licence and attribution texts, an inventory tied to the actual binary and
   target, and Go runtime notices. Installers verify and preserve the notices;
