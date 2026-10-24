@@ -369,18 +369,15 @@ mod tests {
         );
         call("disconnect_agent", json!({}));
         call("disconnect_tutor", json!({}));
-        let initial = call("load_state", json!({}));
-        assert_eq!(initial["agentConnected"], false);
-        assert_eq!(initial["identity"]["exists"], false);
-        let public = call("create_identity", json!({"nsec":null}));
-        assert!(public["npub"].as_str().unwrap().starts_with("npub1"));
-        assert_ne!(public["npub"], public["recoveryNpub"]);
-        assert_eq!(public["backupConfirmed"], false);
-        assert!(public.get("secret").is_none());
-        assert_eq!(call("load_state", json!({}))["identity"]["exists"], true);
+        let disconnected = call("load_state", json!({}));
+        assert_eq!(disconnected["agentConnected"], false);
+        assert_eq!(disconnected["identity"]["exists"], true);
+        assert_eq!(disconnected["identity"]["npub"], public["npub"]);
         let reopened = Backend::new(directory.path(), Arc::new(|_, _| {})).unwrap();
+        let reopened_state = tauri::async_runtime::block_on(reopened.snapshot());
+        assert_eq!(reopened_state["identity"]["npub"], public["npub"]);
         assert_eq!(
-            tauri::async_runtime::block_on(reopened.snapshot())["conversations"][0]["messages"]
+            reopened_state["conversations"][0]["messages"]
                 .as_array()
                 .unwrap()
                 .len(),

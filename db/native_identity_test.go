@@ -270,11 +270,12 @@ func TestNativeRotationRevokesAllTenantsAndReservesRetiredKeys(t *testing.T) {
 }
 
 func TestNormalizeNativePublicKeyNIP19Vectors(t *testing.T) {
-	const key = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"
+	// Published public-key example: https://github.com/nostr-protocol/nips/blob/master/19.md
+	const hexPublic = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d"
 	const npub = "npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6"
-	for _, value := range []string{key, npub, strings.ToUpper(npub)} {
+	for _, value := range []string{hexPublic, npub, strings.ToUpper(npub)} {
 		got, err := NormalizeNativePublicKey(value)
-		if err != nil || got != key {
+		if err != nil || got != hexPublic {
 			t.Fatalf("NIP19 public vector=%s err=%v", got, err)
 		}
 	}
