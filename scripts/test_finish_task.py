@@ -145,7 +145,7 @@ class TaskPublicationTests(unittest.TestCase):
             with patch("finish_task.subprocess.run", side_effect=timeout_verification):
                 with self.assertRaises(subprocess.TimeoutExpired):
                     publisher.publish()
-            self.assertEqual(intercepted, [900])
+            self.assertEqual(intercepted, [1800])
             self.assertEqual(self.git("rev-parse", "HEAD"), self.base)
             self.assertEqual(self.heads(), [self.base] * 2)
             self.assertEqual(self.git("branch", "--show-current"), "staging")

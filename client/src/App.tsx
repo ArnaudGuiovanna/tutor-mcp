@@ -54,7 +54,7 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   const formations = formationViews(overview);
   const availableFormations = availableFormationViews(overview);
   const authoredFormations = authoredFormationViews(overview);
-  const staff = !!overview?.identity && !overview.identity.learnerId;
+  const staff = !!overview?.identity && (overview.capabilities?.learning === false || !overview.identity.learnerId);
   const canAuthor = overview?.capabilities?.formationAuthoring === true;
   const authoringGrant = overview?.session?.scope.split(' ').includes('formation:write') === true;
   const learningReady = snapshot.agentConnected && snapshot.tutorStatus.connected;

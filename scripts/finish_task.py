@@ -161,8 +161,10 @@ class Publisher:
 
     def verify(self):
         script = self.root / "scripts" / "verify-task.sh"
+        # The full Go suites and native cryptographic/client tests share this
+        # bounded budget; cold runs can exceed fifteen minutes on the VPS.
         result = subprocess.run(["bash", str(script)], cwd=self.root,
-                                stdout=sys.stderr, stderr=sys.stderr, timeout=900, check=False)
+                                stdout=sys.stderr, stderr=sys.stderr, timeout=1800, check=False)
         if result.returncode:
             raise FinishError("task verification failed; nothing new was published")
 

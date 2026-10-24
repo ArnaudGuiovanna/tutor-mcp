@@ -116,7 +116,7 @@ export interface Institution {
 
 export interface TutorOverview {
   identity?: { tenantId: string; userId: string; membershipId: string; learnerId?: string; roles?: string[] };
-  capabilities?: { formationAuthoring?: boolean };
+  capabilities?: { learning?: boolean; formationAuthoring?: boolean };
   session?: { scope: string; allowedScopes: string[] };
   context: unknown;
   formations: unknown;

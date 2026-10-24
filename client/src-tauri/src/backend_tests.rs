@@ -832,6 +832,18 @@ fn staff_authoring_prompt_never_invents_a_learner() {
     assert!(prompt.contains("ne publie qu’après confirmation humaine explicite"));
     assert!(prompt.contains("draft_formation puis add_formation_concepts"));
     assert!(!prompt.contains("Pour une nouvelle formation personnelle"));
+    let mut dual_role = overview;
+    dual_role["identity"]["learnerId"] = json!("actual-learner");
+    dual_role["identity"]["roles"] = json!(["owner", "learner"]);
+    dual_role["capabilities"]["learning"] = json!(false);
+    let design = pedagogical_prompt(None, &conversation, "Concevoir", Some(&dual_role));
+    assert!(design.contains("draft_formation puis add_formation_concepts"));
+    assert!(!design.contains("Commence par get_learner_context"));
+    dual_role["capabilities"]["learning"] = json!(true);
+    dual_role["capabilities"]["formationAuthoring"] = json!(false);
+    let learning = pedagogical_prompt(None, &conversation, "Apprendre", Some(&dual_role));
+    assert!(learning.contains("Commence par get_learner_context"));
+    assert!(!learning.contains("draft_formation puis add_formation_concepts"));
 }
 
 #[tokio::test]

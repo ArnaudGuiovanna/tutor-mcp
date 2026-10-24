@@ -235,4 +235,13 @@ describe('Le parcours de l’apprenant', () => {
     expect((screen.getByLabelText(/^Phrase pour chiffrer la sauvegarde/) as HTMLInputElement).value).toBe(''); expect((screen.getByLabelText('Confirmer la phrase de sauvegarde') as HTMLInputElement).value).toBe('');
   });
 
+  it('ouvre la conception autorisée même si le propriétaire possède aussi un profil apprenant', async () => {
+    const user = userEvent.setup(); const { api } = client(initialState(true));
+    vi.mocked(api.tutorOverview).mockResolvedValue({ identity: { tenantId: 'tenant', userId: 'owner', membershipId: 'staff', learnerId: 'actual-learner', roles: ['owner', 'learner'] }, capabilities: { learning: false, formationAuthoring: true }, session: { scope: 'formation:read formation:write', allowedScopes: ['formation:read', 'formation:write', 'learner:read', 'learner:write'] }, context: {}, formations: { items: [] }, availableFormations: { items: [] } });
+    await ready(api); await user.click(screen.getByRole('button', { name: 'Mes formations' }));
+    await screen.findByRole('region', { name: 'Création de formations' });
+    expect((screen.getByRole('button', { name: 'Préparer une formation' }) as HTMLButtonElement).disabled).toBe(false);
+    expect(api.sendPrompt).not.toHaveBeenCalled();
+  });
+
 });

@@ -1595,15 +1595,19 @@ fn pedagogical_prompt(
         .map(|m| json!({"role":m.role,"text":m.text.chars().take(4000).collect::<String>()}))
         .collect();
     let staff = tutor_context.is_some_and(|value| {
-        value
-            .pointer("/identity/learnerId")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .is_empty()
-            && value.get("identity").is_some()
+        value.get("identity").is_some()
+            && (value
+                .pointer("/capabilities/learning")
+                .and_then(Value::as_bool)
+                == Some(false)
+                || value
+                    .pointer("/identity/learnerId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .is_empty())
     });
     let role = if staff {
-        "Tu accompagnes un membre de l’équipe de l’institution dans la conception de formations. Il n’a pas de profil apprenant : ne demande jamais get_learner_context, ne fabrique pas de learnerId et ne l’inscris pas comme apprenant. Consulte les schémas et métadonnées des outils MCP autorisés. Les autorisations affichées par le serveur et le grant actif sont la référence. Co-conçois une formation, crée un brouillon réel via les outils de formation autorisés, ajoute ses objectifs/concepts et ne publie qu’après confirmation humaine explicite. Un refus de permission doit rester un refus, sans contourner le rôle."
+        "Tu accompagnes un membre de l’équipe de l’institution dans la conception de formations. Cette session concerne la conception institutionnelle : ne demande jamais get_learner_context, ne fabrique pas de learnerId et ne l’inscris pas comme apprenant. Consulte les schémas et métadonnées des outils MCP autorisés. Les autorisations affichées par le serveur et le grant actif sont la référence. Co-conçois une formation, crée un brouillon réel via les outils de formation autorisés, ajoute ses objectifs/concepts et ne publie qu’après confirmation humaine explicite. Un refus de permission doit rester un refus, sans contourner le rôle."
     } else {
         "Tu es le tuteur pédagogique de cette personne. Commence par get_learner_context et consulte les schémas des outils."
     };
