@@ -91,14 +91,14 @@ func (s *Store) ListLearnerFormations(ctx context.Context, actor models.Principa
 		if err := txs.learnerFormationActor(txCtx, actor, models.OAuthScopeLearnerRead); err != nil {
 			return err
 		}
-		own := `EXISTS (SELECT 1 FROM enrollments e WHERE e.tenant_id = c.tenant_id AND e.cohort_id = c.id AND e.membership_id = ?)
- OR EXISTS (SELECT 1 FROM formation_admissions a WHERE a.tenant_id = c.tenant_id AND a.cohort_id = c.id AND a.membership_id = ?)`
+		own := `EXISTS (SELECT 1 FROM enrollments e WHERE e.tenant_id = c.tenant_id AND e.cohort_id = c.id AND e.membership_id = ? AND (f.enrollment_policy<>'invitation' OR e.status IN ('active','completed')))
+ OR EXISTS (SELECT 1 FROM formation_admissions a WHERE a.tenant_id = c.tenant_id AND a.cohort_id = c.id AND a.membership_id = ? AND (f.enrollment_policy<>'invitation' OR a.status IN ('invited','approved')))`
 		query := `SELECT c.id FROM cohorts c JOIN formation_versions v ON v.tenant_id = c.tenant_id AND v.id = c.formation_version_id
  JOIN formations f ON f.tenant_id = v.tenant_id AND f.id = v.formation_id
  WHERE c.tenant_id = ? AND v.status = 'published' AND ` + institutionalFormationSQL + ` AND c.id > ? AND (` + own
 		args := []any{actor.TenantID, after, actor.MembershipID, actor.MembershipID}
 		if !mine {
-			query += ` OR (f.status = 'active' AND c.status = 'open' AND (c.ends_at IS NULL OR c.ends_at > ?))`
+			query += ` OR (f.enrollment_policy <> 'invitation' AND f.status = 'active' AND c.status = 'open' AND (c.ends_at IS NULL OR c.ends_at > ?))`
 			args = append(args, time.Now().UTC())
 		}
 		query += `) ORDER BY c.id LIMIT ?`
@@ -148,9 +148,12 @@ func (s *Store) GetLearnerFormation(ctx context.Context, actor models.Principal,
 		if err != nil {
 			return err
 		}
-		if !offeringOpen(f, time.Now().UTC()) && f.Enrollment == nil && f.AdmissionStatus == "" {
+		invited := f.AdmissionStatus == "invited" || f.AdmissionStatus == "approved"
+		enrolled := f.Enrollment != nil && (f.Enrollment.Status == "active" || f.Enrollment.Status == "completed")
+		if (f.EnrollmentPolicy == "invitation" && !invited && !enrolled) || (!offeringOpen(f, time.Now().UTC()) && f.Enrollment == nil && !invited) {
 			return storeport.ErrFormationUnavailable
 		}
+
 		d, err := txs.loadFormationVersion(txCtx, actor.TenantID, f.VersionID)
 		if err != nil {
 			return err

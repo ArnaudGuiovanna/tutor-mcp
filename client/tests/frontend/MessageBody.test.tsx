@@ -10,3 +10,10 @@ it('structure le texte et les tableaux sans exécuter HTML ni charger les images
  expect(screen.getByRole('region',{name:'Tableau de la réponse'}).tabIndex).toBe(0);expect(container.querySelector('img,script')).toBeNull();
  await userEvent.click(screen.getByRole('link',{name:'Source'}));expect(open).toHaveBeenCalledWith('https://example.org/source');
 });
+
+it('copie le code exact malgré son retour visuel à la ligne et présente les tableaux larges verticalement',async()=>{
+ const user=userEvent.setup();const copy=vi.spyOn(navigator.clipboard,'writeText').mockResolvedValue();
+ const code='const long = "'+ 'x'.repeat(600)+'";\n\n  // espaces conservés\n';
+ const {container}=render(<MessageBody text={'```go\n'+code+'```\n\n| A | B | C | D | E |\n|---|---|---|---|---|\n| un | deux | trois | quatre | cinq |'}/>);
+ await user.click(screen.getByRole('button',{name:'Copier le code'}));expect(copy).toHaveBeenCalledWith(code);expect(container.querySelector('.stacked-table-row')).toBeTruthy();expect(screen.getByText('cinq')).toBeTruthy();expect(container.querySelector('.message-table table')).toBeNull();
+});

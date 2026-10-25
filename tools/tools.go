@@ -40,6 +40,7 @@ var toolRegistrationOAuthModes sync.Map // map[*mcp.Server]bool; populated only 
 var toolRegistrationNames sync.Map // map[*mcp.Server]map[string]struct{}; registration only
 
 var readOnlyTools = map[string]bool{
+	"get_training_groups":            true,
 	"list_formations":                true,
 	"list_formation_versions":        true,
 	"review_formation_version":       true,
@@ -76,6 +77,7 @@ var readOnlyTools = map[string]bool{
 // their primary read payload, while a read-only grant must not authorize their
 // side effects, so these tools require both granular capabilities.
 var readWriteTools = map[string]bool{
+	"list_training_library": true, "get_training": true, "get_conversation_context": true, "preview_training_edit": true, "get_training_policy": true, "find_training_members": true,
 	"get_curriculum_snapshot":  true,
 	"get_memory_state":         true,
 	"get_next_activity":        true,
@@ -83,6 +85,7 @@ var readWriteTools = map[string]bool{
 }
 
 var writeTools = map[string]bool{
+	"select_conversation_training": true, "save_training_edit": true, "propose_training_edit": true, "share_training": true, "submit_training": true, "decide_training": true, "publish_training": true, "set_training_access": true, "set_training_policy": true, "join_training": true,
 	"publish_formation_to_catalog":    true,
 	"join_formation":                  true,
 	"leave_formation":                 true,
@@ -152,6 +155,18 @@ var openWorldTools = map[string]bool{
 func boolHint(v bool) *bool { return &v }
 
 func requiredOAuthScopesForTool(name string) ([]string, bool) {
+	if name == "get_training_groups" {
+		return []string{models.OAuthScopeProgressRead}, true
+	}
+	if contributionTool(name) {
+		return []string{models.OAuthScopeFormationContribute}, true
+	}
+	if models.ValidTrainingAction(name) {
+		if models.TrainingReadAction(name) {
+			return []string{models.OAuthScopeLearnerRead}, true
+		}
+		return []string{models.OAuthScopeLearnerWrite}, true
+	}
 	if progressTool(name) {
 		return []string{models.OAuthScopeProgressRead}, true
 	}
@@ -189,6 +204,10 @@ func hasRequiredOAuthScopes(ctx context.Context, required []string) bool {
 		}
 	}
 	return true
+}
+
+func hasToolOAuthScopes(ctx context.Context, name string, required []string) bool {
+	return hasRequiredOAuthScopes(ctx, required) || (contributionCompatibleTool(name) && auth.HasOAuthScope(ctx, models.OAuthScopeFormationContribute))
 }
 
 // addTool is the single registration boundary for authorization and safety
@@ -256,7 +275,7 @@ func addTool[In, Out any](server *mcp.Server, tool *mcp.Tool, handler mcp.ToolHa
 	granularScopes, _ := toolRegistrationOAuthModes.Load(server)
 	granular, _ := granularScopes.(bool)
 	advertisedScopes := requiredScopes
-	if !granular && !formationTool(tool.Name) && !progressTool(tool.Name) {
+	if !granular && !formationTool(tool.Name) && !progressTool(tool.Name) && !contributionTool(tool.Name) {
 		advertisedScopes = []string{models.OAuthScopeLearner}
 	}
 	destructive := !readOnly && !additiveWriteTools[tool.Name]
@@ -278,6 +297,9 @@ func addTool[In, Out any](server *mcp.Server, tool *mcp.Tool, handler mcp.ToolHa
 		"type":   "oauth2",
 		"scopes": advertisedScopes,
 	}}
+	if contributionCompatibleTool(tool.Name) {
+		tool.Meta["securitySchemes"] = append(tool.Meta["securitySchemes"].([]map[string]any), map[string]any{"type": "oauth2", "scopes": []string{models.OAuthScopeFormationContribute}})
+	}
 	if local, _ := toolRegistrationLocalModes.Load(server); local == true {
 		tool.Meta["securitySchemes"] = []map[string]any{{"type": "noauth"}}
 	}
@@ -288,7 +310,7 @@ func addTool[In, Out any](server *mcp.Server, tool *mcp.Tool, handler mcp.ToolHa
 		// but fail closed when a principal exists without the capability required
 		// by this exact tool. The bounded legacy learner grant is accepted by
 		// OAuthScopeAllows and cannot silently cover future scope families.
-		if (principal.UserID != "" || auth.GetLearnerID(ctx) != "") && !hasRequiredOAuthScopes(ctx, requiredScopes) {
+		if (principal.UserID != "" || auth.GetLearnerID(ctx) != "") && !hasToolOAuthScopes(ctx, tool.Name, requiredScopes) {
 			result := insufficientOAuthScopeResult(ctx, "", requiredScopes, granular)
 			markToolCallDenied(ctx, result)
 			return result, zero, nil
@@ -332,7 +354,7 @@ func toolOAuthScopeMiddleware(baseURL string, granular bool) mcp.Middleware {
 			if !known || !oauthToolAvailable(call.Params.Name) {
 				return next(ctx, method, req)
 			}
-			if hasRequiredOAuthScopes(ctx, requiredScopes) {
+			if hasToolOAuthScopes(ctx, call.Params.Name, requiredScopes) {
 				return next(ctx, method, req)
 			}
 			result := insufficientOAuthScopeResult(ctx, baseURL, requiredScopes, granular)
@@ -350,10 +372,12 @@ func authorizedNativeTools(ctx context.Context, available []*mcp.Tool) []*mcp.To
 	}
 	for _, tool := range available {
 		scopes, known := requiredOAuthScopesForTool(tool.Name)
-		if !known || !hasRequiredOAuthScopes(ctx, scopes) {
+		if !known || !hasToolOAuthScopes(ctx, tool.Name, scopes) {
 			continue
 		}
-		if formationTool(tool.Name) {
+		if contributionTool(tool.Name) || (contributionCompatibleTool(tool.Name) && auth.HasOAuthScope(ctx, models.OAuthScopeFormationContribute)) {
+			// The store checks ownership/assignment on each actual resource.
+		} else if formationTool(tool.Name) {
 			if !actor.Authorize(models.PermissionFormationWrite, models.AuthorizationResource{TenantID: actor.TenantID}) {
 				continue
 			}
@@ -403,6 +427,26 @@ func domainLookupErrorResult(deps *Deps, err error) (*mcp.CallToolResult, error)
 // through resolveDomain — they call store.GetLearnerDomainByID directly because
 // they legitimately need to operate on archived rows.
 func resolveDomain(ctx context.Context, store storeport.Store, learnerID, domainID string) (*models.Domain, error) {
+	if conversationID := storeport.ConversationID(ctx); conversationID != "" {
+		p, ok := auth.GetPrincipal(ctx)
+		training, available := store.(storeport.TrainingStore)
+		if !ok || !available {
+			return nil, fmt.Errorf("conversation context unavailable")
+		}
+		selected, err := training.TrainingAction(ctx, p, "get_conversation_context", models.TrainingRequest{ConversationID: conversationID})
+		if err != nil {
+			return nil, err
+		}
+		c, ok := selected.(*models.ConversationContext)
+		if !ok || c.DomainID == "" {
+			return nil, fmt.Errorf("select an enrolled or personal training for this conversation first")
+		}
+		if domainID != "" && domainID != c.DomainID {
+			return nil, fmt.Errorf("domain differs from the selected conversation training; select it explicitly first")
+		}
+		domainID = c.DomainID
+	}
+
 	if domainID != "" {
 		d, err := store.GetLearnerDomainByID(ctx, learnerID, domainID)
 		if err != nil {
@@ -490,6 +534,7 @@ func RegisterTools(server *mcp.Server, deps *Deps) {
 	toolRegistrationOAuthModes.Store(server, granularScopes)
 	defer toolRegistrationOAuthModes.Delete(server)
 	addIdempotencyMiddleware(server, deps)
+	registerTrainingTools(server, deps)
 	if deps != nil && deps.Institution {
 		registerFormationTools(server, deps)
 		registerProgressTools(server, deps)
@@ -584,7 +629,7 @@ func toolTenantTransactionMiddleware(deps *Deps) mcp.Middleware {
 				markToolCallDenied(ctx, result)
 				return result, nil
 			}
-			if !isProgress && !principal.Authorize(permission, models.AuthorizationResource{TenantID: principal.TenantID, OwnerUserID: principal.UserID}) {
+			if !isProgress && !models.ValidTrainingAction(toolNameFromRequest(req)) && !principal.Authorize(permission, models.AuthorizationResource{TenantID: principal.TenantID, OwnerUserID: principal.UserID}) {
 				result, _ := errorResult("tenant principal is not authorized for this tool")
 				markToolCallDenied(ctx, result)
 				return result, nil

@@ -78,6 +78,9 @@ func TestFormationCatalogPublicationIsAtomicVisibleAndDoesNotEnroll(t *testing.T
 	if _, err = s.AddFormationConcept(ctx, owner, v.ID, models.FormationConceptInput{ModuleStableKey: "m", StableKey: "c", Label: "Concept"}); err != nil {
 		t.Fatal(err)
 	}
+	if err = s.SetFormationEnrollmentPolicy(ctx, owner, f.ID, "open"); err != nil {
+		t.Fatal(err)
+	}
 	publication, replayed, err := s.PublishFormationToCatalogIdempotent(ctx, owner, "catalog-publish", v.ID)
 	if err != nil || replayed || publication.Version.Status != "published" || publication.Cohort.Status != "open" {
 		t.Fatalf("publication=%#v replay=%v err=%v", publication, replayed, err)

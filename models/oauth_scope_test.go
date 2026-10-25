@@ -64,3 +64,12 @@ func TestOAuthScopeCapabilitiesAndNarrowing(t *testing.T) {
 		t.Fatal("granular grant converted back to legacy bundle")
 	}
 }
+
+func TestLegacyGrantCannotAcquireContribution(t *testing.T) {
+	if OAuthScopeAllows(OAuthScopeLearner, OAuthScopeFormationContribute) || OAuthScopeCanNarrow(OAuthScopeLearner, OAuthScopeFormationContribute) {
+		t.Fatal("legacy learner grant widened into contribution")
+	}
+	if !OAuthScopeAllows(OAuthScopeFormationContribute, OAuthScopeFormationContribute) || OAuthScopeAllows(OAuthScopeFormationContribute, OAuthScopeFormationWrite) {
+		t.Fatal("contribution scope became administration")
+	}
+}

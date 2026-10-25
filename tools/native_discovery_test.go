@@ -44,3 +44,28 @@ func TestNativeToolDiscoveryMatchesRoleAndDelegatedActivity(t *testing.T) {
 		})
 	}
 }
+
+func TestNativeContributionToolsWorkWithoutEnablingPrivateLearning(t *testing.T) {
+	p := models.Principal{TenantID: "tenant", UserID: "author", MembershipID: "member", Roles: []string{models.RoleTrainer}, Scopes: []string{models.OAuthScopeFormationContribute}, TokenVersion: 1}
+	ctx, err := auth.WithPrincipal(t.Context(), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx = auth.WithOAuthScope(ctx, models.OAuthScopeFormationContribute)
+	names := []string{"list_training_library", "get_training", "preview_training_edit", "propose_training_edit", "save_training_edit", "share_training", "get_training_policy"}
+	available := []*mcp.Tool{}
+	for _, name := range append(slices.Clone(names), "get_learner_context", "get_conversation_context", "join_training", "list_formations") {
+		available = append(available, &mcp.Tool{Name: name})
+		required, _ := requiredOAuthScopesForTool(name)
+		if hasToolOAuthScopes(ctx, name, required) != slices.Contains(names, name) {
+			t.Errorf("incorrect scope decision for %s", name)
+		}
+	}
+	var visible []string
+	for _, tool := range authorizedNativeTools(ctx, available) {
+		visible = append(visible, tool.Name)
+	}
+	if !slices.Equal(visible, names) {
+		t.Fatalf("visible=%v want=%v", visible, names)
+	}
+}

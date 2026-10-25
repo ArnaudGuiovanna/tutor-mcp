@@ -129,11 +129,6 @@ func (s *Store) PublishFormationToCatalogIdempotent(ctx context.Context, actor m
 			if version.Status != "published" {
 				return storeport.ErrFormationVersionImmutable
 			}
-			if f.EnrollmentPolicy != "open" {
-				if err = root.SetFormationEnrollmentPolicy(innerCtx, actor, f.ID, "open"); err != nil {
-					return err
-				}
-			}
 			digest := sha256.Sum256([]byte(actor.TenantID + "\x00" + versionID))
 			id := "catalog_" + hex.EncodeToString(digest[:16])
 			// Only retire automatic catalogue offerings; explicit cohorts and

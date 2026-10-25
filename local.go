@@ -15,6 +15,7 @@ import (
 	"tutor-mcp/engine"
 	"tutor-mcp/memory"
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 	"tutor-mcp/tools"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -66,6 +67,9 @@ func runLocal(options commandOptions, logger *slog.Logger) error {
 		return err
 	}
 	ctx = auth.WithOAuthScope(ctx, models.OAuthScopeLearner)
+	if conversationID := os.Getenv("TUTOR_CONVERSATION_ID"); conversationID != "" {
+		ctx = storeport.WithConversation(ctx, conversationID)
+	}
 	memory.ConfigureNarrativeStore(store)
 	defer memory.ConfigureNarrativeStore(nil)
 	limits, err := memory.LimitsFromEnv()

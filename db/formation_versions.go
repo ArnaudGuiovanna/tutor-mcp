@@ -48,6 +48,12 @@ func (s *Store) formationAccess(ctx context.Context, actor models.Principal, kin
 		}
 		return nil, err
 	}
+	// Compatibility resources in institutions represent private learning, not
+	// administrative catalogue content. Legacy local assessment workflows keep
+	// their existing explicit reviewer assignments.
+	if actor.TenantID != models.LegacyTenantID && (strings.HasPrefix(f.ID, "legacy_") || strings.HasPrefix(f.ID, "domain_formation_")) {
+		return nil, storeport.ErrInvalidPrincipal
+	}
 	resource := models.AuthorizationResource{TenantID: actor.TenantID, FormationID: f.ID, OwnerMembershipID: f.OwnerMembershipID, OwnerUserID: actor.UserID}
 	var assigned int
 	if err := s.queryRow(ctx, `SELECT COUNT(*) FROM formation_trainers WHERE tenant_id = ? AND formation_id = ? AND membership_id = ?`, actor.TenantID, f.ID, actor.MembershipID).Scan(&assigned); err != nil {
@@ -55,6 +61,9 @@ func (s *Store) formationAccess(ctx context.Context, actor models.Principal, kin
 	}
 	if assigned > 0 {
 		resource.AssignedFormationIDs = []string{f.ID}
+	}
+	if actor.TenantID != models.LegacyTenantID && (permission == models.PermissionFormationWrite || permission == models.PermissionFormationDelete) && !trainingOwner(actor) && f.CreatedBy != actor.UserID && assigned == 0 {
+		return nil, storeport.ErrInvalidPrincipal
 	}
 	if kind == "cohort" {
 		resource.CohortID = id

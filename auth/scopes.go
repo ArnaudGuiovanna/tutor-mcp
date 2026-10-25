@@ -60,7 +60,7 @@ func hasFormationScope(scope string) bool {
 }
 
 func hasInstitutionScope(scope string) bool {
-	return hasFormationScope(scope) || models.OAuthScopeAllows(scope, models.OAuthScopeProgressRead)
+	return models.OAuthScopeAllows(scope, models.OAuthScopeFormationContribute) || hasFormationScope(scope) || models.OAuthScopeAllows(scope, models.OAuthScopeProgressRead)
 }
 
 // normalizeRefreshScope keeps an omitted refresh scope distinguishable from an
@@ -118,6 +118,9 @@ func oauthScopeDescription(scope string) string {
 	default:
 		if hasInstitutionScope(canonical) {
 			text := ""
+			if models.OAuthScopeAllows(canonical, models.OAuthScopeFormationContribute) {
+				text += "Contribute to formations you author or are explicitly authorized to edit, and submit or publish them only when the institution permits it. No administrative role is granted. "
+			}
 			if models.OAuthScopeAllows(canonical, models.OAuthScopeProgressRead) {
 				text += "Read learner identities and learning progress in cohorts you are authorized to follow. "
 			}

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"tutor-mcp/models"
 )
 
 // TestRegisterTools_Smoke wires every tool through RegisterTools and lists them
@@ -88,6 +89,9 @@ func TestRegisterTools_Smoke(t *testing.T) {
 		"get_dashboard_state",
 		"set_goal_relevance",
 		"get_goal_relevance",
+	}
+	for name := range trainingTools {
+		want = append(want, name)
 	}
 	got := map[string]bool{}
 	registered := map[string]*mcp.Tool{}
@@ -174,9 +178,16 @@ func TestRegisterTools_Smoke(t *testing.T) {
 			Scopes []string `json:"scopes"`
 		}
 		decodeErr := json.Unmarshal(encoded, &advertised)
-		if err != nil || decodeErr != nil || len(advertised) != 1 || advertised[0].Type != "oauth2" ||
+		expectedSchemes := 1
+		if contributionCompatibleTool(name) {
+			expectedSchemes = 2
+		}
+		if err != nil || decodeErr != nil || len(advertised) != expectedSchemes || advertised[0].Type != "oauth2" ||
 			!slices.Equal(advertised[0].Scopes, requiredScopes) {
 			t.Errorf("%s securitySchemes=%s err=%v", name, encoded, err)
+		}
+		if expectedSchemes == 2 && (advertised[1].Type != "oauth2" || !slices.Equal(advertised[1].Scopes, []string{models.OAuthScopeFormationContribute})) {
+			t.Errorf("%s missing independent contribution scheme", name)
 		}
 	}
 	if deleteTool := registered["delete_domain"]; deleteTool.Annotations.DestructiveHint == nil || !*deleteTool.Annotations.DestructiveHint {
@@ -218,8 +229,8 @@ func TestRegisterTools_LegacyRolloutAdvertisesOnlyBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(listed.Tools) != 46 {
-		t.Fatalf("listed tools=%d, want 46", len(listed.Tools))
+	if len(listed.Tools) != 46+len(trainingTools) {
+		t.Fatalf("listed tools=%d, want %d", len(listed.Tools), 46+len(trainingTools))
 	}
 	for _, tool := range listed.Tools {
 		encoded, err := json.Marshal(tool.Meta["securitySchemes"])
@@ -230,8 +241,18 @@ func TestRegisterTools_LegacyRolloutAdvertisesOnlyBundle(t *testing.T) {
 			Type   string   `json:"type"`
 			Scopes []string `json:"scopes"`
 		}
-		if err := json.Unmarshal(encoded, &schemes); err != nil || len(schemes) != 1 ||
-			schemes[0].Type != "oauth2" || !slices.Equal(schemes[0].Scopes, []string{"learner"}) {
+		expected := []string{"learner"}
+		if tool.Name == "get_training_groups" {
+			expected = []string{models.OAuthScopeProgressRead}
+		} else if contributionTool(tool.Name) {
+			expected = []string{models.OAuthScopeFormationContribute}
+		}
+		expectedSchemes := 1
+		if contributionCompatibleTool(tool.Name) {
+			expectedSchemes = 2
+		}
+		if err := json.Unmarshal(encoded, &schemes); err != nil || len(schemes) != expectedSchemes ||
+			schemes[0].Type != "oauth2" || !slices.Equal(schemes[0].Scopes, expected) {
 			t.Fatalf("%s phase-A securitySchemes=%s decodeErr=%v", tool.Name, encoded, err)
 		}
 	}

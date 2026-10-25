@@ -139,6 +139,9 @@ func TestNativeClientAuthorPublishAndLearningJourney(t *testing.T) {
 			if status, _ := request(read, "POST", "/admin/catalog/formation-versions/"+versionID+"/publish-to-catalog", `{}`); status != 403 {
 				t.Fatalf("read session published=%d", status)
 			}
+			if err = f.admin.SetFormationEnrollmentPolicy(t.Context(), owner, formationID, "open"); err != nil {
+				t.Fatal(err)
+			}
 			if status, out := request(write, "POST", "/admin/catalog/formation-versions/"+versionID+"/publish-to-catalog", `{}`); status != 201 || out["cohort"] == nil {
 				t.Fatalf("publish=%d %#v", status, out)
 			}

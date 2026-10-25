@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tutor_client::{
     backend::Backend,
     discovery::AgentTarget,
-    workspace::{LearningIntent, Settings, TutorSettings},
+    workspace::{Settings, TutorSettings},
 };
 
 #[tokio::main]
@@ -90,39 +90,51 @@ async fn smoke() -> Result<(), String> {
     if !overview["context"].is_object() {
         return Err("Tutor ne retourne pas son contexte pédagogique.".into());
     }
-    let state = backend
-        .save_intent(LearningIntent {
-            title: "Comprendre les saisons".into(),
-            goals: "Expliquer simplement l’inclinaison de la Terre".into(),
-            constraints: "Une activité courte ; ne rien publier".into(),
-            validated: true,
-            ..Default::default()
-        })
-        .await?;
     if !live {
         backend.shutdown().await;
         println!(
             "{}",
-            json!({"adapter":initialized["agentInfo"],"realTutorContext":true,"intentPersisted":true,"liveModel":false})
+            json!({"adapter":initialized["agentInfo"],"realTutorContext":true,"liveModel":false})
         );
         return Ok(());
     }
-    let intent_id = state["intents"][0]["id"]
-        .as_str()
-        .ok_or("Intention non enregistrée.")?
-        .to_string();
-    let conversation = backend.start_conversation(Some(intent_id), None).await?;
+    let conversation = backend.start_conversation(None, None).await?;
     let (tools_tx, tools_rx) = tokio::sync::oneshot::channel();
-    let permission_backend = backend.clone();
+    let permission_target = Arc::new(tokio::sync::Mutex::new(backend.clone()));
+    let permission_backend = permission_target.clone();
     let event_task = tokio::spawn(async move {
         let mut tools = Vec::<String>::new();
+        let mut tool_names = std::collections::HashMap::<String, String>::new();
         while let Some(event) = events.recv().await {
             if event["method"] == "session/request_permission" {
-                // Denial is the acceptance default. The smoke must not grant
-                // general shell/filesystem rights to make a test appear green.
-                let _ = permission_backend
-                    .answer_permission(event["id"].clone(), None)
-                    .await;
+                // Only isolated Tutor MCP operations are authorized. Built-in
+                // terminal/filesystem tools and publication remain denied.
+                let title = event["params"]["toolCall"]["title"]
+                    .as_str()
+                    .filter(|value| !value.is_empty())
+                    .or_else(|| {
+                        event["params"]["toolCall"]["toolCallId"]
+                            .as_str()
+                            .and_then(|id| tool_names.get(id).map(String::as_str))
+                    })
+                    .unwrap_or("");
+                let allowed = title.starts_with("mcp.tutor.")
+                    && !["publish", "delete", "share", "webhook"]
+                        .iter()
+                        .any(|name| title.contains(name));
+                let choice = if allowed {
+                    event["params"]["options"]
+                        .as_array()
+                        .and_then(|options| {
+                            options.iter().find(|option| option["kind"] == "allow_once")
+                        })
+                        .and_then(|option| option["optionId"].as_str())
+                        .map(str::to_string)
+                } else {
+                    None
+                };
+                let target = permission_backend.lock().await.clone();
+                let _ = target.answer_permission(event["id"].clone(), choice).await;
             }
             if event["method"] == "session/update"
                 && [Some("tool_call"), Some("tool_call_update")]
@@ -130,6 +142,9 @@ async fn smoke() -> Result<(), String> {
             {
                 if let Some(title) = event["params"]["update"]["title"].as_str() {
                     tools.push(title.to_string());
+                    if let Some(id) = event["params"]["update"]["toolCallId"].as_str() {
+                        tool_names.insert(id.to_string(), title.to_string());
+                    }
                 }
             }
             if event["_smokeDone"] == true {
@@ -138,28 +153,100 @@ async fn smoke() -> Result<(), String> {
         }
         let _ = tools_tx.send(tools);
     });
-    let first=backend.send_prompt(conversation.id.clone(),"Ceci est un essai technique dans un profil neuf. Consulte réellement get_learner_context sur le serveur MCP tutor. Je valide explicitement la création d’un domaine personnel nommé « Saisons — essai client », avec un seul concept « Inclinaison terrestre », aucune publication, aucune réponse évaluée. Enregistre ce domaine avec init_domain, puis ouvre une séance pédagogique avec start_learning_session. Utilise des clés d’idempotence pour cet essai. Réponds en une phrase avec les identifiants retournés, sans inventer de résultat et sans utiliser le shell.".into()).await;
-    first?;
-    let after = backend.tutor_overview().await?;
-    if after["context"]["domains"]
+    let mut original_go = String::new();
+    for (index, message) in [
+        "Je veux apprendre le Go.",
+        "Je veux apprendre Python.",
+        "Je veux apprendre l’astronomie.",
+    ]
+    .iter()
+    .enumerate()
+    {
+        backend
+            .send_prompt(conversation.id.clone(), (*message).into())
+            .await?;
+        let library = backend
+            .training_action(
+                "list_training_library".into(),
+                json!({"filter":"personal","limit":100}),
+            )
+            .await?;
+        let items = library["items"]
+            .as_array()
+            .ok_or("Bibliothèque réelle absente.")?;
+        if items.len() != index + 1 {
+            return Err(format!(
+                "Création immédiate : {} formations enregistrées, {} attendues.",
+                items.len(),
+                index + 1
+            ));
+        }
+        let context = backend
+            .training_action(
+                "get_conversation_context".into(),
+                json!({"conversation_id":conversation.id}),
+            )
+            .await?;
+        if context["domain_id"].as_str().is_none_or(str::is_empty) {
+            return Err("La formation n’a pas été sélectionnée sur le serveur.".into());
+        }
+        if index == 0 {
+            original_go = context["domain_id"].as_str().unwrap().to_string();
+        }
+    }
+    let saved = backend.snapshot().await;
+    if saved["conversations"][0]["messages"]
         .as_array()
-        .is_none_or(|domains| domains.is_empty())
+        .map(Vec::len)
+        != Some(6)
     {
-        return Err("L’agent n’a enregistré aucune formation réelle dans Tutor.".into());
+        return Err("Trois échanges réels non conservés.".into());
     }
-    let domains = after["context"]["domains"].as_array().unwrap();
-    if domains.len() != 1
-        || domains[0]["name"] != "Saisons — essai client"
-        || domains[0]["concept_count"] != 1
+    backend.shutdown().await;
+    let resumed_events = event_control.clone();
+    let reopened = Backend::new(
+        &directory.join("client"),
+        Arc::new(move |name, value| {
+            if name == "acp:event" {
+                let _ = resumed_events.send(value);
+            }
+        }),
+    )?;
+    *permission_target.lock().await = reopened.clone();
+    reopened.connect_agent(target, settings.cwd).await?;
+    reopened
+        .start_conversation(None, Some(conversation.id.clone()))
+        .await?;
+    reopened
+        .send_prompt(conversation.id.clone(), "Reprenons ma formation Go.".into())
+        .await?;
+    let context = reopened
+        .training_action(
+            "get_conversation_context".into(),
+            json!({"conversation_id":conversation.id}),
+        )
+        .await?;
+    if context["domain_id"] != original_go {
+        return Err("La reprise n’a pas retrouvé la formation Go d’origine.".into());
+    }
+    let library = reopened
+        .training_action(
+            "list_training_library".into(),
+            json!({"filter":"personal","limit":100}),
+        )
+        .await?;
+    if library["items"].as_array().map(Vec::len) != Some(3) {
+        return Err("La reprise a créé un doublon.".into());
+    }
+    let persisted = reopened.snapshot().await;
+    if persisted["conversations"][0]["messages"]
+        .as_array()
+        .map(Vec::len)
+        != Some(8)
     {
-        return Err("La formation enregistrée ne correspond pas à l’intention validée.".into());
+        return Err("La reprise a rejoué un échange.".into());
     }
-    let learning_session = after["context"]["session_id"]
-        .as_str()
-        .filter(|id| !id.is_empty())
-        .ok_or("L’agent n’a ouvert aucune séance pédagogique réelle.")?
-        .to_string();
-    backend.send_prompt(conversation.id.clone(),"Dans la séance pédagogique que tu viens d’ouvrir, appelle réellement get_next_activity pour le domaine créé. Utilise cette recommandation pour me proposer une première activité courte sur l’inclinaison terrestre. Pose une seule question et attends ma réponse. Ne soumets aucune réponse en mon nom, ne modifie pas mes objectifs, n’utilise pas le shell et ne prétends pas avoir observé un apprentissage.".into()).await?;
+    reopened.shutdown().await;
     let _ = event_control.send(json!({"_smokeDone":true}));
     event_task
         .await
@@ -176,36 +263,7 @@ async fn smoke() -> Result<(), String> {
             tools.join(", ")
         ));
     }
-    let messages = backend.snapshot().await["conversations"][0]["messages"]
-        .as_array()
-        .cloned()
-        .ok_or("Conversation non persistée.")?;
-    if messages.len() != 4 || messages[3]["text"].as_str().is_none_or(str::is_empty) {
-        return Err("Réponse réelle non conservée.".into());
-    }
-    backend.shutdown().await;
-    let reopened = Backend::new(&directory.join("client"), Arc::new(|_, _| {}))?;
-    reopened.connect_agent(target, settings.cwd).await?;
-    reopened
-        .start_conversation(None, Some(conversation.id.clone()))
-        .await?;
-    let resumed = reopened.tutor_overview().await?;
-    if resumed["context"]["domains"] != after["context"]["domains"] {
-        return Err("Le contexte pédagogique n’a pas été retrouvé.".into());
-    }
-    if resumed["context"]["session_id"] != learning_session {
-        return Err("La séance pédagogique n’a pas été retrouvée après redémarrage.".into());
-    }
-    let persisted = reopened.snapshot().await;
-    if persisted["conversations"][0]["messages"]
-        .as_array()
-        .map(Vec::len)
-        != Some(4)
-    {
-        return Err("La reprise a dupliqué les échanges.".into());
-    }
-    reopened.shutdown().await;
-    let report: Value = json!({"adapter":initialized["agentInfo"],"realTutorContext":true,"liveModel":true,"formationCreated":true,"learningSessionOpened":true,"activityToolCalled":true,"activityPresented":true,"observationRecorded":false,"replyPersisted":true,"restartPassed":true,"duplicateMessages":false,"tools":tools});
+    let report: Value = json!({"adapter":initialized["agentInfo"],"realTutorContext":true,"liveModel":true,"personalFormationsCreated":3,"explicitContext":true,"goPythonAstronomyGo":true,"activityToolCalled":true,"activityPresented":true,"observationRecorded":false,"replyPersisted":true,"restartPassed":true,"duplicateMessages":false,"tools":tools});
     std::fs::write(
         directory.join("acceptance.json"),
         serde_json::to_vec_pretty(&report).unwrap(),

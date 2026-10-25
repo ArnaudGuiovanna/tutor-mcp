@@ -65,3 +65,42 @@ Cette projection exclut email, mot de passe, données d’intégration, notes li
 du profil et réponses brutes aux activités. Les choix de projection sont testés
 sur SQLite et sur un rôle PostgreSQL sans propriété des tables ni contournement
 RLS, via `TestClientAPI*`.
+
+
+## Conversation et bibliothèque unifiée (client 0.2)
+
+`POST /api/client/v1/training/{action}` accepte un objet `TrainingRequest`.
+Les actions correspondent aux outils MCP de même nom. Les lecteurs exigent
+`learner:read`, `formation:read` ou `formation:contribute`, les écritures personnelles `learner:write`. Les contributions, le partage,
+les décisions et les réglages communs exigent la délégation distincte
+`formation:contribute` en plus des capacités de la ressource. Le bundle historique
+`learner` n’accorde jamais cette nouvelle délégation. `get_training_groups` exige `progress:read` et les affectations
+réelles. Aucune permission administrative n’est accordée aux contributeurs.
+Toutes les opérations revérifient le principal dans une transaction d’institution.
+
+- `list_training_library` : `query`, `filter`, `after`, `limit` ; déduplication,
+  confidentialité et pagination côté serveur. `next_after` poursuit la même recherche.
+- `get_training` : `id` réel `personal:<domain_id>` ou `formation:<formation_id>` ;
+  programme, progression privée, révision, capacités, calibration et proposition.
+- `get_conversation_context`, `select_conversation_training` : contexte associé à
+  l’adhésion et à `conversation_id`, sélection avec `expected_selection`.
+- `preview_training_edit`, `propose_training_edit`, `save_training_edit` : document
+  complet et `expected_revision` ; les conséquences pédagogiques proviennent du
+  moteur existant. Un programme commun publié crée la version suivante.
+- `share_training`, `submit_training`, `decide_training`, `publish_training` :
+  copie de conception, candidature figée, décision motivée, publication atomique.
+- `set_training_access`, `find_training_members` : destinataires et éditeurs par
+  nom ou clé publique ; seul le propriétaire autorise la publication libre.
+- `get_training_policy`, `set_training_policy`, `join_training` : politique
+  personnelle explicite et inscription contrôlée.
+
+Chaque écriture exige `key`, propre à l’action, réutilisée uniquement pour une
+reprise exacte. Les reçus sont liés à l’auteur et l’institution. HTTP 409 signale
+une révision obsolète ou une clé réutilisée avec un contenu différent ; 404 ne
+révèle pas l’existence d’une ressource inaccessible. Les paramètres inconnus et
+les corps multiples sont refusés. Les réponses restent `no-store`.
+
+Le transport MCP natif porte `Tutor-Conversation-ID` (HTTP) ou
+`TUTOR_CONVERSATION_ID` (stdio). Les outils de routage et d’observation refusent
+un autre domaine, y compris un identifiant explicite. Les clients MCP historiques
+sans contexte conservent leur contrat existant.

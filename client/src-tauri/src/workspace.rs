@@ -68,6 +68,8 @@ pub struct LearningIntent {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub training_context: Option<serde_json::Value>,
     pub id: String,
     pub role: String,
     pub text: String,
@@ -78,6 +80,8 @@ pub struct Message {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Conversation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_training: Option<serde_json::Value>,
     pub id: String,
     pub title: String,
     pub intent_id: Option<String>,
@@ -93,7 +97,16 @@ pub struct Conversation {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PendingMessage {
+    pub text: String,
+    pub conversation_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Workspace {
+    #[serde(default)]
+    pub pending_message: Option<PendingMessage>,
     pub schema_version: u32,
     pub settings: Settings,
     pub intents: Vec<LearningIntent>,
@@ -105,6 +118,7 @@ impl Default for Workspace {
     fn default() -> Self {
         Self {
             schema_version: 1,
+            pending_message: None,
             settings: Settings::default(),
             intents: vec![],
             conversations: vec![],

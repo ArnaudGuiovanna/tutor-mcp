@@ -190,6 +190,10 @@ func nativeScopesAllowed(p models.Principal) bool {
 			if p.LearnerID == "" || !slices.Contains(p.Roles, models.RoleLearner) {
 				return false
 			}
+		case models.OAuthScopeFormationContribute:
+			if p.Validate() != nil {
+				return false
+			}
 		case models.OAuthScopeFormationRead, models.OAuthScopeFormationWrite:
 			if !p.Authorize(models.PermissionFormationWrite, models.AuthorizationResource{TenantID: p.TenantID}) {
 				return false

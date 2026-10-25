@@ -39,7 +39,7 @@ GRANT SELECT ON tenants, plans, schema_migrations, installation TO tutor_worker;
 -- grants expose no token or secret value, only what a DELETE needs to match.
 GRANT SELECT (tenant_id, learner_id, erasure_row_id) ON
     refresh_tokens, oauth_codes, login_challenges, account_tokens, learner_approved_clients, tool_call_idempotency,
-    native_challenges, native_sessions
+    native_challenges, native_sessions, conversation_contexts, training_proposals, training_receipts
 TO tutor_worker;
 GRANT SELECT (tenant_id, learner_id, id) ON
     implementation_intentions, pedagogical_snapshots, learning_sessions TO tutor_worker;
@@ -95,7 +95,7 @@ GRANT UPDATE (status, seat_reserved, objectives_json, updated_at) ON enrollments
 GRANT SELECT (tenant_id, accepted_membership_id), UPDATE (email, normalized_email)
     ON tenant_invitations TO tutor_worker;
 GRANT DELETE ON
-    native_challenges, native_sessions,
+    native_challenges, native_sessions, conversation_contexts, training_proposals, training_receipts,
     learner_concept_states, calibration_records,
     tool_call_idempotency, login_challenges, learner_approved_clients,
     concept_bkt_estimates, collective_weight_applications, learning_badges, learning_badge_evidence,

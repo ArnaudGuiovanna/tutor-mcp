@@ -136,6 +136,7 @@ jobs:
           name: tutor-client-windows-x64-${{ github.sha }}
           path: |
             client/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+            ${{ runner.temp }}/tutor-client-accessibility.json
             ${{ runner.temp }}/tutor-client-runtime.json
             ${{ runner.temp }}/tutor-client-wsl-runtime.json
           if-no-files-found: error

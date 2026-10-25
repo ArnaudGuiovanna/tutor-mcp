@@ -261,8 +261,12 @@ func (s *Store) ListFormations(ctx context.Context, actor models.Principal, afte
 		if err := scoped.ValidatePrincipal(txCtx, actor); err != nil {
 			return err
 		}
+		global := formationGlobalAccess(actor)
+		if actor.TenantID != models.LegacyTenantID {
+			global = boolInt(trainingOwner(actor))
+		}
 		rows, err := scoped.(*Store).query(txCtx, `SELECT id, name, description, status, created_by, created_at, updated_at, owner_membership_id, enrollment_policy
-            FROM formations WHERE tenant_id = ? AND id > ? AND `+formationVisibilitySQL(actor, "formations")+` ORDER BY id LIMIT ?`, actor.TenantID, after, formationGlobalAccess(actor), actor.MembershipID, actor.MembershipID, limit+1)
+            FROM formations WHERE tenant_id = ? AND id > ? AND substr(id,1,7)<>'legacy_' AND substr(id,1,17)<>'domain_formation_' AND (?=1 OR created_by=? OR EXISTS (SELECT 1 FROM formation_trainers ft WHERE ft.tenant_id=formations.tenant_id AND ft.formation_id=formations.id AND ft.membership_id=?)) ORDER BY id LIMIT ?`, actor.TenantID, after, global, actor.UserID, actor.MembershipID, limit+1)
 		if err != nil {
 			return err
 		}
@@ -294,12 +298,16 @@ func (s *Store) ListCohorts(ctx context.Context, actor models.Principal, after s
 		if err := scoped.ValidatePrincipal(txCtx, actor); err != nil {
 			return err
 		}
+		global := formationGlobalAccess(actor)
+		if actor.TenantID != models.LegacyTenantID {
+			global = boolInt(trainingOwner(actor))
+		}
 		rows, err := scoped.(*Store).query(txCtx, `SELECT id, formation_version_id, name, starts_at, ends_at,
 			capacity, reserved_seats, status, version, created_by, created_at, updated_at
 			FROM cohorts WHERE tenant_id = ? AND id > ? AND EXISTS
             (SELECT 1 FROM formation_versions v JOIN formations f ON f.tenant_id = v.tenant_id AND f.id = v.formation_id
-             WHERE v.tenant_id = cohorts.tenant_id AND v.id = cohorts.formation_version_id AND `+formationVisibilitySQL(actor, "f")+`)
-             ORDER BY id LIMIT ?`, actor.TenantID, after, formationGlobalAccess(actor), actor.MembershipID, actor.MembershipID, limit+1)
+             WHERE v.tenant_id = cohorts.tenant_id AND v.id = cohorts.formation_version_id AND substr(f.id,1,7)<>'legacy_' AND substr(f.id,1,17)<>'domain_formation_' AND (?=1 OR f.created_by=? OR EXISTS (SELECT 1 FROM formation_trainers ft WHERE ft.tenant_id=f.tenant_id AND ft.formation_id=f.id AND ft.membership_id=?)))
+             ORDER BY id LIMIT ?`, actor.TenantID, after, global, actor.UserID, actor.MembershipID, limit+1)
 		if err != nil {
 			return err
 		}

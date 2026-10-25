@@ -291,7 +291,7 @@ func (s *OAuthServer) HandleAuthServerMetadata(w http.ResponseWriter, r *http.Re
 		}
 	}
 	if s.InstitutionAccountsEnabled() {
-		scopesSupported = append(scopesSupported, models.OAuthScopeFormationRead, models.OAuthScopeFormationWrite, models.OAuthScopeProgressRead)
+		scopesSupported = append(scopesSupported, models.OAuthScopeFormationContribute, models.OAuthScopeFormationRead, models.OAuthScopeFormationWrite, models.OAuthScopeProgressRead)
 	}
 	meta := map[string]interface{}{
 		"issuer":                                s.baseURL,

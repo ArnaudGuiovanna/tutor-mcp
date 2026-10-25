@@ -103,14 +103,15 @@ export function validateIntent(intent: Intent): string | undefined {
   return undefined;
 }
 
-export function permissionFromEvent(event: JsonRecord): PermissionRequest | null {
+export function permissionFromEvent(event: JsonRecord, activities: ToolActivity[] = []): PermissionRequest | null {
   if (event.method !== 'session/request_permission') return null;
   const params = record(event.params);
   const tool = record(params.toolCall);
+  const correlated = activities.find(activity => activity.id === text(tool.toolCallId));
   const content = Array.isArray(tool.content) ? tool.content.map(record) : [];
   const description = content.map((block) => text(record(block.content).text) || text(block.text)).filter(Boolean).join('\n');
   const options = Array.isArray(params.options) ? params.options.map(record).filter((option) => text(option.optionId)).map((option) => ({ optionId: text(option.optionId), name: text(option.name), kind: text(option.kind) })) : [];
-  return { id: event.id, sessionId: text(params.sessionId), title: text(tool.title) || 'Autorisation demandée par Codex', description, options };
+  return { id: event.id, sessionId: text(params.sessionId), title: text(tool.title) || correlated?.title || 'Autorisation demandée par Codex', description, options };
 }
 
 export function toolFromEvent(event: JsonRecord): ToolActivity | null {
@@ -130,6 +131,7 @@ export function chunkFromEvent(event: JsonRecord): string {
 }
 
 export function permissionLabel(kind: string, name: string): string {
+  if (kind === 'allow_always' && name.toLowerCase().includes('session')) return 'Autoriser pour cette conversation';
   const labels: Record<string, string> = { allow_once: 'Autoriser une fois', allow_always: 'Toujours autoriser', reject_once: 'Refuser', reject_always: 'Toujours refuser' };
   return labels[kind] || name || 'Choisir';
 }

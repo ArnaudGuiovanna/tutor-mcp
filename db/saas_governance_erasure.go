@@ -13,7 +13,7 @@ import (
 // system ctid needs table-wide SELECT, so credential erasure uses a dedicated
 // non-secret row identifier instead of widening access to token values.
 var dsarCredentialTables = map[string]bool{
-	"native_challenges": true, "native_sessions": true,
+	"native_challenges": true, "native_sessions": true, "conversation_contexts": true, "training_proposals": true, "training_receipts": true,
 	"refresh_tokens": true, "oauth_codes": true, "login_challenges": true,
 	"account_tokens": true, "learner_approved_clients": true, "tool_call_idempotency": true,
 }

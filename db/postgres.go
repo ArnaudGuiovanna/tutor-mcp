@@ -1686,6 +1686,7 @@ END $$;`,
 	{Version: "postgres_0071_session_narrative_index", Body: sessionNarrativeIndexMigration},
 	{Version: "postgres_0072_tenant_erasure_identity", Body: postgresErasureIdentityMigration},
 	{Version: "postgres_0073_native_identities", Body: postgresNativeIdentityMigration},
+	{Version: "postgres_0074_conversation_training", Body: postgresTrainingMigration},
 }
 
 // OpenPostgres opens a PostgreSQL-backed *sql.DB via the pgx database/sql

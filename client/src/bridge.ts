@@ -10,6 +10,9 @@ function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
 }
 
 export const bridge = {
+  trainingAction: (action: string, input: Record<string, unknown>) => call<unknown>('training_action', { action, input }),
+  queuePrompt: (text: string | null, conversationId?: string) => call<Snapshot>('queue_prompt', { text, conversationId }),
+  selectConversation: (id?: string) => call<Snapshot>('select_conversation', { id }),
   bundledAgents: () => call<AgentTarget[]>('bundled_agents'),
   loadState: () => call<Snapshot>('load_state'),
   createProfile: (label: string) => call<Snapshot>('create_profile', { label }),

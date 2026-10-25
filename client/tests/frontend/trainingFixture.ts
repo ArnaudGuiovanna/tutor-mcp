@@ -1,0 +1,4 @@
+import type { TrainingDocument } from '../../src/types';
+export function trainingFixture(): TrainingDocument {
+ return {training:{id:'personal:go',kind:'personal',name:'Go',description:'Programmer en Go',domain_id:'go',revision:'1',status:'active',audience:'private',author_id:'user',can_edit:true,can_publish:false,can_review:false,can_learn:true,can_share:true,free_publication:false,progress:[]},modules:[],concepts:[],curriculum:{domain_id:'go',version:1,graph:{concepts:['variables'],prerequisites:{}},concepts:[{id:'c1',key:'variables',label:'Variables',description:'Déclarer une variable',level:'foundation',status:'active',outcomes:[{id:'o1',statement:'Déclarer une variable entière',observable:'Un programme compilable'}],criteria:[{id:'cr1',description:'Le programme compile',evidence:'Code exécuté'}]}]}};
+}

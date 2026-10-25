@@ -59,7 +59,7 @@ func insufficientOAuthScopeChallenge(ctx context.Context, baseURL string, requir
 // complete scope set cannot accidentally exchange one permission for another.
 func oauthScopeUnion(granted string, required []string) []string {
 	seen := map[string]bool{}
-	for _, scope := range []string{models.OAuthScopeLearnerRead, models.OAuthScopeLearnerWrite, models.OAuthScopeFormationRead, models.OAuthScopeFormationWrite, models.OAuthScopeProgressRead} {
+	for _, scope := range []string{models.OAuthScopeLearnerRead, models.OAuthScopeLearnerWrite, models.OAuthScopeFormationContribute, models.OAuthScopeFormationRead, models.OAuthScopeFormationWrite, models.OAuthScopeProgressRead} {
 		if models.OAuthScopeAllows(granted, scope) {
 			seen[scope] = true
 		}
@@ -68,7 +68,7 @@ func oauthScopeUnion(granted string, required []string) []string {
 		seen[scope] = true
 	}
 	union := []string{}
-	for _, scope := range []string{models.OAuthScopeLearnerRead, models.OAuthScopeLearnerWrite, models.OAuthScopeFormationRead, models.OAuthScopeFormationWrite, models.OAuthScopeProgressRead} {
+	for _, scope := range []string{models.OAuthScopeLearnerRead, models.OAuthScopeLearnerWrite, models.OAuthScopeFormationContribute, models.OAuthScopeFormationRead, models.OAuthScopeFormationWrite, models.OAuthScopeProgressRead} {
 		if seen[scope] {
 			union = append(union, scope)
 		}
@@ -78,7 +78,7 @@ func oauthScopeUnion(granted string, required []string) []string {
 
 func institutionScopes(scopes []string) bool {
 	for _, scope := range scopes {
-		if scope == models.OAuthScopeFormationRead || scope == models.OAuthScopeFormationWrite || scope == models.OAuthScopeProgressRead {
+		if scope == models.OAuthScopeFormationContribute || scope == models.OAuthScopeFormationRead || scope == models.OAuthScopeFormationWrite || scope == models.OAuthScopeProgressRead {
 			return true
 		}
 	}
@@ -162,7 +162,7 @@ func OAuthScopeHTTPMiddleware(baseURL string, maxBodyBytes int64, granular bool,
 			next.ServeHTTP(w, r)
 			return
 		}
-		if hasRequiredOAuthScopes(r.Context(), required) {
+		if hasToolOAuthScopes(r.Context(), call.Params.Name, required) {
 			next.ServeHTTP(w, r)
 			return
 		}

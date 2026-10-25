@@ -8,6 +8,7 @@ import (
 	"tutor-mcp/auth"
 	"tutor-mcp/models"
 	"tutor-mcp/observability"
+	storeport "tutor-mcp/store"
 	"tutor-mcp/tools"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -46,7 +47,17 @@ func newMCPHTTPHandler(deps *tools.Deps, maxBodyBytes int64, timeout time.Durati
 	// Cross-origin rejection precedes buffering; OAuth preflight and the SDK
 	// consume the same bounded bytes only after both identity guards.
 	handler := cop.Handler(mcpRequestBodyLimitMiddleware(maxBodyBytes,
-		tools.OAuthScopeHTTPMiddleware(deps.BaseURL, maxBodyBytes, deps.OAuthGranularScopes, raw)))
+		tools.OAuthScopeHTTPMiddleware(deps.BaseURL, maxBodyBytes, deps.OAuthGranularScopes, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			id := r.Header.Get("Tutor-Conversation-ID")
+			if len(id) > 128 {
+				http.Error(w, "invalid conversation", 400)
+				return
+			}
+			if id != "" {
+				r = r.WithContext(storeport.WithConversation(r.Context(), id))
+			}
+			raw.ServeHTTP(w, r)
+		}))))
 	authenticated := auth.LearnerRateLimitMiddleware(guards.Learner, guards.Concurrency.Middleware(handler))
 	var protected http.Handler
 	if guards.NativeOnly {

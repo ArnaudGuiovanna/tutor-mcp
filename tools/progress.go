@@ -11,6 +11,9 @@ import (
 )
 
 func progressTool(name string) bool {
+	if name == "get_training_groups" {
+		return true
+	}
 	return name == "list_trainer_cohorts" || name == "get_cohort_insights" || name == "get_learner_progress" || name == "get_learner_badges" || name == "get_cohort_statistics"
 }
 

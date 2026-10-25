@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { authoredFormationViews, availableFormationViews, formationViews } from '../../src/model';
+import { permissionFromEvent, authoredFormationViews, availableFormationViews, formationViews } from '../../src/model';
 
 describe('Les objets pédagogiques retournés par Tutor', () => {
   it('présente les vrais brouillons du personnel sans inventer une inscription ou une progression', () => {
@@ -33,4 +33,11 @@ describe('Les objets pédagogiques retournés par Tutor', () => {
     expect(views).toEqual([{ id: 'personal:native-active', name: 'Les constellations', description: '', kind: 'personal', domainId: 'native-active', conceptCount: 7 }]);
   });
 
+});
+
+
+it('retrouve le titre d’une permission MCP corrélée à un appel précédent',()=>{
+ const request=permissionFromEvent({id:12,method:'session/request_permission',params:{toolCall:{toolCallId:'tool-1',kind:'execute',status:'pending'},options:[]}},[{id:'tool-1',title:'mcp.tutor.init_domain',status:'pending'}]);
+ expect(request?.title).toBe('mcp.tutor.init_domain');
+ expect(permissionFromEvent({id:13,method:'session/request_permission',params:{toolCall:{toolCallId:'other'},options:[]}},[{id:'tool-1',title:'Wrong tool',status:'pending'}])?.title).toBe('Autorisation demandée par Codex');
 });

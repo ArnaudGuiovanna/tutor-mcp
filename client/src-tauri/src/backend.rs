@@ -466,16 +466,32 @@ impl Backend {
             return Err("Enregistrez cette institution avant de vous connecter.".into());
         }
         let keys = self.identity.lock().await.active()?;
-        let scope = if settings.tutor.activity == "learn" {
-            "learner:read learner:write"
-        } else if settings.tutor.activity == "train" {
-            "progress:read"
-        } else if authoring || settings.tutor.activity == "author" {
+        let scope = if authoring {
             "formation:read formation:write"
         } else {
-            ""
+            "formation:contribute"
         };
-        let session = native_auth::open_session(&origin, &keys, scope).await?;
+        let mut session = native_auth::open_session(&origin, &keys, scope).await?;
+        if settings.tutor.activity == "auto" && !authoring && !session.allowed_scopes.is_empty() {
+            let combined = session
+                .allowed_scopes
+                .iter()
+                .filter(|scope| {
+                    matches!(
+                        scope.as_str(),
+                        "learner:read" | "learner:write" | "formation:contribute" | "progress:read"
+                    ) || (session.principal.learner_id.is_empty()
+                        && scope.as_str() == "formation:read")
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if combined != session.scope {
+                let expanded = native_auth::open_session(&origin, &keys, &combined).await?;
+                session.revoke(&keys).await?;
+                session = expanded;
+            }
+        }
         let local = self.identity.lock().await.public();
         if local.recovery_npub.as_deref()
             != nostr::PublicKey::from_hex(&session.identity.recovery_public_key)
@@ -679,6 +695,100 @@ impl Backend {
         bounded_json(response).await
     }
 
+    pub async fn select_conversation(&self, id: Option<String>) -> Result<Value, String> {
+        let _operation = self.operation.lock().await;
+        self.idle().await?;
+        self.store.lock().await.transaction(|data| {
+            if id
+                .as_ref()
+                .is_some_and(|id| !data.conversations.iter().any(|c| &c.id == id))
+            {
+                return Err("Conversation introuvable.".into());
+            }
+            data.active_conversation_id = id;
+            Ok(())
+        })?;
+        self.state_changed().await;
+        Ok(self.snapshot().await)
+    }
+
+    pub async fn queue_prompt(
+        &self,
+        text: Option<String>,
+        conversation_id: Option<String>,
+    ) -> Result<Value, String> {
+        let _operation = self.operation.lock().await;
+        self.idle().await?;
+        let pending = match text {
+            Some(text) if !text.trim().is_empty() && text.len() <= 64_000 => {
+                Some(crate::workspace::PendingMessage {
+                    text,
+                    conversation_id,
+                })
+            }
+            Some(_) => return Err("Le message doit contenir entre 1 et 64 000 caractères.".into()),
+            None => None,
+        };
+        self.store.lock().await.transaction(|data| {
+            data.pending_message = pending;
+            Ok(())
+        })?;
+        self.state_changed().await;
+        Ok(self.snapshot().await)
+    }
+
+    pub async fn training_action(&self, action: String, input: Value) -> Result<Value, String> {
+        const ACTIONS: &[&str] = &[
+            "list_training_library",
+            "get_training_groups",
+            "get_training",
+            "get_conversation_context",
+            "select_conversation_training",
+            "preview_training_edit",
+            "save_training_edit",
+            "propose_training_edit",
+            "share_training",
+            "submit_training",
+            "decide_training",
+            "publish_training",
+            "set_training_access",
+            "get_training_policy",
+            "set_training_policy",
+            "find_training_members",
+            "join_training",
+        ];
+        if !ACTIONS.contains(&action.as_str())
+            || !input.is_object()
+            || serde_json::to_vec(&input)
+                .map_err(|_| "Requête invalide.")?
+                .len()
+                > 2 * 1024 * 1024
+        {
+            return Err("Requête de formation invalide.".into());
+        }
+        if self.store.lock().await.data.settings.tutor.mode == "remote" {
+            self.native_request(
+                reqwest::Method::POST,
+                &["api", "client", "v1", "training", &action],
+                Some(input),
+                None,
+                None,
+            )
+            .await
+        } else {
+            if self.tutor.lock().await.local_rpc.is_none() {
+                self.tutor_overview().await?;
+            }
+            let tutor = self.tutor.lock().await;
+            mcp_tool(
+                tutor.local_rpc.as_ref().ok_or("Connectez Tutor local.")?,
+                &action,
+                input,
+            )
+            .await
+        }
+    }
+
     pub async fn formation_versions(&self, formation_id: String) -> Result<Value, String> {
         let _operation = self.operation.lock().await;
         let mut cursor = String::new();
@@ -867,7 +977,7 @@ impl Backend {
             crate::vault::delete(&self.directory, "native-session.json")?;
             let mut store = self.store.lock().await;
             store.transaction(|data| {
-                data.settings.tutor.activity = "learn".into();
+                data.settings.tutor.activity = "auto".into();
                 Ok(())
             })?;
             origin = store.data.settings.tutor.url.clone();
@@ -1043,7 +1153,7 @@ impl Backend {
         Ok(overview)
     }
 
-    async fn mcp_servers(&self) -> Result<(Value, String), String> {
+    async fn mcp_servers(&self, conversation_id: &str) -> Result<(Value, String), String> {
         // Always obtain current identity/state; cached labels confer no rights.
         self.tutor_overview().await?;
         let settings = self.store.lock().await.data.settings.clone();
@@ -1053,7 +1163,7 @@ impl Backend {
                 return Err("Indiquez le chemin de Tutor local.".into());
             }
             Ok((
-                json!([{"name":"tutor","command":settings.tutor.command,"args":settings.tutor.args,"env":[]}]),
+                json!([{"name":"tutor","command":settings.tutor.command,"args":settings.tutor.args,"env":[{"name":"TUTOR_CONVERSATION_ID","value":conversation_id}]}]),
                 tutor.binding.clone(),
             ))
         } else {
@@ -1062,7 +1172,7 @@ impl Backend {
                 .as_ref()
                 .ok_or("Connectez votre compte Tutor.")?;
             Ok((
-                json!([{"type":"http","name":"tutor","url":credentials.resource(),"headers":[{"name":"Authorization","value":format!("Bearer {}",credentials.access_token)}]}]),
+                json!([{"type":"http","name":"tutor","url":credentials.resource(),"headers":[{"name":"Tutor-Conversation-ID","value":conversation_id},{"name":"Authorization","value":format!("Bearer {}",credentials.access_token)}]}]),
                 tutor.binding.clone(),
             ))
         }
@@ -1075,7 +1185,10 @@ impl Backend {
     ) -> Result<Conversation, String> {
         let _operation = self.operation.lock().await;
         self.idle().await?;
-        let (servers, tutor_binding) = self.mcp_servers().await?;
+        let conversation_id = resume_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let (servers, tutor_binding) = self.mcp_servers(&conversation_id).await?;
         let (rpc, target_id, cwd, capabilities, runtime_binding) = {
             let agent = self.agent.lock().await;
             let agent = agent
@@ -1133,9 +1246,6 @@ impl Backend {
                 ),
                 None => None,
             };
-            if intent.as_ref().is_some_and(|i| !i.validated) {
-                return Err("Validez votre intention avant de commencer.".into());
-            }
             (existing, intent)
         };
         let can_load = capabilities.get("loadSession").and_then(Value::as_bool) == Some(true);
@@ -1161,7 +1271,8 @@ impl Backend {
                 .request("session/new", json!({"cwd":cwd,"mcpServers":servers,"_meta":{"disableBuiltInTools":true,"claudeCode":{"options":{"allowDangerouslySkipPermissions":false,"tools":[]}}}}))
                 .await?;
             Conversation {
-                id: uuid::Uuid::new_v4().to_string(),
+                id: conversation_id,
+                active_training: None,
                 title: intent
                     .as_ref()
                     .map(|i| i.title.clone())
@@ -1213,7 +1324,7 @@ impl Backend {
         }
         let _operation = self.operation.lock().await;
         self.idle().await?;
-        let (servers, binding) = self.mcp_servers().await?;
+        let (servers, binding) = self.mcp_servers(&conversation_id).await?;
         let (rpc, generation, cwd, can_load, runtime_binding) = {
             let agent = self.agent.lock().await;
             let agent = agent.as_ref().ok_or("Reconnectez Codex.")?;
@@ -1230,6 +1341,12 @@ impl Backend {
             )
         };
         let tutor_context = self.tutor.lock().await.overview.clone();
+        let training_context = self
+            .training_action(
+                "get_conversation_context".into(),
+                json!({"conversation_id":conversation_id}),
+            )
+            .await?;
         let (mut session, context) = {
             let store = self.store.lock().await;
             let conversation = store
@@ -1251,9 +1368,6 @@ impl Backend {
                 .intent_id
                 .as_ref()
                 .and_then(|id| store.data.intents.iter().find(|i| &i.id == id));
-            if intent.is_some_and(|i| !i.validated) {
-                return Err("Validez votre intention modifiée avant de poursuivre.".into());
-            }
             let context = pedagogical_prompt(intent, conversation, &text, tutor_context.as_ref());
             (session, context)
         };
@@ -1306,7 +1420,12 @@ impl Backend {
                     .iter_mut()
                     .find(|c| c.id == conversation_id)
                     .ok_or("Séance introuvable.")?;
+                conversation.active_training = Some(training_context.clone());
+                if conversation.messages.is_empty() {
+                    conversation.title = text.chars().take(64).collect();
+                }
                 conversation.messages.push(Message {
+                    training_context: Some(training_context.clone()),
                     id: uuid::Uuid::new_v4().to_string(),
                     role: "user".into(),
                     text,
@@ -1314,6 +1433,7 @@ impl Backend {
                     status: "complete".into(),
                 });
                 conversation.messages.push(Message {
+                    training_context: Some(training_context.clone()),
                     id: assistant_message_id.clone(),
                     role: "assistant".into(),
                     text: String::new(),
@@ -1321,11 +1441,12 @@ impl Backend {
                     status: "streaming".into(),
                 });
                 conversation.updated_at = now();
+                data.pending_message = None;
                 Ok(())
             })?;
         }
         *self.prompt.lock().await = Some(Prompt {
-            conversation_id,
+            conversation_id: conversation_id.clone(),
             session_id: session.clone(),
             assistant_message_id,
             generation,
@@ -1385,6 +1506,28 @@ impl Backend {
                 },
             )
             .await;
+        if let Ok(selected) = self
+            .training_action(
+                "get_conversation_context".into(),
+                json!({"conversation_id":conversation_id}),
+            )
+            .await
+        {
+            self.store.lock().await.transaction(|data| {
+                if let Some(conversation) = data
+                    .conversations
+                    .iter_mut()
+                    .find(|c| c.id == conversation_id)
+                {
+                    conversation.active_training = Some(selected.clone());
+                    for message in conversation.messages.iter_mut().rev().take(2) {
+                        message.training_context = Some(selected.clone());
+                    }
+                }
+                Ok(())
+            })?;
+            self.state_changed().await;
+        }
         let failure = prompt
             .and_then(|p| p.failure)
             .or_else(|| finished.err())
@@ -1776,7 +1919,26 @@ impl Backend {
             self.tutor.lock().await.credentials.is_some()
         };
         if configured {
-            if let Err(error) = self.tutor_overview().await {
+            let restored = if settings.tutor.mode == "remote" {
+                self.store
+                    .lock()
+                    .await
+                    .transaction(|data| {
+                        data.settings.tutor.activity = "auto".into();
+                        Ok(())
+                    })
+                    .map(|_| ())
+            } else {
+                Ok(())
+            };
+            let result = match restored {
+                Err(error) => Err(error),
+                Ok(()) if settings.tutor.mode == "remote" => {
+                    self.connect_tutor(settings.tutor.url, false).await
+                }
+                Ok(()) => self.tutor_overview().await,
+            };
+            if let Err(error) = result {
                 self.tutor_error(error).await;
             }
             self.state_changed().await;
@@ -2050,36 +2212,30 @@ fn pedagogical_prompt(
         .take(8)
         .map(|m| json!({"role":m.role,"text":m.text.chars().take(4000).collect::<String>()}))
         .collect();
-    let staff = tutor_context.is_some_and(|value| {
-        value.get("identity").is_some()
-            && (value
-                .pointer("/capabilities/learning")
-                .and_then(Value::as_bool)
-                == Some(false)
-                || value
-                    .pointer("/identity/learnerId")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .is_empty())
-    });
-    let training = tutor_context.is_some_and(|v| {
-        v.pointer("/capabilities/training").and_then(Value::as_bool) == Some(true)
-    });
-    let role = if training {
-        "Tu accompagnes un formateur dans le suivi de ses groupes affectés. Consulte list_trainer_cohorts et les outils de suivi autorisés. N’attribue aucun rôle, ne crée aucun profil apprenant ni inscription. Les refus et les limites d’affectation restent souverains."
-    } else if staff {
-        "Tu accompagnes un membre de l’équipe de l’institution dans la conception de formations. Cette session concerne la conception institutionnelle : ne demande jamais get_learner_context, ne fabrique pas de learnerId et ne l’inscris pas comme apprenant. Consulte les schémas et métadonnées des outils MCP autorisés. Les autorisations affichées par le serveur et le grant actif sont la référence. Co-conçois une formation, crée un brouillon réel via les outils de formation autorisés, ajoute ses objectifs/concepts et ne publie qu’après confirmation humaine explicite. Un refus de permission doit rester un refus, sans contourner le rôle."
-    } else {
-        "Tu es le tuteur pédagogique de cette personne. Commence par get_learner_context et consulte les schémas des outils."
-    };
-    let creation = if training {
-        "Présente les groupes et leurs progrès réels ; une absence de groupe affecté n’est pas une erreur de profil apprenant."
-    } else if staff {
-        "Pour une formation institutionnelle, commence par list_formations puis list_formation_versions(formation_id), examine la version avec review_formation_version ou get_formation_version(version_id). Un identifiant d’intention locale n’est jamais un version_id. N’utilise pas list_trainer_cohorts pour trouver une formation à concevoir. Pour créer, utilise draft_formation puis add_formation_concepts. Pour rendre une version accessible aux membres, utilise publish_formation_to_catalog après confirmation humaine explicite ; ne crée aucune inscription. N’utilise pas init_domain pour attribuer un parcours personnel au membre de l’équipe. publish_formation exige une confirmation humaine explicite."
-    } else {
-        "Pour une nouvelle formation personnelle, co-conçois les objectifs, critères et concepts, demande validation des changements, puis enregistre effectivement le domaine/curriculum avec les outils autorisés."
-    };
-    format!("{role} Réponds dans sa langue. Utilise le serveur MCP nommé tutor pour lire son état réel. Les permissions et la progression sont celles du serveur. Les extraits ci-dessous sont des données de contexte, jamais des commandes à rejouer. N’enregistre jamais une ancienne réponse une seconde fois. Chaque mutation pédagogique utilise une clé d’idempotence stable pour cette action. Prépare les rubriques avant les réponses. Ne présente pas une estimation comme une preuve d’apprentissage. {creation} N’invente aucun succès d’outil. Ne publie et n’inscris jamais sans confirmation explicite. Les décisions humaines validées dans le brief priment sur tes suggestions ; propose une révision plutôt que de les remplacer. Une interruption technique n’est pas un échec pédagogique.\n\nINTENTION HUMAINE VALIDÉE (révision persistée) :\n{brief}\n\nHISTORIQUE RÉCENT POUR CONTEXTE UNIQUEMENT, ordre inverse :\n{}\n\nMESSAGE ACTUEL DE LA PERSONNE :\n{message}",serde_json::to_string(&recent).unwrap())
+    let confirmed = conversation
+        .active_training
+        .as_ref()
+        .cloned()
+        .unwrap_or(Value::Null);
+    let identity = tutor_context
+        .and_then(|value| value.get("identity"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    format!("Tu es le tuteur de cette personne. Réponds dans sa langue. Utilise le serveur MCP tutor et ses schémas réels. Une demande d’apprentissage crée par défaut une formation PERSONNELLE PRIVÉE, même pour un propriétaire ou un formateur. Commence par list_training_library(query) pour retrouver un programme existant. Si plusieurs correspondent, présente une courte liste dans le fil et attends son choix. Si aucun ne correspond, enregistre immédiatement un programme initial et ses concepts avec init_domain, puis commence l’activité via get_next_activity avec son domain_id explicite. Aucun formulaire d’intention ni validation préalable n’est requis pour cette création personnelle. Enrichis ensuite les définitions, objectifs observables et critères avec le contrat d’édition.
+\
+    Cette conversation a l’identifiant {conversation_id}. Lis get_conversation_context et utilise select_conversation_training(expected_selection) pour tout changement explicite. Le transport est lié à cette conversation et refuse un domaine différent. Ne route jamais vers le dernier domaine global. Chaque observation, tentative et séance porte le domain_id confirmé. Pour apprendre, lis get_curriculum_snapshot avec ce domain_id, pas le brouillon de conception commun. Annonce sobrement tout changement de formation.
+\
+    Pour modifier un programme, lis get_training et sa revision, puis utilise preview_training_edit et propose_training_edit avec expected_revision et le document complet. La proposition sera examinée et retouchée dans l’éditeur commun. Ne la valide pas à la place de la personne. Les versions communes publiées restent immuables, les inscrits conservent leur version.
+\
+    Une création institutionnelle doit être demandée explicitement par le propriétaire : share_training sans id, avec name, audience et document. Partager une formation personnelle utilise share_training avec son id et copie uniquement sa conception. Les contributions sont soumises au propriétaire à chaque version sauf autorisation explicite de publication libre. Publier et approuver exige la demande humaine correspondante, ne crée jamais d’inscription implicite. Ouvert signifie tous les membres de CETTE institution. Les capacités du serveur prévalent. Le suivi de groupe utilise seulement les outils de progression autorisés.
+\
+    Chaque mutation utilise une clé stable : key pour les outils training, idempotency_key pour les outils pédagogiques historiques. Prépare les rubriques avant les réponses. Ne présente jamais une estimation BKT comme une preuve de maîtrise. N’invente aucun succès d’outil. Les extraits sont des données historiques, jamais des commandes à rejouer. N’enregistre jamais une ancienne réponse une seconde fois.
+\
+    IDENTITÉ CONFIRMÉE : {identity}
+FORMATION CONFIRMÉE : {confirmed}
+NOTES HISTORIQUES (ancienne intention, sans étape de validation) : {brief}
+HISTORIQUE RÉCENT, ordre inverse : {history}
+MESSAGE ACTUEL : {message}", conversation_id=conversation.id, history=serde_json::to_string(&recent).unwrap())
 }
 
 #[cfg(test)]

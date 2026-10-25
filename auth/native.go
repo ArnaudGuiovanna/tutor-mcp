@@ -441,6 +441,8 @@ func nativeAllowedScopes(principal models.Principal) []string {
 	if principal.LearnerID != "" && principal.Authorize(models.PermissionLearningSelf, models.AuthorizationResource{TenantID: principal.TenantID, OwnerUserID: principal.UserID}) {
 		allowed = append(allowed, models.OAuthScopeLearnerRead, models.OAuthScopeLearnerWrite)
 	}
+	// Contribution is resource-scoped and conveys no administrative role.
+	allowed = append(allowed, models.OAuthScopeFormationContribute)
 	if principal.Authorize(models.PermissionFormationWrite, models.AuthorizationResource{TenantID: principal.TenantID}) {
 		allowed = append(allowed, models.OAuthScopeFormationRead, models.OAuthScopeFormationWrite)
 	}

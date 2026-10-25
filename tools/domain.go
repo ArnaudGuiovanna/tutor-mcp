@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
+	"tutor-mcp/auth"
 	"tutor-mcp/engine"
 	"tutor-mcp/models"
 	storeport "tutor-mcp/store"
@@ -235,12 +237,13 @@ type ValueFramingsInput struct {
 
 type InitDomainParams struct {
 	IdempotentMutationParams
-	Name          string              `json:"name" jsonschema:"learning domain name"`
-	Concepts      []string            `json:"concepts" jsonschema:"list of domain concepts"`
-	Prerequisites map[string][]string `json:"prerequisites" jsonschema:"prerequisite graph (concept -> list of prerequisites)"`
-	PersonalGoal  string              `json:"personal_goal,omitempty" jsonschema:"learner's personal goal within this domain (optional)"`
-	ValueFramings *ValueFramingsInput `json:"value_framings,omitempty" jsonschema:"4 value axes (financial/employment/intellectual/innovation). 1-2 sentences per axis. Optional - can be filled in later."`
-	HighStakes    bool                `json:"high_stakes,omitempty" jsonschema:"mark regulated, clinical, legal, safety-critical, or other high-consequence learning; this safety classification cannot be unset through MCP"`
+	Details       map[string]CurriculumConceptDefinition `json:"details,omitempty" jsonschema:"initial definitions, observable outcomes, criteria and levels keyed by concept name; saved atomically before the first activity"`
+	Name          string                                 `json:"name" jsonschema:"learning domain name"`
+	Concepts      []string                               `json:"concepts" jsonschema:"list of domain concepts"`
+	Prerequisites map[string][]string                    `json:"prerequisites" jsonschema:"prerequisite graph (concept -> list of prerequisites)"`
+	PersonalGoal  string                                 `json:"personal_goal,omitempty" jsonschema:"learner's personal goal within this domain (optional)"`
+	ValueFramings *ValueFramingsInput                    `json:"value_framings,omitempty" jsonschema:"4 value axes (financial/employment/intellectual/innovation). 1-2 sentences per axis. Optional - can be filled in later."`
+	HighStakes    bool                                   `json:"high_stakes,omitempty" jsonschema:"mark regulated, clinical, legal, safety-critical, or other high-consequence learning; this safety classification cannot be unset through MCP"`
 }
 
 func registerInitDomain(server *mcp.Server, deps *Deps) {
@@ -329,6 +332,33 @@ func registerInitDomain(server *mcp.Server, deps *Deps) {
 				}
 			}
 
+			if len(params.Details) > 0 {
+				baseline, err := tx.EnsureCurriculumBaseline(ctx, learnerID, domain.ID)
+				if err != nil {
+					return err
+				}
+				next := models.CloneCurriculumSnapshot(baseline)
+				for key := range params.Details {
+					if !slices.Contains(params.Concepts, key) {
+						return fmt.Errorf("details key is not a declared concept")
+					}
+				}
+				for i := range next.Concepts {
+					if definition, ok := params.Details[next.Concepts[i].Key]; ok {
+						if definition.Label == "" {
+							definition.Label = next.Concepts[i].Label
+						}
+						if err = applyCurriculumDefinition(&next.Concepts[i], definition, false); err != nil {
+							return err
+						}
+					}
+				}
+				next.Operation = models.CurriculumOperation{Type: models.CurriculumOperationUpdateMetadata, Rationale: "initial programme definitions"}
+				if err = tx.CompareAndSwapCurriculum(ctx, learnerID, domain.ID, baseline.Version, next); err != nil {
+					return err
+				}
+				domain.GraphVersion++
+			}
 			// Initial phase is part of the same atomic unit: callers never
 			// observe a half-created graph or a NULL fallback phase.
 			states, err := tx.GetConceptStatesByDomain(ctx, learnerID, domain.ID)
@@ -350,7 +380,25 @@ func registerInitDomain(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
+		if conversationID := storeport.ConversationID(ctx); conversationID != "" {
+			p, _ := auth.GetPrincipal(ctx)
+			training, ok := deps.Store.(storeport.TrainingStore)
+			if !ok {
+				r, _ := errorResult("conversation context unavailable")
+				return r, nil, nil
+			}
+			selected, selectErr := training.TrainingAction(ctx, p, "get_conversation_context", models.TrainingRequest{ConversationID: conversationID})
+			if selectErr == nil {
+				c := selected.(*models.ConversationContext)
+				_, selectErr = training.TrainingAction(ctx, p, "select_conversation_training", models.TrainingRequest{ID: "personal:" + domain.ID, ConversationID: conversationID, ExpectedSelection: &c.SelectionVersion, Key: "init-selection:" + domain.ID})
+			}
+			if selectErr != nil {
+				r, _ := safeErrorResult(deps.Logger, "failed to select training", selectErr)
+				return r, nil, nil
+			}
+		}
 		response := map[string]interface{}{
+			"training_id":            "personal:" + domain.ID,
 			"domain_id":              domain.ID,
 			"curriculum_version":     domain.GraphVersion,
 			"high_stakes":            domain.HighStakes,

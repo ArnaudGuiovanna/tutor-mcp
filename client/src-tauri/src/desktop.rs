@@ -35,6 +35,32 @@ async fn rename_profile(backend: AppBackend<'_>, label: String) -> Result<Value,
 }
 
 #[tauri::command]
+async fn select_conversation(backend: AppBackend<'_>, id: Option<String>) -> Result<Value, String> {
+    backend.current().await.select_conversation(id).await
+}
+
+#[tauri::command]
+async fn training_action(
+    backend: AppBackend<'_>,
+    action: String,
+    input: Value,
+) -> Result<Value, String> {
+    backend.current().await.training_action(action, input).await
+}
+#[tauri::command]
+async fn queue_prompt(
+    backend: AppBackend<'_>,
+    text: Option<String>,
+    conversation_id: Option<String>,
+) -> Result<Value, String> {
+    backend
+        .current()
+        .await
+        .queue_prompt(text, conversation_id)
+        .await
+}
+
+#[tauri::command]
 async fn formation_versions(
     backend: AppBackend<'_>,
     formation_id: String,
@@ -343,6 +369,9 @@ fn command_handler<R: tauri::Runtime>(
         publish_formation_to_catalog,
         clone_formation_version,
         enable_learning,
+        training_action,
+        queue_prompt,
+        select_conversation,
         load_state,
         discover_agents,
         save_settings,

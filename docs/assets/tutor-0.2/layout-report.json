@@ -1,0 +1,47 @@
+{
+  "fixtureOnly": true,
+  "checks": [
+    {
+      "name": "conversation",
+      "width": 1440,
+      "document": 1440,
+      "overflows": []
+    },
+    {
+      "name": "formations",
+      "width": 1440,
+      "document": 1440,
+      "overflows": []
+    },
+    {
+      "name": "programme",
+      "width": 1440,
+      "document": 1440,
+      "overflows": []
+    },
+    {
+      "name": "programme-compact",
+      "width": 360,
+      "document": 360,
+      "overflows": []
+    },
+    {
+      "name": "conversation-compact",
+      "width": 360,
+      "document": 360,
+      "overflows": []
+    },
+    {
+      "name": "conversation-zoom-400",
+      "width": 320,
+      "document": 320,
+      "overflows": []
+    },
+    {
+      "name": "long-code-table",
+      "width": 360,
+      "document": 360,
+      "overflows": []
+    }
+  ]
+}

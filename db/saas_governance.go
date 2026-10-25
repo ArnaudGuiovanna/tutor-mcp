@@ -474,7 +474,7 @@ var dsarErasurePhases = []string{
 	// Revoke live access before deleting even the first credential or data row.
 	"revoke_access",
 	"refresh_tokens", "oauth_codes", "login_challenges", "account_tokens", "learner_approved_clients",
-	"native_challenges", "native_sessions",
+	"native_challenges", "native_sessions", "conversation_contexts", "training_proposals", "training_receipts",
 	"concept_bkt_estimates", "collective_weight_applications", "learning_badge_evidence", "learning_badges",
 	"webhook_delivery_transitions", "webhook_push_log", "webhook_message_queue",
 	"narrative_mutations", "narrative_objects", "pedagogical_snapshots",
@@ -505,12 +505,12 @@ var dsarLearnerTables = map[string]string{
 	"pending_consolidations": "learner_id", "tool_call_idempotency": "learner_id",
 	"refresh_tokens": "learner_id", "oauth_codes": "learner_id", "login_challenges": "learner_id",
 	"account_tokens": "learner_id", "learner_approved_clients": "learner_id",
-	"native_challenges": "learner_id", "native_sessions": "learner_id",
+	"native_challenges": "learner_id", "native_sessions": "learner_id", "conversation_contexts": "learner_id", "training_proposals": "learner_id", "training_receipts": "learner_id",
 }
 
 // dsarLatePhases are appended to requests created before they existed.
 var dsarLatePhases = []string{
-	"native_challenges", "native_sessions",
+	"native_challenges", "native_sessions", "conversation_contexts", "training_proposals", "training_receipts",
 	"revoke_access",
 	"refresh_tokens", "oauth_codes", "login_challenges", "account_tokens", "learner_approved_clients",
 	"learner_concept_states", "calibration_records", "pending_consolidations", "tool_call_idempotency",

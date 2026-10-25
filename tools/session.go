@@ -66,6 +66,14 @@ func registerStartLearningSession(server *mcp.Server, deps *Deps) {
 				return r, nil, nil
 			}
 		}
+		if storeport.ConversationID(ctx) != "" && params.DomainID == "" {
+			selected, err := resolveDomain(ctx, deps.Store, learnerID, "")
+			if err != nil {
+				r, _ := errorResult(err.Error())
+				return r, nil, nil
+			}
+			params.DomainID = selected.ID
+		}
 		if params.DomainID != "" {
 			if _, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID); err != nil {
 				r, _ := errorResult("domain not found")

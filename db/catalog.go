@@ -57,6 +57,21 @@ func (s *Store) CreateFormationDraft(ctx context.Context, actor models.Principal
 			formationID, actor.UserID, now); err != nil {
 			return fmt.Errorf("insert formation version: %w", err)
 		}
+		// Older administrative clients use this entry point too. Their new
+		// contributions follow the same owner review policy as the unified API.
+		var installed int
+		if err := txs.queryRow(txCtx, `SELECT COUNT(*) FROM schema_migrations WHERE version IN ('0082_conversation_training','postgres_0074_conversation_training')`).Scan(&installed); err != nil {
+			return err
+		}
+		if installed > 0 && actor.TenantID != models.LegacyTenantID {
+			kind := "shared"
+			if trainingOwner(actor) {
+				kind = "institutional"
+			}
+			if _, err := txs.exec(txCtx, `INSERT INTO training_workflows(tenant_id,formation_id,author_id,kind) VALUES(?,?,?,?)`, actor.TenantID, formationID, actor.UserID, kind); err != nil {
+				return err
+			}
+		}
 		return txs.AppendAuditEvent(txCtx, actor, models.AuditEvent{
 			Action: "formation.create", TargetType: "formation", TargetID: formationID,
 		})
@@ -197,6 +212,23 @@ func (s *Store) PublishFormationVersion(ctx context.Context, actor models.Princi
 		if f.Status == "archived" {
 			return storeport.ErrFormationVersionImmutable
 		}
+		// Historical migration fixtures can publish before the contribution
+		// schema exists. Apply this policy only once that migration is installed.
+		var installed int
+		if err := txs.queryRow(txCtx, `SELECT COUNT(*) FROM schema_migrations WHERE version IN ('0082_conversation_training','postgres_0074_conversation_training')`).Scan(&installed); err != nil {
+			return err
+		}
+		if installed > 0 {
+			var free int
+			policyErr := txs.queryRow(txCtx, `SELECT free_publication FROM training_workflows WHERE tenant_id=? AND formation_id=?`, actor.TenantID, f.ID).Scan(&free)
+			if !trainingOwner(actor) && free != 1 && (policyErr == nil || actor.TenantID != models.LegacyTenantID) {
+				return storeport.ErrInvalidPrincipal
+			}
+			if policyErr != nil && policyErr != sql.ErrNoRows {
+				return policyErr
+			}
+		}
+
 		var formationID, metadata, createdBy string
 		var version int64
 		var createdAt time.Time

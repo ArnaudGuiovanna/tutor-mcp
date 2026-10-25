@@ -28,6 +28,9 @@ func (s *Store) curriculumReviewDomain(ctx context.Context, actor models.Princip
 	query := `SELECT d.learner_id,d.graph_version FROM domains d JOIN learners l ON l.id = d.learner_id AND l.tenant_id = d.tenant_id
  WHERE d.id = ? AND d.tenant_id = ? AND l.user_id <> ?`
 	args := []any{domainID, actor.TenantID, actor.UserID}
+	if actor.TenantID != models.LegacyTenantID {
+		query += ` AND d.formation_enrollment_id IS NOT NULL AND d.formation_enrollment_id <> ''`
+	}
 	if formationGlobalAccess(actor) == 0 && slicesContains(actor.Roles, models.RolePedagogyManager) {
 		query += ` AND EXISTS (SELECT 1 FROM legacy_domain_enrollments de
  JOIN enrollments e ON e.tenant_id = de.tenant_id AND e.id = de.enrollment_id

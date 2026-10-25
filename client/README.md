@@ -9,23 +9,25 @@ exécuté nativement ou dans une distribution **WSL2** choisie explicitement.
 
 - Connexions séparées à Codex et à Tutor, avec état réel et erreurs explicites.
 - Détection de l’adaptateur et de Codex sur Windows et dans WSL2 ; chemin manuel.
-- Intention personnelle révisable, validation humaine et conservation locale.
+- Accueil Conversation : écrire ce que vous souhaitez apprendre crée un programme personnel privé et permet de commencer immédiatement.
 - Conception et tutorat avec les vrais outils MCP, formations et catalogue du
   serveur, conversation progressive, permissions explicites et interruption.
 - Conservation des échanges sur l’appareil et reprise de la séance agent avec
   le même compte Tutor. Les réponses interrompues restent identifiées comme telles.
 
-Une intention locale devient un parcours pédagogique quand l’agent l’enregistre
-effectivement dans Tutor. Les inscriptions, les permissions et les observations
+Les programmes sont enregistrés dans Tutor dès le premier échange. La bibliothèque
+Formations provient d’une projection serveur paginée et recherchable. Les inscriptions, les permissions et les observations
 restent contrôlées par le serveur. Les estimations ne constituent pas une preuve
 de maîtrise. Le client ne crée ni votes ni publication communautaire inexistants.
 
 ## Installation Windows et Codex
 
-Le workflow **Client → Client (Windows)** construit un installateur NSIS et
-conserve l’artefact `tutor-client-windows-x64-<commit>` pendant 14 jours. Il teste
-l’installation et la création d’une fenêtre native ; une compilation locale
-Linux ne vaut pas qualification Windows. Les installateurs de développement
+L’installateur **0.2.0** est distribué comme asset de release avec un
+[lien durable](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/tutor-client-v0.2.0/Tutor_0.2.0_x64-setup.exe).
+Le workflow **Client → Client (Windows)** construit NSIS, vérifie les agents
+embarqués, installe l’application et teste sa fenêtre ainsi que son arbre
+UI Automation et la saisie au clavier. Le rapport est conservé avec l’artefact CI.
+Une compilation Linux ne qualifie pas Windows. Les installateurs de développement
 ne sont pas signés avec un certificat commercial.
 
 **Codex Desktop n’est pas requis.** Le processus lancé est l’adaptateur
@@ -126,29 +128,45 @@ de travail. Un changement termine l’agent et révoque l’accès Tutor du comp
 précédent. Un compte déjà connecté retrouve l’institution par une nouvelle signature
 lors de sa sélection. Le compte historique reste dans son dossier d’origine.
 
-Les activités **Concevoir et publier**, **Accompagner mes groupes**, **Apprendre**
-ouvrent des sessions avec les seules permissions utiles. Elles n’accordent aucun
-rôle propriétaire ou formateur. Un responsable doit autoriser les clés des
-nouveaux comptes dans l’institution. Un membre d’équipe peut explicitement
-**Activer mon espace apprenant** : seul son rôle apprenant personnel est ajouté,
-ses droits d’équipe sont conservés et aucune inscription n’est créée.
+Les deux destinations principales sont **Conversation** et **Formations**.
+La dernière conversation du compte est reprise à l’ouverture. Son historique
+reste vertical dans la sidebar ; une nouvelle conversation est toujours accessible.
+Le compte, l’identité, les agents et l’institution ont leurs propres pages.
+Les anciennes intentions sont conservées dans les notes historiques du compte.
 
-Dans **Mes formations**, utilisez **Créer une formation** pour obtenir un vrai
-brouillon, puis **Concevoir avec mon agent** pour construire le programme. Le
-bouton **Examiner et publier** retrouve les versions réelles à partir de la
-formation, affiche modules, objectifs, critères et blocages. Après examen et
-confirmation, **Publier dans mon institution** publie la version et ouvre une
-offre dans le catalogue de tous les membres. Chacun s’inscrit volontairement.
-Une publication ultérieure remplace l’offre automatique du catalogue ; les
-apprenants déjà inscrits conservent leur version et leur progression. Une
-version publiée est immuable : préparez une nouvelle version pour la modifier.
-Un identifiant d’intention locale ne doit jamais être utilisé comme `version_id`.
+Écrire « Je veux apprendre le Go » recherche d’abord un programme existant,
+puis enregistre un programme personnel privé et ses concepts si nécessaire.
+Aucun formulaire d’intention n’est requis. Un propriétaire ou formateur qui
+commence à apprendre obtient son espace apprenant sans modifier ses droits d’équipe.
+Les permissions de session utiles sont demandées avec la même identité.
+Une configuration incomplète conserve le message **À envoyer** sur l’appareil ;
+la connexion se termine dans cette fenêtre, puis le message reprend une seule fois.
 
-La conversation occupe l’espace disponible, avec un texte de 20 px sur écran
-standard, titres, listes, emphase, tableaux et liens. Les repères se déplient en
-panneau flottant. Navigation clavier, lien d’évitement, focus visible, mouvement
-réduit et reflow sont pris en compte ; cela ne constitue pas un audit de
-conformité RGAA complet.
+Chaque conversation possède un contexte serveur avec sa formation active.
+Les changements sont explicites et les tours conservent leur référence pédagogique.
+Un domaine différent est refusé tant qu’il n’a pas été sélectionné dans cette
+conversation. Les changements d’institution ou de compte ne rejouent aucun échange.
+
+La fiche formation remplace la zone centrale et propose **Programme**,
+**Progression**, **Partage et accès**. L’édition manuelle et **Modifier avec l’agent**
+utilisent le même éditeur et la même prévisualisation serveur. Un conflit conserve
+le texte à examiner ; il ne remplace pas silencieusement la version récente.
+**Valider les modifications**, **Soumettre au propriétaire** et **Publier dans
+l’institution** sont des actions distinctes.
+
+Partager un programme personnel crée une copie de sa conception. Les échanges
+et la progression privés restent séparés. Les contributions requièrent une
+validation du propriétaire à chaque révision, sauf publication libre explicitement
+autorisée pour cette formation. **Approuver et publier** est atomique.
+Les offres nominatives restent cachées aux non-invités. « Tous les membres »
+désigne uniquement les membres de l’institution. Les versions communes publiées
+sont immuables et les inscrits conservent leur version jusqu’à une migration explicite.
+
+Le texte de conversation mesure 20 px, avec interligne 1,65 et taille réglable
+de 16 à 24 px dans le compte. Le code revient à la ligne et sa copie conserve
+les caractères originaux. Les tableaux trop larges deviennent verticaux.
+Les réglages et formations utilisent la même surface sombre. Voir le
+[contrat et les captures de référence](../docs/tutor-conversation-formations.md).
 
 La rotation exige l’approbation de la clé de récupération actuelle, lue
 temporairement depuis la sauvegarde hors ligne. Une clé active volée ne peut donc

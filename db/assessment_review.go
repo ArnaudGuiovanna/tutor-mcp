@@ -41,11 +41,15 @@ func (s *Store) assessmentReviewAccess(ctx context.Context, actor models.Princip
 		return "", nil, err
 	}
 	args := []any{actor.TenantID, actor.UserID}
+	from := assessmentReviewFrom
+	if actor.TenantID != models.LegacyTenantID {
+		from += ` AND EXISTS (SELECT 1 FROM formation_versions v JOIN formations f ON f.tenant_id=v.tenant_id AND f.id=v.formation_id WHERE v.tenant_id=e.tenant_id AND v.id=e.formation_version_id AND ` + institutionalFormationSQL + `)`
+	}
 	if formationGlobalAccess(actor) == 1 {
-		return assessmentReviewFrom, args, nil
+		return from, args, nil
 	}
 	if slicesContains(actor.Roles, models.RolePedagogyManager) {
-		return assessmentReviewFrom + ` AND (EXISTS (
+		return from + ` AND (EXISTS (
  SELECT 1 FROM formation_versions fv JOIN formations f ON f.tenant_id = fv.tenant_id AND f.id = fv.formation_id
  WHERE fv.tenant_id = e.tenant_id AND fv.id = e.formation_version_id AND ` + formationVisibilitySQL(actor, "f") + `)
  OR EXISTS (SELECT 1 FROM cohort_trainers ct WHERE ct.tenant_id = e.tenant_id AND ct.cohort_id = e.cohort_id AND ct.membership_id = ?))`,
@@ -54,7 +58,7 @@ func (s *Store) assessmentReviewAccess(ctx context.Context, actor models.Princip
 	if !slicesContains(actor.Roles, models.RoleTrainer) {
 		return "", nil, storeport.ErrInvalidPrincipal
 	}
-	return assessmentReviewFrom + ` AND EXISTS (
+	return from + ` AND EXISTS (
  SELECT 1 FROM cohort_trainers ct WHERE ct.tenant_id = a.tenant_id
    AND ct.cohort_id = e.cohort_id AND ct.membership_id = ?)`, append(args, actor.MembershipID), nil
 }

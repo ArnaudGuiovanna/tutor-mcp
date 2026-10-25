@@ -129,6 +129,10 @@ type Overview struct {
 }
 
 func (api *API) handle(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, TrainingPath) {
+		api.training(w, r)
+		return
+	}
 	if r.URL.Path == LearningActivationPath {
 		api.enableLearning(w, r)
 		return
@@ -151,8 +155,9 @@ func (api *API) handle(w http.ResponseWriter, r *http.Request) {
 		actor.Authorize(models.PermissionLearningSelf, models.AuthorizationResource{TenantID: actor.TenantID, OwnerUserID: actor.UserID})
 	canViewAuthoring := auth.HasOAuthScope(r.Context(), models.OAuthScopeFormationRead) &&
 		actor.Authorize(models.PermissionFormationWrite, models.AuthorizationResource{TenantID: actor.TenantID})
+	canContribute := auth.HasOAuthScope(r.Context(), models.OAuthScopeFormationContribute)
 	canTrain := auth.HasOAuthScope(r.Context(), models.OAuthScopeProgressRead) && actor.CanReadInstitutionProgress()
-	if !canLearn && !canViewAuthoring && !canTrain {
+	if !canLearn && !canViewAuthoring && !canTrain && !canContribute {
 		w.Header().Set("WWW-Authenticate", `Bearer error="insufficient_scope", scope="learner:read"`)
 		writeError(w, http.StatusForbidden, "forbidden")
 		return

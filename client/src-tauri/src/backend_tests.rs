@@ -232,15 +232,20 @@ async fn full_client_flow_persists_last_chunk_and_resumes_without_replay() {
 }
 
 #[tokio::test]
-async fn unvalidated_brief_and_stale_revision_are_rejected() {
+async fn historical_unvalidated_brief_is_preserved_without_blocking_conversation() {
     let directory = tempfile::tempdir().unwrap();
     let (backend, _) = connected(directory.path()).await;
     let id = intent(&backend, false).await;
-    assert!(backend.start_conversation(Some(id), None).await.is_err());
-    assert!(backend.snapshot().await["conversations"]
-        .as_array()
-        .unwrap()
-        .is_empty());
+    let conversation = backend
+        .start_conversation(Some(id.clone()), None)
+        .await
+        .unwrap();
+    assert_eq!(conversation.intent_id.as_deref(), Some(id.as_str()));
+    backend
+        .send_prompt(conversation.id, "Commençons".into())
+        .await
+        .unwrap();
+    assert_eq!(backend.snapshot().await["intents"][0]["validated"], false);
     backend.shutdown().await;
 }
 
@@ -870,6 +875,7 @@ async fn backup_export_and_confirmation_broadcast_the_public_identity_state() {
 #[test]
 fn staff_authoring_prompt_never_invents_a_learner() {
     let conversation = Conversation {
+        active_training: None,
         id: "staff-session".into(),
         title: "Formation institution".into(),
         intent_id: None,
@@ -888,23 +894,12 @@ fn staff_authoring_prompt_never_invents_a_learner() {
         "Concevoir une formation",
         Some(&overview),
     );
-    assert!(prompt.contains("ne demande jamais get_learner_context"));
-    assert!(!prompt.contains("Commence par get_learner_context"));
-    assert!(prompt.contains("ne publie qu’après confirmation humaine explicite"));
-    assert!(prompt.contains("draft_formation puis add_formation_concepts"));
-    assert!(!prompt.contains("Pour une nouvelle formation personnelle"));
-    let mut dual_role = overview;
-    dual_role["identity"]["learnerId"] = json!("actual-learner");
-    dual_role["identity"]["roles"] = json!(["owner", "learner"]);
-    dual_role["capabilities"]["learning"] = json!(false);
-    let design = pedagogical_prompt(None, &conversation, "Concevoir", Some(&dual_role));
-    assert!(design.contains("draft_formation puis add_formation_concepts"));
-    assert!(!design.contains("Commence par get_learner_context"));
-    dual_role["capabilities"]["learning"] = json!(true);
-    dual_role["capabilities"]["formationAuthoring"] = json!(false);
-    let learning = pedagogical_prompt(None, &conversation, "Apprendre", Some(&dual_role));
-    assert!(learning.contains("Commence par get_learner_context"));
-    assert!(!learning.contains("draft_formation puis add_formation_concepts"));
+    assert!(prompt.contains("PERSONNELLE PRIVÉE"));
+    assert!(prompt.contains("Aucun formulaire d’intention"));
+    assert!(prompt.contains("select_conversation_training"));
+    assert!(prompt.contains("propose_training_edit"));
+    assert!(prompt.contains("création institutionnelle doit être demandée explicitement"));
+    assert!(prompt.contains("staff-session"));
 }
 
 #[tokio::test]
@@ -1038,7 +1033,12 @@ async fn expiring_native_session_signs_again_and_installs_new_mcp_headers_before
     )
     .unwrap();
     assert_eq!(
-        captured[conversation.agent_session_id.unwrap()]["mcpServers"][0]["headers"][0]["value"],
+        captured[conversation.agent_session_id.unwrap()]["mcpServers"][0]["headers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|header| header["name"] == "Authorization")
+            .unwrap()["value"],
         "Bearer new-native-session-token"
     );
     let state = backend.snapshot().await;
@@ -1066,4 +1066,51 @@ async fn expiring_native_session_signs_again_and_installs_new_mcp_headers_before
     let NativeCredential::NativeIdentity(saved) = credential;
     assert_eq!(saved.access_token, "new-native-session-token");
     backend.shutdown().await;
+}
+
+#[tokio::test]
+async fn queued_message_survives_restart_and_is_consumed_with_one_user_turn() {
+    let directory = tempfile::tempdir().unwrap();
+    let (backend, _) = connected(directory.path()).await;
+    backend
+        .queue_prompt(Some("Je veux apprendre le Go".into()), None)
+        .await
+        .unwrap();
+    backend.shutdown().await;
+    drop(backend);
+    let (resumed, _) = connected(directory.path()).await;
+    assert_eq!(
+        resumed.snapshot().await["pendingMessage"]["text"],
+        "Je veux apprendre le Go"
+    );
+    let conversation = resumed.start_conversation(None, None).await.unwrap();
+    resumed
+        .send_prompt(conversation.id.clone(), "Je veux apprendre le Go".into())
+        .await
+        .unwrap();
+    let snapshot = resumed.snapshot().await;
+    assert!(snapshot["pendingMessage"].is_null());
+    assert_eq!(
+        snapshot["conversations"][0]["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        snapshot["conversations"][0]["title"],
+        "Je veux apprendre le Go"
+    );
+    assert!(snapshot["conversations"][0]["messages"][0]["trainingContext"].is_object());
+    resumed.select_conversation(None).await.unwrap();
+    assert!(resumed.snapshot().await["activeConversationId"].is_null());
+    resumed
+        .select_conversation(Some(conversation.id.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        resumed.snapshot().await["activeConversationId"],
+        conversation.id
+    );
+    resumed.shutdown().await;
 }

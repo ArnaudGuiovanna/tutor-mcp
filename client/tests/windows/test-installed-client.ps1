@@ -41,6 +41,10 @@ try {
     Start-Sleep -Seconds 2
     $application.Refresh()
     if ($application.HasExited) { throw "Le client s’est arrêté après la création de la fenêtre." }
+    $accessibility = Join-Path $PSScriptRoot 'test-accessibility.ps1'
+    $report = Join-Path $env:TEMP 'tutor-client-accessibility.json'
+    & powershell.exe -NoProfile -STA -File $accessibility -NativeHandle $window.ToInt64() -Report $report
+    if ($LASTEXITCODE -ne 0) { throw 'La navigation accessible du client installé a échoué.' }
     Write-Host "Installation et démarrage Windows réussis : $($application.MainWindowTitle)"
 } finally {
     if ($null -ne $application) {

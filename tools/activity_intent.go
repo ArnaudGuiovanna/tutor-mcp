@@ -43,6 +43,9 @@ func normalizeActivityIntent(raw string) (string, error) {
 }
 
 func resolveActivityDomain(ctx context.Context, store storeport.Store, learnerID, domainID, domainName string) (*models.Domain, error) {
+	if storeport.ConversationID(ctx) != "" {
+		return resolveDomain(ctx, store, learnerID, domainID)
+	}
 	if domainID != "" || strings.TrimSpace(domainName) == "" {
 		if domainID == "" {
 			if d, err := resolveCriticalRetentionDomain(ctx, store, learnerID); err != nil {

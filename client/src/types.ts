@@ -41,9 +41,11 @@ export interface Message {
   text: string;
   createdAt: string;
   status: 'complete' | 'streaming' | 'interrupted' | 'error';
+  trainingContext?: ConversationContext;
 }
 
 export interface Conversation {
+  activeTraining?: ConversationContext;
   id: string;
   title: string;
   intentId?: string;
@@ -62,6 +64,7 @@ export interface TutorStatus {
 }
 
 export interface Snapshot {
+  pendingMessage?: { text: string; conversationId?: string } | null;
   profileEpoch?: number;
   profile?: { id: string; label: string; npub?: string };
   profiles?: { id: string; label: string; npub?: string }[];
@@ -144,4 +147,31 @@ export interface FormationReview {
     concepts: { id: string; stable_key: string; module_stable_key: string; label: string; description?: string; level?: string; outcomes?: { id: string; statement: string; observable?: string }[]; criteria?: { id: string; description: string; evidence?: string }[]; prerequisites?: string[] }[];
   };
   publishable: boolean; issues: string[]; catalog_available?: boolean; catalog_cohort_id?: string;
+}
+
+export interface ConversationContext {
+  conversation_id: string; training_id: string; domain_id: string; revision: string; selection_version: number; name: string;
+}
+export interface Training {
+  id: string; learning_version_id?: string; kind: 'personal' | 'institutional' | 'shared'; name: string; description: string;
+  domain_id?: string; formation_id?: string; version_id?: string; cohort_id?: string; revision: string; status: string; audience: string; author_id: string;
+  can_edit: boolean; can_publish: boolean; can_review: boolean; can_learn: boolean; can_share: boolean; free_publication: boolean;
+  progress: { concept: string; mastery: number; last_review?: string; next_review?: string }[];
+}
+export interface TrainingPage { items: Training[]; next_after: string }
+export interface CurriculumConcept {
+  id: string; key: string; label: string; description?: string; level: string; status: string;
+  outcomes: { id: string; statement: string; observable?: string }[];
+  criteria: { id: string; description: string; evidence?: string }[];
+}
+export interface TrainingProgramme {
+  training: Training;
+  curriculum?: { domain_id: string; version: number; parent_version?: number; graph: { concepts: string[]; prerequisites: Record<string, string[]> }; concepts: CurriculumConcept[]; [key: string]: unknown };
+  modules: { stable_key: string; title: string; position: number; metadata_json?: string }[];
+  concepts: { module_stable_key: string; stable_key: string; label: string; description?: string; level?: string; position: number; prerequisites?: string[]; outcomes?: CurriculumConcept['outcomes']; criteria?: CurriculumConcept['criteria']; metadata_json?: string }[];
+}
+export interface TrainingDocument extends TrainingProgramme {
+  proposal?: { id: string; expected_revision: string; document: TrainingProgramme };
+  submission?: { id: string; version_id: string; revision: string; status: string; reason: string; author_id: string };
+  calibration?: { minimum_contributors: number; minimum_observations: number; source: string; available_concepts: string[] };
 }

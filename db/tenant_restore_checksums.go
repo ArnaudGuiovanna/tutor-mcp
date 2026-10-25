@@ -24,6 +24,7 @@ type tenantChecksumSpec struct{ table string }
 // status and timestamps. The coverage test inventories the remaining tables and
 // requires an explicit reason for each deliberate table-level exclusion.
 var tenantChecksumSpecs = []tenantChecksumSpec{
+	{"training_receipts"}, {"conversation_contexts"}, {"training_workflows"}, {"training_submissions"}, {"training_proposals"},
 	{"concept_bkt_estimates"}, {"concept_collective_weights"}, {"collective_weight_applications"},
 	{"learning_badges"}, {"learning_badge_evidence"}, {"interactions"}, {"concept_states"},
 	{"assessment_attempts"}, {"assessment_reviews"}, {"assessment_adjudications"},
