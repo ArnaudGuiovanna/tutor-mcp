@@ -26,6 +26,7 @@ npm --prefix client run check
 npm --prefix client test
 npm --prefix client run build
 python3 -B -m unittest discover -s client/scripts -p test_collect_notices.py
+python3 -B -m unittest discover -s client/scripts -p test_packaged_agents.py
 cargo fmt --manifest-path client/src-tauri/Cargo.toml --check
 cargo clippy --manifest-path client/src-tauri/Cargo.toml --locked --no-default-features --features qualification --all-targets -- -D warnings
 cargo test --manifest-path client/src-tauri/Cargo.toml --locked --no-default-features --features qualification

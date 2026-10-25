@@ -26,7 +26,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Les notices installées sont absentes, incomplètes ou altérées.' }
     $agentVerifier = (Resolve-Path (Join-Path $PSScriptRoot '../../scripts/verify-packaged-agents.py')).Path
     & python $agentVerifier (Join-Path $installRoot 'agents')
-    if ($LASTEXITCODE -ne 0) { throw 'Les agents installés ne fonctionnent pas sans Node externe.' }
+    if ($LASTEXITCODE -ne 0) { throw 'La qualification des agents installés a échoué ; voir le détail ci-dessus.' }
     $application = Start-Process -FilePath $binary -PassThru
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
     $window = [IntPtr]::Zero

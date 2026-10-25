@@ -6,7 +6,9 @@ use crate::backend::Backend;
 use crate::discovery::AgentTarget;
 use crate::profiles::ClientProfiles;
 use crate::workspace::{LearningIntent, Settings};
-use serde_json::{json, Value};
+#[cfg(all(test, windows))]
+use serde_json::json;
+use serde_json::Value;
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
