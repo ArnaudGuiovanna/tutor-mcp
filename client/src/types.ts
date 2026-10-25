@@ -103,6 +103,7 @@ export interface PublicIdentity {
   npub?: string;
   recoveryNpub?: string;
   backupConfirmed: boolean;
+  backupExported?: boolean;
   needsBackup: boolean;
 }
 

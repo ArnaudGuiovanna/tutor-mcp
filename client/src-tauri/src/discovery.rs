@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
 const NATIVE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -187,7 +187,8 @@ pub async fn launch_spec(target: &AgentTarget, cwd: &str) -> Result<LaunchSpec, 
                     },
                     WSL_TIMEOUT,
                 )
-                .await?;
+                .await
+                .map_err(|error| format!("Vérification des distributions WSL2 : {error}"))?;
                 let distro = target.distribution.as_deref().unwrap_or_default();
                 if !parse_wsl_distributions(&decode_command_output(&output))
                     .iter()
@@ -409,7 +410,9 @@ pub async fn agent_cwd(target: &AgentTarget, cwd: &str) -> Result<String, String
                 return Err("Le lancement WSL est disponible depuis Windows.".into());
             }
             let spec = wsl_cwd_probe(&wsl_program(), target, cwd)?;
-            let output = run_probe(spec, Duration::from_secs(8)).await?;
+            let output = run_probe(spec, Duration::from_secs(8))
+                .await
+                .map_err(|error| format!("Vérification du dossier de travail WSL : {error}"))?;
             let text =
                 String::from_utf8(output).map_err(|_| "Réponse WSL invalide.".to_string())?;
             let resolved = text
@@ -896,6 +899,19 @@ fn is_windows_absolute(value: &str) -> bool {
         || value.starts_with("\\\\")
 }
 
+async fn read_probe_output(output: impl AsyncRead + Unpin) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    output
+        .take(MAX_PROBE_OUTPUT + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|_| "Lecture du processus impossible.".to_string())?;
+    if bytes.len() as u64 > MAX_PROBE_OUTPUT {
+        return Err("Sortie de détection trop volumineuse.".into());
+    }
+    Ok(bytes)
+}
+
 async fn run_probe(spec: LaunchSpec, deadline: Duration) -> Result<Vec<u8>, String> {
     let mut command = Command::new(&spec.program);
     command
@@ -903,7 +919,7 @@ async fn run_probe(spec: LaunchSpec, deadline: Duration) -> Result<Vec<u8>, Stri
         .envs(spec.env.iter().map(|(key, value)| (key, value)))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .kill_on_drop(true);
     if let Some(cwd) = spec.cwd {
         command.current_dir(cwd);
@@ -917,22 +933,38 @@ async fn run_probe(spec: LaunchSpec, deadline: Duration) -> Result<Vec<u8>, Stri
         .stdout
         .take()
         .ok_or_else(|| "Sortie du processus indisponible.".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Diagnostic du processus indisponible.".to_string())?;
     let response = tokio::time::timeout(deadline, async {
-        let mut bytes = Vec::new();
-        stdout
-            .take(MAX_PROBE_OUTPUT + 1)
-            .read_to_end(&mut bytes)
-            .await
-            .map_err(|_| "Lecture du processus impossible.".to_string())?;
-        if bytes.len() as u64 > MAX_PROBE_OUTPUT {
-            return Err("Sortie de détection trop volumineuse.".into());
-        }
+        let (bytes, diagnostic) =
+            tokio::try_join!(read_probe_output(stdout), read_probe_output(stderr))?;
         let status = child
             .wait()
             .await
             .map_err(|_| "État du processus indisponible.".to_string())?;
         if !status.success() {
-            return Err("La commande de détection a échoué.".into());
+            let code = status
+                .code()
+                .map(|code| format!(" (code {code})"))
+                .unwrap_or_default();
+            let diagnostic = if diagnostic.is_empty() {
+                &bytes
+            } else {
+                &diagnostic
+            };
+            let detail: String = decode_command_output(diagnostic)
+                .chars()
+                .filter(|character| !character.is_control() || character.is_whitespace())
+                .take(1600)
+                .collect();
+            let detail = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+            return Err(if detail.is_empty() {
+                format!("La commande de détection a échoué{code}.")
+            } else {
+                format!("La commande de détection a échoué{code} : {detail}")
+            });
         }
         Ok(bytes)
     })
@@ -1214,12 +1246,33 @@ mod tests {
         assert!(run_probe(shell("exit 1"), Duration::from_secs(1))
             .await
             .is_err());
+        let error = run_probe(
+            shell("printf 'Dossier de travail WSL introuvable.\\n' >&2; exit 72"),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("code 72"));
+        assert!(error.contains("Dossier de travail WSL introuvable."));
+        assert!(run_probe(
+            shell("printf 'WSL indisponible'; exit 1"),
+            Duration::from_secs(1)
+        )
+        .await
+        .unwrap_err()
+        .contains("WSL indisponible"));
         assert!(run_probe(shell("exec sleep 10"), Duration::from_millis(25))
             .await
             .unwrap_err()
             .contains("Délai"));
         assert!(
             run_probe(shell("head -c 40000 /dev/zero"), Duration::from_secs(1))
+                .await
+                .unwrap_err()
+                .contains("volumineuse")
+        );
+        assert!(
+            run_probe(shell("head -c 40000 /dev/zero >&2"), Duration::from_secs(1))
                 .await
                 .unwrap_err()
                 .contains("volumineuse")

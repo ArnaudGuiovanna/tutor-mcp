@@ -286,7 +286,9 @@ impl Backend {
         let passphrase = zeroize::Zeroizing::new(passphrase);
         let _operation = self.operation.lock().await;
         self.idle().await?;
-        self.identity.lock().await.backup(&path, &passphrase)
+        self.identity.lock().await.backup(&path, &passphrase)?;
+        self.state_changed().await;
+        Ok(())
     }
     pub async fn confirm_identity_backup(&self) -> Result<PublicIdentity, String> {
         let _operation = self.operation.lock().await;

@@ -806,6 +806,43 @@ async fn native_login_requires_backup_and_preserves_legacy_credentials() {
     );
     assert!(backend.snapshot().await["identity"].get("secret").is_none());
 }
+#[tokio::test]
+async fn backup_export_and_confirmation_broadcast_the_public_identity_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let (events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let backend = Backend::new(
+        directory.path(),
+        Arc::new(move |name, value| {
+            let _ = events.send((name.to_string(), value));
+        }),
+    )
+    .unwrap();
+    let original = backend.create_identity(None).await.unwrap();
+    while receiver.try_recv().is_ok() {}
+    backend
+        .backup_identity(
+            directory.path().join("offline.json"),
+            "une phrase vraiment privée".into(),
+        )
+        .await
+        .unwrap();
+    let (name, state) = receiver.try_recv().unwrap();
+    assert_eq!(name, "client:state");
+    assert_eq!(state["identity"]["backupExported"], true);
+    assert_eq!(state["identity"]["backupConfirmed"], false);
+    assert_eq!(state["identity"]["npub"], original.npub.clone().unwrap());
+    backend.confirm_identity_backup().await.unwrap();
+    let (name, state) = receiver.try_recv().unwrap();
+    assert_eq!(name, "client:state");
+    assert_eq!(state["identity"]["backupExported"], false);
+    assert_eq!(state["identity"]["backupConfirmed"], true);
+    assert_eq!(state["identity"]["npub"], original.npub.unwrap());
+    assert_eq!(
+        state["identity"]["recoveryNpub"],
+        original.recovery_npub.unwrap()
+    );
+}
+
 #[test]
 fn staff_authoring_prompt_never_invents_a_learner() {
     let conversation = Conversation {

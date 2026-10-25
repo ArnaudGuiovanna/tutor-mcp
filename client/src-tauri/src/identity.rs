@@ -25,6 +25,7 @@ pub struct PublicIdentity {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recovery_npub: Option<String>,
     pub backup_confirmed: bool,
+    pub backup_exported: bool,
     pub needs_backup: bool,
 }
 
@@ -207,6 +208,7 @@ impl IdentityStore {
             npub: self.primary.as_ref().map(npub),
             recovery_npub: self.recovery_public.and_then(|key| key.to_bech32().ok()),
             backup_confirmed: self.backup_confirmed,
+            backup_exported: self.exported,
             needs_backup: self.primary.is_some() && !self.backup_confirmed,
         }
     }
@@ -340,7 +342,10 @@ mod tests {
         assert!(store.active().is_err());
         assert!(store.confirm_backup().is_err());
         store.backup(&backup, "une phrase vraiment privée").unwrap();
+        assert!(store.public().backup_exported);
+        assert!(!store.public().backup_confirmed);
         store.confirm_backup().unwrap();
+        assert!(!store.public().backup_exported);
         let pair = KeyPair::restore(&backup, "une phrase vraiment privée").unwrap();
         assert_eq!(npub(&store.active().unwrap()), npub(&pair.primary));
         assert!(store.pending_recovery.is_none());
@@ -361,6 +366,33 @@ mod tests {
             .restore(&backup, "une phrase vraiment privée")
             .unwrap();
         assert_eq!(restored.public().npub, public.npub);
+    }
+    #[test]
+    fn an_existing_backup_confirms_the_same_identity_after_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let backup = directory.path().join("offline.json");
+        let mut original = IdentityStore::load(directory.path()).unwrap();
+        let public = original.create(None).unwrap();
+        original
+            .backup(&backup, "une phrase vraiment privée")
+            .unwrap();
+        drop(original);
+
+        let mut restarted = IdentityStore::load(directory.path()).unwrap();
+        assert!(!restarted.public().backup_confirmed);
+        assert!(!restarted.public().backup_exported);
+        assert!(restarted.restore(&backup, "une mauvaise phrase").is_err());
+        assert!(restarted.active().is_err());
+        restarted
+            .restore(&backup, "une phrase vraiment privée")
+            .unwrap();
+        assert_eq!(restarted.public().npub, public.npub);
+        assert_eq!(restarted.public().recovery_npub, public.recovery_npub);
+        assert!(restarted.public().backup_confirmed);
+        assert!(IdentityStore::load(directory.path())
+            .unwrap()
+            .active()
+            .is_ok());
     }
     #[test]
     fn corrupt_import_or_different_backup_does_not_replace_active_identity() {

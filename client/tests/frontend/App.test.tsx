@@ -30,8 +30,8 @@ function client(initial = initialState()) {
     answerPermission: vi.fn(async () => {}),
     disconnectAgent: vi.fn(async () => { state.agentConnected = false; }),
     createIdentity: vi.fn(async () => { state.identity = { exists: true, npub: 'npub1test', recoveryNpub: 'npub1recovery', backupConfirmed: false, needsBackup: true }; return structuredClone(state.identity); }),
-    backupIdentity: vi.fn(async () => {}),
-    confirmIdentityBackup: vi.fn(async () => { state.identity.backupConfirmed = true; state.identity.needsBackup = false; return structuredClone(state.identity); }),
+    backupIdentity: vi.fn(async () => { state.identity.backupExported = true; }),
+    confirmIdentityBackup: vi.fn(async () => { state.identity.backupConfirmed = true; state.identity.backupExported = false; state.identity.needsBackup = false; return structuredClone(state.identity); }),
     restoreIdentity: vi.fn(async () => { state.identity = { exists: true, npub: 'npub1restored', recoveryNpub: 'npub1offline', backupConfirmed: true, needsBackup: false }; return structuredClone(state.identity); }),
     discoverInstitution: vi.fn(async () => ({ version: 1, institution_id: 'tenant-1', name: 'Institution de test', issuer: 'https://institution.example', mcp_url: 'https://institution.example/mcp' })),
     connectTutor: vi.fn(async () => { state.tutorStatus = { connected: true, label: 'Institution de test' }; return structuredClone(state); }),
@@ -204,6 +204,50 @@ describe('Le parcours de l’apprenant', () => {
     await user.click(screen.getByRole('button', { name: 'Connecter avec ma clé' }));
     await waitFor(() => expect(api.connectTutor).toHaveBeenCalledWith('https://institution.example', true));
     expect(screen.queryByLabelText(/Identifiant du client OAuth/)).toBeNull(); expect(screen.queryByText(/dans votre navigateur/)).toBeNull();
+  });
+
+  it('retrouve la confirmation d’un export en revenant sur les connexions', async () => {
+    const user = userEvent.setup(); const initial = initialState();
+    initial.identity = { exists: true, npub: 'npub1active', recoveryNpub: 'npub1offline', backupConfirmed: false, needsBackup: true };
+    const { api } = client(initial); await ready(api);
+    await user.click(screen.getByRole('button', { name: 'Connexions' }));
+    await user.type(screen.getByLabelText(/^Phrase pour chiffrer la sauvegarde/), 'une phrase pour mon fichier');
+    await user.type(screen.getByLabelText('Confirmer la phrase de sauvegarde'), 'une phrase pour mon fichier');
+    await user.click(screen.getByRole('button', { name: 'Chiffrer et exporter la sauvegarde' }));
+    await screen.findByRole('button', { name: 'Confirmer ma sauvegarde' });
+    await user.click(screen.getByRole('button', { name: 'Aujourd’hui' }));
+    await user.click(screen.getByRole('button', { name: 'Connexions' }));
+    expect(screen.getByText('Exportée · à confirmer')).toBeTruthy();
+    await user.click(screen.getByRole('checkbox', { name: 'J’ai conservé le fichier hors ligne et sa phrase séparément.' }));
+    await user.click(screen.getByRole('button', { name: 'Confirmer ma sauvegarde' }));
+    await screen.findByText('Sauvegardée');
+    expect(api.backupIdentity).toHaveBeenCalledTimes(1);
+    expect(api.confirmIdentityBackup).toHaveBeenCalledTimes(1);
+  });
+
+  it('explique le blocage avant confirmation de sauvegarde et peut vérifier le fichier existant', async () => {
+    const user = userEvent.setup(); const initial = initialState();
+    initial.settings.tutor.mode = 'remote'; initial.settings.tutor.url = 'https://institution.example';
+    initial.identity = { exists: true, npub: 'npub1active', recoveryNpub: 'npub1offline', backupConfirmed: false, needsBackup: true };
+    const { api, setState } = client(initial);
+    vi.mocked(api.restoreIdentity).mockImplementation(async () => {
+      initial.identity.backupConfirmed = true; initial.identity.needsBackup = false; setState(initial);
+      return structuredClone(initial.identity);
+    });
+    await ready(api); await user.click(screen.getByRole('button', { name: 'Connexions' }));
+    await user.click(screen.getByRole('button', { name: 'Vérifier l’institution' }));
+    await screen.findByRole('region', { name: 'Institution vérifiée' });
+    const connect = screen.getByRole('button', { name: 'Connecter avec ma clé' }) as HTMLButtonElement;
+    expect(connect.disabled).toBe(true);
+    expect(screen.getByText('Confirmez votre sauvegarde dans « Votre identité locale », ou vérifiez votre fichier déjà exporté.')).toBeTruthy();
+    await user.click(screen.getByText('J’ai déjà exporté ma sauvegarde'));
+    await user.type(screen.getByLabelText('Phrase de la sauvegarde existante'), 'la phrase de mon fichier');
+    await user.click(screen.getByRole('button', { name: 'Vérifier ma sauvegarde existante' }));
+    await screen.findByText('Sauvegardée');
+    await waitFor(() => expect(connect.disabled).toBe(false));
+    expect(api.restoreIdentity).toHaveBeenCalledWith('la phrase de mon fichier');
+    expect(api.createIdentity).not.toHaveBeenCalled(); expect(api.backupIdentity).not.toHaveBeenCalled();
+    expect(api.connectTutor).not.toHaveBeenCalled();
   });
 
   it('restaure localement une sauvegarde sans compte e-mail', async () => {

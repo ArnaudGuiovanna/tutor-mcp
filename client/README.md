@@ -74,6 +74,13 @@ chemin Windows pour un agent natif. Pour choisir un profil, ajouter
 
 **Institution** : créez une identité locale (ou importez une clé Nostr `nsec`),
 exportez sa sauvegarde chiffrée, puis confirmez sa conservation hors ligne.
+Après l’export, le badge indique **Exportée · à confirmer** : cochez la
+confirmation de conservation hors ligne, puis cliquez sur **Confirmer ma
+sauvegarde** pour passer à **Sauvegardée**. L’étape reste disponible si vous
+changez d’onglet. Si l’application a été fermée avant confirmation, ouvrez
+**J’ai déjà exporté ma sauvegarde** et vérifiez votre fichier avec sa phrase,
+sans recréer vos clés. Une sauvegarde d’une autre identité est refusée.
+Le bouton de connexion à Tutor affiche le prérequis restant lorsqu’il est grisé.
 L’identité utilise secp256k1 et les signatures BIP340, comme Buzz. L’application
 présente uniquement les clés publiques `npub` de l’identité et de sa récupération.
 L’administrateur autorise ces deux clés publiques dans l’institution ; le client
