@@ -67,3 +67,9 @@ type NativeOwnerProvision struct {
 	PublicKey         string `json:"public_key"`
 	RecoveryPublicKey string `json:"recovery_public_key"`
 }
+
+type NativeLearningMembership struct {
+	LearnerID string   `json:"learner_id"`
+	Roles     []string `json:"roles"`
+	Changed   bool     `json:"changed"`
+}

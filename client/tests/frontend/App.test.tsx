@@ -18,7 +18,18 @@ function client(initial = initialState()) {
   let agentListener: (event: JsonRecord) => void = () => {};
   let stateListener: (snapshot: Snapshot) => void = () => {};
   const api: ClientBridge = {
+    bundledAgents: vi.fn(async () => []),
     loadState: vi.fn(async () => structuredClone(state)),
+    createProfile: vi.fn(async () => structuredClone(state)),
+    selectProfile: vi.fn(async () => structuredClone(state)),
+    renameProfile: vi.fn(async () => structuredClone(state)),
+    openExternalLink: vi.fn(async () => {}),
+    formationVersions: vi.fn(async () => ({items:[],next_after:''})),
+    formationReview: vi.fn(async () => {throw new Error('Version absente');}),
+    createFormation: vi.fn(async () => {throw new Error('Non configuré');}),
+    publishFormation: vi.fn(async () => ({})),
+    cloneFormation: vi.fn(async () => {throw new Error('Non configuré');}),
+    enableLearning: vi.fn(async () => structuredClone(state)),
     discoverAgents: vi.fn(async () => [target]),
     saveSettings: vi.fn(async (settings) => { state.settings = settings; return structuredClone(state); }),
     saveIntent: vi.fn(async (draft) => { const saved = { ...draft, id: draft.id || 'new-intent', revision: draft.revision + 1, createdAt: draft.createdAt || '2026-10-24T10:00:00Z', updatedAt: '2026-10-24T10:21:00Z' }; state.intents = [...state.intents.filter((item) => item.id !== saved.id), saved]; return structuredClone(state); }),
@@ -30,7 +41,7 @@ function client(initial = initialState()) {
     answerPermission: vi.fn(async () => {}),
     disconnectAgent: vi.fn(async () => { state.agentConnected = false; }),
     createIdentity: vi.fn(async () => { state.identity = { exists: true, npub: 'npub1test', recoveryNpub: 'npub1recovery', backupConfirmed: false, needsBackup: true }; return structuredClone(state.identity); }),
-    backupIdentity: vi.fn(async () => { state.identity.backupExported = true; }),
+    backupIdentity: vi.fn(async () => { state.identity.backupExported = true; stateListener(structuredClone(state)); }),
     confirmIdentityBackup: vi.fn(async () => { state.identity.backupConfirmed = true; state.identity.backupExported = false; state.identity.needsBackup = false; return structuredClone(state.identity); }),
     restoreIdentity: vi.fn(async () => { state.identity = { exists: true, npub: 'npub1restored', recoveryNpub: 'npub1offline', backupConfirmed: true, needsBackup: false }; return structuredClone(state.identity); }),
     discoverInstitution: vi.fn(async () => ({ version: 1, institution_id: 'tenant-1', name: 'Institution de test', issuer: 'https://institution.example', mcp_url: 'https://institution.example/mcp' })),
@@ -168,7 +179,7 @@ describe('Le parcours de l’apprenant', () => {
     await screen.findByRole('radio', { name: /Codex — Ubuntu/ });
     await user.click(screen.getByRole('button', { name: 'Connecter Codex' }));
     expect(await screen.findByRole('alert')).toHaveProperty('textContent', expect.stringContaining('L’adaptateur ne répond pas'));
-    expect(screen.getByRole('button', { name: 'Codex hors ligne' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Agent hors ligne' })).toBeTruthy();
     expect(screen.queryByText(/Connexion ACP établie/)).toBeNull();
   });
 
@@ -178,7 +189,7 @@ describe('Le parcours de l’apprenant', () => {
     await act(async () => { emit({ type: 'connection', status: 'closed', message: 'Codex est déconnecté.' }); });
     expect(screen.getByText('Codex est déconnecté.')).toBeTruthy();
     expect(screen.queryByRole('alert')).toBeNull();
-    expect(screen.getByRole('button', { name: 'Codex hors ligne' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Agent hors ligne' })).toBeTruthy();
     await act(async () => { emit({ type: 'connection', status: 'error', message: 'La réponse n’a pas pu être enregistrée.' }); });
     expect(screen.getByRole('alert')).toHaveProperty('textContent', expect.stringContaining('La réponse n’a pas pu être enregistrée.'));
   });
@@ -192,13 +203,10 @@ describe('Le parcours de l’apprenant', () => {
     expect(api.connectTutor).not.toHaveBeenCalled();
     await user.type(screen.getByLabelText(/^Phrase pour chiffrer la sauvegarde/), 'une phrase longue et privée');
     await user.type(screen.getByLabelText('Confirmer la phrase de sauvegarde'), 'une phrase longue et privée');
-    await user.click(screen.getByRole('button', { name: 'Chiffrer et exporter la sauvegarde' }));
-    await screen.findByRole('button', { name: 'Confirmer ma sauvegarde' });
-    expect(api.confirmIdentityBackup).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: 'Enregistrer ma sauvegarde chiffrée' }));
+    await screen.findByText('Sauvegardée');
+    expect(api.confirmIdentityBackup).toHaveBeenCalledTimes(1);
     expect((screen.getByLabelText(/^Phrase pour chiffrer la sauvegarde/) as HTMLInputElement).value).toBe('');
-    expect((screen.getByRole('button', { name: 'Confirmer ma sauvegarde' }) as HTMLButtonElement).disabled).toBe(true);
-    await user.click(screen.getByRole('checkbox', { name: 'J’ai conservé le fichier hors ligne et sa phrase séparément.' }));
-    await user.click(screen.getByRole('button', { name: 'Confirmer ma sauvegarde' }));
     await waitFor(() => expect((screen.getByRole('button', { name: 'Connecter avec ma clé' }) as HTMLButtonElement).disabled).toBe(false));
     await user.click(screen.getByRole('checkbox', { name: 'Demander la création et la publication de formations' }));
     await user.click(screen.getByRole('button', { name: 'Connecter avec ma clé' }));
@@ -210,19 +218,19 @@ describe('Le parcours de l’apprenant', () => {
     const user = userEvent.setup(); const initial = initialState();
     initial.identity = { exists: true, npub: 'npub1active', recoveryNpub: 'npub1offline', backupConfirmed: false, needsBackup: true };
     const { api } = client(initial); await ready(api);
+    vi.mocked(api.confirmIdentityBackup).mockRejectedValueOnce(new Error('Le coffre ne peut pas être enregistré pour le moment.'));
     await user.click(screen.getByRole('button', { name: 'Connexions' }));
     await user.type(screen.getByLabelText(/^Phrase pour chiffrer la sauvegarde/), 'une phrase pour mon fichier');
     await user.type(screen.getByLabelText('Confirmer la phrase de sauvegarde'), 'une phrase pour mon fichier');
-    await user.click(screen.getByRole('button', { name: 'Chiffrer et exporter la sauvegarde' }));
-    await screen.findByRole('button', { name: 'Confirmer ma sauvegarde' });
+    await user.click(screen.getByRole('button', { name: 'Enregistrer ma sauvegarde chiffrée' }));
+    await screen.findByRole('button', { name: 'Terminer ma sauvegarde' });
     await user.click(screen.getByRole('button', { name: 'Aujourd’hui' }));
     await user.click(screen.getByRole('button', { name: 'Connexions' }));
     expect(screen.getByText('Exportée · à confirmer')).toBeTruthy();
-    await user.click(screen.getByRole('checkbox', { name: 'J’ai conservé le fichier hors ligne et sa phrase séparément.' }));
-    await user.click(screen.getByRole('button', { name: 'Confirmer ma sauvegarde' }));
+    await user.click(screen.getByRole('button', { name: 'Terminer ma sauvegarde' }));
     await screen.findByText('Sauvegardée');
     expect(api.backupIdentity).toHaveBeenCalledTimes(1);
-    expect(api.confirmIdentityBackup).toHaveBeenCalledTimes(1);
+    expect(api.confirmIdentityBackup).toHaveBeenCalledTimes(2);
   });
 
   it('explique le blocage avant confirmation de sauvegarde et peut vérifier le fichier existant', async () => {
@@ -264,8 +272,8 @@ describe('Le parcours de l’apprenant', () => {
     const { api } = client(initial); vi.mocked(api.tutorOverview).mockResolvedValue({ identity: { tenantId: 'tenant', userId: 'owner', membershipId: 'staff', learnerId: '', roles: ['owner'] }, capabilities: { formationAuthoring: true }, session: { scope: 'formation:read', allowedScopes: ['formation:read', 'formation:write'] }, context: {}, formations: { items: [] }, availableFormations: { items: [] } });
     await ready(api); await user.click(screen.getByRole('button', { name: 'Mes formations' }));
     await screen.findByRole('region', { name: 'Création de formations' });
-    expect((screen.getByRole('button', { name: 'Préparer une formation' }) as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByText('Votre rôle d’équipe ne crée pas de profil apprenant.')).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Créer une formation' }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByText(/Votre rôle d’équipe ne crée pas de profil apprenant/)).toBeTruthy();
     expect(api.sendPrompt).not.toHaveBeenCalled();
   });
   it('n’annonce aucune sauvegarde après un échec d’écriture et efface les phrases du formulaire', async () => {
@@ -273,9 +281,9 @@ describe('Le parcours de l’apprenant', () => {
     const { api } = client(initial); vi.mocked(api.backupIdentity).mockRejectedValue(new Error('Le support de sauvegarde est inaccessible.'));
     await ready(api); await user.click(screen.getByRole('button', { name: 'Connexions' }));
     await user.type(screen.getByLabelText(/^Phrase pour chiffrer la sauvegarde/), 'une phrase pour mon fichier'); await user.type(screen.getByLabelText('Confirmer la phrase de sauvegarde'), 'une phrase pour mon fichier');
-    await user.click(screen.getByRole('button', { name: 'Chiffrer et exporter la sauvegarde' }));
+    await user.click(screen.getByRole('button', { name: 'Enregistrer ma sauvegarde chiffrée' }));
     expect(await screen.findByRole('alert')).toHaveProperty('textContent', expect.stringContaining('support de sauvegarde est inaccessible'));
-    expect(screen.queryByRole('button', { name: 'Confirmer ma sauvegarde' })).toBeNull(); expect(api.confirmIdentityBackup).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: 'Terminer ma sauvegarde' })).toBeNull(); expect(api.confirmIdentityBackup).not.toHaveBeenCalled();
     expect((screen.getByLabelText(/^Phrase pour chiffrer la sauvegarde/) as HTMLInputElement).value).toBe(''); expect((screen.getByLabelText('Confirmer la phrase de sauvegarde') as HTMLInputElement).value).toBe('');
   });
 
@@ -284,8 +292,21 @@ describe('Le parcours de l’apprenant', () => {
     vi.mocked(api.tutorOverview).mockResolvedValue({ identity: { tenantId: 'tenant', userId: 'owner', membershipId: 'staff', learnerId: 'actual-learner', roles: ['owner', 'learner'] }, capabilities: { learning: false, formationAuthoring: true }, session: { scope: 'formation:read formation:write', allowedScopes: ['formation:read', 'formation:write', 'learner:read', 'learner:write'] }, context: {}, formations: { items: [] }, availableFormations: { items: [] } });
     await ready(api); await user.click(screen.getByRole('button', { name: 'Mes formations' }));
     await screen.findByRole('region', { name: 'Création de formations' });
-    expect((screen.getByRole('button', { name: 'Préparer une formation' }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole('button', { name: 'Créer une formation' }) as HTMLButtonElement).disabled).toBe(false);
     expect(api.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('change de compte sans conserver les droits affichés ni accepter les anciens événements', async()=>{
+    const user=userEvent.setup();const initial=initialState(true);
+    initial.profileEpoch=1;initial.profile={id:'principal',label:'Direction'};initial.profiles=[initial.profile,{id:'second',label:'Compte test'}];initial.identity={exists:true,npub:'npub1owner',backupConfirmed:true,needsBackup:false};
+    const {api,setState,emit}=client(initial);
+    vi.mocked(api.tutorOverview).mockResolvedValue({identity:{tenantId:'t',userId:'u',membershipId:'m',roles:['owner']},capabilities:{learning:false,canRequestAuthoring:true},context:{},formations:{items:[]},availableFormations:{items:[]}});
+    vi.mocked(api.selectProfile).mockImplementation(async()=>{const next=initialState();next.profileEpoch=2;next.profile={id:'second',label:'Compte test'};next.profiles=initial.profiles;next.identity={exists:true,npub:'npub1second',backupConfirmed:false,needsBackup:true};setState(next);return next;});
+    await ready(api);await screen.findAllByText('Propriétaire');
+    await user.click(screen.getByLabelText('Mon compte et mes rôles'));await user.click(screen.getByRole('button',{name:'Compte test'}));
+    await screen.findByDisplayValue('npub1second');expect(screen.queryByText('Propriétaire')).toBeNull();
+    await act(async()=>{emit({profileEpoch:1,type:'connection',status:'error',message:'ancien compte'});});
+    expect(screen.queryByText('ancien compte')).toBeNull();expect(api.selectProfile).toHaveBeenCalledWith('second');
   });
 
 });

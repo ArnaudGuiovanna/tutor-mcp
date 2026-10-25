@@ -23,6 +23,7 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       GOTOOLCHAIN: local
+      TUTOR_DEFAULT_INSTITUTION: https://vps-d764c05b.tail4f8dac.ts.net
 
     steps:
       - name: Checkout
@@ -65,6 +66,12 @@ jobs:
       - name: Verify interface, native core, and real ACP handshake
         shell: bash
         run: bash scripts/verify-client.sh --real-adapter
+
+      - name: Prepare self-contained Codex and Claude resources
+        shell: pwsh
+        run: |
+          python client/scripts/prepare-agents.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build actual Tutor executable
         shell: pwsh

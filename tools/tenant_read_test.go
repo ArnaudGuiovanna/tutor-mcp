@@ -39,6 +39,7 @@ func TestTenantToolReadRoutesAreExplicitAndEnforced(t *testing.T) {
 	// This reviewed list is deliberately independent of readOnlyTools, so a
 	// new getter cannot inherit read-only routing through a name heuristic.
 	readers := []string{
+		"list_formations", "list_formation_versions", "review_formation_version",
 		"get_my_badges", "get_learner_badges", "list_trainer_cohorts", "get_cohort_insights", "get_cohort_statistics", "get_learner_progress",
 		"list_available_formations", "get_my_formations", "get_learner_formation", "get_formation_version",
 		"get_pending_alerts", "check_mastery", "get_learner_context", "get_availability_model", "get_olm_snapshot", "get_pedagogical_snapshots",
@@ -100,8 +101,10 @@ func TestTenantToolReadRoutesAreExplicitAndEnforced(t *testing.T) {
 							args["enrollment_id"] = "missing"
 						case "get_learner_formation", "get_cohort_insights", "get_cohort_statistics":
 							args["cohort_id"] = "missing"
-						case "get_formation_version":
+						case "get_formation_version", "review_formation_version":
 							args["version_id"] = "missing"
+						case "list_formation_versions":
+							args["formation_id"] = "missing"
 						}
 						result := callTool(t, deps, func(server *mcp.Server, deps *Deps) {
 							RegisterTools(server, deps)

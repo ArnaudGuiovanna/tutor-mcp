@@ -6,4 +6,6 @@ src-tauri/gen/
 test-results/
 playwright-report/
 THIRD_PARTY_NOTICES/
+bundled-agents/
+.agents-*/
 *.local

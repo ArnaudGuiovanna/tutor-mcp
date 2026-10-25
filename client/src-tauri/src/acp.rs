@@ -1377,7 +1377,13 @@ mod tests {
             LaunchSpec {
                 program: adapter,
                 args,
-                env: vec![("CODEX_HOME".into(), home.to_string_lossy().into_owned())],
+                env: vec![
+                    ("CODEX_HOME".into(), home.to_string_lossy().into_owned()),
+                    (
+                        "CLAUDE_CONFIG_DIR".into(),
+                        home.to_string_lossy().into_owned(),
+                    ),
+                ],
                 cwd: Some(home.clone()),
             },
             events,

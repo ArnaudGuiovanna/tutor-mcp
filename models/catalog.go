@@ -88,6 +88,24 @@ type FormationPage struct {
 	NextAfter string      `json:"next_after"`
 }
 
+type FormationVersionPage struct {
+	Items     []FormationVersion `json:"items"`
+	NextAfter string             `json:"next_after"`
+}
+
+type FormationReview struct {
+	Detail           *FormationVersionDetail `json:"detail"`
+	Publishable      bool                    `json:"publishable"`
+	Issues           []string                `json:"issues"`
+	CatalogAvailable bool                    `json:"catalog_available"`
+	CatalogCohortID  string                  `json:"catalog_cohort_id,omitempty"`
+}
+
+type FormationPublication struct {
+	Version FormationVersion `json:"version"`
+	Cohort  Cohort           `json:"cohort"`
+}
+
 type CohortPage struct {
 	Items     []Cohort `json:"items"`
 	NextAfter string   `json:"next_after"`

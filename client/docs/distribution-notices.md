@@ -87,10 +87,26 @@ embarquant le bootstrapper, le runtime hors ligne ou un runtime fixe exige de
 revoir les éléments distribués et leurs conditions. [Installation WebView2 avec
 Tauri](https://v2.tauri.app/distribute/windows-installer/#webview2-installation-options).
 
-L’adaptateur ACP et Codex sont installés séparément dans cette version. Le verrou
-de `client/scripts/adapter/` sert à qualifier une version reproductible ; ses
-binaires ne sont pas incorporés à l’installeur Tutor. Les prérequis du système
-Windows et les outils installés séparément gardent leurs propres distributions.
+Les adaptateurs Codex ACP 2.2.2 et Claude ACP 0.95.0 sont intégrés avec
+leurs dépendances verrouillées et Node.js 24.13.0. Exécuter d’abord
+`python client/scripts/prepare-agents.py`, puis le collecteur. Le manifeste
+inventorie chaque ressource Windows par taille/SHA256. La vérification de
+l’installeur négocie ACP avec les deux agents en retirant Node externe de PATH.
+
+Le collecteur ajoute le graphe npm installé des agents, y compris leurs paquets
+natifs et les dépendances optionnelles/peer effectivement distribuées. Il conserve
+le LICENSE original de Node et les termes du SDK/runtime Anthropic ; ces derniers
+ne sont pas présentés comme MIT. Les licences absentes des archives npm Codex et
+standardwebhooks sont des suppléments amont épinglés dans `agent-provenance.json`.
+La provenance du binaire ripgrep a été comparée octet par octet à son archive
+amont 15.2.0. Le NOTICE Codex et les termes Ratatui qu’il référence sont inclus.
+La couverture des binaires tiers précompilés est celle des distributions
+fournisseurs, sans prétendre reconstruire leur carte de liens.
+
+Le client conversationnel projette hors du paquet le module vocal natif facultatif
+de Codex et ses DLL GStreamer/GLib/VC++. Il ne modifie aucun exécutable conservé.
+Toute réintroduction de ces bibliothèques exige leur inventaire de redistribution
+et les sources correspondantes prévus par les licences originales.
 
 ## Installeur NSIS
 

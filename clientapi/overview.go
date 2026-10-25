@@ -105,9 +105,13 @@ type Context struct {
 }
 
 type Capabilities struct {
-	CommonCatalog      bool `json:"commonCatalog"`
-	Learning           bool `json:"learning"`
-	FormationAuthoring bool `json:"formationAuthoring"`
+	CommonCatalog       bool `json:"commonCatalog"`
+	Learning            bool `json:"learning"`
+	FormationAuthoring  bool `json:"formationAuthoring"`
+	Training            bool `json:"training"`
+	CanRequestAuthoring bool `json:"canRequestAuthoring"`
+	CanLearn            bool `json:"canLearn"`
+	CanEnableLearning   bool `json:"canEnableLearning"`
 	// The current read port does not expose the institution's personal-domain
 	// policy. Unknown is omitted rather than announced as an authorization.
 	PersonalLearning *bool `json:"personalLearning,omitempty"`
@@ -121,9 +125,14 @@ type Overview struct {
 	AvailableFormations models.LearnerFormationPage `json:"availableFormations"`
 	AuthoredFormations  models.FormationPage        `json:"authoredFormations"`
 	Capabilities        Capabilities                `json:"capabilities"`
+	TrainerCohorts      *models.TrainerCohortPage   `json:"trainerCohorts,omitempty"`
 }
 
 func (api *API) handle(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == LearningActivationPath {
+		api.enableLearning(w, r)
+		return
+	}
 	if r.URL.Path != OverviewPath {
 		writeError(w, http.StatusNotFound, "not_found")
 		return
@@ -142,7 +151,8 @@ func (api *API) handle(w http.ResponseWriter, r *http.Request) {
 		actor.Authorize(models.PermissionLearningSelf, models.AuthorizationResource{TenantID: actor.TenantID, OwnerUserID: actor.UserID})
 	canViewAuthoring := auth.HasOAuthScope(r.Context(), models.OAuthScopeFormationRead) &&
 		actor.Authorize(models.PermissionFormationWrite, models.AuthorizationResource{TenantID: actor.TenantID})
-	if !canLearn && !canViewAuthoring {
+	canTrain := auth.HasOAuthScope(r.Context(), models.OAuthScopeProgressRead) && actor.CanReadInstitutionProgress()
+	if !canLearn && !canViewAuthoring && !canTrain {
 		w.Header().Set("WWW-Authenticate", `Bearer error="insufficient_scope", scope="learner:read"`)
 		writeError(w, http.StatusForbidden, "forbidden")
 		return
@@ -161,6 +171,9 @@ func (api *API) handle(w http.ResponseWriter, r *http.Request) {
 		AuthoredFormations:  models.FormationPage{Items: []models.Formation{}},
 		Capabilities:        Capabilities{Learning: canLearn, FormationAuthoring: canViewAuthoring && auth.HasOAuthScope(r.Context(), models.OAuthScopeFormationWrite)},
 	}
+	result.Capabilities.CanRequestAuthoring = actor.Authorize(models.PermissionFormationWrite, models.AuthorizationResource{TenantID: actor.TenantID})
+	result.Capabilities.CanLearn = actor.LearnerID != "" && actor.Authorize(models.PermissionLearningSelf, models.AuthorizationResource{TenantID: actor.TenantID, OwnerUserID: actor.UserID})
+	result.Capabilities.CanEnableLearning = auth.IsNativeClientSession(r.Context()) && actor.LearnerID == ""
 	err = api.store.WithTenantReadTx(r.Context(), actor.TenantScope(), func(ctx context.Context, scoped storeport.Store) error {
 		if err := scoped.ValidatePrincipal(ctx, actor); err != nil {
 			return err
@@ -196,6 +209,14 @@ func (api *API) handle(w http.ResponseWriter, r *http.Request) {
 			if result.AuthoredFormations.Items == nil {
 				result.AuthoredFormations.Items = []models.Formation{}
 			}
+		}
+	}
+	if err == nil && canTrain {
+		if progress, ok := api.store.(storeport.ProgressStore); ok {
+			page, readErr := progress.ListTrainerCohorts(r.Context(), actor, params.trainingAfter, params.limit)
+			err = readErr
+			result.TrainerCohorts = &page
+			result.Capabilities.Training = readErr == nil
 		}
 	}
 	if errors.Is(err, storeport.ErrInvalidPrincipal) {
@@ -239,8 +260,8 @@ func projectContext(source *storeport.LearnerContextOverview) Context {
 }
 
 type pageParams struct {
-	after, availableAfter, authoredAfter string
-	limit                                int
+	after, availableAfter, authoredAfter, trainingAfter string
+	limit                                               int
 }
 
 func parsePageParams(raw string) (pageParams, error) {
@@ -253,7 +274,7 @@ func parsePageParams(raw string) (pageParams, error) {
 		return result, err
 	}
 	for key, values := range query {
-		if len(values) != 1 || (key != "after" && key != "available_after" && key != "authored_after" && key != "limit") {
+		if len(values) != 1 || (key != "after" && key != "available_after" && key != "authored_after" && key != "training_after" && key != "limit") {
 			return result, errors.New("unknown or repeated parameter")
 		}
 		value := values[0]
@@ -271,6 +292,8 @@ func parsePageParams(raw string) (pageParams, error) {
 			result.after = value
 		} else if key == "available_after" {
 			result.availableAfter = value
+		} else if key == "training_after" {
+			result.trainingAfter = value
 		} else {
 			result.authoredAfter = value
 		}

@@ -65,7 +65,10 @@ pub struct AgentTarget {
 /// not to whatever distribution happens to be the default on the next launch.
 #[allow(unused_mut)] // Windows appends WSL installations; other hosts do not.
 pub async fn discover_agents() -> Vec<AgentTarget> {
-    let mut targets = vec![discover_native().await];
+    let mut targets = crate::bundled::targets();
+    #[cfg(windows)]
+    let external_start = targets.len();
+    targets.push(discover_native().await);
     #[cfg(windows)]
     {
         let wsl = wsl_program();
@@ -89,7 +92,7 @@ pub async fn discover_agents() -> Vec<AgentTarget> {
                     targets.push(target);
                 }
             }
-            targets[1..].sort_by(|a, b| a.label.cmp(&b.label));
+            targets[external_start + 1..].sort_by(|a, b| a.label.cmp(&b.label));
         }
     }
     targets
@@ -143,6 +146,9 @@ async fn discover_native() -> AgentTarget {
 /// A manually configured target can explicitly choose another versioned CLI.
 pub async fn launch_spec(target: &AgentTarget, cwd: &str) -> Result<LaunchSpec, String> {
     validate_text(cwd, "Le dossier de travail")?;
+    if target.id.starts_with("bundled:") {
+        return crate::bundled::launch(&target.id, cwd);
+    }
     let adapter = target
         .adapter_path
         .as_deref()

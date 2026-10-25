@@ -5,6 +5,7 @@
   "description": "Pinned Codex ACP runtime used by Tutor acceptance checks",
   "license": "MIT",
   "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "0.95.0",
     "@agentclientprotocol/codex-acp": "2.2.2"
   },
   "engines": {

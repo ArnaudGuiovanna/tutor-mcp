@@ -62,6 +62,7 @@ async fn smoke() -> Result<(), String> {
         cwd: directory.to_string_lossy().into_owned(),
         tutor: TutorSettings {
             mode: "local".into(),
+            activity: "auto".into(),
             url: String::new(),
             command: tutor.to_string_lossy().into_owned(),
             args: vec![

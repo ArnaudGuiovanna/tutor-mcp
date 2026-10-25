@@ -1,0 +1,49 @@
+{
+  "codexVersion": "0.160.1",
+  "codexCommit": "d27764b82f7118f674371e6d6e76271d9d606edb",
+  "ripgrepVersion": "15.2.0",
+  "ripgrepArchiveSha256": "71b2fef860abe467217a538ff31de02f5258807c0129f771846f87bd029aafc5",
+  "files": [
+    {
+      "file": "codex-0.160.1/LICENSE",
+      "sha256": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc",
+      "source": "https://raw.githubusercontent.com/openai/codex/d27764b82f7118f674371e6d6e76271d9d606edb/LICENSE"
+    },
+    {
+      "file": "codex-0.160.1/NOTICE",
+      "sha256": "9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915",
+      "source": "https://raw.githubusercontent.com/openai/codex/d27764b82f7118f674371e6d6e76271d9d606edb/NOTICE"
+    },
+    {
+      "file": "codex-0.160.1/ripgrep-COPYING",
+      "sha256": "dfe7d0a6134a17d3de7409762e08dc02133303912875cab40a74ba07a390f85a",
+      "source": "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-pc-windows-msvc.zip#COPYING"
+    },
+    {
+      "file": "codex-0.160.1/ripgrep-LICENSE-MIT",
+      "sha256": "970813655a1bf777d2ead189cef71ab73ab92ce04dc864027d61a45de03e6728",
+      "source": "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-pc-windows-msvc.zip#LICENSE-MIT"
+    },
+    {
+      "file": "codex-0.160.1/ripgrep-UNLICENSE",
+      "sha256": "640514163b17f977adc997cb16f51871122cfb0555ebad1a3f01e167b7ba8857",
+      "source": "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-pc-windows-msvc.zip#UNLICENSE"
+    },
+    {
+      "file": "codex-0.160.1/ratatui-LICENSE",
+      "sha256": "50eb43e8d742c9c61a9391e42b2184fce54dbd1893a1bb1c85b8c9ee217ab1f5",
+      "source": "https://static.crates.io/crates/ratatui/ratatui-0.30.2.crate#ratatui-0.30.2/LICENSE"
+    }
+  ],
+  "standardwebhooks": {
+    "version": "1.1.1",
+    "commit": "b4d2c14fc5b4ccff3ff271e3b087dff812254c59",
+    "files": [
+      {
+        "file": "standardwebhooks-1.1.1/LICENSE",
+        "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+        "source": "https://raw.githubusercontent.com/standard-webhooks/standard-webhooks/b4d2c14fc5b4ccff3ff271e3b087dff812254c59/LICENSE"
+      }
+    ]
+  }
+}

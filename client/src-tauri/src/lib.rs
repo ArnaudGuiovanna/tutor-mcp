@@ -7,6 +7,7 @@ pub mod discovery;
 pub mod identity;
 pub mod launch;
 pub mod native_auth;
+pub mod profiles;
 pub mod vault;
 pub mod workspace;
 
@@ -14,3 +15,4 @@ pub mod workspace;
 mod desktop;
 #[cfg(feature = "desktop")]
 pub use desktop::run;
+pub mod bundled;

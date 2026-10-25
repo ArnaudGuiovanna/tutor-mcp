@@ -13,16 +13,25 @@ pub fn now() -> String {
 #[serde(rename_all = "camelCase", default)]
 pub struct TutorSettings {
     pub mode: String,
+    #[serde(default = "default_activity")]
+    pub activity: String,
     pub url: String,
     pub command: String,
     pub args: Vec<String>,
+}
+
+fn default_activity() -> String {
+    "auto".into()
 }
 
 impl Default for TutorSettings {
     fn default() -> Self {
         Self {
             mode: "remote".into(),
-            url: String::new(),
+            activity: default_activity(),
+            url: option_env!("TUTOR_DEFAULT_INSTITUTION")
+                .unwrap_or("")
+                .into(),
             command: String::new(),
             args: vec!["--local".into()],
         }

@@ -1,6 +1,6 @@
 # Tutor — client de bureau
 
-Application Tauri pour apprendre avec Codex via Agent Client Protocol (ACP).
+Application Tauri pour apprendre avec Codex ou Claude via Agent Client Protocol (ACP).
 Le client est développé dans ce dossier du dépôt Tutor ; le serveur pédagogique
 reste à la racine. La cible de référence est **Windows x64**. Un agent peut être
 exécuté nativement ou dans une distribution **WSL2** choisie explicitement.
@@ -39,19 +39,29 @@ exécutable. Laisser ce champ vide conserve le runtime fourni par l’adaptateur
 La négociation et les opérations réelles de l’agent vérifient ensuite la
 compatibilité du couple choisi.
 
-L’adaptateur de référence est **2.2.2**, avec ses dépendances exactes conservées
-dans `scripts/adapter/package-lock.json`. Pour le préparer dans ce dépôt :
+L’installateur inclut **Codex ACP 2.2.2**, **Claude ACP 0.95.0**, leurs
+runtimes compatibles et **Node.js 24.13.0**. Aucune installation npm/Node séparée
+n’est nécessaire pour ces deux agents. Choisissez l’agent, puis connectez votre
+compte fournisseur. Le dossier de séance est préparé automatiquement. Une
+installation WSL2 existante reste accessible dans les réglages avancés.
+
+La connexion Claude ouvre le parcours officiel du fournisseur dans une fenêtre
+séparée : Tutor ne collecte pas les identifiants Claude. Les dépendances système
+requises par le fournisseur (notamment Git Bash pour les usages shell de Claude
+sur Windows) restent celles de son CLI. Les outils intégrés de fichiers/terminal
+de Claude sont désactivés dans les séances pédagogiques ; ses outils MCP restent
+soumis aux permissions de Tutor. Le module vocal natif facultatif de Codex est
+exclu de ce client textuel. Les exécutables conservés restent inchangés.
+
+Pour reconstruire les ressources depuis le dépôt :
 
 ```powershell
-npm ci --prefix client/scripts/adapter --ignore-scripts
+python client/scripts/prepare-agents.py
 ```
 
-Dans les réglages avancés, sélectionner ensuite le chemin absolu de
-`client\scripts\adapter\node_modules\.bin\codex-acp.cmd`. Le client résout ce
-wrapper vers Node et son script, sans interpréter une commande par `cmd.exe`.
-Cette distribution npm nécessite Node.js. Une installation globale de la même
-version ou un exécutable autonome compatible peut également être sélectionné.
-L’installateur Tutor ne télécharge pas silencieusement un agent ou un modèle.
+Le script utilise les archives npm verrouillées et le ZIP officiel Node vérifié
+par SHA256. Les ressources générées sont ignorées par Git. Le workflow teste
+les deux agents installés sans Node externe dans PATH.
 
 Pour WSL2, installer l’adaptateur **dans la distribution Linux concernée**, puis
 relancer la détection. Le lancement conserve le même utilisateur Linux, retrouve
@@ -73,13 +83,13 @@ chemin Windows pour un agent natif. Pour choisir un profil, ajouter
 `--data-dir CHEMIN_ABSOLU`. Plusieurs processus Tutor partagent ce profil durable.
 
 **Institution** : créez une identité locale (ou importez une clé Nostr `nsec`),
-exportez sa sauvegarde chiffrée, puis confirmez sa conservation hors ligne.
-Après l’export, le badge indique **Exportée · à confirmer** : cochez la
-confirmation de conservation hors ligne, puis cliquez sur **Confirmer ma
-sauvegarde** pour passer à **Sauvegardée**. L’étape reste disponible si vous
-changez d’onglet. Si l’application a été fermée avant confirmation, ouvrez
-**J’ai déjà exporté ma sauvegarde** et vérifiez votre fichier avec sa phrase,
-sans recréer vos clés. Une sauvegarde d’une autre identité est refusée.
+enregistrez sa sauvegarde chiffrée sur un support sûr. Une fois le fichier écrit
+et relu, la confirmation est automatique et le badge passe à **Sauvegardée**.
+Les clés restent identiques après un redémarrage avant sauvegarde ; la clé de
+récupération est alors temporairement protégée dans le coffre DPAPI. Si un ancien
+client a fermé une identité non confirmée sans conserver cette clé, vérifiez le
+fichier déjà exporté ; l’application ne remplace jamais silencieusement vos clés.
+Une sauvegarde d’une autre identité est refusée.
 Le bouton de connexion à Tutor affiche le prérequis restant lorsqu’il est grisé.
 L’identité utilise secp256k1 et les signatures BIP340, comme Buzz. L’application
 présente uniquement les clés publiques `npub` de l’identité et de sa récupération.
@@ -109,11 +119,36 @@ ses paramètres, son environnement ou ses prompts. Une déconnexion révoque la
 session distante et retire son accès local ; les erreurs de révocation sont
 signalées. Les anciens coffres OAuth sont conservés sans être réutilisés.
 
-Le rôle d’équipe ne crée aucun apprenant. La lecture est le grant par défaut ;
-la case « Demander la création et la publication de formations » demande
-explicitement `formation:read formation:write`, accordé uniquement si le serveur
-l’autorise. La création passe par les vrais outils MCP et un brouillon ; la
-publication reste soumise à confirmation humaine.
+Le menu **Mon compte et mes rôles** affiche l’identité locale, l’institution et
+les rôles renvoyés par le serveur. Créez ou sélectionnez plusieurs comptes locaux
+sur le même client ; chacun possède son coffre, ses conversations et son dossier
+de travail. Un changement termine l’agent et révoque l’accès Tutor du compte
+précédent. Un compte déjà connecté retrouve l’institution par une nouvelle signature
+lors de sa sélection. Le compte historique reste dans son dossier d’origine.
+
+Les activités **Concevoir et publier**, **Accompagner mes groupes**, **Apprendre**
+ouvrent des sessions avec les seules permissions utiles. Elles n’accordent aucun
+rôle propriétaire ou formateur. Un responsable doit autoriser les clés des
+nouveaux comptes dans l’institution. Un membre d’équipe peut explicitement
+**Activer mon espace apprenant** : seul son rôle apprenant personnel est ajouté,
+ses droits d’équipe sont conservés et aucune inscription n’est créée.
+
+Dans **Mes formations**, utilisez **Créer une formation** pour obtenir un vrai
+brouillon, puis **Concevoir avec mon agent** pour construire le programme. Le
+bouton **Examiner et publier** retrouve les versions réelles à partir de la
+formation, affiche modules, objectifs, critères et blocages. Après examen et
+confirmation, **Publier dans mon institution** publie la version et ouvre une
+offre dans le catalogue de tous les membres. Chacun s’inscrit volontairement.
+Une publication ultérieure remplace l’offre automatique du catalogue ; les
+apprenants déjà inscrits conservent leur version et leur progression. Une
+version publiée est immuable : préparez une nouvelle version pour la modifier.
+Un identifiant d’intention locale ne doit jamais être utilisé comme `version_id`.
+
+La conversation occupe l’espace disponible, avec un texte de 20 px sur écran
+standard, titres, listes, emphase, tableaux et liens. Les repères se déplient en
+panneau flottant. Navigation clavier, lien d’évitement, focus visible, mouvement
+réduit et reflow sont pris en compte ; cela ne constitue pas un audit de
+conformité RGAA complet.
 
 La rotation exige l’approbation de la clé de récupération actuelle, lue
 temporairement depuis la sauvegarde hors ligne. Une clé active volée ne peut donc
@@ -168,7 +203,7 @@ npm ci
 npm run tauri -- dev
 ```
 
-Pour construire l’installateur, générer les notices selon le
+Pour construire l’installateur, préparer les ressources des agents puis générer les notices selon le
 [guide de distribution](docs/distribution-notices.md),
 puis lancer `npm run tauri -- build --bundles nsis`.
 

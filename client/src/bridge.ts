@@ -1,6 +1,6 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { AgentConnection, AgentTarget, Conversation, Intent, Institution, PublicIdentity, JsonRecord, Settings, Snapshot, TutorOverview, TutorStatus } from './types';
+import type { AgentConnection, AgentTarget, Conversation, FormationReview, FormationVersion, Intent, Institution, PublicIdentity, JsonRecord, Settings, Snapshot, TutorOverview, TutorStatus } from './types';
 
 function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (!isTauri()) {
@@ -10,7 +10,18 @@ function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
 }
 
 export const bridge = {
+  bundledAgents: () => call<AgentTarget[]>('bundled_agents'),
   loadState: () => call<Snapshot>('load_state'),
+  createProfile: (label: string) => call<Snapshot>('create_profile', { label }),
+  selectProfile: (id: string) => call<Snapshot>('select_profile', { id }),
+  renameProfile: (label: string) => call<Snapshot>('rename_profile', { label }),
+  openExternalLink: (url: string) => call<void>('open_external_link', { url }),
+  formationVersions: (formationId: string) => call<{ items: FormationVersion[]; next_after: string }>('formation_versions', { formationId }),
+  formationReview: (versionId: string) => call<FormationReview>('formation_review', { versionId }),
+  createFormation: (name: string, description: string, key: string) => call<{ formation: { id: string }; version: FormationVersion }>('create_formation', { name, description, key }),
+  publishFormation: (versionId: string, key: string) => call<unknown>('publish_formation_to_catalog', { versionId, key }),
+  cloneFormation: (versionId: string, key: string) => call<FormationReview['detail']>('clone_formation_version', { versionId, key }),
+  enableLearning: () => call<Snapshot>('enable_learning'),
   discoverAgents: () => call<AgentTarget[]>('discover_agents'),
   saveSettings: (settings: Settings) => call<Snapshot>('save_settings', { settings }),
   saveIntent: (intent: Intent) => call<Snapshot>('save_intent', { intent }),

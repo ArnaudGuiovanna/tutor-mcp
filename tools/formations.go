@@ -22,7 +22,7 @@ type formationAuthoringStore interface {
 
 func formationTool(name string) bool {
 	switch name {
-	case "draft_formation", "add_formation_concepts", "publish_formation", "get_formation_version":
+	case "draft_formation", "add_formation_concepts", "publish_formation", "get_formation_version", "list_formations", "list_formation_versions", "review_formation_version", "publish_formation_to_catalog":
 		return true
 	}
 	return false
@@ -63,6 +63,7 @@ type PublishFormationParams struct {
 }
 
 func registerFormationTools(server *mcp.Server, deps *Deps) {
+	registerFormationCatalogTools(server, deps)
 	addTool(server, &mcp.Tool{Name: "draft_formation", Description: "Create a formation draft, or clone an existing version. Requires explicit formation authoring access. Learners already enrolled remain on their published version."}, func(ctx context.Context, _ *mcp.CallToolRequest, input DraftFormationParams) (*mcp.CallToolResult, any, error) {
 		actor, store, err := formationActor(ctx, deps)
 		if err != nil {
@@ -108,6 +109,10 @@ func registerFormationTools(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 		out, err := store.GetFormationVersion(ctx, actor, input.VersionID)
+		if err != nil {
+			r, _ := safeErrorResult(deps.Logger, "version unavailable or not authorized; use list_formations then list_formation_versions(formation_id) to obtain an accessible version_id; a local intention ID is not a version ID", err)
+			return r, nil, nil
+		}
 		return formationToolResult(deps, out, err)
 	})
 	addTool(server, &mcp.Tool{Name: "publish_formation", Description: "Publish a reviewed formation draft. Its content becomes immutable and available for cohort enrollment. Requires the formateur's explicit decision to publish; existing enrollments never migrate automatically."}, func(ctx context.Context, _ *mcp.CallToolRequest, input PublishFormationParams) (*mcp.CallToolResult, any, error) {

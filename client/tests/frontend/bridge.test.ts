@@ -37,6 +37,17 @@ describe('Le contrat IPC du bridge Tauri', () => {
     await bridge.recoverIdentity(settings.tutor.url, 'ancienne phrase privée', 'nouvelle phrase privée');
     await bridge.disconnectTutor();
     await bridge.tutorOverview();
+    await bridge.bundledAgents();
+    await bridge.createProfile('Apprenant');
+    await bridge.selectProfile('profile-2');
+    await bridge.renameProfile('Mon nom');
+    await bridge.formationVersions('formation-1');
+    await bridge.formationReview('version-1');
+    await bridge.createFormation('Titre','Objectif','create-key');
+    await bridge.publishFormation('version-1','publish-key');
+    await bridge.cloneFormation('version-1','clone-key');
+    await bridge.enableLearning();
+
     expect(calls).toEqual([
       { command: 'load_state', args: {} },
       { command: 'discover_agents', args: {} },
@@ -60,6 +71,17 @@ describe('Le contrat IPC du bridge Tauri', () => {
       { command: 'recover_identity', args: { url: settings.tutor.url, oldPassphrase: 'ancienne phrase privée', newPassphrase: 'nouvelle phrase privée' } },
       { command: 'disconnect_tutor', args: {} },
       { command: 'tutor_overview', args: {} },
+      { command: 'bundled_agents', args: {} },
+      { command: 'create_profile', args: {label:'Apprenant'} },
+      { command: 'select_profile', args: {id:'profile-2'} },
+      { command: 'rename_profile', args: {label:'Mon nom'} },
+      { command: 'formation_versions', args: {formationId:'formation-1'} },
+      { command: 'formation_review', args: {versionId:'version-1'} },
+      { command: 'create_formation', args: {name:'Titre',description:'Objectif',key:'create-key'} },
+      { command: 'publish_formation_to_catalog', args: {versionId:'version-1',key:'publish-key'} },
+      { command: 'clone_formation_version', args: {versionId:'version-1',key:'clone-key'} },
+      { command: 'enable_learning', args: {} },
+
     ]);
   });
 

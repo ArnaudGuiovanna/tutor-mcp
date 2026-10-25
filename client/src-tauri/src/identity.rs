@@ -1,8 +1,8 @@
 // Copyright (c) 2026 Arnaud Guiovanna
 // SPDX-License-Identifier: MIT
 
-//! Local BIP340 identity. Only the active key enters the device vault. The
-//! distinct recovery key lives in memory until backup confirmation, then only
+//! Local BIP340 identity. The active key stays in the device vault. The
+//! distinct recovery key is protected locally until backup confirmation, then only
 //! in the user's portable NIP-49 backup. Neither key is returned over IPC.
 use nostr::{
     nips::nip49::{EncryptedSecretKey, KeySecurity},
@@ -27,6 +27,7 @@ pub struct PublicIdentity {
     pub backup_confirmed: bool,
     pub backup_exported: bool,
     pub needs_backup: bool,
+    pub needs_recovery_restore: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -35,10 +36,15 @@ struct StoredIdentity {
     secret: String,
     recovery_public_key: String,
     backup_confirmed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery_secret: Option<String>,
 }
 impl Drop for StoredIdentity {
     fn drop(&mut self) {
         self.secret.zeroize();
+        if let Some(secret) = &mut self.recovery_secret {
+            secret.zeroize()
+        }
     }
 }
 
@@ -199,6 +205,20 @@ impl IdentityStore {
             value.primary = Some(primary);
             value.recovery_public = Some(recovery);
             value.backup_confirmed = stored.backup_confirmed;
+            if let Some(secret) = &stored.recovery_secret {
+                if stored.backup_confirmed {
+                    return Err("Le coffre confirmé contient une clé de récupération inattendue. Le fichier est conservé.".into());
+                }
+                let keys = Keys::parse(secret)
+                    .map_err(|_| "La clé de récupération locale est invalide.")?;
+                if keys.public_key() != recovery {
+                    return Err(
+                        "Les clés de récupération ne correspondent pas. Le coffre est conservé."
+                            .into(),
+                    );
+                }
+                value.pending_recovery = Some(keys);
+            }
         }
         Ok(value)
     }
@@ -210,6 +230,9 @@ impl IdentityStore {
             backup_confirmed: self.backup_confirmed,
             backup_exported: self.exported,
             needs_backup: self.primary.is_some() && !self.backup_confirmed,
+            needs_recovery_restore: self.primary.is_some()
+                && !self.backup_confirmed
+                && self.pending_recovery.is_none(),
         }
     }
     fn persist(
@@ -218,11 +241,25 @@ impl IdentityStore {
         recovery: nostr::PublicKey,
         confirmed: bool,
     ) -> Result<(), String> {
+        self.persist_pending(primary, recovery, confirmed, None)
+    }
+    fn persist_pending(
+        &self,
+        primary: &Keys,
+        recovery: nostr::PublicKey,
+        confirmed: bool,
+        pending: Option<&Keys>,
+    ) -> Result<(), String> {
         let value = StoredIdentity {
             version: 1,
             secret: primary.secret_key().to_secret_hex(),
             recovery_public_key: recovery.to_hex(),
             backup_confirmed: confirmed,
+            recovery_secret: if confirmed {
+                None
+            } else {
+                pending.map(|keys| keys.secret_key().to_secret_hex())
+            },
         };
         crate::vault::save(&self.directory, VAULT, &value)
     }
@@ -240,7 +277,7 @@ impl IdentityStore {
             Keys::generate()
         };
         let recovery = Keys::generate();
-        self.persist(&primary, recovery.public_key(), false)?;
+        self.persist_pending(&primary, recovery.public_key(), false, Some(&recovery))?;
         self.recovery_public = Some(recovery.public_key());
         self.pending_recovery = Some(recovery);
         self.primary = Some(primary);
@@ -264,19 +301,10 @@ impl IdentityStore {
         if self.backup_confirmed {
             return Err("La clé de récupération est désormais hors ligne. Conservez votre sauvegarde existante ; une nouvelle paire sera créée lors d’une rotation.".into());
         }
-        // If restarted before the first backup, there is no registered identity
-        // yet (active() is gated). Replace only the unregistered recovery key.
-        if self.pending_recovery.is_none() {
-            let recovery = Keys::generate();
-            self.persist(&primary, recovery.public_key(), false)?;
-            self.recovery_public = Some(recovery.public_key());
-            self.pending_recovery = Some(recovery);
-        }
-        KeyPair {
-            primary,
-            recovery: self.pending_recovery.clone().unwrap(),
-        }
-        .backup(path, password)?;
+        // Public keys may already have been authorized by the institution.
+        // Never replace recovery material silently after a restart/upgrade.
+        let recovery=self.pending_recovery.clone().ok_or("Choisissez votre sauvegarde existante pour retrouver la clé de récupération. Les clés publiques ne seront pas remplacées.")?;
+        KeyPair { primary, recovery }.backup(path, password)?;
         self.exported = true;
         Ok(())
     }
@@ -320,6 +348,50 @@ impl IdentityStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_unconfirmed_vault_never_replaces_authorized_recovery_key() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut original = IdentityStore::load(directory.path()).unwrap();
+        let public = original.create(None).unwrap();
+        original
+            .persist(
+                original.primary.as_ref().unwrap(),
+                original.recovery_public.unwrap(),
+                false,
+            )
+            .unwrap();
+        drop(original);
+        let bytes = std::fs::read(directory.path().join(VAULT)).unwrap();
+        let mut loaded = IdentityStore::load(directory.path()).unwrap();
+        assert!(loaded.public().needs_recovery_restore);
+        assert!(loaded
+            .backup(
+                &directory.path().join("new.json"),
+                "une phrase privée suffisante"
+            )
+            .is_err());
+        assert_eq!(loaded.public().recovery_npub, public.recovery_npub);
+        assert_eq!(std::fs::read(directory.path().join(VAULT)).unwrap(), bytes);
+    }
+    #[test]
+    fn unconfirmed_identity_keeps_both_public_keys_after_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut initial = IdentityStore::load(directory.path()).unwrap();
+        let before = initial.create(None).unwrap();
+        drop(initial);
+        let mut restarted = IdentityStore::load(directory.path()).unwrap();
+        assert_eq!(restarted.public().npub, before.npub);
+        assert_eq!(restarted.public().recovery_npub, before.recovery_npub);
+        assert!(!restarted.public().needs_recovery_restore);
+        restarted
+            .backup(
+                &directory.path().join("backup.json"),
+                "une phrase privée suffisante",
+            )
+            .unwrap();
+        restarted.confirm_backup().unwrap();
+        assert_eq!(restarted.public().recovery_npub, before.recovery_npub);
+    }
     #[test]
     fn nip49_official_vector() {
         let text="ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";

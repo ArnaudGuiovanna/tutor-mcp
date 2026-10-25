@@ -12,3 +12,7 @@ client/scripts/notices-supplements/nsis-3.13/COPYING -whitespace
 # Original upstream license files end with a blank line; keep their exact bytes.
 client/scripts/notices-supplements/bitcoin-io-0.1.3/LICENSE -whitespace
 client/scripts/notices-supplements/bitcoin_hashes-0.14.0/LICENSE -whitespace
+# Preserve the CRLF line endings from the verified Windows ripgrep archive.
+client/scripts/notices-supplements/codex-0.160.1/ripgrep-COPYING whitespace=cr-at-eol
+client/scripts/notices-supplements/codex-0.160.1/ripgrep-LICENSE-MIT whitespace=cr-at-eol
+client/scripts/notices-supplements/codex-0.160.1/ripgrep-UNLICENSE whitespace=cr-at-eol

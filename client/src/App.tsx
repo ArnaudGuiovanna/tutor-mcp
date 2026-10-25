@@ -4,9 +4,12 @@ import { bridge } from './bridge';
 import type { ClientBridge } from './bridge';
 import { Icon } from './icons';
 import { IdentityPanel } from './IdentityPanel';
+import { MessageBody } from './MessageBody';
+import { AccountMenu } from './AccountMenu';
+import { FormationReviewPanel, NewFormation } from './FormationReviewPanel';
 import { authoredFormationViews, availableFormationViews, blankIntent, chunkFromEvent, displayDate, errorMessage, formationViews, permissionFromEvent, permissionLabel, record, statusLabel, text, toolFromEvent, validateIntent } from './model';
 import type { FormationView } from './model';
-import type { AgentConnection, AgentTarget, Conversation, Intent, Institution, PermissionRequest, Settings, Snapshot, ToolActivity, TutorOverview } from './types';
+import type { AgentConnection, AgentTarget, Conversation, FormationReview, FormationVersion, Intent, Institution, PermissionRequest, Settings, Snapshot, ToolActivity, TutorOverview } from './types';
 
 type Page = 'today' | 'formations' | 'session' | 'connections';
 const pageLabels: Record<Page, string> = { today: 'Aujourd’hui', formations: 'Mes formations', session: 'Ma séance', connections: 'Connexions' };
@@ -45,6 +48,12 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   const [activeConversationId, setActiveConversationId] = useState<string | undefined>();
   const [readyConversationId, setReadyConversationId] = useState<string | undefined>();
   const [permissionBusy, setPermissionBusy] = useState(false);
+  const [contextOpen, setContextOpen] = useState(false);
+  const contextButton = useRef<HTMLButtonElement>(null);
+  const contextPanel=useRef<HTMLElement>(null);
+  useEffect(()=>{if(contextOpen)contextPanel.current?.querySelector<HTMLButtonElement>('button')?.focus();},[contextOpen]);
+  const [newFormationOpen, setNewFormationOpen] = useState(false);
+  const [reviewFormationId, setReviewFormationId] = useState<string>();
 
   const conversation = snapshot.conversations.find((item) => item.id === (activeConversationId || snapshot.activeConversationId));
   const currentIntent = page === 'session'
@@ -56,12 +65,14 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   const authoredFormations = authoredFormationViews(overview);
   const staff = !!overview?.identity && (overview.capabilities?.learning === false || !overview.identity.learnerId);
   const canAuthor = overview?.capabilities?.formationAuthoring === true;
+  const canRequestAuthoring = canAuthor || overview?.capabilities?.canRequestAuthoring === true || overview?.session?.allowedScopes.includes('formation:write') === true;
   const authoringGrant = overview?.session?.scope.split(' ').includes('formation:write') === true;
   const learningReady = snapshot.agentConnected && snapshot.tutorStatus.connected;
   const conversationReady = learningReady && !!conversation && readyConversationId === conversation.id;
 
   useEffect(() => {
     let live = true;
+    api.bundledAgents().then((found) => {if(live) setTargets(found);}).catch(() => {});
     const unlisten: (() => void)[] = [];
     const register = (promise: Promise<() => void>) => promise.then((dispose) => { if (live) unlisten.push(dispose); else dispose(); }).catch(() => {});
     api.loadState().then((state) => {
@@ -71,9 +82,14 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
       const intent = newestIntent(state.intents);
       if (intent) { setDraft(intent); setSelectedIntentId(intent.id); setIntentEditing(!intent.validated); }
     }).catch((reason) => { if (live) setError(errorMessage(reason)); }).finally(() => { if (live) setLoading(false); });
-    register(api.listenState((state) => { if (live) setSnapshot(state); }));
+    register(api.listenState((state) => {
+      if (!live || (state.profileEpoch || 0) < (snapshotRef.current.profileEpoch || 0)) return;
+      if (state.profile?.id && snapshotRef.current.profile?.id && state.profile.id !== snapshotRef.current.profile.id) displayProfile(state);
+      else setSnapshot(state);
+    }));
     register(api.listenTutor((status) => { if (live) setSnapshot((state) => ({ ...state, tutorStatus: status })); }));
     register(api.listenAgent((event) => {
+      if (typeof event.profileEpoch === 'number' && event.profileEpoch < (snapshotRef.current.profileEpoch || 0)) return;
       if (!live) return;
       if (event.type === 'connection' && (event.status === 'closed' || event.status === 'error')) {
         setSnapshot((state) => ({ ...state, agentConnected: false }));
@@ -112,7 +128,7 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
     let live = true;
     api.tutorOverview().then((value) => { if (live) { setOverview(value); setOverviewError(''); } }).catch((reason) => { if (live) setOverviewError(errorMessage(reason)); });
     return () => { live = false; };
-  }, [api, snapshot.tutorStatus.connected]);
+  }, [api, snapshot.tutorStatus.connected, snapshot.profile?.id, snapshot.settings.tutor.activity]);
 
   async function perform<T>(label: string, operation: () => Promise<T>): Promise<T | undefined> {
     setBusy(label); setError(''); setNotice('');
@@ -122,9 +138,10 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   }
 
   async function refreshOverview() {
+    const profileId = snapshotRef.current.profile?.id;
     setOverviewError('');
-    try { setOverview(await api.tutorOverview()); }
-    catch (reason) { setOverviewError(errorMessage(reason)); }
+    try { const next = await api.tutorOverview(); if (snapshotRef.current.profile?.id === profileId) setOverview(next); }
+    catch (reason) { if (snapshotRef.current.profile?.id === profileId) setOverviewError(errorMessage(reason)); }
   }
 
   async function discover() {
@@ -142,26 +159,26 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   }
 
   async function connect(target: AgentTarget, settings: Settings) {
-    await perform('Connexion à Codex…', async () => {
+    await perform('Connexion à votre agent…', async () => {
       setSnapshot(await api.saveSettings(settings));
       const connection = await api.connectAgent(target, settings.cwd);
       setAgentConnection(connection);
       setReadyConversationId(undefined);
       setSnapshot(await api.loadState());
-      setNotice('Connexion ACP établie. Si Codex demande une identification, choisissez sa méthode de connexion ci-dessous.');
+      setNotice('Connexion ACP établie. Si votre agent demande une identification, choisissez sa méthode de connexion ci-dessous.');
     });
   }
 
   async function authenticate(methodId: string) {
-    await perform('Identification auprès de Codex…', async () => {
+    await perform('Identification auprès du fournisseur…', async () => {
       await api.authenticateAgent(methodId);
       setSnapshot(await api.loadState());
-      setNotice('Identification Codex terminée.');
+      setNotice('Identification auprès du fournisseur terminée.');
     });
   }
 
   async function disconnectAgent() {
-    await perform('Déconnexion de Codex…', async () => {
+    await perform('Déconnexion de votre agent…', async () => {
       await api.disconnectAgent(); setAgentConnection(null); setPermissions([]); setReadyConversationId(undefined);
       setSnapshot(await api.loadState());
     });
@@ -172,7 +189,7 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
       setSnapshot(await api.saveSettings(settings));
       if (settings.tutor.mode === 'remote') {
         setSnapshot(await api.connectTutor(settings.tutor.url, authoring));
-        setNotice('Identité vérifiée par l’institution. Connectez Codex pour commencer une séance.');
+        setNotice('Identité vérifiée par l’institution. Connectez votre agent pour commencer une séance.');
       } else {
         setOverview(await api.tutorOverview());
         setSnapshot(await api.loadState());
@@ -187,6 +204,90 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
 
   async function disconnectTutor() {
     await perform('Déconnexion de Tutor…', async () => { setSnapshot(await api.disconnectTutor()); setOverview(null); });
+  }
+
+  function displayProfile(state: Snapshot) {
+    const intent = newestIntent(state.intents);
+    setSnapshot(state); setOverview(null); setOverviewError(''); setAgentConnection(null); setTargets((items)=>items.filter((item)=>item.id.startsWith('bundled:')));
+    setActiveConversationId(state.activeConversationId); setReadyConversationId(undefined); setSelectedIntentId(intent?.id);
+    setDraft(intent || blankIntent()); setIntentEditing(!intent?.validated);
+    setPendingConversationId(null); pendingRef.current = null; setPermissions([]); setTools([]); setStreamText(''); setPromptDraft('');
+    setContextOpen(false); setPage('connections');
+    setNotice(state.profileSwitchWarning || '');
+    setNewFormationOpen(false); setReviewFormationId(undefined);
+    setNotice(state.profileSwitchWarning || 'Compte actif changé. Les conversations et les clés de chaque compte restent séparées.');
+  }
+
+  async function selectProfile(id: string) {
+    await perform('Changement de compte…', async () => displayProfile(await api.selectProfile(id)));
+  }
+
+  async function createProfile(label: string) {
+    await perform('Création du compte et de ses clés…', async () => {
+      displayProfile(await api.createProfile(label));
+      await api.createIdentity(); setSnapshot(await api.loadState());
+      setNotice('Votre nouveau compte et ses clés sont créés. Copiez votre identifiant public ou protégez votre compte avec une sauvegarde.');
+    });
+  }
+
+  async function renameProfile(label: string) {
+    await perform('Enregistrement du nom du compte…', async () => { setSnapshot(await api.renameProfile(label)); setNotice('Nom du compte enregistré.'); });
+  }
+
+  async function activateActivity(activity: 'author' | 'learn' | 'train') {
+    const previous = snapshotRef.current;
+    if (previous.settings.tutor.mode !== 'remote') throw new Error('Cette activité appartient à une institution distante.');
+    const settings: Settings = { ...previous.settings, tutor: { ...previous.settings.tutor, activity } };
+    const selected = settings.manualTarget || targets.find((target) => target.id === settings.targetId);
+    setSnapshot(await api.saveSettings(settings));
+    setSnapshot(await api.connectTutor(settings.tutor.url, activity === 'author'));
+    setAgentConnection(null); setReadyConversationId(undefined);
+    if (previous.agentConnected && selected) { setAgentConnection(await api.connectAgent(selected, settings.cwd)); setSnapshot(await api.loadState()); }
+    await refreshOverview();
+  }
+
+  async function ensureAuthoring() {
+    if (!snapshotRef.current.tutorStatus.connected) throw new Error('Connectez votre compte à l’institution avant de créer une formation.');
+    if (!authoringGrant) await activateActivity('author');
+  }
+
+  async function changeActivity(activity: 'author' | 'learn' | 'train') {
+    await perform('Changement d’activité…', async () => { await activateActivity(activity); setPage('formations'); setReviewFormationId(undefined); setNotice('Votre activité est active. Les droits sont ceux accordés par l’institution.'); });
+  }
+
+  async function enableLearning() {
+    await perform('Activation de votre espace apprenant…', async () => { setSnapshot(await api.enableLearning()); setAgentConnection(null); setReadyConversationId(undefined); await refreshOverview(); setPage('formations'); setNotice('Votre espace apprenant est activé. Choisissez une formation dans le catalogue ; aucune inscription n’a été créée.'); });
+  }
+
+  async function createInstitutionFormation(name: string, description: string, key: string) {
+    await perform('Création du brouillon institutionnel…', async () => {
+      await ensureAuthoring();
+      const created = await api.createFormation(name, description, key);
+      setSnapshot(await api.loadState()); await refreshOverview();
+      setNewFormationOpen(false); setReviewFormationId(created.formation.id);
+      setNotice('Le brouillon est créé. Examinez son programme ou construisez-le avec votre agent.');
+    });
+  }
+
+  async function publishInstitutionFormation(versionId: string, key: string): Promise<boolean> {
+    return (await perform('Publication dans le catalogue de l’institution…', async () => {
+      await ensureAuthoring(); await api.publishFormation(versionId, key); await refreshOverview();
+      setNotice('La version est publiée et proposée aux membres de l’institution. Aucune inscription n’a été créée.');
+      return true;
+    })) === true;
+  }
+
+  async function cloneInstitutionFormation(versionId: string, key: string): Promise<FormationVersion | undefined> {
+    return await perform('Préparation d’un nouveau brouillon…', async () => {
+      await ensureAuthoring(); const result = await api.cloneFormation(versionId, key); await refreshOverview(); return result.version;
+    });
+  }
+
+  async function discussInstitutionFormation(review: FormationReview) {
+    const authorized = await perform('Préparation de la conception…', async () => { await ensureAuthoring(); return true; });
+    if (!authorized) return;
+    const { formation, version } = review.detail;
+    await startLearning(undefined, undefined, `Examine la formation institutionnelle « ${formation.name} » et sa version ${version.version} avec les outils MCP autorisés. formation_id=${formation.id}, version_id=${version.id}. Ces deux identifiants viennent du serveur ; un identifiant d’intention locale ne désigne pas une version. Lis cette version avec review_formation_version ou get_formation_version et présente son programme réel. Propose les prochaines modifications. Ne publie aucune version et ne crée aucune inscription sans ma confirmation explicite. Si la version est publiée, propose une nouvelle version avant de modifier son contenu. Mon rôle d’équipe ne requiert pas de profil apprenant.`);
   }
 
   async function saveIntention(event: FormEvent) {
@@ -223,7 +324,7 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
 
   async function startLearning(intent?: Intent, resume?: Conversation, initialPrompt?: string) {
     if (pendingRef.current) return;
-    if (!learningReady) { setPage('connections'); setNotice('Connectez Codex et Tutor pour commencer ou reprendre votre séance.'); return; }
+    if (!learningReady) { setPage('connections'); setNotice('Connectez votre agent et Tutor pour commencer ou reprendre votre séance.'); return; }
     const started = await perform(resume ? 'Reprise de votre séance…' : 'Préparation de votre séance…', async () => {
       const result = await api.startConversation(intent?.id, resume?.id);
       const state = await api.loadState();
@@ -258,6 +359,7 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   }
 
   function openFormation(formation: FormationView) {
+    if (formation.kind === 'authored' && formation.formationId) { setReviewFormationId(formation.formationId); return; }
     const prompt = formation.kind === 'authored'
       ? `Examine la formation institutionnelle « ${formation.name} » (formation_id ${formation.formationId}) et ses versions avec les outils MCP autorisés. Présente son état réel et propose les prochaines modifications. Ne publie aucune version et ne crée aucune inscription sans ma confirmation explicite. Mon rôle d’équipe ne requiert pas de profil apprenant.`
       : formation.domainId
@@ -269,11 +371,12 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   if (loading) return <div className="loading-screen"><div className="button-row"><span className="spinner" />Ouverture de votre espace…</div></div>;
 
   return <div className="app-shell">
+    <a className="skip-link" href="#main-content">Aller au contenu principal</a>
     <aside className="sidebar">
       <div className="brand"><span className="brand-symbol">t</span><span>tutor</span></div>
       <p className="sidebar-caption">Votre espace</p>
       <nav className="navigation" aria-label="Navigation principale">
-        {(['today', 'formations', 'session', 'connections'] as Page[]).map((item) => <button key={item} className={`nav-item ${page === item ? 'active' : ''}`} aria-current={page === item ? 'page' : undefined} onClick={() => setPage(item)}>
+        {(['today', 'formations', 'session', 'connections'] as Page[]).map((item) => <button key={item} aria-label={pageLabels[item]} className={`nav-item ${page === item ? 'active' : ''}`} aria-current={page === item ? 'page' : undefined} onClick={() => setPage(item)}>
           <Icon name={item === 'today' ? 'sun' : item === 'formations' ? 'book' : item === 'session' ? 'chat' : 'plug'} /><span>{pageLabels[item]}</span>
           {item === 'formations' && formations.length > 0 && <span className="nav-count">{formations.length}</span>}
           {item === 'session' && pendingConversationId && <span className="dot" aria-label="Réponse en cours" />}
@@ -287,12 +390,13 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
     <div className="main-shell">
       <header className="topbar">
         <div className="breadcrumb"><span>Mon espace</span><Icon name="chevron" size={12} /><strong>{pageLabels[page]}</strong></div>
+        <AccountMenu key={snapshot.profile?.id || 'principal'} snapshot={snapshot} overview={overview} busy={!!busy || !!pendingConversationId} onSelect={(id) => void selectProfile(id)} onCreate={(label) => void createProfile(label)} onRename={(label) => void renameProfile(label)} onActivity={(activity) => void changeActivity(activity)} onEnableLearning={() => void enableLearning()} />
         <div className="topbar-status" aria-label="État des connexions">
           <button className={`status-pill ${snapshot.tutorStatus.connected ? 'connected' : ''}`} onClick={() => setPage('connections')}><span className="dot" />{snapshot.tutorStatus.connected ? snapshot.tutorStatus.label || 'Tutor connecté' : 'Tutor non connecté'}</button>
-          <button className={`status-pill ${snapshot.agentConnected ? 'connected' : ''}`} onClick={() => setPage('connections')}><span className="dot" />{snapshot.agentConnected ? 'Codex connecté' : 'Codex hors ligne'}</button>
+          <button className={`status-pill ${snapshot.agentConnected ? 'connected' : ''}`} onClick={() => setPage('connections')}><span className="dot" />{snapshot.agentConnected ? `${snapshot.settings.targetId==='bundled:claude'?'Claude':'Codex'} connecté` : 'Agent hors ligne'}</button>
         </div>
       </header>
-      <main className="content" id="main-content">
+      <main className={`content ${page === 'session' ? 'session-content' : ''}`} id="main-content" tabIndex={-1}>
         {error && <Notice kind="error" onDismiss={() => setError('')}>{error}</Notice>}
         {notice && <Notice kind="info" onDismiss={() => setNotice('')}>{notice}</Notice>}
         {busy && <div className="notice" role="status"><span className="spinner" /><p>{busy}</p></div>}
@@ -305,7 +409,7 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
             {currentIntent.goals && <p><strong>Ce que vous visez :</strong> {currentIntent.goals}</p>}
             {currentIntent.constraints && <p><strong>Votre cadre :</strong> {currentIntent.constraints}</p>}
             <div className="intent-footer"><button className="button secondary" onClick={() => editIntent(currentIntent)}>Modifier mon intention</button><button className="button primary" disabled={!!busy || !!pendingConversationId} onClick={() => void startLearning(currentIntent, undefined, 'Aide-moi à concevoir une formation à partir de mon intention validée. Commence par reformuler mon objectif et proposer des étapes de conception que je pourrai examiner et modifier avant de les valider.')}><Icon name="spark" size={15} />Concevoir ma formation<Icon name="arrow" size={15} /></button></div>
-            {!learningReady && <p className="subtle-note">La conception commencera après la connexion de Codex et Tutor.</p>}
+            {!learningReady && <p className="subtle-note">La conception commencera après la connexion de votre agent et Tutor.</p>}
           </section> : <IntentEditor draft={draft} setDraft={setDraft} onSubmit={(event) => void saveIntention(event)} busy={!!busy} />}
 
           <div className="guide-grid" aria-label="Les étapes de votre apprentissage">
@@ -332,7 +436,10 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
         {page === 'formations' && <>
           <div className="page-heading-row"><PageHeading eyebrow="Votre bibliothèque" title="Des parcours qui vous ressemblent." description="Retrouvez les formations enregistrées dans Tutor et les intentions préparées sur cet appareil." /><button className="button secondary" onClick={() => editIntent()}><Icon name="plus" size={15} />Nouvelle intention</button></div>
           {overviewError && <Notice kind="error">{overviewError}</Notice>}
-          {staff && <section className="card authoring-panel" aria-label="Création de formations"><div className="formation-meta"><span className="tag purple">Équipe de l’institution</span><span className="section-caption">{overview?.identity?.roles?.join(' · ')}</span></div><h2>Concevoir une formation pour votre institution</h2><p>{canAuthor ? 'Votre rôle autorise la création de formations. Préparez une intention, puis co-concevez un brouillon réel avec Codex. La publication demande votre confirmation.' : 'Cette session donne accès à la lecture. La création reste soumise aux permissions de votre institution.'}</p>{canAuthor && !authoringGrant && <p className="subtle-note">Pour écrire, reconnectez Tutor en activant « Demander la création et la publication de formations ».</p>}<button className="button primary" disabled={!canAuthor || !authoringGrant || !!busy} onClick={() => editIntent()}>Préparer une formation<Icon name="plus" size={14} /></button><p className="subtle-note">Votre rôle d’équipe ne crée pas de profil apprenant.</p></section>}
+          {newFormationOpen && <NewFormation busy={!!busy} onCreate={(name, description, key) => void createInstitutionFormation(name, description, key)} onCancel={() => setNewFormationOpen(false)} />}
+          {reviewFormationId && <FormationReviewPanel key={`${snapshot.profile?.id || 'principal'}:${reviewFormationId}`} formationId={reviewFormationId} api={api} canPublish={canRequestAuthoring} busy={!!busy || !!pendingConversationId} onClose={() => setReviewFormationId(undefined)} onDiscuss={(review) => void discussInstitutionFormation(review)} onPublish={publishInstitutionFormation} onClone={cloneInstitutionFormation} />}
+          {staff && !overview?.capabilities?.training && <section className="card authoring-panel" aria-label="Création de formations"><div className="formation-meta"><span className="tag purple">Équipe de l’institution</span></div><h2>Les formations de votre institution</h2><p>{canRequestAuthoring ? 'Créez un brouillon, construisez son programme avec votre agent, puis examinez la version et décidez de sa publication pour les membres.' : 'Votre rôle permet de consulter les formations qui vous sont accessibles.'}</p><button className="button primary" disabled={!canRequestAuthoring || !!busy || !!pendingConversationId} onClick={() => setNewFormationOpen(true)}>Créer une formation<Icon name="plus" size={14} /></button><p className="subtle-note">Votre rôle d’équipe ne crée pas de profil apprenant. Les inscriptions restent volontaires.</p></section>}
+          {overview?.capabilities?.training && <section className="card" aria-label="Mes groupes de formation"><h2>Mes groupes de formation</h2>{overview.trainerCohorts?.items.length ? overview.trainerCohorts.items.map((cohort) => <div key={cohort.cohort_id}><h3>{cohort.cohort_name}</h3><p>{cohort.formation_name}</p><button className="button secondary" disabled={!!busy || !!pendingConversationId} onClick={() => void startLearning(undefined, undefined, `Consulte le groupe qui m’est affecté : cohort_id=${cohort.cohort_id}, formation_id=${cohort.formation_id}. Présente les progrès réels avec les outils autorisés. Ne crée aucun profil apprenant ni inscription.`)}>Examiner le suivi</button></div>) : <p>Aucun groupe ne vous est actuellement affecté. Un responsable de l’institution peut vous affecter comme formateur.</p>}</section>}
           <div className="section-heading"><h2>Mes formations</h2><button className="link-button" disabled={!snapshot.tutorStatus.connected || !!busy} onClick={() => void refreshOverview()}><Icon name="refresh" size={13} />Actualiser</button></div>
           {formations.length ? <div className="formation-grid">{formations.map((formation) => <FormationCard key={formation.id} formation={formation} onOpen={() => openFormation(formation)} disabled={!!busy || !!pendingConversationId} />)}</div> : <EmptyState icon="book" title={snapshot.tutorStatus.connected ? 'Aucune formation enregistrée' : 'Retrouvez vos formations'} description={snapshot.tutorStatus.connected ? 'Commencez par une intention personnelle ou explorez les formations accessibles dans votre institution.' : 'Connectez Tutor pour lire vos parcours. Les données de votre institution restent la référence.'} action={!snapshot.tutorStatus.connected ? <button className="button secondary" onClick={() => setPage('connections')}>Connecter Tutor<Icon name="arrow" size={14} /></button> : undefined} />}
           {!!authoredFormations.length && <><div className="section-heading"><h2>Formations de l’institution</h2><span className="section-caption">Brouillons et publications autorisés</span></div><div className="formation-grid">{authoredFormations.map((formation) => <FormationCard key={formation.id} formation={formation} onOpen={() => openFormation(formation)} disabled={!!busy || !!pendingConversationId} />)}</div></>}
@@ -342,12 +449,13 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
         </>}
 
         {page === 'session' && <>
-          <PageHeading eyebrow="Un pas après l’autre" title="Votre séance, votre rythme." description="Échangez avec votre tuteur, examinez ses propositions et gardez la main sur les décisions qui comptent." />
+          <h1 className="visually-hidden">Votre séance, votre rythme.</h1>
           {!!snapshot.conversations.length && <div className="session-picker" aria-label="Séances enregistrées">{snapshot.conversations.map((item) => <button key={item.id} className="session-chip" aria-pressed={conversation?.id === item.id} disabled={!!pendingConversationId || !!busy} onClick={() => { setActiveConversationId(item.id); setSelectedIntentId(item.intentId); setTools([]); setStreamText(''); }}>{item.title || 'Séance'} · {displayDate(item.updatedAt)}</button>)}</div>}
           <div className="session-layout" style={{ marginTop: 20 }}>
             <section className="conversation-panel" aria-label="Conversation avec votre tuteur">
-              <div className="conversation-heading"><div><h2>{conversation?.title || 'Votre tuteur'}</h2><p>{pendingConversationId ? 'Codex prépare sa réponse…' : conversation ? 'Échanges conservés sur cet appareil' : 'Une nouvelle séance commence par votre intention'}</p></div><span className={`tag ${snapshot.agentConnected ? 'green' : ''}`}><span className="dot" />Codex</span></div>
-              <ConversationMessages conversation={conversation} streamText={streamText} streaming={!!pendingConversationId} />
+              <div className="conversation-heading"><div><h2>{conversation?.title || 'Votre tuteur'}</h2><p>{pendingConversationId ? 'Votre agent prépare sa réponse…' : conversation ? 'Échanges conservés dans ce compte' : 'Une nouvelle séance commence par votre intention'}</p></div><button ref={contextButton} className="button secondary" aria-controls="session-context" aria-expanded={contextOpen} onClick={() => setContextOpen(!contextOpen)}>Repères de la séance</button></div>
+              {conversation && !conversationReady && !pendingConversationId && <button className="button secondary resume-session" disabled={!!busy} onClick={() => void startLearning(undefined, conversation)}>Reprendre cette séance</button>}
+              <ConversationMessages conversation={conversation} streamText={streamText} streaming={!!pendingConversationId} openLink={api.openExternalLink} />
               {permissions.map((permission, index) => <PermissionCard key={JSON.stringify(permission.id)} permission={permission} disabled={permissionBusy || index > 0} onAnswer={(optionId) => void answerPermission(permission, optionId)} />)}
               {pendingConversationId && <div className="session-strip" role="status"><span className="spinner" />{permissions.length ? 'Votre autorisation est attendue.' : tools.some((tool) => tool.status === 'in_progress') ? 'Le tuteur utilise les outils autorisés.' : 'Réponse en cours…'}</div>}
               <form className="composer" onSubmit={(event) => { event.preventDefault(); if (conversation && promptDraft.trim()) { const value = promptDraft; setPromptDraft(''); void sendText(conversation.id, value); } }}>
@@ -356,15 +464,16 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
                 <div className="composer-footer"><span className="composer-hint">Ctrl + Entrée pour envoyer · L’IA peut se tromper.</span>{pendingConversationId ? <button type="button" className="button secondary" onClick={() => void cancel()}><Icon name="pause" size={14} />Interrompre</button> : <button className="button primary" disabled={!conversationReady || !promptDraft.trim() || !!busy}>Envoyer<Icon name="arrow" size={14} /></button>}</div>
               </form>
             </section>
-            <aside className="session-context" aria-label="Repères de votre séance">
+            <aside ref={contextPanel} id="session-context" className="session-context" aria-label="Repères de votre séance" hidden={!contextOpen} onKeyDown={(event) => { if (event.key === 'Escape') { setContextOpen(false); contextButton.current?.focus(); } }}>
+              <button className="button secondary context-close" onClick={() => { setContextOpen(false); contextButton.current?.focus(); }}>Fermer les repères</button>
               <section className="card context-card"><h3>Votre intention</h3>{currentIntent ? <><p>{currentIntent.title}</p>{currentIntent.constraints && <p className="subtle-note">{currentIntent.constraints}</p>}<button className="link-button" disabled={!!pendingConversationId} onClick={() => editIntent(currentIntent)}>Revoir mon intention</button></> : <><p>Un objectif clair vous aide à garder le fil de votre apprentissage.</p><button className="link-button" onClick={() => editIntent()}>Définir mon intention<Icon name="arrow" size={12} /></button></>}</section>
               <section className="card context-card"><h3>Activité du tuteur</h3>{tools.length ? <ul className="context-list">{tools.map((tool) => <li key={tool.id} className="tool-entry"><strong>{tool.title}</strong><span className="tool-status">{statusLabel(tool.status)}</span></li>)}</ul> : <p>Les actions réalisées pendant votre séance apparaîtront ici.</p>}</section>
-              {!pendingConversationId && conversation && <section className="card context-card"><h3>Reprendre le fil</h3><p>Reconnectez votre agent pour retrouver cette séance et son contexte pédagogique.</p><button className="button secondary small" disabled={!!busy} onClick={() => void startLearning(undefined, conversation)}>Reprendre cette séance<Icon name="arrow" size={12} /></button></section>}
+
             </aside>
           </div>
         </>}
 
-        {page === 'connections' && <Connections settings={snapshot.settings} targets={targets} connected={snapshot.agentConnected} tutorStatus={snapshot.tutorStatus} connection={agentConnection} identity={snapshot.identity} api={api} onIdentityAction={identityAction} busy={!!busy || !!pendingConversationId} onDiscover={() => void discover()} onSave={(settings) => void saveSettings(settings)} onConnect={(target, settings) => void connect(target, settings)} onAuthenticate={(methodId) => void authenticate(methodId)} onDisconnectAgent={() => void disconnectAgent()} onConnectTutor={(settings, authoring) => void connectTutor(settings, authoring)} onDisconnectTutor={() => void disconnectTutor()} />}
+        {page === 'connections' && <Connections key={snapshot.profile?.id || 'principal'} settings={snapshot.settings} targets={targets} connected={snapshot.agentConnected} tutorStatus={snapshot.tutorStatus} connection={agentConnection} identity={snapshot.identity} api={api} onIdentityAction={identityAction} busy={!!busy || !!pendingConversationId} onDiscover={() => void discover()} onSave={(settings) => void saveSettings(settings)} onConnect={(target, settings) => void connect(target, settings)} onAuthenticate={(methodId) => void authenticate(methodId)} onDisconnectAgent={() => void disconnectAgent()} onConnectTutor={(settings, authoring) => void connectTutor(settings, authoring)} onDisconnectTutor={() => void disconnectTutor()} />}
       </main>
     </div>
   </div>;
@@ -407,23 +516,27 @@ function IntentEditor({ draft, setDraft, onSubmit, busy }: { draft: Intent; setD
 }
 
 function FormationCard({ formation, onOpen, disabled, catalog = false }: { formation: FormationView; onOpen: () => void; disabled: boolean; catalog?: boolean }) {
-  return <section className="card formation-card"><div className="formation-meta"><span className={`tag ${formation.kind === 'personal' ? 'purple' : ''}`}>{formation.kind === 'personal' ? 'Parcours personnel' : formation.kind === 'authored' ? 'Formation institutionnelle' : 'Formation commune'}</span>{formation.version !== undefined && <span className="section-caption">Version {formation.version}</span>}</div><h3>{formation.name}</h3>{formation.description && <p>{formation.description}</p>}{formation.conceptCount !== undefined && <div className="data-pair"><span>Concepts du parcours</span><strong>{formation.conceptCount}</strong></div>}{formation.publicationStatus && <div className="data-pair"><span>État du serveur</span><strong>{statusLabel(formation.publicationStatus)}</strong></div>}{formation.enrollmentStatus && <div className="data-pair"><span>Votre inscription</span><strong>{statusLabel(formation.enrollmentStatus)}</strong></div>}<div className="button-row"><button className="button secondary small" disabled={disabled} onClick={onOpen}>{formation.kind === 'authored' ? 'Examiner avec Codex' : catalog || !formation.domainId ? 'Découvrir avec mon tuteur' : 'Reprendre mon parcours'}<Icon name="arrow" size={13} /></button></div></section>;
+  return <section className="card formation-card"><div className="formation-meta"><span className={`tag ${formation.kind === 'personal' ? 'purple' : ''}`}>{formation.kind === 'personal' ? 'Parcours personnel' : formation.kind === 'authored' ? 'Formation institutionnelle' : 'Formation commune'}</span>{formation.version !== undefined && <span className="section-caption">Version {formation.version}</span>}</div><h3>{formation.name}</h3>{formation.description && <p>{formation.description}</p>}{formation.conceptCount !== undefined && <div className="data-pair"><span>Concepts du parcours</span><strong>{formation.conceptCount}</strong></div>}{formation.publicationStatus && <div className="data-pair"><span>État du serveur</span><strong>{statusLabel(formation.publicationStatus)}</strong></div>}{formation.enrollmentStatus && <div className="data-pair"><span>Votre inscription</span><strong>{statusLabel(formation.enrollmentStatus)}</strong></div>}<div className="button-row"><button className="button secondary small" disabled={disabled} onClick={onOpen}>{formation.kind === 'authored' ? 'Examiner et publier' : catalog || !formation.domainId ? 'Découvrir avec mon tuteur' : 'Reprendre mon parcours'}<Icon name="arrow" size={13} /></button></div></section>;
 }
 
-function ConversationMessages({ conversation, streamText, streaming }: { conversation?: Conversation; streamText: string; streaming: boolean }) {
+function ConversationMessages({ conversation, streamText, streaming, openLink }: { conversation?: Conversation; streamText: string; streaming: boolean; openLink: ClientBridge['openExternalLink'] }) {
   const endRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { endRef.current?.scrollIntoView?.({ block: 'nearest' }); }, [conversation?.messages.length, streamText]);
+  const nearEnd = useRef(true);
+  const [unread, setUnread] = useState(false);
+  useEffect(() => { nearEnd.current = true; setUnread(false); endRef.current?.scrollIntoView?.({ block: 'nearest' }); }, [conversation?.id]);
+  useEffect(() => { if (nearEnd.current) endRef.current?.scrollIntoView?.({ block: 'nearest' }); else setUnread(true); }, [conversation?.messages.length, streamText]);
   const messages = conversation?.messages || [];
-  return <div className="conversation-messages" role="log" aria-label="Messages de la séance" aria-live="polite" aria-relevant="additions text">
+  return <div className="conversation-messages" role="log" aria-label="Messages de la séance" aria-live={streaming ? 'off' : 'polite'} aria-relevant="additions" tabIndex={0} onScroll={(event) => { const element = event.currentTarget; nearEnd.current = element.scrollHeight - element.scrollTop - element.clientHeight < 96; if (nearEnd.current) setUnread(false); }}>
     {!messages.length && !streamText && <div className="conversation-welcome"><Icon name="spark" size={29} /><h3>Un espace pour explorer ensemble.</h3><p>{conversation ? 'Posez votre première question ou expliquez ce que vous souhaitez travailler aujourd’hui.' : 'Définissez une intention depuis Aujourd’hui, ou reprenez une séance enregistrée.'}</p></div>}
     {messages.map((message) => {
       // The native snapshot creates the durable assistant placeholder before
       // the first ACP chunk. Display live chunks inside that same message;
       // completion/interruption snapshots replace it without a second bubble.
       const visibleText = message.status === 'streaming' && streamText.length > message.text.length ? streamText : message.text;
-      return <div className={`message ${message.role}`} key={message.id}><div className="message-avatar">{message.role === 'user' ? 'V' : message.role === 'assistant' ? <Icon name="spark" size={14} /> : 'i'}</div><div className="message-content"><p className="message-label">{message.role === 'user' ? 'Vous' : message.role === 'assistant' ? 'Votre tuteur' : 'Tutor'}</p><div className="message-text">{visibleText}{message.status === 'streaming' && <span className="streaming-cursor" />}</div>{message.status === 'interrupted' && <span className="message-interrupted">Réponse interrompue — les éléments affichés peuvent être incomplets.</span>}{message.status === 'error' && <span className="message-interrupted">Ce message n’a pas été confirmé comme terminé.</span>}</div></div>;
+      return <article className={`message ${message.role}`} key={message.id}><div className="message-avatar" aria-hidden="true">{message.role === 'user' ? 'V' : message.role === 'assistant' ? <Icon name="spark" size={14} /> : 'i'}</div><div className="message-content"><p className="message-label">{message.role === 'user' ? 'Vous' : message.role === 'assistant' ? 'Votre tuteur' : 'Tutor'}</p><div className="message-text"><MessageBody text={visibleText} openLink={openLink} />{message.status === 'streaming' && <span className="streaming-cursor" aria-hidden="true" />}</div>{message.status === 'interrupted' && <span className="message-interrupted">Réponse interrompue — les éléments affichés peuvent être incomplets.</span>}{message.status === 'error' && <span className="message-interrupted">Ce message n’a pas été confirmé comme terminé.</span>}</div></article>;
     })}
-    {!!streamText && messages.at(-1)?.role === 'user' && <div className="message assistant"><div className="message-avatar"><Icon name="spark" size={14} /></div><div className="message-content"><p className="message-label">Votre tuteur</p><div className="message-text">{streamText}{streaming && <span className="streaming-cursor" />}</div></div></div>}
+    {!!streamText && messages.at(-1)?.role === 'user' && <div className="message assistant"><div className="message-avatar" aria-hidden="true"><Icon name="spark" size={14} /></div><div className="message-content"><p className="message-label">Votre tuteur</p><div className="message-text"><MessageBody text={streamText} openLink={openLink} />{streaming && <span className="streaming-cursor" aria-hidden="true" />}</div></div></div>}
+    {unread && <button className="button secondary jump-to-latest" onClick={() => { nearEnd.current = true; setUnread(false); endRef.current?.scrollIntoView?.({ block: 'nearest' }); }}>Aller aux derniers messages</button>}
     <div ref={endRef} />
   </div>;
 }
@@ -454,6 +567,9 @@ function Connections(props: ConnectionsProps) {
   const [argsText, setArgsText] = useState(JSON.stringify(props.settings.tutor.args));
   const [argsError, setArgsError] = useState('');
   const selected = targets.find((target) => target.id === settings.targetId);
+  const agentName=settings.targetId==='bundled:claude'?'Claude':'Codex';
+  useEffect(() => {if(!settings.targetId && targets.some(t=>t.id.startsWith('bundled:'))) setSettings(previous=>({...previous,targetId:targets.find(t=>t.id.startsWith('bundled:'))!.id}));},[targets,settings.targetId]);
+  useEffect(() => {if(settings.tutor.mode!=='remote'||!settings.tutor.url)return;let live=true;const timer=setTimeout(()=>{props.api.discoverInstitution(settings.tutor.url).then(value=>{if(live)setInstitution(value);}).catch(()=>{});},400);return()=>{live=false;clearTimeout(timer);};},[props.api,settings.tutor.mode,settings.tutor.url]);
   const tutorBlockedReason = busy ? 'Une opération est en cours. Attendez sa fin.'
     : settings.tutor.mode === 'remote'
       ? !props.identity.exists ? 'Créez ou restaurez votre identité dans « Votre identité locale ».'
@@ -487,10 +603,10 @@ function Connections(props: ConnectionsProps) {
     <IdentityPanel identity={props.identity} api={props.api} busy={busy} connected={tutorStatus.connected && settings.tutor.mode === 'remote'} institutionUrl={settings.tutor.url} run={props.onIdentityAction} />
     <PageHeading eyebrow="Votre environnement" title="Vos outils, réunis dans Tutor." description="Connectez votre agent IA et votre moteur pédagogique. Chacun conserve son rôle et son propre accès." />
     <section className="card connection-card">
-      <div className="connection-heading"><div className="connection-heading-main"><span className="connection-number">02</span><div><h2 className="card-title">Votre agent Codex</h2><p>Une installation Windows ou WSL2, accessible par son adaptateur ACP.</p></div></div><span className={`tag ${connected ? 'green' : ''}`}>{connected ? 'Connecté' : 'À connecter'}</span></div>
+      <div className="connection-heading"><div className="connection-heading-main"><span className="connection-number">02</span><div><h2 className="card-title">Votre agent IA</h2><p>Choisissez Codex ou Claude intégrés. Votre compte fournisseur reste personnel.</p></div></div><span className={`tag ${connected ? 'green' : ''}`}>{connected ? 'Connecté' : 'À connecter'}</span></div>
       <div className="button-row" style={{ marginBottom: 18 }}><button className="button secondary" disabled={busy || connected} onClick={props.onDiscover}><Icon name="refresh" size={14} />Rechercher les installations</button><span className="inline-status">Windows natif et distributions WSL2</span></div>
       {!!targets.length && <fieldset style={{ border: 0, padding: 0, margin: 0 }}><legend className="visually-hidden">Installation de Codex</legend><div className="target-list">{targets.map((target) => <label className="target-option" key={target.id}><input type="radio" name="target" checked={!manual && settings.targetId === target.id} disabled={busy || connected || !target.available} onChange={() => { setManual(false); setSettings({ ...settings, targetId: target.id }); }} /><div className="target-option-main"><strong>{target.label}</strong><small>{target.detail}{target.codexVersion ? ` · Codex ${target.codexVersion}` : ''}{target.adapterVersion ? ` · Adaptateur ${target.adapterVersion}` : ''}</small></div><span className={`tag ${target.available ? 'green' : ''}`}>{target.available ? 'Disponible' : 'À compléter'}</span></label>)}</div></fieldset>}
-      <div className="form-grid"><label className="field full">Dossier de travail<input value={settings.cwd} onChange={(event) => setSettings({ ...settings, cwd: event.target.value })} disabled={busy || connected} placeholder={selected?.environment === 'wsl' || (manual && manualEnvironment === 'wsl') ? '~' : 'C:\\Users\\vous\\Tutor'} /><small>Un dossier existant dans l’environnement choisi. Dans WSL, ~ désigne votre dossier personnel. Codex utilisera ce dossier pour la séance.</small></label></div>
+      <details className="advanced-workspace"><summary>Dossier de séance et réglages avancés</summary><div className="form-grid"><label className="field full">Dossier de travail<input value={settings.cwd} onChange={(event) => setSettings({ ...settings, cwd: event.target.value })} disabled={busy || connected} placeholder={selected?.environment === 'wsl' || (manual && manualEnvironment === 'wsl') ? '~' : 'C:\\Users\\vous\\Tutor'} /><small>Un dossier existant dans l’environnement choisi. Dans WSL, ~ désigne votre dossier personnel. Un dossier privé est déjà préparé pour les agents intégrés.</small></label></div></details>
       <details open={manual || undefined}><summary>Choisir une installation manuellement</summary><div className="form-grid">
         <label className="checkbox-label field full"><input type="checkbox" checked={manual} disabled={busy || connected} onChange={(event) => setManual(event.target.checked)} />Utiliser les chemins ci-dessous</label>
         <label className="field">Environnement<select value={manualEnvironment} disabled={busy || connected} onChange={(event) => setManualEnvironment(event.target.value as 'native' | 'wsl')}><option value="native">Windows natif</option><option value="wsl">WSL2</option></select></label>
@@ -498,8 +614,8 @@ function Connections(props: ConnectionsProps) {
         <label className="field full">Chemin de l’adaptateur ACP<input value={adapterPath} disabled={busy || connected} onChange={(event) => setAdapterPath(event.target.value)} placeholder={manualEnvironment === 'wsl' ? '/home/vous/.local/bin/codex-acp' : 'C:\\Outils\\codex-acp.exe'} /><small>Le programme codex-acp, qui lancera Codex pour cette application.</small></label>
         <label className="field full">Chemin de Codex <span className="field-optional">facultatif</span><input value={codexPath} disabled={busy || connected} onChange={(event) => setCodexPath(event.target.value)} placeholder="Laisser vide pour le Codex fourni par l’adaptateur" /><small>{manualEnvironment === 'wsl' ? 'Pour utiliser votre propre installation, choisissez un exécutable ou un script Linux exécutable dans cette distribution.' : 'Pour utiliser votre propre installation, choisissez son exécutable Codex .exe ; les wrappers npm .cmd ne conviennent pas à ce champ.'} Laissez vide pour conserver la version compatible fournie par l’adaptateur.</small></label>
       </div></details>
-      <div className="connection-actions"><span className="inline-status">{connection ? `${connection.agentInfo.title || connection.agentInfo.name || 'Codex'}${connection.agentInfo.version ? ` · ${connection.agentInfo.version}` : ''}` : 'Codex Desktop n’est pas nécessaire.'}</span><div className="button-row">{connected ? <button className="button secondary" disabled={busy} onClick={props.onDisconnectAgent}>Déconnecter Codex</button> : <button className="button primary" disabled={busy || !settings.cwd.trim() || (manual ? !adapterPath.trim() || (manualEnvironment === 'wsl' && !distribution.trim()) : !selected?.available)} onClick={connectAgent}>Connecter Codex<Icon name="arrow" size={14} /></button>}</div></div>
-      {!!connection?.authMethods.length && <div className="form-grid" style={{ marginTop: 19 }}><label className="field">Identification Codex<select value={methodId || connection.authMethods[0]?.id} disabled={busy} onChange={(event) => setMethodId(event.target.value)}>{connection.authMethods.map((method) => <option key={method.id} value={method.id}>{method.name}</option>)}</select></label><div style={{ alignSelf: 'end' }}><button className="button secondary" disabled={busy} onClick={() => props.onAuthenticate(methodId || connection.authMethods[0].id)}><Icon name="external" size={13} />S’identifier auprès de Codex</button></div></div>}
+      <div className="connection-actions"><span className="inline-status">{connection ? `${connection.agentInfo.title || connection.agentInfo.name || 'Codex'}${connection.agentInfo.version ? ` · ${connection.agentInfo.version}` : ''}` : 'Codex Desktop n’est pas nécessaire.'}</span><div className="button-row">{connected ? <button className="button secondary" disabled={busy} onClick={props.onDisconnectAgent}>Déconnecter {agentName}</button> : <button className="button primary" disabled={busy || !settings.cwd.trim() || (manual ? !adapterPath.trim() || (manualEnvironment === 'wsl' && !distribution.trim()) : !selected?.available)} onClick={connectAgent}>Connecter {agentName}<Icon name="arrow" size={14} /></button>}</div></div>
+      {!!connection?.authMethods.length && <div className="form-grid" style={{ marginTop: 19 }}><label className="field">Identification {agentName}<select value={methodId || connection.authMethods[0]?.id} disabled={busy} onChange={(event) => setMethodId(event.target.value)}>{connection.authMethods.map((method) => <option key={method.id} value={method.id}>{method.name}</option>)}</select></label><div style={{ alignSelf: 'end' }}><button className="button secondary" disabled={busy} onClick={() => props.onAuthenticate(methodId || connection.authMethods[0].id)}><Icon name="external" size={13} />S’identifier auprès de {agentName}</button></div></div>}
     </section>
 
     <section className="card connection-card">
@@ -511,7 +627,7 @@ function Connections(props: ConnectionsProps) {
       {argsError && <p role="alert" className="notice error" style={{ marginTop: 15 }}>{argsError}</p>}
       {tutorStatus.message && <p className="subtle-note">{tutorStatus.message}</p>}
       {!tutorStatus.connected && tutorBlockedReason && <p id="tutor-connect-help" className="subtle-note">{tutorBlockedReason}</p>}
-      <div className="connection-actions"><span className="inline-status">Votre accès Tutor est distinct de votre compte Codex.</span>{tutorStatus.connected ? <button className="button secondary" disabled={busy} onClick={props.onDisconnectTutor}>Déconnecter Tutor</button> : <button className="button primary" disabled={!!tutorBlockedReason} aria-describedby={tutorBlockedReason ? 'tutor-connect-help' : undefined} onClick={() => { const next = preparedSettings(); if (next) { props.onConnectTutor(next, authoring); } }}>{settings.tutor.mode === 'remote' ? <>Connecter avec ma clé<Icon name="arrow" size={14} /></> : <>Vérifier Tutor local<Icon name="arrow" size={14} /></>}</button>}</div>
+      <div className="connection-actions"><span className="inline-status">Votre accès Tutor est distinct de votre compte fournisseur.</span>{tutorStatus.connected ? <button className="button secondary" disabled={busy} onClick={props.onDisconnectTutor}>Déconnecter Tutor</button> : <button className="button primary" disabled={!!tutorBlockedReason} aria-describedby={tutorBlockedReason ? 'tutor-connect-help' : undefined} onClick={() => { const next = preparedSettings(); if (next) { props.onConnectTutor(next, authoring); } }}>{settings.tutor.mode === 'remote' ? <>Connecter avec ma clé<Icon name="arrow" size={14} /></> : <>Vérifier Tutor local<Icon name="arrow" size={14} /></>}</button>}</div>
     </section>
     <div className="button-row"><button className="button secondary" disabled={busy} onClick={() => { const next = preparedSettings(); if (next) props.onSave(next); }}><Icon name="check" size={14} />Enregistrer les réglages</button></div>
     <p className="subtle-note">Codex et son adaptateur doivent être compatibles. Les fonctionnalités réellement disponibles sont vérifiées à la connexion ; une installation détectée ne garantit pas encore le fonctionnement complet d’une séance.</p>

@@ -40,6 +40,9 @@ var toolRegistrationOAuthModes sync.Map // map[*mcp.Server]bool; populated only 
 var toolRegistrationNames sync.Map // map[*mcp.Server]map[string]struct{}; registration only
 
 var readOnlyTools = map[string]bool{
+	"list_formations":                true,
+	"list_formation_versions":        true,
+	"review_formation_version":       true,
 	"get_my_badges":                  true,
 	"get_learner_badges":             true,
 	"list_trainer_cohorts":           true,
@@ -80,6 +83,7 @@ var readWriteTools = map[string]bool{
 }
 
 var writeTools = map[string]bool{
+	"publish_formation_to_catalog":    true,
 	"join_formation":                  true,
 	"leave_formation":                 true,
 	"draft_formation":                 true,
@@ -152,7 +156,7 @@ func requiredOAuthScopesForTool(name string) ([]string, bool) {
 		return []string{models.OAuthScopeProgressRead}, true
 	}
 	if formationTool(name) {
-		if name == "get_formation_version" {
+		if name == "get_formation_version" || name == "list_formations" || name == "list_formation_versions" || name == "review_formation_version" {
 			return []string{models.OAuthScopeFormationRead}, true
 		}
 		return []string{models.OAuthScopeFormationWrite}, true
@@ -305,6 +309,18 @@ func addTool[In, Out any](server *mcp.Server, tool *mcp.Tool, handler mcp.ToolHa
 func toolOAuthScopeMiddleware(baseURL string, granular bool) mcp.Middleware {
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method == "tools/list" && auth.IsNativeClientSession(ctx) {
+				result, err := next(ctx, method, req)
+				if err != nil {
+					return result, err
+				}
+				if list, ok := result.(*mcp.ListToolsResult); ok {
+					copy := *list
+					copy.Tools = authorizedNativeTools(ctx, list.Tools)
+					return &copy, nil
+				}
+				return result, nil
+			}
 			if method != "tools/call" {
 				return next(ctx, method, req)
 			}
@@ -324,6 +340,33 @@ func toolOAuthScopeMiddleware(baseURL string, granular bool) mcp.Middleware {
 			return result, nil
 		}
 	}
+}
+
+func authorizedNativeTools(ctx context.Context, available []*mcp.Tool) []*mcp.Tool {
+	visible := make([]*mcp.Tool, 0, len(available))
+	actor, ok := auth.GetPrincipal(ctx)
+	if !ok {
+		return visible
+	}
+	for _, tool := range available {
+		scopes, known := requiredOAuthScopesForTool(tool.Name)
+		if !known || !hasRequiredOAuthScopes(ctx, scopes) {
+			continue
+		}
+		if formationTool(tool.Name) {
+			if !actor.Authorize(models.PermissionFormationWrite, models.AuthorizationResource{TenantID: actor.TenantID}) {
+				continue
+			}
+		} else if progressTool(tool.Name) {
+			if !actor.CanReadInstitutionProgress() {
+				continue
+			}
+		} else if actor.LearnerID == "" || !actor.Authorize(models.PermissionLearningSelf, models.AuthorizationResource{TenantID: actor.TenantID, OwnerUserID: actor.UserID}) {
+			continue
+		}
+		visible = append(visible, tool)
+	}
+	return visible
 }
 
 func getLearnerID(ctx context.Context) (string, error) {

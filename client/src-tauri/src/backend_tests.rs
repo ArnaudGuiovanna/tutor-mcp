@@ -3,6 +3,29 @@
 
 use super::*;
 
+#[tokio::test]
+async fn switching_from_wsl_home_to_packaged_agent_uses_the_accounts_private_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Backend::new(directory.path(), Arc::new(|_, _| {})).unwrap();
+    let mut target = fixture_target();
+    target.id = "bundled:codex".into();
+    let mut settings = backend.settings().await;
+    settings.target_id = target.id.clone();
+    settings.cwd = "~".into();
+    backend.save_settings(settings).await.unwrap();
+    let cwd = backend.resolve_agent_directory(&target, "~").await.unwrap();
+    assert!(Path::new(&cwd).is_absolute() && Path::new(&cwd).is_dir());
+    assert_eq!(Path::new(&cwd), directory.path().join("work"));
+    assert_eq!(backend.settings().await.cwd, cwd);
+    assert!(discovery::agent_cwd(&target, &cwd).await.is_ok());
+    target.id = "wsl:Ubuntu".into();
+    target.environment = "wsl".into();
+    assert_eq!(
+        backend.resolve_agent_directory(&target, "~").await.unwrap(),
+        "~"
+    );
+}
+
 fn fixture_target() -> AgentTarget {
     AgentTarget {
         id: "manual".into(),
@@ -127,6 +150,7 @@ async fn connected(
         cwd: directory.to_string_lossy().into_owned(),
         tutor: crate::workspace::TutorSettings {
             mode: "local".into(),
+            activity: "auto".into(),
             url: String::new(),
             command: target.adapter_path.clone().unwrap(),
             args: vec!["--local".into()],

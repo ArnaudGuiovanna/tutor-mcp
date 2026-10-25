@@ -31,19 +31,21 @@ cargo clippy --manifest-path client/src-tauri/Cargo.toml --locked --no-default-f
 cargo test --manifest-path client/src-tauri/Cargo.toml --locked --no-default-features --features qualification
 
 if [[ "$client_verify_real" == 1 ]]; then
-    client_verify_entry="$client_verify_root/client/scripts/adapter/node_modules/@agentclientprotocol/codex-acp/dist/index.js"
-    if [[ ! -f "$client_verify_entry" ]]; then
-        printf 'Install the pinned adapter first: npm ci --prefix client/scripts/adapter --ignore-scripts\n' >&2
-        exit 1
-    fi
-    client_verify_node=$(command -v node)
-    # Git Bash paths must be made native for programs launched by Rust/Windows.
-    if command -v cygpath >/dev/null 2>&1; then
-        client_verify_node=$(cygpath -w "$client_verify_node")
-        client_verify_entry=$(cygpath -w "$client_verify_entry")
-    fi
-    TUTOR_ACP_TEST_ADAPTER="$client_verify_node" \
-    TUTOR_ACP_TEST_ADAPTER_ENTRY="$client_verify_entry" \
-        cargo test --manifest-path client/src-tauri/Cargo.toml --locked --no-default-features --features qualification \
-        real_codex_adapter_negotiates_acp -- --ignored
+    for client_verify_package in codex-acp claude-agent-acp; do
+        client_verify_entry="$client_verify_root/client/scripts/adapter/node_modules/@agentclientprotocol/$client_verify_package/dist/index.js"
+        if [[ ! -f "$client_verify_entry" ]]; then
+            printf 'Install the pinned adapter first: npm ci --prefix client/scripts/adapter --ignore-scripts\n' >&2
+            exit 1
+        fi
+        client_verify_node=$(command -v node)
+        # Git Bash paths must be made native for programs launched by Rust/Windows.
+        if command -v cygpath >/dev/null 2>&1; then
+            client_verify_node=$(cygpath -w "$client_verify_node")
+            client_verify_entry=$(cygpath -w "$client_verify_entry")
+        fi
+        TUTOR_ACP_TEST_ADAPTER="$client_verify_node" \
+        TUTOR_ACP_TEST_ADAPTER_ENTRY="$client_verify_entry" \
+            cargo test --manifest-path client/src-tauri/Cargo.toml --locked --no-default-features --features qualification \
+            real_codex_adapter_negotiates_acp -- --ignored
+    done
 fi

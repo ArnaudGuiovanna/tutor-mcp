@@ -24,6 +24,9 @@ try {
     $noticeVerifier = (Resolve-Path (Join-Path $PSScriptRoot '../../scripts/collect-notices.py')).Path
     & python $noticeVerifier verify-tree (Join-Path $installRoot 'THIRD_PARTY_NOTICES')
     if ($LASTEXITCODE -ne 0) { throw 'Les notices installées sont absentes, incomplètes ou altérées.' }
+    $agentVerifier = (Resolve-Path (Join-Path $PSScriptRoot '../../scripts/verify-packaged-agents.py')).Path
+    & python $agentVerifier (Join-Path $installRoot 'agents')
+    if ($LASTEXITCODE -ne 0) { throw 'Les agents installés ne fonctionnent pas sans Node externe.' }
     $application = Start-Process -FilePath $binary -PassThru
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
     $window = [IntPtr]::Zero

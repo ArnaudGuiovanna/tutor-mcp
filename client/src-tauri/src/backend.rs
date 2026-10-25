@@ -69,12 +69,39 @@ pub struct Backend {
     tutor: Mutex<Tutor>,
     prompt: Mutex<Option<Prompt>>,
     operation: Mutex<()>,
+    provider_login: Mutex<Option<tokio::process::Child>>,
     emit: EventSink,
+    profile: Option<crate::profiles::ProfileContext>,
 }
 
 impl Backend {
     pub fn new(directory: &Path, emit: EventSink) -> Result<Arc<Self>, String> {
-        let store = WorkspaceStore::load(directory)?;
+        Self::new_with_profile(directory, emit, None)
+    }
+
+    pub fn new_with_profile(
+        directory: &Path,
+        emit: EventSink,
+        profile: Option<crate::profiles::ProfileContext>,
+    ) -> Result<Arc<Self>, String> {
+        let mut store = WorkspaceStore::load(directory)?;
+        if store.data.settings.cwd.is_empty() {
+            let cwd = directory.join("work");
+            std::fs::create_dir_all(&cwd)
+                .map_err(|_| "Impossible de créer votre dossier de séance.")?;
+            store.transaction(|data| {
+                data.settings.cwd = cwd.to_string_lossy().into_owned();
+                Ok(())
+            })?;
+        }
+        if store.data.settings.target_id.is_empty() {
+            if let Some(target) = crate::bundled::targets().first() {
+                store.transaction(|data| {
+                    data.settings.target_id = target.id.clone();
+                    Ok(())
+                })?;
+            }
+        }
         let identity = IdentityStore::load(directory)?;
         let credentials =
             match crate::vault::load::<NativeCredential>(directory, "native-session.json")? {
@@ -95,7 +122,9 @@ impl Backend {
             }),
             prompt: Mutex::new(None),
             operation: Mutex::new(()),
+            provider_login: Mutex::new(None),
             emit,
+            profile,
         }))
     }
 
@@ -106,7 +135,19 @@ impl Backend {
         value["tutorStatus"] = serde_json::to_value(&self.tutor.lock().await.status).unwrap();
         value["identity"] = serde_json::to_value(self.identity.lock().await.public()).unwrap();
         value["agentConnected"] = json!(self.agent.lock().await.is_some());
+        if let Some(profile) = &self.profile {
+            profile.decorate(&mut value)
+        }
         value
+    }
+
+    pub async fn settings(&self) -> Settings {
+        self.store.lock().await.data.settings.clone()
+    }
+
+    pub async fn report_connection_error(&self, error: String) {
+        self.tutor_error(error).await;
+        self.state_changed().await;
     }
 
     async fn state_changed(&self) {
@@ -125,6 +166,7 @@ impl Backend {
         let _operation = self.operation.lock().await;
         self.idle().await?;
         if !["local", "remote"].contains(&settings.tutor.mode.as_str())
+            || !["auto", "author", "learn", "train"].contains(&settings.tutor.activity.as_str())
             || settings.cwd.len() > 32768
             || settings.tutor.args.len() > 32
             || settings
@@ -182,6 +224,7 @@ impl Backend {
     ) -> Result<Value, String> {
         let _operation = self.operation.lock().await;
         self.idle().await?;
+        let cwd = self.resolve_agent_directory(&target, &cwd).await?;
         self.stop_agent().await?;
         let agent_cwd = discovery::agent_cwd(&target, &cwd).await?;
         let mut spec = discovery::launch_spec(&target, &cwd).await?;
@@ -193,7 +236,7 @@ impl Backend {
         let rpc = AcpClient::spawn(spec, events.clone()).await?;
         let initialized = match rpc.request("initialize", json!({
             "protocolVersion": 1,
-            "clientCapabilities": {},
+            "clientCapabilities": {"auth":{"terminal":cfg!(windows) && target.id=="bundled:claude"}},
             "clientInfo": {"name":"tutor", "title":"Tutor", "version":env!("CARGO_PKG_VERSION")}
         })).await {
             Ok(value) => value,
@@ -239,7 +282,35 @@ impl Backend {
         Ok(initialized)
     }
 
+    async fn resolve_agent_directory(
+        &self,
+        target: &AgentTarget,
+        requested: &str,
+    ) -> Result<String, String> {
+        let linux_path = requested == "~"
+            || requested.starts_with("~/")
+            || requested.starts_with("\\\\wsl")
+            || (cfg!(windows) && requested.starts_with('/'));
+        if target.id.starts_with("bundled:") && (requested.trim().is_empty() || linux_path) {
+            let work = self.directory.join("work");
+            std::fs::create_dir_all(&work)
+                .map_err(|_| "Impossible de préparer votre dossier de séance.")?;
+            let cwd = work.to_string_lossy().into_owned();
+            let mut store = self.store.lock().await;
+            if store.data.settings.target_id == target.id {
+                store.transaction(|data| {
+                    data.settings.cwd = cwd.clone();
+                    Ok(())
+                })?;
+            }
+            return Ok(cwd);
+        }
+        Ok(requested.into())
+    }
+
     pub async fn authenticate_agent(&self, method_id: String) -> Result<Value, String> {
+        let _operation = self.operation.lock().await;
+        self.idle().await?;
         let rpc = {
             let guard = self.agent.lock().await;
             let agent = guard.as_ref().ok_or("Connectez d’abord Codex.")?;
@@ -250,13 +321,82 @@ impl Backend {
             {
                 return Err("Méthode de connexion non proposée par cet agent.".into());
             }
+            if agent.target.id == "bundled:claude"
+                && ["claude-ai-login", "console-login"].contains(&method_id.as_str())
+            {
+                let cwd = agent.cwd.clone();
+                drop(guard);
+                return self.authenticate_bundled_claude(&method_id, &cwd).await;
+            }
             agent.rpc.clone()
         };
         rpc.request("authenticate", json!({"methodId":method_id}))
             .await
     }
 
+    async fn authenticate_bundled_claude(&self, method: &str, cwd: &str) -> Result<Value, String> {
+        #[cfg(windows)]
+        {
+            let spec = crate::bundled::launch("bundled:claude", cwd)?;
+            let mut command = tokio::process::Command::new(spec.program);
+            command
+                .args(spec.args)
+                .args([
+                    "--cli",
+                    "auth",
+                    "login",
+                    if method == "claude-ai-login" {
+                        "--claudeai"
+                    } else {
+                        "--console"
+                    },
+                ])
+                .envs(spec.env)
+                .current_dir(cwd)
+                .kill_on_drop(true);
+            command.creation_flags(0x00000010); // CREATE_NEW_CONSOLE: official interactive provider login.
+            *self.provider_login.lock().await = Some(
+                command
+                    .spawn()
+                    .map_err(|_| "Impossible d’ouvrir la connexion officielle de Claude.")?,
+            );
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
+            loop {
+                let mut login = self.provider_login.lock().await;
+                let child = login.as_mut().ok_or(
+                    "La connexion fournisseur a été interrompue lors du changement de compte.",
+                )?;
+                if let Some(status) = child
+                    .try_wait()
+                    .map_err(|_| "Connexion fournisseur interrompue.")?
+                {
+                    login.take();
+                    return if status.success() {
+                        Ok(json!({}))
+                    } else {
+                        Err("La connexion officielle de Claude n’a pas abouti. Réessayez depuis votre compte fournisseur.".into())
+                    };
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    let _ = child.kill().await;
+                    login.take();
+                    return Err("Délai de connexion fournisseur dépassé.".into());
+                }
+                drop(login);
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (method, cwd);
+            Err("La connexion intégrée de Claude est disponible dans l’application Windows.".into())
+        }
+    }
+
     async fn stop_agent(&self) -> Result<(), String> {
+        if let Some(mut login) = self.provider_login.lock().await.take() {
+            let _ = login.kill().await;
+        }
         let old = self.agent.lock().await.take();
         if let Some(old) = old {
             old.rpc.stop().await?;
@@ -326,7 +466,11 @@ impl Backend {
             return Err("Enregistrez cette institution avant de vous connecter.".into());
         }
         let keys = self.identity.lock().await.active()?;
-        let scope = if authoring {
+        let scope = if settings.tutor.activity == "learn" {
+            "learner:read learner:write"
+        } else if settings.tutor.activity == "train" {
+            "progress:read"
+        } else if authoring || settings.tutor.activity == "author" {
             "formation:read formation:write"
         } else {
             ""
@@ -448,6 +592,287 @@ impl Backend {
         };
         self.tutor.lock().await.status = status.clone();
         (self.emit)("tutor:status", serde_json::to_value(status).unwrap());
+    }
+
+    async fn native_request(
+        &self,
+        method: reqwest::Method,
+        segments: &[&str],
+        mut body: Option<Value>,
+        key: Option<&str>,
+        required: Option<&str>,
+    ) -> Result<Value, String> {
+        let settings = self.store.lock().await.data.settings.clone();
+        if settings.tutor.mode != "remote" {
+            return Err("Cette action appartient à une institution distante.".into());
+        }
+        let mut credentials = self
+            .tutor
+            .lock()
+            .await
+            .credentials
+            .clone()
+            .ok_or("Connectez votre compte à l’institution.")?;
+        if credentials.origin != native_auth::validate_origin(&settings.tutor.url)? {
+            return Err("Reconnectez ce compte à l’institution sélectionnée.".into());
+        }
+        let keys = self.identity.lock().await.active()?;
+        credentials.ensure_access(&keys).await?;
+        if required.is_some_and(|scope| {
+            !credentials
+                .scope
+                .split_whitespace()
+                .any(|held| held == scope)
+        }) {
+            return Err(
+                "Choisissez l’activité Conception pour créer ou publier une formation.".into(),
+            );
+        }
+        crate::vault::save(
+            &self.directory,
+            "native-session.json",
+            &NativeCredential::NativeIdentity(credentials.clone()),
+        )?;
+        self.tutor.lock().await.credentials = Some(credentials.clone());
+        let mut url = reqwest::Url::parse(&credentials.origin)
+            .map_err(|_| "Adresse institutionnelle invalide.")?;
+        url.path_segments_mut()
+            .map_err(|_| "Adresse institutionnelle invalide.")?
+            .extend(segments);
+        // GET payloads are bounded query parameters, never an HTTP GET body.
+        if method == reqwest::Method::GET {
+            if let Some(query) = body.take() {
+                let query = query
+                    .as_object()
+                    .ok_or("Paramètres de lecture invalides.")?;
+                for (name, value) in query {
+                    url.query_pairs_mut().append_pair(
+                        name,
+                        value.as_str().ok_or("Paramètre de lecture invalide.")?,
+                    );
+                }
+            }
+        }
+        let mut request = http_client()?
+            .request(method, url)
+            .bearer_auth(&credentials.access_token);
+        if let Some(key) = key {
+            request = request.header("Idempotency-Key", key)
+        }
+        if let Some(body) = body {
+            request = request.json(&body)
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|_| "L’institution ne répond pas. Réessayez sans recréer la formation.")?;
+        if !response.status().is_success() {
+            return Err(match response.status().as_u16(){
+            401=>"La session a expiré ou a été révoquée. Reconnectez ce compte.",
+            403=>"Votre rôle actuel n’autorise pas cette action dans l’institution.",
+            404=>"Cette formation ou cette version n’est pas accessible à ce compte. Actualisez la liste des versions.",
+            409=>"Cette version ou cette action a déjà changé. Actualisez son état avant de réessayer.",
+            400|422=>"Le programme n’est pas prêt pour cette action. Consultez les points de validation de la version.",
+            _=>"L’institution ne peut pas terminer cette action pour le moment.",
+        }.into());
+        }
+        bounded_json(response).await
+    }
+
+    pub async fn formation_versions(&self, formation_id: String) -> Result<Value, String> {
+        let _operation = self.operation.lock().await;
+        let mut cursor = String::new();
+        let mut seen = HashSet::new();
+        let mut items = Vec::new();
+        let mut total = 0usize;
+        for _ in 0..100 {
+            let page = self
+                .native_request(
+                    reqwest::Method::GET,
+                    &["admin", "catalog", "formations", &formation_id, "versions"],
+                    Some(json!({"limit":"100","after":cursor})),
+                    None,
+                    Some("formation:read"),
+                )
+                .await?;
+            let entries = page
+                .get("items")
+                .and_then(Value::as_array)
+                .ok_or("La liste des versions est invalide.")?;
+            if entries.len() > 100
+                || entries.iter().any(|value| {
+                    value.get("formation_id").and_then(Value::as_str) != Some(&formation_id)
+                })
+            {
+                return Err(
+                    "Les versions retournées ne correspondent pas à la formation sélectionnée."
+                        .into(),
+                );
+            }
+            total = total.saturating_add(
+                serde_json::to_vec(entries)
+                    .map_err(|_| "Versions invalides.")?
+                    .len(),
+            );
+            if total > 32 * 1024 * 1024 {
+                return Err("La liste des versions dépasse la taille affichable.".into());
+            }
+            items.extend(entries.iter().cloned());
+            cursor = page
+                .get("next_after")
+                .and_then(Value::as_str)
+                .ok_or("Curseur de versions invalide.")?
+                .to_string();
+            if cursor.is_empty() {
+                return Ok(json!({"items":items,"next_after":""}));
+            }
+            if !seen.insert(cursor.clone()) {
+                return Err("Le serveur a répété une page de versions.".into());
+            }
+        }
+        Err(
+            "La liste des versions dépasse 100 pages. Aucune liste partielle n’est présentée."
+                .into(),
+        )
+    }
+    pub async fn formation_review(&self, version_id: String) -> Result<Value, String> {
+        let _operation = self.operation.lock().await;
+        self.native_request(
+            reqwest::Method::GET,
+            &[
+                "admin",
+                "catalog",
+                "formation-versions",
+                &version_id,
+                "review",
+            ],
+            None,
+            None,
+            Some("formation:read"),
+        )
+        .await
+    }
+    pub async fn create_formation(
+        &self,
+        name: String,
+        description: String,
+        key: String,
+    ) -> Result<Value, String> {
+        let _operation = self.operation.lock().await;
+        self.idle().await?;
+        let result = self
+            .native_request(
+                reqwest::Method::POST,
+                &["admin", "catalog", "formations"],
+                Some(json!({"name":name,"description":description})),
+                Some(&key),
+                Some("formation:write"),
+            )
+            .await?;
+        if self.tutor_overview().await.is_err() {
+            self.tutor_error(
+                "Action enregistrée. L’actualisation du catalogue a échoué ; réessayez Actualiser."
+                    .into(),
+            )
+            .await;
+        }
+        self.state_changed().await;
+        Ok(result)
+    }
+    pub async fn publish_formation_to_catalog(
+        &self,
+        version_id: String,
+        key: String,
+    ) -> Result<Value, String> {
+        let _operation = self.operation.lock().await;
+        self.idle().await?;
+        let result = self
+            .native_request(
+                reqwest::Method::POST,
+                &[
+                    "admin",
+                    "catalog",
+                    "formation-versions",
+                    &version_id,
+                    "publish-to-catalog",
+                ],
+                Some(json!({})),
+                Some(&key),
+                Some("formation:write"),
+            )
+            .await?;
+        if result.pointer("/version/id").and_then(Value::as_str) != Some(&version_id)
+            || result.pointer("/version/status").and_then(Value::as_str) != Some("published")
+        {
+            return Err("La publication retournée ne correspond pas à la version sélectionnée. Actualisez son état.".into());
+        }
+        if self.tutor_overview().await.is_err() {
+            self.tutor_error(
+                "Action enregistrée. L’actualisation du catalogue a échoué ; réessayez Actualiser."
+                    .into(),
+            )
+            .await;
+        }
+        self.state_changed().await;
+        Ok(result)
+    }
+    pub async fn clone_formation_version(
+        &self,
+        version_id: String,
+        key: String,
+    ) -> Result<Value, String> {
+        let _operation = self.operation.lock().await;
+        self.idle().await?;
+        let result = self
+            .native_request(
+                reqwest::Method::POST,
+                &[
+                    "admin",
+                    "catalog",
+                    "formation-versions",
+                    &version_id,
+                    "clone",
+                ],
+                Some(json!({})),
+                Some(&key),
+                Some("formation:write"),
+            )
+            .await?;
+        if self.tutor_overview().await.is_err() {
+            self.tutor_error(
+                "Action enregistrée. L’actualisation du catalogue a échoué ; réessayez Actualiser."
+                    .into(),
+            )
+            .await;
+        }
+        self.state_changed().await;
+        Ok(result)
+    }
+
+    pub async fn enable_learning(&self) -> Result<Value, String> {
+        let origin;
+        {
+            let _operation = self.operation.lock().await;
+            self.idle().await?;
+            self.native_request(
+                reqwest::Method::POST,
+                &["api", "client", "v1", "me", "learning"],
+                Some(json!({"confirm":true})),
+                None,
+                None,
+            )
+            .await?;
+            self.stop_agent().await?;
+            self.tutor.lock().await.credentials = None;
+            crate::vault::delete(&self.directory, "native-session.json")?;
+            let mut store = self.store.lock().await;
+            store.transaction(|data| {
+                data.settings.tutor.activity = "learn".into();
+                Ok(())
+            })?;
+            origin = store.data.settings.tutor.url.clone();
+        }
+        self.connect_tutor(origin, false).await
     }
 
     pub async fn disconnect_tutor(&self) -> Result<Value, String> {
@@ -724,7 +1149,7 @@ impl Backend {
                 .await?;
             } else {
                 let session = rpc
-                    .request("session/new", json!({"cwd":cwd,"mcpServers":servers}))
+                    .request("session/new", json!({"cwd":cwd,"mcpServers":servers,"_meta":{"disableBuiltInTools":true,"claudeCode":{"options":{"allowDangerouslySkipPermissions":false,"tools":[]}}}}))
                     .await?;
                 old.agent_session_id = Some(session_id(&session)?);
                 old.target_id = target_id;
@@ -733,7 +1158,7 @@ impl Backend {
             old
         } else {
             let session = rpc
-                .request("session/new", json!({"cwd":cwd,"mcpServers":servers}))
+                .request("session/new", json!({"cwd":cwd,"mcpServers":servers,"_meta":{"disableBuiltInTools":true,"claudeCode":{"options":{"allowDangerouslySkipPermissions":false,"tools":[]}}}}))
                 .await?;
             Conversation {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -853,7 +1278,7 @@ impl Backend {
                 // grant before another prompt. Prior messages remain context,
                 // never replayed user turns or tool mutations.
                 let replacement = rpc
-                    .request("session/new", json!({"cwd":cwd,"mcpServers":servers}))
+                    .request("session/new", json!({"cwd":cwd,"mcpServers":servers,"_meta":{"disableBuiltInTools":true,"claudeCode":{"options":{"allowDangerouslySkipPermissions":false,"tools":[]}}}}))
                     .await?;
                 session = session_id(&replacement)?;
                 self.store.lock().await.transaction(|data| {
@@ -1413,7 +1838,8 @@ async fn remote_overview(credentials: &Session) -> Result<Value, String> {
     let client = http_client()?;
     let fetch = |after: Option<String>,
                  available_after: Option<String>,
-                 authored_after: Option<String>| {
+                 authored_after: Option<String>,
+                 training_after: Option<String>| {
         let client = &client;
         async move {
             let mut url =
@@ -1430,6 +1856,9 @@ async fn remote_overview(credentials: &Session) -> Result<Value, String> {
             if let Some(cursor) = authored_after {
                 url.query_pairs_mut().append_pair("authored_after", &cursor);
             }
+            if let Some(cursor) = training_after {
+                url.query_pairs_mut().append_pair("training_after", &cursor);
+            }
             let response = client
                 .get(url)
                 .bearer_auth(&credentials.access_token)
@@ -1442,7 +1871,7 @@ async fn remote_overview(credentials: &Session) -> Result<Value, String> {
             bounded_json(response).await
         }
     };
-    let mut overview = fetch(None, None, None).await?;
+    let mut overview = fetch(None, None, None, None).await?;
     let identity = overview
         .get("identity")
         .cloned()
@@ -1455,6 +1884,13 @@ async fn remote_overview(credentials: &Session) -> Result<Value, String> {
     } else {
         (vec![], None)
     };
+    let has_training = overview.get("trainerCohorts").is_some_and(|v| !v.is_null());
+    let (mut training, mut training_after) = if has_training {
+        catalog_page(&overview, "trainerCohorts")?
+    } else {
+        (vec![], None)
+    };
+    let mut training_cursors = HashSet::new();
     let mut authored_cursors = HashSet::new();
     let mut mine_cursors = HashSet::new();
     let mut available_cursors = HashSet::new();
@@ -1462,15 +1898,22 @@ async fn remote_overview(credentials: &Session) -> Result<Value, String> {
     let mut bytes = serde_json::to_vec(&overview)
         .map_err(|_| "Catalogue Tutor invalide.")?
         .len();
-    while after.is_some() || available_after.is_some() || authored_after.is_some() {
+    while after.is_some()
+        || available_after.is_some()
+        || authored_after.is_some()
+        || training_after.is_some()
+    {
         if page_count >= 100 {
             return Err(
                 "Le catalogue dépasse 100 pages. Aucune liste partielle n’a été présentée.".into(),
             );
         }
-        if after
+        if training_after
             .as_ref()
-            .is_some_and(|cursor| !mine_cursors.insert(cursor.clone()))
+            .is_some_and(|cursor| !training_cursors.insert(cursor.clone()))
+            || after
+                .as_ref()
+                .is_some_and(|cursor| !mine_cursors.insert(cursor.clone()))
             || available_after
                 .as_ref()
                 .is_some_and(|cursor| !available_cursors.insert(cursor.clone()))
@@ -1484,6 +1927,7 @@ async fn remote_overview(credentials: &Session) -> Result<Value, String> {
             after.clone(),
             available_after.clone(),
             authored_after.clone(),
+            training_after.clone(),
         )
         .await?;
         if next.get("identity") != Some(&identity) {
@@ -1494,6 +1938,12 @@ async fn remote_overview(credentials: &Session) -> Result<Value, String> {
         }
         page_count += 1;
         for (name, active, items, cursor) in [
+            (
+                "trainerCohorts",
+                training_after.is_some(),
+                &mut training,
+                &mut training_after,
+            ),
             ("formations", after.is_some(), &mut mine, &mut after),
             (
                 "authoredFormations",
@@ -1530,6 +1980,10 @@ async fn remote_overview(credentials: &Session) -> Result<Value, String> {
     if has_authored {
         overview["authoredFormations"]["items"] = json!(authored);
         overview["authoredFormations"]["next_after"] = json!("");
+    }
+    if has_training {
+        overview["trainerCohorts"]["items"] = json!(training);
+        overview["trainerCohorts"]["next_after"] = json!("");
     }
     Ok(overview)
 }
@@ -1608,13 +2062,20 @@ fn pedagogical_prompt(
                     .unwrap_or("")
                     .is_empty())
     });
-    let role = if staff {
+    let training = tutor_context.is_some_and(|v| {
+        v.pointer("/capabilities/training").and_then(Value::as_bool) == Some(true)
+    });
+    let role = if training {
+        "Tu accompagnes un formateur dans le suivi de ses groupes affectés. Consulte list_trainer_cohorts et les outils de suivi autorisés. N’attribue aucun rôle, ne crée aucun profil apprenant ni inscription. Les refus et les limites d’affectation restent souverains."
+    } else if staff {
         "Tu accompagnes un membre de l’équipe de l’institution dans la conception de formations. Cette session concerne la conception institutionnelle : ne demande jamais get_learner_context, ne fabrique pas de learnerId et ne l’inscris pas comme apprenant. Consulte les schémas et métadonnées des outils MCP autorisés. Les autorisations affichées par le serveur et le grant actif sont la référence. Co-conçois une formation, crée un brouillon réel via les outils de formation autorisés, ajoute ses objectifs/concepts et ne publie qu’après confirmation humaine explicite. Un refus de permission doit rester un refus, sans contourner le rôle."
     } else {
         "Tu es le tuteur pédagogique de cette personne. Commence par get_learner_context et consulte les schémas des outils."
     };
-    let creation = if staff {
-        "Pour une formation institutionnelle, utilise draft_formation puis add_formation_concepts selon leurs schémas et les permissions accordées ; examine la version avec get_formation_version. N’utilise pas init_domain pour attribuer un parcours personnel au membre de l’équipe. publish_formation exige une confirmation humaine explicite."
+    let creation = if training {
+        "Présente les groupes et leurs progrès réels ; une absence de groupe affecté n’est pas une erreur de profil apprenant."
+    } else if staff {
+        "Pour une formation institutionnelle, commence par list_formations puis list_formation_versions(formation_id), examine la version avec review_formation_version ou get_formation_version(version_id). Un identifiant d’intention locale n’est jamais un version_id. N’utilise pas list_trainer_cohorts pour trouver une formation à concevoir. Pour créer, utilise draft_formation puis add_formation_concepts. Pour rendre une version accessible aux membres, utilise publish_formation_to_catalog après confirmation humaine explicite ; ne crée aucune inscription. N’utilise pas init_domain pour attribuer un parcours personnel au membre de l’équipe. publish_formation exige une confirmation humaine explicite."
     } else {
         "Pour une nouvelle formation personnelle, co-conçois les objectifs, critères et concepts, demande validation des changements, puis enregistre effectivement le domaine/curriculum avec les outils autorisés."
     };

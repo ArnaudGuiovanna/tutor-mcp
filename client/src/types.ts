@@ -16,7 +16,7 @@ export interface Settings {
   targetId: string;
   manualTarget?: AgentTarget;
   cwd: string;
-  tutor: { mode: 'local' | 'remote'; url: string; command: string; args: string[] };
+  tutor: { mode: 'local' | 'remote'; activity?: 'auto' | 'author' | 'learn' | 'train'; url: string; command: string; args: string[] };
 }
 
 export interface Intent {
@@ -62,6 +62,10 @@ export interface TutorStatus {
 }
 
 export interface Snapshot {
+  profileEpoch?: number;
+  profile?: { id: string; label: string; npub?: string };
+  profiles?: { id: string; label: string; npub?: string }[];
+  profileSwitchWarning?: string;
   settings: Settings;
   identity: PublicIdentity;
   intents: Intent[];
@@ -105,6 +109,7 @@ export interface PublicIdentity {
   backupConfirmed: boolean;
   backupExported?: boolean;
   needsBackup: boolean;
+  needsRecoveryRestore?: boolean;
 }
 
 export interface Institution {
@@ -117,12 +122,26 @@ export interface Institution {
 
 export interface TutorOverview {
   identity?: { tenantId: string; userId: string; membershipId: string; learnerId?: string; roles?: string[] };
-  capabilities?: { learning?: boolean; formationAuthoring?: boolean };
+  capabilities?: { learning?: boolean; formationAuthoring?: boolean; training?: boolean; canRequestAuthoring?: boolean; canLearn?: boolean; canEnableLearning?: boolean };
   session?: { scope: string; allowedScopes: string[] };
   context: unknown;
   formations: unknown;
   availableFormations: unknown;
   authoredFormations?: unknown;
+  trainerCohorts?: { items: { cohort_id: string; cohort_name: string; formation_id: string; formation_name: string; version_id: string; enrollment_count?: number }[]; next_after: string };
 }
 
 export type JsonRecord = Record<string, unknown>;
+
+export interface FormationVersion {
+  id: string; formation_id: string; version: number; status: 'draft' | 'published' | 'archived';
+}
+export interface FormationReview {
+  detail: {
+    formation: { id: string; name: string; description: string; status: string; enrollment_policy: string };
+    version: FormationVersion;
+    modules: { id: string; stable_key: string; title: string; position: number }[];
+    concepts: { id: string; stable_key: string; module_stable_key: string; label: string; description?: string; level?: string; outcomes?: { id: string; statement: string; observable?: string }[]; criteria?: { id: string; description: string; evidence?: string }[]; prerequisites?: string[] }[];
+  };
+  publishable: boolean; issues: string[]; catalog_available?: boolean; catalog_cohort_id?: string;
+}

@@ -236,6 +236,53 @@ def installer_components(client, supplements, supplement_root, output, files, ca
     return result
 
 
+def bundled_components(client, output, files):
+    root = client / 'bundled-agents'
+    manifest = json.loads((root / 'runtime-manifest.json').read_text(encoding='utf-8'))
+    if manifest.get('format') != 1 or manifest.get('platform') != 'windows-x64':
+        raise ValueError('unsupported bundled-agent inventory')
+    for asset in manifest['files']:
+        path = root.joinpath(*safe_path(asset['path']).parts)
+        if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(root.resolve()) or path.stat().st_size != asset['bytes'] or digest(path.read_bytes()) != asset['sha256']:
+            raise ValueError(f"modified bundled resource: {asset['path']}")
+    locked = json.loads((root / 'package-lock.json').read_text(encoding='utf-8'))['packages']
+    result, seen = [], set()
+    for key, entry in locked.items():
+        if not key:
+            continue
+        directory = root.joinpath(*safe_path(key).parts)
+        if not directory.is_dir():  # Optional runtimes for other platforms.
+            continue
+        package = json.loads((directory / 'package.json').read_text(encoding='utf-8'))
+        if package['version'] != entry['version'] or not entry.get('integrity'):
+            raise ValueError(f'changed locked agent package: {key}')
+        identity = (package['name'],package['version'])
+        if identity in seen:
+            continue
+        seen.add(identity)
+        component = {'kind':'agent-npm','name':package['name'],'version':package['version'], 'license':package.get('license'), 'integrity':entry['integrity'], 'scope':'unmodified bundled ACP agent/runtime'}
+        # The SDK's own license points to the terms in its original README.
+        extra = [directory / 'README.md'] if package['name'] == '@anthropic-ai/claude-agent-sdk' else []
+        supplement_root=Path(__file__).resolve().parent/'notices-supplements'
+        supplements=[]
+        if package['name']=='@openai/codex':
+            provenance=json.loads((supplement_root/'agent-provenance.json').read_text(encoding='utf-8'))
+            if package['version'] not in {provenance['codexVersion'],provenance['codexVersion']+'-win32-x64'}:
+                raise ValueError('Codex changed: review original vendor notices')
+            component['vendorSourceCommit']=provenance['codexCommit']
+            component['binaryScope']='vendor prebuilt, not a reconstructed linker map; optional voice runtime excluded'
+            supplements=provenance['files']
+        elif package['name']=='standardwebhooks':
+            provenance=json.loads((supplement_root/'agent-provenance.json').read_text(encoding='utf-8'))['standardwebhooks']
+            if package['version']!=provenance['version']:
+                raise ValueError('standardwebhooks changed: review upstream original license')
+            supplements=provenance['files']
+        result.append(copy_component(output,component,directory,files,extra_files=extra,supplement_root=supplement_root,supplements=supplements))
+    node = {'kind':'bundled-runtime','name':'Node.js','version':manifest['nodeVersion'],'license':'original Node.js LICENSE including bundled dependency notices','source':manifest['nodeSource'],'archiveSha256':manifest['nodeArchiveSha256']}
+    result.append(copy_component(output,node,root / 'node',files,scan_source=False))
+    return result
+
+
 def collect(client, output, target, *, metadata=None, cargo="cargo", rustc="rustc",
             rust_root=None, rust_version=None):
     client, output = Path(client).resolve(), Path(output).resolve()
@@ -263,6 +310,7 @@ def collect(client, output, target, *, metadata=None, cargo="cargo", rustc="rust
         put(staging,"LICENSE",project_license.read_bytes(),files)
         for component, root in npm_packages(client):
             components.append(copy_component(staging,component,root,files))
+        components.extend(bundled_components(client,staging,files))
         packages = reachable_packages(metadata)
         for package in packages:
             root = Path(package["manifest_path"]).parent
@@ -309,16 +357,17 @@ def collect(client, output, target, *, metadata=None, cargo="cargo", rustc="rust
             scan_original=False,scan_source=False))
         components.extend(installer_components(client,supplements,supplement_root,staging,files,components))
         inputs = []
-        for path in [client / "package.json",client / "package-lock.json",client / "src-tauri/Cargo.toml",client / "src-tauri/Cargo.lock",client / "src-tauri/tauri.conf.json"] + sorted((client / "dist").rglob("*")):
+        for path in [client / "package.json",client / "package-lock.json",client / "src-tauri/Cargo.toml",client / "src-tauri/Cargo.lock",client / "src-tauri/tauri.conf.json",client / "scripts/adapter/package-lock.json",client / "bundled-agents/runtime-manifest.json"] + sorted((client / "dist").rglob("*")):
             if path.is_file():
                 inputs.append({"file":path.relative_to(client).as_posix(),"sha256":digest(path.read_bytes())})
         readme = ("Tutor client third-party notices\n\nOriginal license/notice files and legal source comments are retained.\n"
             "Cargo coverage is the reachable target-filtered desktop graph, including a build/dev superset.\n"
             "MPL-2.0 corresponding source archives are included under sources/.\n"
-            "The Codex ACP adapter is installed separately and is not embedded in this installer.\n"
+            "Codex and Claude ACP adapters, their compatible vendor runtimes and Node.js are embedded unmodified.\n"
+            "Anthropic SDK/runtime terms are proprietary; retain the original LICENSE and SDK README. Provider authentication remains with the provider.\n"
             "WebView2 Runtime is supplied by Microsoft; the linked SDK loader's original terms are included.\n")
         put(staging,"README.txt",readme.encode("utf-8"),files)
-        inventory = {"format":FORMAT,"target":target,"coverage":"reachable Cargo desktop graph including build/dev superset; npm runtime graph plus Vite helper; Rust std; native WebView2 SDK loader; NSIS installer and Tauri plugin",
+        inventory = {"format":FORMAT,"target":target,"coverage":"reachable Cargo desktop graph including build/dev superset; npm runtime graph plus Vite helper; bundled ACP npm graphs and vendor runtimes; Node.js original terms; Rust std; native WebView2 SDK loader; NSIS installer and Tauri plugin",
             "rootCargoFeatures":next(node["features"] for node in metadata["resolve"]["nodes"] if node["id"] == metadata["resolve"]["root"]),
             "installerToolFiles":supplements["installer"]["toolFiles"],
             "inputs":inputs,"components":components,"files":sorted(files,key=lambda item:item["file"])}

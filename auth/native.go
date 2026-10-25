@@ -28,6 +28,15 @@ import (
 
 const NativeChallengeTTL = 120 * time.Second
 
+type nativeClientContextKey struct{}
+
+// IsNativeClientSession identifies the already-verified native transport. It
+// only controls discovery; every call still checks its scope and live role.
+func IsNativeClientSession(ctx context.Context) bool {
+	value, _ := ctx.Value(nativeClientContextKey{}).(bool)
+	return value
+}
+
 const nativeIdentityPrefix = "/api/client/v1/identity/"
 
 type NativeIdentityOptions struct {
@@ -507,6 +516,6 @@ func BearerMiddlewareWithNativePrincipalValidator(baseURL, initialScope string, 
 			deny()
 			return
 		}
-		protected.ServeHTTP(w, r)
+		protected.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), nativeClientContextKey{}, true)))
 	})
 }

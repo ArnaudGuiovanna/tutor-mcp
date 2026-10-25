@@ -61,6 +61,7 @@ func New(store CatalogStore, logger *slog.Logger) *API {
 func (api *API) Handler() http.Handler {
 	mux := http.NewServeMux()
 	api.registerFormationRoutes(mux)
+	api.registerCatalogPublicationRoutes(mux)
 	api.registerAdmissionRoutes(mux)
 	mux.HandleFunc("GET /admin/catalog/formations", api.listFormations)
 	mux.HandleFunc("POST /admin/catalog/formations", api.createFormation)
