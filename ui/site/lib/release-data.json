@@ -1,0 +1,121 @@
+{
+  "version": "v0.7.0",
+  "url": "https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/v0.7.0",
+  "publishedAt": "2026-10-26T18:47:19Z",
+  "verifiedAt": "2026-10-26T22:22:59.494Z",
+  "assets": [
+    {
+      "name": "RELEASE_QUALIFICATION.json",
+      "url": "https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.0/RELEASE_QUALIFICATION.json",
+      "size": 8845
+    },
+    {
+      "name": "SHA256SUMS",
+      "url": "https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.0/SHA256SUMS",
+      "size": 1961
+    },
+    {
+      "name": "THIRD_PARTY_NOTICES_PROVENANCE.json",
+      "url": "https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.0/THIRD_PARTY_NOTICES_PROVENANCE.json",
+      "size": 3849
+    },
+    {
+      "name": "THIRD_PARTY_NOTICES_SHA256SUMS",
+      "url": "https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.0/THIRD_PARTY_NOTICES_SHA256SUMS",
+      "size": 618
+    },
+    {
+      "name": "tutor-client-accessibility.json",
+      "url": "https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.0/tutor-client-accessibility.json",
+      "size": 1754
+    },
+    {
+      "name": "tutor-client-runtime.json",
+      "url": "https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.0/tutor-client-runtime.json",
+      "size": 1161
+    },
+    {
+      "name": "tutor-client-wsl-runtime.json",
+      "url": "https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.0/tutor-client-wsl-runtime.json",
+      "size": 1614
+    },
+    {
+      "name": "tutor-mcp_darwin_amd64.tar.gz",
+      "url": "https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.0/tutor-mcp_darwin_amd64.tar.gz",
+      "size": 13376010
+    },
+    {
+      "name": "tutor-mcp_darwin_amd64_notices.tar.gz",
+      "url": "https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.0/tutor-mcp_darwin_amd64_notices.tar.gz",
+      "size": 119516
+    },
+    {
+      "name": "tutor-mcp_darwin_arm64.tar.gz",
+      "url": "https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.0/tutor-mcp_darwin_arm64.tar.gz",
+      "size": 12592655
+    },
+    {
+      "name": "tutor-mcp_darwin_arm64_notices.tar.gz",
+      "url": "https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.0/tutor-mcp_darwin_arm64_notices.tar.gz",
+      "size": 119231
+    },
+    {
+      "name": "tutor-mcp_linux_amd64.tar.gz",
+      "url": "https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.0/tutor-mcp_linux_amd64.tar.gz",
+      "size": 13033070
+    },
+    {
+      "name": "tutor-mcp_linux_amd64_notices.tar.gz",
+      "url": "https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.0/tutor-mcp_linux_amd64_notices.tar.gz",
+      "size": 107913
+    },
+    {
+      "name": "tutor-mcp_linux_arm64.tar.gz",
+      "url": "https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.0/tutor-mcp_linux_arm64.tar.gz",
+      "size": 11981480
+    },
+    {
+      "name": "tutor-mcp_linux_arm64_notices.tar.gz",
+      "url": "https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.0/tutor-mcp_linux_arm64_notices.tar.gz",
+      "size": 107012
+    },
+    {
+      "name": "tutor-mcp_windows_amd64.zip",
+      "url": "https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.0/tutor-mcp_windows_amd64.zip",
+      "size": 13509551
+    },
+    {
+      "name": "tutor-mcp_windows_amd64_notices.zip",
+      "url": "https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.0/tutor-mcp_windows_amd64_notices.zip",
+      "size": 238815
+    },
+    {
+      "name": "tutor-mcp_windows_arm64.zip",
+      "url": "https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.0/tutor-mcp_windows_arm64.zip",
+      "size": 12243324
+    },
+    {
+      "name": "tutor-mcp_windows_arm64_notices.zip",
+      "url": "https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.0/tutor-mcp_windows_arm64_notices.zip",
+      "size": 235462
+    },
+    {
+      "name": "tutor-packaged-rust.json",
+      "url": "https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.0/tutor-packaged-rust.json",
+      "size": 907
+    },
+    {
+      "name": "Tutor_ACP_0.0.1_windows_x64-setup.exe",
+      "url": "https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.0/Tutor_ACP_0.0.1_windows_x64-setup.exe",
+      "size": 336555285
+    }
+  ],
+  "clientVersion": "0.0.1",
+  "client": {
+    "name": "Tutor_ACP_0.0.1_windows_x64-setup.exe",
+    "url": "https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.0/Tutor_ACP_0.0.1_windows_x64-setup.exe",
+    "size": 336555285
+  },
+  "clientRelease": "v0.7.0",
+  "clientChecksums": "https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.0/SHA256SUMS"
+}

@@ -1,10 +1,11 @@
 import type { ReactNode } from 'react';
+import { releaseSnapshot } from '@/lib/releases';
 
 export const REPO = 'https://github.com/ArnaudGuiovanna/tutor-mcp';
-export const VERSION = 'v0.7.0';
-export const CLIENT_VERSION = '0.0.1';
-export const RELEASE = `${REPO}/releases/tag/${VERSION}`;
-export const CLIENT_DOWNLOAD = `${REPO}/releases/download/${VERSION}/Tutor_ACP_${CLIENT_VERSION}_windows_x64-setup.exe`;
+export const VERSION = releaseSnapshot.version;
+export const CLIENT_VERSION = releaseSnapshot.clientVersion;
+export const RELEASE = releaseSnapshot.url;
+export const CLIENT_DOWNLOAD = releaseSnapshot.client.url;
 
 export function Wordmark({ size = 17, still = false }: { size?: number; still?: boolean }) {
   return (

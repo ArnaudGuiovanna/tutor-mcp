@@ -6,11 +6,11 @@ import './globals.css';
 const inter = Inter({ subsets: ['latin'], variable: '--font-inter', display: 'swap', axes: ['opsz'] });
 const mono = JetBrains_Mono({ subsets: ['latin'], weight: ['400', '500'], variable: '--font-mono', display: 'swap' });
 
-const description = 'An open-source MCP engine for adaptive learning, self-learning and personalized AI tutoring. Bring course creation, a structured learning path and ongoing tutoring into the AI assistant you already use.';
+const description = 'Keep learning. Grow together. Tutor MCP and Tutor ACP are open-source tools for personal AI tutoring, shared courses and learning communities. Download, self-host and get started.';
 
 export const metadata: Metadata = {
   metadataBase: new URL('https://tutor-mcp.dev'),
-  title: { default: 'Tutor MCP — Learn throughout your life', template: '%s | Tutor MCP' },
+  title: { default: 'Tutor MCP — Keep learning. Grow together.', template: '%s | Tutor MCP' },
   description,
   applicationName: 'Tutor MCP',
   authors: [{ name: 'Arnaud Guiovanna', url: 'https://aguiovanna.fr' }],
@@ -26,11 +26,11 @@ export const metadata: Metadata = {
     url: 'https://tutor-mcp.dev/',
     siteName: 'Tutor MCP',
     locale: 'en_US',
-    title: 'Tutor MCP — Learn throughout your life',
+    title: 'Tutor MCP — Keep learning. Grow together.',
     description,
     images: [{ url: '/opengraph-image.png', width: 1200, height: 630, alt: 'Tutor-MCP' }],
   },
-  twitter: { card: 'summary_large_image', site: '@TutorMCP', creator: '@TutorMCP', title: 'Tutor MCP — Learn throughout your life', description, images: ['/opengraph-image.png'] },
+  twitter: { card: 'summary_large_image', site: '@TutorMCP', creator: '@TutorMCP', title: 'Tutor MCP — Keep learning. Grow together.', description, images: ['/opengraph-image.png'] },
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

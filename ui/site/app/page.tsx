@@ -1,17 +1,24 @@
 import Link from 'next/link';
 import { Footer, Header } from '@/components/chrome';
-import { ClientWindow } from '@/components/mock';
-import { CLIENT_DOWNLOAD, Kbd, Meter, Pill, Providers, RELEASE, REPO, SectionTop, Wordmark } from '@/components/ui';
+import { ClientWindow, InstitutionPreview } from '@/components/mock';
+import { CLIENT_VERSION, Meter, Pill, Providers, RELEASE, REPO, SectionTop, VERSION, Wordmark } from '@/components/ui';
 
 const faq: [string, string][] = [
-  ['Do I need an account with Anthropic, OpenAI, Mistral or Google?', 'Tutor MCP does not ship a language model. It plugs into the assistant you already use: Claude Code, Claude Desktop, ChatGPT, Hermes, Pi, Gemini CLI, Le Chat and other MCP clients. Tutor ACP bundles the Codex and Claude adapters; your provider account and its costs stay separate from Tutor. The conversation lives in that client; the learning state lives in your Tutor installation.'],
-  ['Where does my learning data live?', 'In the Tutor installation you choose. Local: a private SQLite directory on your machine, ~/.tutor-mcp/local. Hobby: SQLite on your own VPS behind HTTPS. Institution: PostgreSQL with tenant isolation and operator-managed keys. Narrative memory is encrypted and versioned in the database. There is no telemetry.'],
-  ['Can I learn with several AI clients and keep one history?', 'Yes. Connect them to the same Tutor installation, locally over stdio or remotely over HTTPS with OAuth. Multiple local clients can share one profile and its learner identity. Separate installations stay independent; nothing synchronizes implicitly.'],
-  ['How is this different from flashcards, a language app or a prompt around a chatbot?', 'A flashcard app schedules reviews. A language app plays a fixed item bank. A prompt around a chatbot forgets. Tutor MCP is the layer between them: a persistent, auditable engine that tracks estimates, retention, demonstrated skills, transfer, misconceptions and narrative memory, and decides what comes next. The AI creates and explains.'],
-  ['Is this production-ready?', 'Tutor MCP is in alpha. The engine, the three profiles and the Windows client are tested in CI, and only the latest release tag and main receive fixes. Software tests establish implementation behaviour, not measured learning effectiveness; estimates are never presented as proof of mastery.'],
-  ['Can I host this for a classroom, a team or a training organization?', 'Yes. The institution profile runs on PostgreSQL with separate API, worker and migrator roles. Members use public-key identities and the Tutor ACP client; owners manage membership and access; authors and authorised trainers maintain programmes. The hobby profile fits a small group on one VPS.'],
-  ['Why Go?', 'One static binary per platform, pure-Go SQLite without CGO, low memory and concurrency for parallel learner loops. Binaries target Linux, macOS and Windows on amd64 and arm64; building from source needs Go 1.26.10 or a newer patched release.'],
-  ['What is the license? Can I fork it or use it commercially?', 'MIT. You can use, copy, modify, merge, publish, distribute, sublicense and sell copies, including commercially, as long as the copyright and license notice stay with the software. It is provided “as is”, without warranty. The name, logo and this site remain their author’s.'],
+  ['What do I need to start?', 'On Windows x64, install Tutor ACP, connect Codex or Claude with your own provider account, then connect Tutor in local mode or join your institution. Tutor ACP includes the agent adapters and their runtime; you do not need to install Node.js separately. Local mode also requires the separate Tutor MCP server binary. If you already use an MCP client, you can install only the Tutor MCP server.'],
+  ['Are Tutor MCP and Tutor ACP the same thing?', 'They work together. Tutor MCP is the server that stores courses, learning state and session memory and provides the pedagogical tools. Tutor ACP is the desktop application for conversations, courses and institution settings. You can also connect another compatible MCP client to Tutor MCP.'],
+  ['Is everything free?', 'Both projects are open source under the MIT licence. You can use and self-host them without a Tutor subscription. Your chosen AI provider may charge for its service, and hosting an institution has infrastructure costs. Tutor does not include a language model.'],
+  ['Where does my data live?', 'The learning state lives in the Tutor installation you choose: SQLite on your computer for local use, SQLite on your VPS for Hobby, or PostgreSQL for an institution. Tutor ACP stores conversations on your device. Your AI provider processes the content sent to it under its own terms; a local Tutor server does not make a remote AI model local.'],
+  ['What happens when I share a course?', 'Tutor copies the course design, not your private conversations, observations or progress. Contributions follow the owner’s review workflow. An institution can offer a published version in its catalogue or invite named members. Joining remains voluntary, and enrolled learners keep their course version.'],
+  ['Can I use several AI clients and keep my progress?', 'Yes, when they connect to the same Tutor installation and learner identity. Separate installations stay independent; nothing synchronizes implicitly. The connection guides explain which local and remote configurations each client supports.'],
+  ['Is Tutor ready for everyone?', 'Tutor is alpha software. The repository documents its tests, supported configurations and known limits. Software tests establish implementation behaviour, not measured learning effectiveness. Mastery estimates are kept distinct from demonstrated skills.'],
+  ['Can I modify it or use it commercially?', 'Yes. The MIT licence permits use, modification and redistribution, including commercially, while preserving its copyright and licence notices. It is provided as is, without warranty. The source and contribution guides are on GitHub.'],
+];
+
+const sharingSteps = [
+  ['Create a private course', 'Start with a question or a learning goal. Build and refine the programme in your own space.'],
+  ['Share its design', 'Create a copy for your institution. Your conversations, observations and personal progress stay out of that copy.'],
+  ['Review, then publish', 'The owner examines contributions before publication. Offer the approved version in the catalogue or invite named members.'],
+  ['Let people make it their own', 'Members choose to enrol and learn at their own pace. Their enrolled version stays stable as the course evolves.'],
 ];
 
 export default function Home() {
@@ -21,220 +28,165 @@ export default function Home() {
       <main id="main">
         <section className="hero">
           <div className="wrap">
-            <a className="badge-new" href={RELEASE}><b>New</b> Tutor ACP 0.0.1 for Windows · Tutor MCP 0.7.0 <span className="dim">→</span></a>
-            <h1>Learn throughout your life. Grow through learning communities.</h1>
+            <a className="badge-new" href={RELEASE}><b>Latest release</b> Tutor ACP {CLIENT_VERSION} · Tutor MCP {VERSION.replace(/^v/, '')} <span className="dim">→</span></a>
+            <h1>Keep learning.<br />Grow together.</h1>
             <div className="sub">
-              <p>Tutor MCP is an open-source engine for adaptive learning and personalized AI tutoring. It brings course creation, a structured learning path and ongoing tutoring into the AI assistant you already use, and gives institutions a desktop client to learn together.</p>
+              <p>Turn a question into a course. Pick up where you left off. Tutor MCP and its ACP client help you learn throughout your life, on your own and in learning communities.</p>
               <div className="row">
-                <a className="btn btn-light btn-lg" href={CLIENT_DOWNLOAD}>Download Tutor ACP</a>
-                <Link className="btn btn-dark btn-lg" href="/docs/">Read the docs</Link>
+                <Link className="btn btn-light btn-lg" href="/download/">Download Tutor</Link>
+                <Link className="btn btn-dark btn-lg" href="/docs/">Get started</Link>
               </div>
             </div>
-            <div className="works"><span className="dim">Works with</span><Providers /><span className="dim">and any MCP client</span></div>
+            <div className="works"><span className="dim">Open source · Self-hosted</span><span>Desktop client for Windows x64</span><a href="#products">Already use an AI assistant? Connect Tutor MCP →</a></div>
             <div className="shot"><ClientWindow /></div>
+            <p className="cap mock-example-note">Illustrative preview of Tutor ACP, using example course and learning data.</p>
           </div>
         </section>
 
-        <section className="sec" style={{ paddingTop: 64 }}>
+        <section className="sec" id="products">
           <div className="wrap">
-            <div className="sec-head" style={{ marginTop: 0 }}>
-              <h2>Generative teaching. Deterministic pedagogy.</h2>
-              <div className="txt"><p>The AI creates lessons, exercises and explanations. A persistent, auditable engine governs progression: what to learn, practice or revisit next. <b>Three rules guide every decision.</b></p></div>
+            <SectionTop n="1.0" title="Two open-source building blocks" />
+            <div className="sec-head">
+              <h2>A learning engine.<br />A place to learn.</h2>
+              <div className="txt"><p>Your AI explains and practises with you. Tutor MCP gives that conversation continuity. Tutor ACP brings your conversations, courses and institution into one desktop application.</p></div>
             </div>
-            <div className="figs">
-              <div>
-                <span className="fig">Fig 0.1</span>
-                <div className="art"><span className="wm" style={{ fontSize: 34 }}>T<span className="cursor" /></span></div>
-                <h4>Local first</h4><p>One binary and SQLite. <code>tutor-mcp --local</code> needs no account, no server and no data leaving your machine.</p>
-              </div>
-              <div>
-                <span className="fig">Fig 0.2</span>
-                <div className="art" style={{ padding: '0 28px' }}><div style={{ width: '100%' }}><Meter label="P(mastery)" value={0.33} max={9999} /></div></div>
-                <h4>Evidence-driven</h4><p>An estimate is not mastery. Every number ships with its threshold and its source; demonstrated skills stay distinct from estimates.</p>
-              </div>
-              <div>
-                <span className="fig">Fig 0.3</span>
-                <div className="art"><div className="row" style={{ gap: 6 }}><Kbd>Ctrl</Kbd><Kbd>K</Kbd></div></div>
-                <h4>Built for communities</h4><p>Institutions publish programmes to their members. Each learner keeps their own pace, conversations and progress.</p>
+            <div className="visual grid g2 product-pair">
+              <article className="card product-card">
+                <span className="fig">The server · MCP</span>
+                <h3>Tutor MCP</h3>
+                <p>Stores your courses, progress, review schedule and session memory. It gives compatible AI clients the tools to choose what to practise, revisit or assess next.</p>
+                <div className="works"><span className="dim">Connect with</span><Providers /><span>and other MCP clients</span></div>
+                <div className="row"><Link className="btn btn-dark" href="/docs/local/">Use it with your MCP client</Link><Link className="more" href="/download/#server">Server downloads</Link></div>
+              </article>
+              <article className="card product-card">
+                <span className="fig">The desktop application · ACP</span>
+                <h3>Tutor ACP</h3>
+                <p>Learn with Codex or Claude, resume conversations and manage your courses. Connect a local Tutor server or join your institution. Agent adapters and their runtime are included.</p>
+                <p className="small">Windows x64 installer. Your AI provider account and its costs are separate.</p>
+                <div className="row"><Link className="btn btn-light" href="/download/#client">Get the Windows client</Link><Link className="more" href="/docs/install-client/">Installation guide</Link></div>
+              </article>
+            </div>
+          </div>
+        </section>
+
+        <section className="sec" id="institutions">
+          <div className="wrap">
+            <SectionTop n="2.0" title="Learning communities" />
+            <div className="sec-head">
+              <h2>Build a shared programme.<br />Leave room for every learner.</h2>
+              <div className="txt">
+                <p>A classroom, a training organisation, a team or a community of practice: institution mode gives your members a common place to find and develop courses.</p>
+                <p>Share the programme and its learning goals. Each member keeps their own conversations, learning history and pace. The server enforces access and roles.</p>
+                <div className="row"><Link className="btn btn-light" href="/docs/institutions/">Explore institution mode</Link><Link className="more" href="/docs/deploy-institution/">Host an institution</Link></div>
               </div>
             </div>
+            <div className="visual institution-layout">
+              <InstitutionPreview />
+              <div className="institution-benefits">
+                <article><span className="num">01</span><h3>A catalogue for your members</h3><p>Publish a reviewed version for the institution or offer it to named members. Members choose to enrol; an invitation does not enrol them automatically.</p></article>
+                <article><span className="num">02</span><h3>Contribute with a clear review</h3><p>Authors and authorised contributors improve a programme. Proposals can be examined and refined before an owner approves publication.</p></article>
+                <article><span className="num">03</span><h3>Keep learning on a stable version</h3><p>A new publication does not silently replace an enrolled learner’s programme. Changes to existing enrolments stay explicit.</p></article>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section className="sec" id="sharing">
+          <div className="wrap">
+            <SectionTop n="3.0" title="Share what you build" />
+            <div className="sec-head">
+              <h2>Your next course could help someone else start.</h2>
+              <div className="txt"><p>Build something for your own learning, then contribute its design to your institution. A shared course can evolve without turning your private learning history into public content.</p><Link className="more" href="/docs/sharing-courses/">Follow the course-sharing guide</Link></div>
+            </div>
+            <ol className="visual sharing-flow">
+              {sharingSteps.map(([title, text], index) => <li className="sharing-step" key={title}><span className="num">0{index + 1}</span><h3>{title}</h3><p>{text}</p></li>)}
+            </ol>
+            <p className="privacy-note"><b>The course design is shared. Your learning history is not.</b> Conversations, private observations and personal progress are not copied when you share a course.</p>
           </div>
         </section>
 
         <section className="sec" id="learner-state">
           <div className="wrap">
-            <SectionTop n="1.0" title="Learner state" />
+            <SectionTop n="4.0" title="Continuity, one session at a time" />
             <div className="sec-head">
-              <h2>The missing layer is not content. It is continuity.</h2>
-              <div className="txt">
-                <p>Your AI handles the conversation. Tutor MCP gives it two persistent layers, so the next session starts from what you have mastered, forgotten, misunderstood and committed to do next.</p>
-                <p><b>The loop is simple:</b> choose an activity, teach and practice, record the response, update the learning state. The client calls <code>get_next_activity</code> for guidance and <code>record_interaction</code> to save observations.</p>
-              </div>
+              <h2>Come back to your learning, not a blank conversation.</h2>
+              <div className="txt"><p>A new interest, a change of career or a course you left months ago: Tutor keeps the programme, the observations and the context needed to resume. Tell your tutor what you want to learn, then come back when you are ready for the next step.</p><Link className="more" href="/docs/first-session/">Start your first learning session</Link></div>
             </div>
-            <div className="visual grid g4">
-              <div className="card"><span className="fig">structured state</span><h4 style={{ marginTop: 10 }}>Learning engine</h4><p>Concepts, prerequisites, mastery estimates, review timing and assessment evidence. Chooses what to practice, revisit or assess next.</p></div>
-              <div className="card"><span className="fig">narrative memory</span><h4 style={{ marginTop: 10 }}>Session memory</h4><p>Session summaries, goals, recurring misconceptions and useful learner context, encrypted and versioned. The AI picks up the thread.</p></div>
-              <div className="card"><span className="fig">assessment</span><h4 style={{ marginTop: 10 }}>Frozen evidence</h4><p>Tasks and rubrics are frozen before the response. Estimated, retained, demonstrated and transferred skills are kept apart.</p></div>
-              <div className="card"><span className="fig">audit</span><h4 style={{ marginTop: 10 }}>Decision trail</h4><p>Decision snapshots and replay explain why an activity was recommended or a concept held back.</p></div>
-            </div>
-            <h3 className="sub">Concept states</h3>
-            <div className="grid g4">
-              <div className="card"><Pill kind="done">Mastered</Pill><p style={{ marginTop: 12 }}>Above the routing threshold, with assessment evidence.</p></div>
-              <div className="card"><Pill kind="prog">In progress</Pill><p style={{ marginTop: 12 }}>Unlocked, BKT estimate moving.</p></div>
-              <div className="card"><Pill kind="review">Review due</Pill><p style={{ marginTop: 12 }}>FSRS predicts retention below target.</p></div>
-              <div className="card"><Pill kind="lock">Locked</Pill><p style={{ marginTop: 12 }}>Prerequisites not met yet. Never red.</p></div>
-            </div>
-          </div>
-        </section>
-
-        <section className="sec" id="use-cases">
-          <div className="wrap">
-            <SectionTop n="2.0" title="Use cases" />
-            <div className="sec-head">
-              <h2>Six ways to use your tutor.</h2>
-              <div className="txt"><p>No catalogue is required. Tell your AI what you want to learn; the engine handles sequencing, pacing and reviews, and says when you have actually got it. Institutions can add a shared catalogue on top.</p></div>
-            </div>
-            <div className="visual grid g3">
-              <div className="card"><p className="q">“I want to learn Spanish before my trip in six weeks.”</p><h4>Pick up something new</h4><p>State a goal and a deadline. The engine maps the path and only opens new ground when the basics are solid.</p><div className="tags">languages · coding · a new craft</div></div>
-              <div className="card"><p className="q">“I studied statistics eight years ago.”</p><h4>Bring rusty knowledge back</h4><p>A short diagnostic shows what is still solid, what faded and where the small wrong ideas hide. You revisit only what needs it.</p><div className="tags">diagnostic · targeted recall</div></div>
-              <div className="card"><p className="q">“AWS Solutions Architect in three weeks.”</p><h4>Prepare an exam or interview</h4><p>Drills focus on weak spots; reviews are scheduled so retention peaks close to the date.</p><div className="tags">certification · coding interview</div></div>
-              <div className="card"><p className="q">“Just one thing today.”</p><h4>Five focused minutes a day</h4><p>Open the chat. The engine knows which concept is due, serves one calibrated exercise and records the trace for next time.</p><div className="tags">microlearning · daily habit</div></div>
-              <div className="card"><p className="q">“Twelve weeks of data engineering, starting Monday.”</p><h4>Run your own bootcamp</h4><p>Set the curriculum, depth and pace. Modules are sequenced on prerequisites, with mastery checks between phases.</p><div className="tags">self-paced · e-learning</div></div>
-              <div className="card"><p className="q">“Publish the onboarding programme to all members.”</p><h4>Teach a community</h4><p>Owners publish programmes to their institution or invite named members. Contributions follow owner review; learners keep their version.</p><div className="tags">institution · catalogue · review</div></div>
+            <div className="figs">
+              <div><span className="fig">Fig 4.1 · continuity</span><div className="art"><span className="wm" style={{ fontSize: 34 }}>T<span className="cursor" /></span></div><h3>A course that stays with you</h3><p>Your learning goals, programme and session memory live in the Tutor installation you choose. Separate installations do not synchronise automatically.</p></div>
+              <div><span className="fig">Fig 4.2 · evidence</span><div className="art" style={{ padding: '0 28px' }}><div style={{ width: '100%' }}><Meter label="Example mastery estimate" value={0.33} max={9999} /></div></div><h3>Progress with a reason</h3><p>Practice, reviews and assessments feed the learning state. An estimate is shown with its threshold; it is kept distinct from demonstrated skills.</p></div>
+              <div><span className="fig">Fig 4.3 · your next step</span><div className="art"><div className="row"><Pill kind="review">Review due</Pill><Pill kind="prog">In progress</Pill></div></div><h3>Pick up at your own pace</h3><p>Resume a course, revisit a concept or work towards a new goal. The engine uses the recorded evidence to suggest the next activity.</p></div>
             </div>
           </div>
         </section>
 
         <section className="sec" id="client">
           <div className="wrap">
-            <SectionTop n="3.0" title="Tutor ACP" />
+            <SectionTop n="5.0" title="Tutor ACP" />
             <div className="sec-head">
-              <h2>One desktop client to learn and manage.</h2>
+              <h2>Your conversations and courses, in one place.</h2>
               <div className="txt">
-                <p>Tutor ACP connects Codex or Claude to your institution’s learning service over the Agent Client Protocol. Members find shared programmes in one catalogue, learn at their own pace and come back to their conversations and progress.</p>
-                <p><b>Conversation</b> and <b>Formations</b> bring together tutoring, the programme library, manual or AI-assisted editing and progress. Account and Settings cover agents, institution, members and reading preferences. French and English, light, dark and system themes.</p>
-                <div className="row"><a className="btn btn-light" href={CLIENT_DOWNLOAD}>Download for Windows x64</a><a className="btn btn-dark" href={`${REPO}/blob/main/client/README.md`}>Client guide</a></div>
+                <p>Conversation is where learning starts. Courses brings together your private programmes and the courses available to you in your institution. Refine a programme manually or examine an AI proposal in the same editor.</p>
+                <p>Account and Settings cover agents, institution, members and reading preferences. The client supports French and English, light, dark and system themes, text size and reduced motion.</p>
+                <div className="row"><Link className="btn btn-light" href="/download/">Download Tutor ACP</Link><Link className="more" href="/docs/install-client/">Set up the Windows client</Link></div>
               </div>
             </div>
             <div className="visual grid g3">
-              <div className="card"><h4>Bundled agents</h4><p>Codex and Claude adapters and their Node.js runtime are included. Connect your provider account; it stays personal.</p></div>
-              <div className="card"><h4>Public-key identities</h4><p>Your identity and recovery key are generated locally and backed up encrypted. The server stores public keys only; the agent never sees a private key.</p></div>
-              <div className="card"><h4>Explicit permissions</h4><p>MCP tool permissions can be remembered per account, server and agent, and changed in Settings. Interrupted answers stay marked as such.</p></div>
+              <article className="card"><h3>Codex and Claude included</h3><p>The adapters and their runtime are bundled. Choose an agent and connect your provider account, without a separate Node.js installation.</p></article>
+              <article className="card"><h3>Your identity, created locally</h3><p>For an institution, create or import your public-key identity and save its encrypted backup. Keep that backup so you can recover your identity.</p></article>
+              <article className="card"><h3>Permissions you can revisit</h3><p>Allow, ask or refuse MCP tools for the selected account, server and agent. Change those choices in Settings; they never grant extra institution roles.</p></article>
             </div>
-          </div>
-        </section>
-
-        <section className="sec" id="architecture">
-          <div className="wrap">
-            <SectionTop n="4.0" title="Architecture and algorithms" />
-            <div className="sec-head">
-              <h2>The AI explains. Tutor MCP remembers and decides.</h2>
-              <div className="txt"><p>The runtime owns the durable learner state and the pedagogical decisions. The model stays free to explain, reframe, question and summarize. Decisions are inspectable; their quality depends on the evidence the AI records.</p></div>
-            </div>
-            <div className="visual grid g2">
-              <div className="card">
-                <span className="fig">deterministic engine</span><h4 style={{ marginTop: 10 }}>Tutor MCP</h4>
-                <p>Phase control, gates, concept and action selection, evidence rules, session history and encrypted narrative memory. Predictable and auditable.</p>
-                <div className="row" style={{ marginTop: 14, gap: 6 }}>{['BKT', 'FSRS-5', 'KST', 'Evidence gates', 'Transfer probes', 'Calibration', 'Decision replay'].map((t) => <span className="pill" key={t}>{t}</span>)}</div>
-              </div>
-              <div className="card">
-                <span className="fig">generative coach</span><h4 style={{ marginTop: 10 }}>Your AI</h4>
-                <p>Generates lessons and exercises on demand for the selected concept and difficulty target, writes feedback and session summaries, and turns raw state into learner-facing explanations without owning the schedule.</p>
-                <div className="row" style={{ marginTop: 14, gap: 6 }}>{['Content generation', 'Natural language', 'Coaching', 'Memory consolidation'].map((t) => <span className="pill" key={t}>{t}</span>)}</div>
-              </div>
-            </div>
-            <div className="scroll-x" style={{ marginTop: 32 }}>
-              <table className="tt">
-                <thead><tr><th>Model</th><th>Question it answers</th><th>Current behaviour</th></tr></thead>
-                <tbody>
-                  <tr><td>BKT</td><td className="m">Bayesian Knowledge Tracing</td><td>How does this response change the estimate of knowledge? A posterior from success, failure, slip and guess. Diagnostic, mastery and transfer probes update the observation only.</td></tr>
-                  <tr><td>Individualized BKT</td><td className="m">bounded adjustments</td><td>What can recent observations add? Bounded parameter adjustments from a fixed reference, for collective calibration within an institution. Heuristics pending empirical calibration.</td></tr>
-                  <tr><td>Information gain</td><td className="m">binary entropy</td><td>Which diagnostic concept would reduce uncertainty most?</td></tr>
-                  <tr><td>FSRS-5</td><td className="m">spaced repetition</td><td>When should a concept be reviewed? Stability, difficulty and retrievability, scheduled in whole days.</td></tr>
-                  <tr><td>KST</td><td className="m">prerequisite graph</td><td>What is accessible now? Validates the graph and unlocks concepts whose prerequisites are satisfied. No castle on sand.</td></tr>
-                  <tr><td>Evidence gates</td><td className="m">frozen rubrics</td><td>Is this mastery or an estimate? Estimated, retained, demonstrated and transferred skills stay distinct. A high estimate alone certifies nothing.</td></tr>
-                  <tr><td>Transfer</td><td className="m">near · far · debugging · teaching · creative</td><td>Does the knowledge move beyond the training pattern? Transfer claims depend on eligible demonstration evidence.</td></tr>
-                  <tr><td>Calibration</td><td className="m">self-prediction</td><td>How well do you predict your own results? Absolute errors with visible sample coverage; missing observations are not good calibration.</td></tr>
-                </tbody>
-              </table>
-            </div>
-            <p className="cap"><b>Limits.</b> PFA has been removed from the runtime and the legacy IRT helpers are not used to set difficulty. Software tests establish implementation behaviour, not measured learning effectiveness. See the <a href={`${REPO}/blob/main/docs/algorithms.md`}>algorithm guide</a>.</p>
           </div>
         </section>
 
         <section className="sec" id="profiles">
           <div className="wrap">
-            <SectionTop n="5.0" title="Profiles" />
-            <div className="sec-head">
-              <h2>Your learning engine, where you want it.</h2>
-              <div className="txt"><p>Same binaries, three profiles. Every profile uses the same learning engine and the same MCP tools. Connect the clients you use to the same installation to keep one learning history.</p></div>
-            </div>
+            <SectionTop n="6.0" title="Choose where to run Tutor" />
+            <div className="sec-head"><h2>Start on your computer.<br />Grow into a community.</h2><div className="txt"><p>The same server supports three deployment profiles. Start with the route that fits you; the guides separate everyday learning from server administration.</p><Link className="more" href="/docs/">Find your installation path</Link></div></div>
             <div className="visual grid g3">
-              <div className="card"><span className="fig">tutor-mcp --local</span><h4 style={{ marginTop: 10 }}>Local</h4><p>Learning on your own computer. Your MCP client starts the binary over stdio; SQLite stores your history in <code>~/.tutor-mcp/local</code>. No account or server setup.</p></div>
-              <div className="card"><span className="fig">tutor-mcp --profile hobby</span><h4 style={{ marginTop: 10 }}>Hobby</h4><p>A personal VPS or a small group using MCP clients. SQLite and an HTTPS proxy. Invite users over SSH; they sign in with a username and password.</p></div>
-              <div className="card"><span className="fig">tutor-mcp --profile institution</span><h4 style={{ marginTop: 10 }}>Institution</h4><p>Learning communities, teams and training organizations. A shared catalogue, member access, contribution review. Public-key identities, PostgreSQL and separate API, worker and migrator roles.</p></div>
+              <article className="card"><span className="fig">tutor-mcp --local</span><h3>Local</h3><p>Your MCP client starts the server on your computer. SQLite stores your learning state; no Tutor account or hosted server is required.</p><Link className="more" href="/docs/local/">Start locally</Link></article>
+              <article className="card"><span className="fig">tutor-mcp --profile hobby</span><h3>Hobby</h3><p>Run a personal server or a small group on a VPS, with SQLite and HTTPS. Members of this profile sign in with a username and password.</p><Link className="more" href="/docs/#hobby">See the Hobby profile</Link></article>
+              <article className="card"><span className="fig">tutor-mcp --profile institution</span><h3>Institution</h3><p>A shared catalogue, public-key identities, members and reviewed contributions. PostgreSQL and separate service roles support the institution deployment.</p><Link className="more" href="/docs/deploy-institution/">Deploy for a community</Link></article>
             </div>
-            <div className="term" style={{ marginTop: 16 }}>
-              <div className="tb"><span className="on">Linux · macOS</span><span>Windows</span><span>From source</span></div>
-              <pre><span className="p">$</span> curl -fsSL https://raw.githubusercontent.com/ArnaudGuiovanna/tutor-mcp/main/scripts/install.sh -o install-tutor.sh{'\n'}<span className="p">$</span> TUTOR_MCP_VERSION=v0.7.0 TUTOR_MCP_INSTALL_DIR=&quot;$HOME/.local/bin&quot; sh install-tutor.sh{'\n'}<span className="p">$</span> tutor-mcp --local{'\n'}<span className="o">✓</span> learning engine ready · ~/.tutor-mcp/local<span className="cursor" /></pre>
+            <p className="cap">Local learning state does not mean a local AI model. Your selected provider processes the content sent to it. Use the client and provider configuration that fits your needs.</p>
+          </div>
+        </section>
+
+        <section className="sec" id="architecture">
+          <div className="wrap">
+            <SectionTop n="7.0" title="Inside the learning engine" />
+            <div className="sec-head"><h2>The AI explains.<br />Tutor MCP remembers and plans.</h2><div className="txt"><p>The model creates explanations, exercises and feedback. The engine maintains the learning state and selects activities from the recorded evidence. Its decisions are inspectable; their quality depends on the observations provided.</p><a className="more" href={REPO + '/blob/main/docs/algorithms.md'}>Read the algorithm guide</a></div></div>
+            <div className="visual grid g3">
+              <article className="card"><span className="fig">BKT · evidence gates</span><h3>Estimate and demonstrate</h3><p>Knowledge tracing updates estimates from responses. Assessment evidence is tracked separately, so a high probability alone does not certify mastery.</p></article>
+              <article className="card"><span className="fig">FSRS-5 · prerequisites</span><h3>Review and progress</h3><p>Spaced review estimates retention. A prerequisite graph helps determine which concepts are accessible and what should be revisited.</p></article>
+              <article className="card"><span className="fig">Session memory · decision replay</span><h3>Remember and inspect</h3><p>Versioned, encrypted narrative memory carries useful session context. Decision snapshots and replay help explain the recommended next step.</p></article>
             </div>
-            <p className="cap">Inspect the installer before running it. It verifies the archive against <code>SHA256SUMS</code> and keeps licence notices beside the executable. Windows uses <code>install.ps1</code>. <Link href="/docs/#install">Installation details →</Link></p>
+            <p className="cap">These are software capabilities, not a claim of measured learning effectiveness. Tutor is alpha, and its documentation describes the implementation and its limits.</p>
           </div>
         </section>
 
         <section className="sec" id="open-source">
           <div className="wrap">
-            <SectionTop n="6.0" title="Open source" />
-            <div className="sec-head">
-              <h2>Your tutor. Your data. Your server.</h2>
-              <div className="txt"><p>No telemetry, no lock-in, no usage caps. Self-host and own the learner model, the memory, the sessions and the backups. The source, the docs and the deployment templates are in one repository.</p><div className="row"><a className="btn btn-light" href={REPO}>Clone the repository</a><Link className="btn btn-dark" href="/docs/">Read the docs</Link></div></div>
-            </div>
+            <SectionTop n="8.0" title="Open source, from the start" />
+            <div className="sec-head"><h2>Use it. Understand it.<br />Help it improve.</h2><div className="txt"><p>The server, desktop client, documentation and deployment templates are in one repository. Self-host your installation, inspect how it works and contribute what you learn.</p><div className="row"><a className="btn btn-light" href={REPO}>Explore the source</a><a className="btn btn-dark" href={REPO + '/issues'}>Report an issue</a><a className="more" href={REPO + '/discussions'}>Join the discussion</a></div></div></div>
             <div className="visual log">
-              <div><small>license</small><b>MIT</b><p>Use, modify, ship and sell, with the notice preserved.</p></div>
-              <div><small>platforms</small><b>Linux · macOS · Windows</b><p>amd64 and arm64 binaries with checksums on every release.</p></div>
-              <div><small>storage</small><b>SQLite or PostgreSQL</b><p>Pure-Go SQLite for local and hobby; PostgreSQL with row-level security for institutions.</p></div>
-              <div className="cur"><small>{'v0.7.0 · current'}</small><b>Tutor ACP 0.0.1</b><p>Institutional programmes, invitations, contribution review and the Windows client.</p></div>
-            </div>
-          </div>
-        </section>
-
-        <section className="sec" id="contribute">
-          <div className="wrap">
-            <SectionTop n="7.0" title="Contribute" />
-            <div className="sec-head">
-              <h2>Help shape the next learning primitive.</h2>
-              <div className="txt">
-                <p>Tutor MCP is alpha. The core works; the best version will come from learners, teachers, builders and MCP users pushing it against real workflows. Bug reports, docs pull requests, architecture critiques and product feedback all count.</p>
-                <div className="row"><a className="btn btn-light" href={REPO}>Contribute on GitHub</a><a className="btn btn-dark" href={`${REPO}/issues`}>Open issues</a><a className="btn btn-ghost" href="https://x.com/TutorMCP">Follow on X</a></div>
-              </div>
-            </div>
-            <div className="visual grid g4">
-              <div className="card"><span className="num">01</span><h4 style={{ marginTop: 8 }}>Test it in the wild</h4><p>Run it with real learning goals and report what is confusing, brittle or surprisingly useful.</p></div>
-              <div className="card"><span className="num">02</span><h4 style={{ marginTop: 8 }}>Improve the engine</h4><p>Scheduling, mastery checks, misconceptions, transfer probes and the signals that drive decisions.</p></div>
-              <div className="card"><span className="num">03</span><h4 style={{ marginTop: 8 }}>Build integrations</h4><p>More MCP clients, provider setup, deployment paths and boringly reliable self-hosting.</p></div>
-              <div className="card"><span className="num">04</span><h4 style={{ marginTop: 8 }}>Write better docs</h4><p>Turn sharp edges into guides, examples and recipes that get people to a first session.</p></div>
+              <div><small>licence</small><b>MIT</b><p>Use, modify and redistribute, with the licence notice preserved.</p></div>
+              <div><small>server</small><b>Linux · macOS · Windows</b><p>amd64 and arm64 releases, with checksums and dependency notices.</p></div>
+              <div><small>desktop client</small><b>Windows x64</b><p>Codex and Claude adapters included. Your provider account stays separate.</p></div>
+              <div className="cur"><small>{VERSION + ' · latest release'}</small><b>Tutor ACP {CLIENT_VERSION}</b><p>Download the current packages or read the release notes.</p><Link className="more" href="/download/">All downloads</Link></div>
             </div>
           </div>
         </section>
 
         <section className="sec" id="faq">
-          <div className="wrap">
-            <SectionTop n="8.0" title="FAQ" />
-            <div className="sec-head">
-              <h2>Questions you might have.</h2>
-              <div className="txt"><p>Short answers. The documentation and the repository have the details.</p></div>
-            </div>
-            <div className="visual faq">
-              {faq.map(([q, a]) => <details key={q}><summary>{q}</summary><p>{a}</p></details>)}
-            </div>
-          </div>
+          <div className="wrap"><SectionTop n="9.0" title="FAQ" /><div className="sec-head"><h2>A few things before you start.</h2><div className="txt"><p>Choose your installation, connect your AI provider and start with one learning goal. The guides walk through each step.</p></div></div><div className="visual faq">{faq.map(([question, answer]) => <details key={question}><summary>{question}</summary><p>{answer}</p></details>)}</div></div>
         </section>
 
         <section className="final">
           <div className="wrap">
-            <h2>Self-learning is a superpower.</h2>
-            <p>Language models put knowledge within reach, but knowing is not learning. Tutor MCP brings decades of intelligent-tutoring research into any AI conversation. Self-hosted. Open source. Free.</p>
-            <div className="row"><a className="btn btn-light btn-lg" href={CLIENT_DOWNLOAD}>Download Tutor ACP</a><Link className="btn btn-dark btn-lg" href="/docs/">Get started</Link><a className="btn btn-ghost btn-lg" href={REPO}>GitHub</a></div>
+            <h2>Start with something<br />you want to learn.</h2>
+            <p>A question today. A course you can come back to. A programme your community can build on.</p>
+            <div className="row"><Link className="btn btn-light btn-lg" href="/download/">Download Tutor</Link><Link className="btn btn-dark btn-lg" href="/docs/first-session/">Your first session</Link><a className="btn btn-ghost btn-lg" href={REPO}>GitHub</a></div>
             <p className="cap" style={{ marginTop: 28 }}><Wordmark size={14} still /> · built by <a href="https://aguiovanna.fr">Arnaud Guiovanna</a> · MIT licensed</p>
           </div>
         </section>

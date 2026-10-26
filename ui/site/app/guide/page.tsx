@@ -1,176 +1,106 @@
 import type { Metadata } from 'next';
-import { Fragment } from 'react';
 import Link from 'next/link';
 import { Footer, Header } from '@/components/chrome';
-import { REPO } from '@/components/ui';
+import { CodeBlock } from '@/components/code-block';
 
 export const metadata: Metadata = {
-  title: 'User guide — learn with Tutor MCP',
-  description: 'How to start a goal, steer the tutor, ask for reviews, change the teaching style, close a session and understand the progression signals behind each decision.',
+  title: 'Beginner’s guide — your first useful Tutor session',
+  description: 'Choose a learning goal, start a course, practise at your own pace, understand your progress and return for your next session. A practical beginner’s guide to Tutor ACP and Tutor MCP.',
   alternates: { canonical: '/guide/' },
 };
 
-const toc: [string, [string, string][]][] = [
-  ['i. Start', [['#mental-model', 'Engine vs AI'], ['#first-session', 'First session'], ['#client', 'In Tutor ACP']]],
-  ['ii. Your moves', [['#steer', 'Ask for what you need'], ['#prompts', 'Prompt examples'], ['#close', 'Close a session']]],
-  ['iii. Under the hood', [['#learning-loop', 'Conversation loop'], ['#progression', 'Progression signals'], ['#memory', 'Learner memory'], ['#privacy', 'Privacy & backups']]],
-];
+export default function BeginnerGuide() {
+  return <>
+    <Header current="guide" />
+    <main id="main">
+      <div className="wrap">
+        <header className="doc-head">
+          <p className="eyebrow">User guide · Your first useful session</p>
+          <h1>Bring a goal. Take a first step.</h1>
+          <p className="lead">You do not need to know a list of tools or write a perfect prompt. Choose something you want to learn, try an activity and leave with a next step you can return to.</p>
+          <div className="facts"><Link className="pill" href="/docs/install-client/">Install Tutor ACP →</Link><Link className="pill" href="/docs/local/">Use a local MCP client</Link><span className="pill">About 10 minutes to try a session</span></div>
+        </header>
 
-function Prompt({ children }: { children: string }) { return <pre><code>{children}</code></pre>; }
+        <div className="doc-layout">
+          <nav className="toc" aria-label="Beginner’s guide sections">
+            <div className="h">Start</div>
+            <a href="#client">Get connected</a>
+            <a href="#first-session">Choose your starting point</a>
+            <div className="h">Learn</div>
+            <a href="#steer">Practise and adjust</a>
+            <a href="#progression">Read your progress</a>
+            <a href="#close">Finish and return</a>
+            <div className="h">Continue</div>
+            <a href="#share">Share a programme</a>
+            <a href="#privacy">Look after your account</a>
+          </nav>
 
-export default function Guide() {
-  return (
-    <>
-      <Header current="guide" />
-      <main id="main">
-        <div className="wrap">
-          <header className="doc-head">
-            <p className="eyebrow">Guide · Learning with Tutor MCP</p>
-            <h1>Use the tutor as a learning engine.</h1>
-            <p className="lead">Tutor MCP is not another chat prompt. It is the durable layer between you and an AI: explicit signals for what should happen next, plus narrative memory for what you actually went through.</p>
-            <div className="facts"><Link className="pill" href="/docs/">Install first →</Link><a className="pill" href={`${REPO}/blob/main/docs/mcp-tools.md`}>Tool catalogue</a></div>
-          </header>
+          <div className="prose">
+            <section id="client">
+              <span className="eyebrow">01 · Connect</span>
+              <h2>Make sure you are ready.</h2>
+              <p>In Tutor ACP, connect your <b>agent</b> and your <b>Tutor service</b>. Choose Codex or Claude in the agent settings. For an institution, your organisation supplies the Tutor address and authorises your public identity.</p>
+              <p>Starting on your own computer? You can run Tutor MCP locally and connect it to a compatible AI application. Follow <Link href="/docs/local/">Local installation</Link> before continuing.</p>
+              <div className="note" id="mental-model"><b>Two parts with different jobs.</b> Your AI explains and responds. Tutor keeps the programme, learning evidence and review schedule. You can ask questions naturally; Tutor gives the conversation a learning history to build on.</div>
+              <p>If setup is incomplete, your message is saved as <b>Ready to send</b>. Finish connecting to continue. The <Link href="/docs/install-client/">client guide</Link> explains identity backups and first connection.</p>
+            </section>
 
-          <div className="doc-layout">
-            <nav className="toc" aria-label="On this page">
-              {toc.map(([h, items]) => (
-                <Fragment key={h}>
-                  <div className="h">{h}</div>
-                  {items.map(([href, label]) => <a key={href} href={href}>{label}</a>)}
-                </Fragment>
-              ))}
-            </nav>
+            <section id="first-session">
+              <span className="eyebrow">02 · Choose</span>
+              <h2>Start with something that matters to you.</h2>
+              <p>Open <b>Courses</b> and choose a programme from your institution’s catalogue, or start a personal programme in <b>Conversation</b> if your institution allows it. A shared course may require an invitation or approval before you can join.</p>
+              <p>For a personal programme, tell the tutor what you want to do, what you already know and how much time you have.</p>
+              <CodeBlock label="Try a first message" code={'I want to learn enough Spanish to talk with people when I travel.\nI am a beginner and can practise for 15 minutes a day.\nHelp me choose a starting point, then guide me through one short activity.'} />
+              <p>In another MCP application, begin with “Use Tutor MCP” so the assistant knows to use your connected learning service. You can replace Spanish with a skill, project or subject of your own.</p>
+              <p>Tutor searches for an existing personal programme before creating a new one. A new personal programme is private and saved from the first exchange.</p>
+            </section>
 
-            <div className="prose">
-              <section id="mental-model">
-                <span className="eyebrow">Model</span>
-                <h2>Engine vs AI</h2>
-                <p>The AI is the interface: it explains, asks questions, adapts tone, writes examples and summarizes the session. Tutor MCP is the engine: it stores state, chooses the next activity, validates evidence, detects gaps and decides when to review or move on.</p>
-                <div className="note">The useful split: <b>Tutor MCP decides what and why. The AI decides how to say it.</b></div>
-              </section>
+            <section id="steer">
+              <span className="eyebrow">03 · Practise</span>
+              <h2>Try it yourself, then ask for help.</h2>
+              <p>Answer the questions, explain your reasoning and tell the tutor where you get stuck. Try an exercise before asking to see the answer. If you used a hint, make that clear.</p>
+              <p id="prompts">You can ask for a different pace, explanation or example:</p>
+              <CodeBlock label="Make the session work for you" code={'Give me a smaller example.\nExplain it in another way.\nLet me try one exercise without hints.\nConnect this idea to a situation from my work.\nI have five minutes left. What is a useful stopping point?'} />
+              <p id="learning-loop">Each activity can add evidence to the course, helping Tutor choose what to practise or review next. The AI can make mistakes: question an explanation that seems wrong and ask it to check the reasoning.</p>
+              <p>When a tool asks for permission, review the request. Your choice can be saved for the relevant account, service and agent, and changed in <b>Settings → Agents</b>.</p>
+            </section>
 
-              <section id="first-session">
-                <span className="eyebrow">Start</span>
-                <h2>First session</h2>
-                <p>Start with a goal concrete enough to decompose into concepts. The assistant creates a domain if none exists, diagnoses your starting point and proposes the first activity.</p>
-                <Prompt>{`Use Tutor MCP.
-I want to learn Go concurrency in three weeks.
-Create a learning domain, start with a short diagnostic, and keep session memory enabled.`}</Prompt>
-                <p>A good first run calls <code>init_domain</code>, then <code>get_next_activity</code>. If the assistant skips the engine and starts tutoring directly, ask it to use Tutor MCP explicitly.</p>
-              </section>
+            <section id="progression">
+              <span className="eyebrow">04 · Notice progress</span>
+              <h2>Look for evidence, not just a high number.</h2>
+              <p>Open the course’s <b>Progress</b> view to see what has been recorded and what is due for review. A mastery estimate helps route your learning; it does not by itself prove that you have retained or demonstrated a skill.</p>
+              <p>Delayed recall can provide evidence of retention. Eligible assessments can support demonstration and transfer to other situations. Badges reflect their recorded evidence and are not an external certification.</p>
+              <p>A useful question is: “What can I now do, and what should I try next?” Read <Link href="/docs/first-session/#read-your-progress">the progress guide</Link> for the differences between estimated, retained, demonstrated and transferred learning.</p>
+            </section>
 
-              <section id="client">
-                <span className="eyebrow">Start</span>
-                <h2>In Tutor ACP</h2>
-                <p>Open <b>Formations</b> to choose a programme from your institution’s catalogue, or write what you want to learn in <b>Conversation</b> when your institution allows personal programmes. The programme is saved from the first exchange and can be resumed later.</p>
-                <ul>
-                  <li><b>Conversation</b> shows each tool call as it happens and asks for your decision when a tool needs permission. Interrupted answers stay marked as such.</li>
-                  <li><b>Formations</b> lists your programmes and the catalogue, with concepts, prerequisites and progress. Owners and authorised trainers edit programmes here, manually or with the agent.</li>
-                  <li><b>Settings</b> keep your agent, institution, members, language, theme and reading preferences per account.</li>
-                </ul>
-                <p>If setup is incomplete, your message is kept as “À envoyer” (to send) until both connections are ready.</p>
-              </section>
+            <section id="close">
+              <span className="eyebrow">05 · Return</span>
+              <h2>Leave a clear next step.</h2>
+              <CodeBlock label="Close the session" code={'Summarise what I practised and what is still difficult.\nSave the session in Tutor.\nSuggest one next step and tell me what I should review.'} />
+              <p id="memory">Next time, reopen the same account and Tutor service, then return to the conversation or select your course. Ask: <b>“Let’s continue my Spanish course.”</b></p>
+              <p>Each conversation keeps its selected course. Switch courses explicitly when you want a different subject, rather than assuming that another conversation changed the current one.</p>
+              <Link className="more" href="/docs/first-session/">Read the complete first-session guide</Link>
+            </section>
 
-              <section id="steer">
-                <span className="eyebrow">Your moves</span>
-                <h2>Ask for what you need</h2>
-                <p>You do not have to accept the default path silently. Ask for a review, a different pace, a harder challenge, a safer exercise, another style or a visible explanation of the plan. The assistant should use <code>learning_negotiation</code>, <code>transfer_challenge</code>, <code>feynman_challenge</code> or <code>get_olm_snapshot</code> rather than inventing a plan from scratch.</p>
-                <Prompt>{`Use Tutor MCP.
-Show me why you picked this activity in plain language.
-Then offer one easier option, one harder option, and one review-only option.`}</Prompt>
-              </section>
+            <section id="share">
+              <span className="eyebrow">06 · Learn together</span>
+              <h2>Turn a useful programme into a shared starting point.</h2>
+              <p>If you want others in your institution to follow your programme, open its <b>Sharing and access</b> tab. Sharing a personal course copies its design while keeping private conversations and progress separate.</p>
+              <p>Review the objectives, choose who can join and submit the programme for the owner’s approval when required. Each member then follows the shared programme with their own learning record.</p>
+              <div className="row"><Link className="btn btn-dark" href="/docs/sharing-courses/">Create and share a course</Link><Link className="btn btn-ghost" href="/docs/institutions/">Understand institution roles →</Link></div>
+            </section>
 
-              <section id="prompts">
-                <span className="eyebrow">Prompts</span>
-                <h2>Prompt examples</h2>
-                <p>These name the engine explicitly so the assistant calls the tools instead of improvising a normal tutoring chat.</p>
-                <h3>Start a new goal</h3>
-                <Prompt>{`Use Tutor MCP.
-I want to learn SQL window functions for analytics interviews in two weeks.
-Create the domain, start with a diagnostic, and keep the first exercise short.`}</Prompt>
-                <h3>Resume where you stopped</h3>
-                <Prompt>{`Use Tutor MCP.
-Resume my Go concurrency track from the last session.
-Read my learner context and memory before choosing the next activity.`}</Prompt>
-                <h3>Ask for review instead of new material</h3>
-                <Prompt>{`Use Tutor MCP with review intent.
-Pick the concept most at risk of forgetting and give me one calibrated exercise.
-Record the result after I answer.`}</Prompt>
-                <h3>Change the teaching style</h3>
-                <Prompt>{`Use Tutor MCP.
-Keep the same activity, but teach it Socratically.
-Ask one question at a time and do not reveal the answer until I try.`}</Prompt>
-                <h3>Make the plan transparent</h3>
-                <Prompt>{`Use Tutor MCP.
-Show me why this activity was selected in learner-friendly terms.
-Then offer one safer option and one harder option.`}</Prompt>
-                <h3>Correct memory</h3>
-                <Prompt>{`Use Tutor MCP.
-You remembered that I prefer visual explanations, but that is only true for math.
-Update learner memory so programming sessions use concrete code examples first.`}</Prompt>
-              </section>
-
-              <section id="close">
-                <span className="eyebrow">End</span>
-                <h2>Close a session</h2>
-                <p>A clean close preserves continuity. The engine returns a recap and asks the AI to write the session summary through <code>update_learner_memory</code>. It can also record an if-then commitment for the next session.</p>
-                <Prompt>{`Close the Tutor MCP session.
-Summarize what changed, ask me when I will practice next, and save the session memory.`}</Prompt>
-              </section>
-
-              <section id="learning-loop">
-                <span className="eyebrow">Under the hood</span>
-                <h2>Conversation loop</h2>
-                <table className="tt">
-                  <tbody>
-                    <tr><td className="m">get_learner_context</td><td><b>Open with context.</b> Active domains, recent history, concept states and active misconceptions, before tutoring.</td></tr>
-                    <tr><td className="m">get_next_activity</td><td><b>Let the engine choose.</b> Phase, concept, activity, difficulty target, motivation brief and relevant memory, with a recorded decision contract.</td></tr>
-                    <tr><td className="m">record_interaction</td><td><b>Record the outcome.</b> Success, error type, hints, initiative and interpretation notes. Evidence-bearing answers go through a frozen assessment attempt.</td></tr>
-                    <tr><td className="m">record_session_close</td><td><b>Close cleanly.</b> Recap signals and a memory-writing request so the AI stores a factual session summary.</td></tr>
-                  </tbody>
-                </table>
-                <div className="note">The loop only works if outcomes are recorded. If the assistant gives exercises but never calls <code>record_interaction</code>, the engine cannot update estimates, retention or misconceptions.</div>
-              </section>
-
-              <section id="progression">
-                <span className="eyebrow">Signals</span>
-                <h2>Progression signals</h2>
-                <p>Explicit models keep the schedule rigorous; the memory layer gives the AI enough context to avoid generic teaching. Each signal is shown with its threshold and its source. An estimate is not mastery.</p>
-                <table className="tt">
-                  <thead><tr><th>Signal</th><th>Source</th><th>Learner-facing effect</th></tr></thead>
-                  <tbody>
-                    <tr><td>Mastery</td><td className="m">BKT, evidence gates</td><td>Whether a concept is ready, shaky or needs stronger proof. Estimated, retained and demonstrated are kept apart.</td></tr>
-                    <tr><td>Retention</td><td className="m">FSRS-5</td><td>When to review before forgetting becomes expensive.</td></tr>
-                    <tr><td>Structure</td><td className="m">KST, prerequisites</td><td>Which concepts can unlock without skipping foundations.</td></tr>
-                    <tr><td>Transfer</td><td className="m">near · far · debugging · teaching · creative</td><td>Whether knowledge moves beyond the training pattern.</td></tr>
-                    <tr><td>Metacognition</td><td className="m">affect, calibration</td><td>How much support, prediction or reflection the tutor should propose. Descriptive, not a validated autonomy score.</td></tr>
-                    <tr><td>Narrative</td><td className="m">sessions, concept notes, archives</td><td>What happened, what clicked, what remains uncertain and what to verify.</td></tr>
-                  </tbody>
-                </table>
-              </section>
-
-              <section id="memory">
-                <span className="eyebrow">Memory</span>
-                <h2>Learner memory</h2>
-                <p>Narrative memory is designed for factual summaries, not diary prose. Sessions capture what happened; concept notes track durable observations; pending memory holds unconfirmed hypotheses; archives consolidate longer periods. In the local, hobby and institution profiles it is stored encrypted and versioned in the database.</p>
-                <Prompt>{`get_memory_state
-read_raw_session(timestamp: "2026-10-14T16:30:00Z")
-update_learner_memory(scope: "concept", concept_slug: "goroutines",
-                      operation: "replace_section", section_key: "Current state", content: "...")`}</Prompt>
-                <p>Ask the assistant to mark uncertain observations as hypotheses. Tutor MCP exposes pending memory so the AI can use it without treating it as established truth.</p>
-              </section>
-
-              <section id="privacy">
-                <span className="eyebrow">Operate</span>
-                <h2>Privacy and backups</h2>
-                <p>Your AI provider or local client keeps its own chat transcript. Tutor MCP keeps the learning state you preserve through MCP calls, in the installation you chose. For local and hobby profiles, back up the whole profile directory, including <code>runtime.db</code> and <code>keys.json</code>, with every process stopped. Institutions keep PostgreSQL procedures and separate server-key backups; members keep their own encrypted identity backups.</p>
-                <p>For sensitive use, self-host behind HTTPS, restrict <code>TRUSTED_PROXY_CIDRS</code> and review what the AI writes to memory from time to time: it is meant to be readable. See <Link href="/docs/#backup">backup and restore</Link>.</p>
-              </section>
-            </div>
+            <section id="privacy">
+              <span className="eyebrow">07 · Keep it yours</span>
+              <h2>Look after your account and your learning.</h2>
+              <p>Keep your encrypted identity backup and its phrase safe and separate. Your identity export, conversation files on the device and learning data on the Tutor service have different backup procedures.</p>
+              <p>You can adjust the application’s language, theme, text size, line spacing and reduced motion in <b>Settings → Reading and appearance</b>. Changing the interface language does not translate your existing conversations or course content.</p>
+              <div className="row"><Link className="btn btn-dark" href="/docs/backup-and-updates/">Backups and updates</Link><Link className="btn btn-ghost" href="/docs/troubleshooting/">Get unstuck →</Link></div>
+            </section>
           </div>
         </div>
-      </main>
-      <Footer />
-    </>
-  );
+      </div>
+    </main>
+    <Footer />
+  </>;
 }

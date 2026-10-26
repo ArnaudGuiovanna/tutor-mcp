@@ -19,7 +19,7 @@ export default function Legal() {
             <p className="eyebrow">Legal</p>
             <h1>Legal notice</h1>
             <p className="lead">Legal information for the website tutor-mcp.dev, the showcase of the open-source Tutor MCP project, in accordance with article 6 III of French law no. 2004-575 of 21 June 2004 on confidence in the digital economy (LCEN).</p>
-            <p className="cap">Last updated: 10 May 2026.</p>
+            <p className="cap">Last updated: 26 October 2026.</p>
           </header>
           <nav aria-label="On this page">
             <a href="#publisher">Publisher</a><a href="#hosting">Hosting provider</a><a href="#license">License &amp; intellectual property</a><a href="#liability">Limitation of liability</a><a href="#data">Personal data &amp; cookies</a><a href="#contact">Contact</a>
@@ -53,6 +53,8 @@ export default function Legal() {
 
           <h2 id="data">Personal data &amp; cookies</h2>
           <p>This website is static and does not collect any personal data. It uses no tracking cookies, no audience measurement tools and no third-party tracking services. No form or registration is offered on the site itself; contributions to the open-source project go through GitHub, which has its own terms of use and privacy policy.</p>
+
+          <p>The downloads page checks GitHub’s public releases API directly from your browser to find the latest stable packages. This request is subject to GitHub’s privacy policy and requires no account or token. If it is unavailable, the verified download links remain usable. Clicking a download takes you to GitHub.</p>
 
           <h2 id="contact">Contact</h2>
           <p>For any question about the site or the project: <a href="mailto:arnaud@tutor-mcp.dev">arnaud@tutor-mcp.dev</a>.</p>
