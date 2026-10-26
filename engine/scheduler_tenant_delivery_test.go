@@ -269,6 +269,26 @@ func assertTenantDeliveryIsolation(t *testing.T, fixture, runtime *db.Store) {
 	}
 }
 
+// Erasure mechanics require an active successor when their victim is an owner.
+// Use the membership service so the fixture obeys the production invariant.
+func ensureDSARReplacementOwner(t *testing.T, store *db.Store, owner models.Principal) {
+	t.Helper()
+	next, err := store.CreateLearner(t.Context(), "dsar-successor@example.test", "hash", "Institution successor", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	member, err := store.GetPrincipalForLearner(t.Context(), next.ID, []string{models.OAuthScopeLearner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if member.TenantID != owner.TenantID {
+		t.Fatal("DSAR fixture successor belongs to another institution")
+	}
+	if err := store.UpdateTenantMember(t.Context(), owner, member.MembershipID, models.MembershipStatusActive, []string{models.RoleOwner, models.RoleLearner}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSaaSWorkerDSARHoldParksAndResumesThroughQueue(t *testing.T) {
 	for _, backend := range []string{"sqlite", "postgres"} {
 		t.Run(backend, func(t *testing.T) {
@@ -288,6 +308,7 @@ func TestSaaSWorkerDSARHoldParksAndResumesThroughQueue(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			ensureDSARReplacementOwner(t, store, owner)
 			request, err := store.RequestTenantDSAR(ctx, owner, "L1", "erase", "verified request")
 			if err != nil {
 				t.Fatal(err)

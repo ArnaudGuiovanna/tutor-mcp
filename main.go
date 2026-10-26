@@ -877,10 +877,12 @@ func mcpRequestBodyLimitMiddleware(maxBytes int64, next http.Handler) http.Handl
 
 func requestLogger(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(observability.WithRequestID(r.Context()))
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: 200}
 		next.ServeHTTP(rec, r)
 		attributes := []any{
+			"request_id", observability.RequestID(r.Context()),
 			"method", sanitizeHTTPLogField(r.Method),
 			"path", sanitizeHTTPLogField(r.URL.Path),
 			"status", rec.status,

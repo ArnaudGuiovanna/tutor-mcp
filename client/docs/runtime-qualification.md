@@ -1,9 +1,21 @@
 # Qualification du client
 
-Le client est construit pour Windows, avec Codex accessible par l’adaptateur
-ACP. Les tests distinguent le protocole, le serveur pédagogique, l’interface
-installée et l’utilisation réelle d’un modèle. Le succès d’une de ces étapes
-ne vaut pas qualification des autres.
+La recette du client **0.3.0** couvre Codex et Claude par leurs adaptateurs ACP.
+Elle distingue le lancement du processus, le protocole, le serveur pédagogique,
+l’interface Windows installée et l’utilisation réelle d’un modèle. Le succès
+d’une de ces étapes ne vaut pas qualification des autres.
+
+Ce document décrit les contrôles implémentés et leurs limites. Une étape présente
+dans le workflow ne constitue pas un résultat CI : sa réussite doit être constatée
+sur le commit concerné et reliée à ses rapports bruts.
+
+| Preuve | Périmètre | Limite |
+|---|---|---|
+| `tutor-packaged-rust.json` | Les deux agents Windows passent par `Backend::connect_agent`, le lancement Rust utilisé par l’application ; premier lancement, reprise et arrêt. | Négociation ACP sans génération ; le parcours d’identification fournisseur n’est pas exercé. |
+| `tutor-client-accessibility.json` | Application installée depuis NSIS : noms UI Automation, clavier, quatre onglets, changement FR/EN/FR, sélection des thèmes et persistance après fermeture du processus. | Profil de test hors ligne, sans séance MCP ni audit manuel de Narrator. |
+| `tutor-client-runtime.json` | Découverte native de l’adaptateur, négociation ACP et, avec `-TutorBinary`, persistance d’appels MCP directs. | Les appels directs ne prouvent pas leur utilisation par un modèle. |
+| `tutor-client-wsl-runtime.json` | Découverte et exécution dans une véritable distribution WSL2 depuis Windows, arrêt des processus et choix du CLI. | Ne qualifie ni l’interface graphique Linux ni une génération de modèle. |
+| Rapport distinct d’une séance avec fournisseur authentifié | Réponses réelles et appels MCP dans le profil pédagogique de test, avec OS, versions et données de test identifiés. | Un essai Linux avec données synthétiques ne qualifie pas l’exécutable Windows installé. |
 
 ## Vérification reproductible
 
@@ -16,16 +28,20 @@ bash scripts/verify-client.sh --install --real-adapter
 Le script installe les dépendances verrouillées, vérifie TypeScript, teste et
 construit l’interface, vérifie le format et Clippy, puis teste le cœur Rust sans
 dépendance à une fenêtre. L’option `--real-adapter` négocie réellement ACP avec
-le paquet de `client/scripts/adapter/package-lock.json`. Le test utilise un
-profil Codex temporaire : il ne copie pas de connexion et n’appelle aucun modèle.
+les deux paquets Codex et Claude verrouillés dans
+`client/scripts/adapter/package-lock.json`. Le test isole `CODEX_HOME` et
+`CLAUDE_CONFIG_DIR` dans un dossier temporaire ; il ne copie pas de connexion
+fournisseur et n’appelle aucun modèle.
 
-Le contexte GitHub **Client (Windows)** ajoute la compilation de Tutor,
-l’exécution des outils MCP réels, la construction de l’installeur NSIS,
-l’installation et l’ouverture d’une fenêtre de l’application. Il conserve
-l’installeur et un rapport lié au commit. L’apparition d’une fenêtre n’établit
-pas à elle seule la qualité de toutes les interactions graphiques.
+Le contexte GitHub **Client (Windows)** ajoute la qualification des agents
+intégrés par Rust, la compilation de Tutor, les outils MCP directs, la construction
+NSIS, l’installation et les interactions UI Automation. Le
+[workflow](../../.github/workflows/client.yml) prévoit de conserver l’installeur
+et les quatre rapports nommés ci-dessus dans l’artefact
+`tutor-client-windows-x64-<commit>`. La présence et la réussite de ces contrôles
+doivent être vérifiées pour le commit livré.
 
-## Windows natif
+## Windows natif : découverte et MCP direct
 
 Dans PowerShell, après installation des dépendances verrouillées :
 
@@ -62,6 +78,88 @@ ne couvre pas `cargo test --lib`. Sans lui, le chargeur peut retourner
 `client/src-tauri/windows-app-manifest.xml` conserve intégralement le manifeste
 par défaut de `tauri-build 2.7.4` ; sa comparaison fait partie de la revue lors
 d’une mise à jour de cette dépendance.
+
+## Agents Windows intégrés : même lancement Rust que l’application
+
+La vérification Python des ressources installées reste utile pour contrôler
+l’inventaire et une négociation ACP. Elle ne remplace pas le test du lancement
+Rust : c’est précisément la différence de chemin de lancement qui pouvait
+laisser passer une erreur Windows dans les agents intégrés.
+
+Depuis PowerShell sous Windows, à la racine du dépôt :
+
+```powershell
+python client/scripts/prepare-agents.py
+if ($LASTEXITCODE -ne 0) { throw 'Préparation des agents refusée.' }
+$env:TUTOR_PACKAGED_ROOT = (Resolve-Path 'client/bundled-agents').Path
+$env:TUTOR_PACKAGED_REPORT = Join-Path (Get-Location) 'tutor-packaged-rust.json'
+cargo test --manifest-path client/src-tauri/Cargo.toml --locked `
+  --no-default-features --lib `
+  installed_bundled_agents_use_the_same_rust_launch_as_the_application `
+  -- --ignored --nocapture
+if ($LASTEXITCODE -ne 0) { throw 'Le lancement Rust des agents a échoué.' }
+if (-not (Test-Path -LiteralPath $env:TUTOR_PACKAGED_REPORT)) {
+  throw 'Le rapport brut de qualification Rust est absent.'
+}
+```
+
+Le test appelle `Backend::connect_agent` pour Codex et Claude, avec la racine
+canonique des ressources et un dossier de travail contenant espaces et Unicode.
+Il vérifie `initialize`, la déconnexion, puis une deuxième connexion et son
+arrêt. Le workflow utilise les ressources Windows préparées avant la construction
+NSIS ; le contrôle Python de l’installation complète cette preuve sur les
+fichiers effectivement installés.
+
+`tutor-packaged-rust.json` enregistre `sourceVersion`, `platform` et deux entrées
+`agents` contenant notamment `agentInfo`, `coldStartMs`, `warmStartMs`,
+`productionRustBackend`, `initialize`, `shutdown` et `modelPromptTested: false`.
+Les durées mesurent la connexion ACP, pas la génération d’une réponse. Le cache
+du paquet est partagé dans le processus : le premier lancement de chaque agent
+ne constitue pas nécessairement une mesure avec cache disque froid indépendant.
+Le rapport est relié au commit par le workflow et le nom de son artefact.
+
+## Interface Windows installée et persistance après fermeture
+
+La recette utilise l’installeur **0.3.0**, pas une prévisualisation web. Elle doit
+être exécutée sur un compte Windows de test sans données Tutor existantes : le
+script refuse de remplacer un profil présent et ne nettoie que ses propres
+dossiers de test.
+
+```powershell
+$env:GITHUB_SHA = (git rev-parse HEAD).Trim()
+./client/tests/windows/test-installed-client.ps1 `
+  -Installer 'client/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Tutor_0.3.0_x64-setup.exe' `
+  -Report (Join-Path (Get-Location) 'tutor-client-accessibility.json')
+```
+
+Le profil semé pour ce test est hors ligne, sans URL ni commande Tutor et sans
+identité native. Le script UI Automation tape un message sans l’envoyer, vérifie
+les noms accessibles et la navigation clavier, puis parcourt les quatre onglets
+**Agents / Institution / Membres / Ergonomie**. Il change la langue
+**Français → English → Français**, vérifie les libellés des paramètres dans les deux langues et
+sélectionne les thèmes clair et sombre avec les contrôles accessibles.
+
+Il laisse ensuite la langue anglaise et le thème clair, ferme proprement le
+processus et relance le même exécutable avec le même profil, sans réinitialiser
+les données. Une seconde passe vérifie ces valeurs dans l’interface et dans le
+fichier de travail réellement enregistré avant de revenir au français et au
+thème sombre.
+
+Le rapport brut `tutor-client-accessibility.json` contient les preuves des deux
+passes dans `exercise` et `reopened`, ainsi que `sourceCommit`, `sourceVersion`,
+`binaryProductVersion`, `settingsTabs`, `languageSwitchFrEnFr`,
+`themeSwitchLightDark`, `persistenceAfterProcessRestart` et
+`persistedValuesVerifiedInWorkspace`. Le workflow exige ce fichier à l’emplacement
+explicite sous `RUNNER_TEMP`, contrôle son commit et ses indicateurs avant de
+l’ajouter à l’artefact. Une ligne de log ou un récépissé reconstruit ne remplace
+pas ce JSON brut.
+
+UI Automation vérifie ici les commandes et valeurs accessibles, pas à elle seule
+le contraste visuel, le comportement de tous les lecteurs d’écran ou une séance
+de tutorat. `narratorManualAudit: false` reste explicite. Les captures de navigateur
+avec un pont IPC simulé peuvent compléter les contrôles de rendu, de zoom et de
+défilement ; elles ne constituent pas une exécution de l’application Windows
+installée ni une preuve d’utilisation du serveur pédagogique.
 
 ## WSL2 réel
 
@@ -119,13 +217,53 @@ cette qualification ; la présence du scénario dans le dépôt ne suffit pas.
 
 ## Parcours avec un modèle
 
-La réception fonctionnelle exige aussi, avec le fournisseur choisi par la
-personne, une intention validée, une formation effectivement enregistrée par
-les outils Tutor, une activité, une interruption et une reprise sans duplication.
-L’annulation et le refus d’une demande de permission doivent rester utilisables.
+La réception fonctionnelle commence par une demande dans Conversation, par
+exemple « Je veux apprendre le Go ». Elle n’exige aucun formulaire d’intention ni
+validation préalable d’un brouillon. Les anciennes intentions restent des notes
+historiques ; elles ne sont pas une étape du parcours.
+
+Avec le fournisseur authentifié choisi par la personne, la recette doit prouver
+la création immédiate d’une formation personnelle privée, sa sélection confirmée
+sur le serveur, une activité, une interruption et une reprise sans duplication.
+Elle couvre aussi trois créations personnelles successives et le parcours
+Go → Python → fermeture → reprise → Go, avec progression et contexte distincts.
+Les prochaines réponses suivent le choix français/anglais ; les messages et les
+programmes historiques ne sont pas réécrits. L’annulation, le refus et les choix
+d’autorisation persistants doivent rester effectifs après reprise.
+
+Une génération réelle sous Linux avec des CLI fournisseurs authentifiés et un
+Tutor éphémère contenant des données synthétiques prouve les étapes effectivement
+tracées dans ce contexte. Une réponse ne valide pas à elle seule toute cette
+recette : le rapport doit montrer les outils et objets réellement créés.
+« Synthétiques » décrit ici les données de test, pas des réponses de modèle
+simulées. Ce résultat doit rester séparé du lancement ACP des agents Windows et
+de la recette UI Automation installée : ni l’un ni l’autre ne prouve une génération
+de modèle dans l’exécutable Windows. Aucun compte ni historique du pilote n’est
+nécessaire pour ces essais isolés.
+
 Une négociation ACP seule, une fixture de protocole ou un outil MCP invoqué
-directement ne prouvent pas ce parcours. Les rapports du probe l’indiquent par
-`modelPromptTested: false` et `desktopUiTested: false`.
+directement ne prouve pas une séance générée par le modèle. Les rapports natifs
+et WSL du probe conservent `modelPromptTested: false` et
+`desktopUiTested: false` ; le rapport Rust des agents intégrés conserve également
+`modelPromptTested: false`. Une validation avec modèle doit apporter sa propre
+preuve, en indiquant explicitement le système d’exploitation, les versions,
+le commit et les limites du scénario.
+
+## Portée du retrait de compte et de l'effacement
+
+Retirer un compte de cet appareil et demander l'effacement de ses données dans
+une institution sont deux opérations distinctes. La demande d'effacement du
+profil apprenant est asynchrone : l'interface affiche l'état réellement retourné
+par le serveur, sans annoncer une suppression terminée dès son acceptation.
+Une conservation légale ou le statut de dernier propriétaire peut empêcher son
+exécution. Sans profil apprenant, le retrait révoque immédiatement l'adhésion et
+ses sessions. Le dernier propriétaire doit transférer la propriété auparavant.
+
+Ces opérations ne suppriment pas l'identité globale ni ses clés publiques sur
+le serveur et ne retirent pas les accès du même compte dans d'autres institutions.
+Les versions communes et les progressions des autres apprenants sont conservées.
+Les tests serveur d'effacement et de contrôle des droits ne constituent pas,
+à eux seuls, une recette de suppression dans l'application Windows installée.
 
 ## Revue des dépendances Rust
 

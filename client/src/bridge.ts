@@ -1,6 +1,6 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { AgentConnection, AgentTarget, Conversation, FormationReview, FormationVersion, Intent, Institution, PublicIdentity, JsonRecord, Settings, Snapshot, TutorOverview, TutorStatus } from './types';
+import type { AgentConfiguration, McpTool, AgentConnection, AgentTarget, Conversation, FormationReview, FormationVersion, Intent, Institution, PublicIdentity, JsonRecord, Settings, Snapshot, TutorOverview, TutorStatus } from './types';
 
 function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (!isTauri()) {
@@ -10,6 +10,11 @@ function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
 }
 
 export const bridge = {
+  deleteProfile: (id: string, confirmation: string) => call<Snapshot>('delete_profile', {id, confirmation}),
+  institutionAction: (action: string, input: Record<string, unknown> = {}) => call<unknown>('institution_action', {action,input}),
+  listMcpTools: () => call<{tools: McpTool[]}>('list_mcp_tools'),
+  agentConfiguration: () => call<AgentConfiguration>('agent_configuration'),
+  setAgentConfiguration: (configuration: AgentConfiguration['current']) => call<AgentConfiguration>('set_agent_configuration', {configuration}),
   trainingAction: (action: string, input: Record<string, unknown>) => call<unknown>('training_action', { action, input }),
   queuePrompt: (text: string | null, conversationId?: string) => call<Snapshot>('queue_prompt', { text, conversationId }),
   selectConversation: (id?: string) => call<Snapshot>('select_conversation', { id }),

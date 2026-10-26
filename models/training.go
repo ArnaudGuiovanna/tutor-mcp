@@ -26,6 +26,10 @@ type Training struct {
 	CanReview         bool               `json:"can_review"`
 	CanLearn          bool               `json:"can_learn"`
 	CanShare          bool               `json:"can_share"`
+	CanArchive        bool               `json:"can_archive"`
+	CanRestore        bool               `json:"can_restore"`
+	CanDelete         bool               `json:"can_delete"`
+	CanWithdraw       bool               `json:"can_withdraw"`
 	FreePublication   bool               `json:"free_publication"`
 	Progress          []TrainingProgress `json:"progress"`
 }
@@ -91,11 +95,11 @@ type TrainingRequest struct {
 	Filter            string            `json:"filter,omitempty"`
 	After             string            `json:"after,omitempty"`
 	Limit             int               `json:"limit,omitempty"`
-	ConversationID    string            `json:"conversation_id,omitempty"`
+	ConversationID    string            `json:"conversation_id,omitempty" jsonschema:"The conversation identifier provided by the native client. Bound transports supply it automatically."`
 	ExpectedRevision  string            `json:"expected_revision,omitempty"`
-	ExpectedSelection *int              `json:"expected_selection,omitempty"`
+	ExpectedSelection *int              `json:"expected_selection,omitempty" jsonschema:"Current selection_version returned by get_conversation_context. Read again after init_domain because creation already selects the training."`
 	Document          *TrainingDocument `json:"document,omitempty"`
-	Key               string            `json:"key,omitempty"`
+	Key               string            `json:"key,omitempty" jsonschema:"Required stable idempotency key for every mutation, 1 to 128 characters. Reuse only for an identical retry; choose a fresh key for a new action."`
 	Name              string            `json:"name,omitempty"`
 	Audience          string            `json:"audience,omitempty"`
 	MemberID          string            `json:"member_id,omitempty"`
@@ -103,11 +107,12 @@ type TrainingRequest struct {
 	Reason            string            `json:"reason,omitempty"`
 	FreePublication   *bool             `json:"free_publication,omitempty"`
 	PersonalLearning  *bool             `json:"personal_learning,omitempty"`
+	Confirm           bool              `json:"confirm,omitempty"`
 }
 
 func TrainingReadAction(action string) bool {
 	switch action {
-	case "list_training_library", "get_training", "get_conversation_context", "preview_training_edit", "get_training_policy", "find_training_members", "get_training_groups":
+	case "list_training_library", "get_training", "get_conversation_context", "preview_training_edit", "get_training_policy", "find_training_members", "get_training_groups", "preview_training_lifecycle":
 		return true
 	}
 	return false
@@ -118,7 +123,7 @@ func ValidTrainingAction(action string) bool {
 		return true
 	}
 	switch action {
-	case "select_conversation_training", "save_training_edit", "propose_training_edit", "share_training", "submit_training", "decide_training", "publish_training", "set_training_access", "set_training_policy", "join_training":
+	case "select_conversation_training", "save_training_edit", "propose_training_edit", "share_training", "submit_training", "decide_training", "publish_training", "set_training_access", "set_training_policy", "join_training", "archive_training", "restore_training", "delete_training", "withdraw_training":
 		return true
 	}
 	return false

@@ -16,6 +16,11 @@ export function client(initial = initialState()) {
   let agentListener: (event: JsonRecord) => void = () => {};
   let stateListener: (snapshot: Snapshot) => void = () => {};
   const api: ClientBridge = {
+    deleteProfile: vi.fn(async () => structuredClone(state)),
+    institutionAction: vi.fn(async (action) => action === 'list_members' ? {items:[],next_after:''} : {institution:{id:'tenant-1',name:'Institution de test'},membership:{id:'member-1',roles:['learner'],status:'active'},capabilities:{manage_members:false,transfer_ownership:false,request_erasure:true,last_owner:false},personal_learning:true,erasure_requests:[]}),
+    listMcpTools: vi.fn(async () => ({tools:[]})),
+    agentConfiguration: vi.fn(async () => ({connected:state.agentConnected,configOptions:[],current:{model:'',reasoningEffort:'',speed:'balanced'},supported:{model:false,reasoningEffort:false,speed:false}})),
+    setAgentConfiguration: vi.fn(async (configuration) => ({connected:state.agentConnected,configOptions:[],current:configuration,supported:{model:false,reasoningEffort:false,speed:false}})),
     trainingAction: vi.fn(async (action) => action === 'list_training_library' ? {items:[],next_after:''} : action === 'get_training_policy' ? {personal_learning:true,can_manage:false} : trainingFixture()),
     queuePrompt: vi.fn(async (text, conversationId) => { state.pendingMessage = text ? {text,conversationId} : null; return structuredClone(state); }),
     selectConversation: vi.fn(async (id) => {state.activeConversationId=id;return structuredClone(state);}),

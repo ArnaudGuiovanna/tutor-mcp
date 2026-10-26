@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 //! Opt-in actual-model acceptance. Uses a fresh Tutor profile and the selected
-//! user's existing Codex login. Never reads or prints provider credentials.
+//! user's existing provider login. Never reads or prints provider credentials.
 
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tutor_client::{
     backend::Backend,
     discovery::AgentTarget,
+    permissions::{canonical_tool, ToolCallRegistry},
     workspace::{Settings, TutorSettings},
 };
 
@@ -33,7 +34,19 @@ async fn smoke() -> Result<(), String> {
         .canonicalize()
         .map_err(|_| "Binaire Tutor introuvable.")?;
     let directory = PathBuf::from(args.next().ok_or("Dossier de test neuf requis.")?);
-    let live = args.next().as_deref() == Some("--live-model");
+    let options: Vec<String> = args.collect();
+    let live = options.iter().any(|option| option == "--live-model");
+    let language = options
+        .iter()
+        .find_map(|option| option.strip_prefix("--language="))
+        .unwrap_or("fr");
+    let speed = options
+        .iter()
+        .find_map(|option| option.strip_prefix("--speed="))
+        .unwrap_or("balanced");
+    if !["fr", "en"].contains(&language) || !["balanced", "fast", "deep"].contains(&speed) {
+        return Err("Invalid qualification language or speed.".into());
+    }
     if directory.exists() {
         return Err(
             "Le dossier de test doit être neuf pour protéger les données existantes.".into(),
@@ -45,7 +58,7 @@ async fn smoke() -> Result<(), String> {
         .map_err(|_| "Dossier de test invalide.")?;
     let target = AgentTarget {
         id: "smoke-native".into(),
-        label: "Qualification Codex réelle".into(),
+        label: "Qualification agent réelle".into(),
         environment: "native".into(),
         distribution: None,
         wsl_user: None,
@@ -57,6 +70,11 @@ async fn smoke() -> Result<(), String> {
         detail: String::new(),
     };
     let settings = Settings {
+        language: language.into(),
+        agent: tutor_client::workspace::AgentSettings {
+            speed: speed.into(),
+            ..Default::default()
+        },
         target_id: target.id.clone(),
         manual_target: Some(target.clone()),
         cwd: directory.to_string_lossy().into_owned(),
@@ -71,6 +89,7 @@ async fn smoke() -> Result<(), String> {
                 directory.join("tutor").to_string_lossy().into_owned(),
             ],
         },
+        ..Default::default()
     };
     let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
     let event_control = sender.clone();
@@ -83,10 +102,14 @@ async fn smoke() -> Result<(), String> {
         }),
     )?;
     backend.save_settings(settings.clone()).await?;
+    let cold_started = std::time::Instant::now();
     let initialized = backend
         .connect_agent(target.clone(), settings.cwd.clone())
         .await?;
+    let cold_start_ms = cold_started.elapsed().as_millis();
+    let context_started = std::time::Instant::now();
     let overview = backend.tutor_overview().await?;
+    let context_ms = context_started.elapsed().as_millis();
     if !overview["context"].is_object() {
         return Err("Tutor ne retourne pas son contexte pédagogique.".into());
     }
@@ -104,24 +127,25 @@ async fn smoke() -> Result<(), String> {
     let permission_backend = permission_target.clone();
     let event_task = tokio::spawn(async move {
         let mut tools = Vec::<String>::new();
-        let mut tool_names = std::collections::HashMap::<String, String>::new();
+        let mut registry = ToolCallRegistry::default();
+        let started = std::time::Instant::now();
         while let Some(event) = events.recv().await {
+            registry.observe(&event);
             if event["method"] == "session/request_permission" {
                 // Only isolated Tutor MCP operations are authorized. Built-in
                 // terminal/filesystem tools and publication remain denied.
-                let title = event["params"]["toolCall"]["title"]
-                    .as_str()
-                    .filter(|value| !value.is_empty())
-                    .or_else(|| {
-                        event["params"]["toolCall"]["toolCallId"]
-                            .as_str()
-                            .and_then(|id| tool_names.get(id).map(String::as_str))
-                    })
-                    .unwrap_or("");
-                let allowed = title.starts_with("mcp.tutor.")
+                let tool = registry.request_tool(&event).unwrap_or("");
+                if !tool.is_empty() {
+                    tools.push(tool.to_owned());
+                    eprintln!(
+                        "{}",
+                        json!({"qualification":"permission","elapsedMs":started.elapsed().as_millis(),"name":tool})
+                    );
+                }
+                let allowed = !tool.is_empty()
                     && !["publish", "delete", "share", "webhook"]
                         .iter()
-                        .any(|name| title.contains(name));
+                        .any(|name| tool.contains(name));
                 let choice = if allowed {
                     event["params"]["options"]
                         .as_array()
@@ -140,11 +164,28 @@ async fn smoke() -> Result<(), String> {
                 && [Some("tool_call"), Some("tool_call_update")]
                     .contains(&event["params"]["update"]["sessionUpdate"].as_str())
             {
-                if let Some(title) = event["params"]["update"]["title"].as_str() {
-                    tools.push(title.to_string());
-                    if let Some(id) = event["params"]["update"]["toolCallId"].as_str() {
-                        tool_names.insert(id.to_string(), title.to_string());
-                    }
+                // Claude's ordinary tool reports carry the SDK tool name,
+                // while only approval requests carry mcpServer metadata.
+                // This observational fallback never grants a permission.
+                let update = &event["params"]["update"];
+                let observed = canonical_tool(update).or_else(|| {
+                    update
+                        .pointer("/_meta/claudeCode/toolName")?
+                        .as_str()?
+                        .strip_prefix("mcp__tutor__")
+                        .filter(|name| {
+                            !name.is_empty()
+                                && name
+                                    .bytes()
+                                    .all(|c| c.is_ascii_alphanumeric() || b"_.-".contains(&c))
+                        })
+                });
+                if let Some(tool) = observed {
+                    tools.push(tool.to_string());
+                    eprintln!(
+                        "{}",
+                        json!({"qualification":"tool","elapsedMs":started.elapsed().as_millis(),"name":tool,"status":event["params"]["update"]["status"]})
+                    );
                 }
             }
             if event["_smokeDone"] == true {
@@ -154,6 +195,7 @@ async fn smoke() -> Result<(), String> {
         let _ = tools_tx.send(tools);
     });
     let mut original_go = String::new();
+    let mut turn_timings_ms = Vec::new();
     for (index, message) in [
         "Je veux apprendre le Go.",
         "Je veux apprendre Python.",
@@ -162,9 +204,11 @@ async fn smoke() -> Result<(), String> {
     .iter()
     .enumerate()
     {
+        let turn_started = std::time::Instant::now();
         backend
             .send_prompt(conversation.id.clone(), (*message).into())
             .await?;
+        turn_timings_ms.push(turn_started.elapsed().as_millis());
         let library = backend
             .training_action(
                 "list_training_library".into(),
@@ -213,13 +257,17 @@ async fn smoke() -> Result<(), String> {
         }),
     )?;
     *permission_target.lock().await = reopened.clone();
+    let reopen_started = std::time::Instant::now();
     reopened.connect_agent(target, settings.cwd).await?;
+    let reopen_ms = reopen_started.elapsed().as_millis();
     reopened
         .start_conversation(None, Some(conversation.id.clone()))
         .await?;
+    let turn_started = std::time::Instant::now();
     reopened
         .send_prompt(conversation.id.clone(), "Reprenons ma formation Go.".into())
         .await?;
+    turn_timings_ms.push(turn_started.elapsed().as_millis());
     let context = reopened
         .training_action(
             "get_conversation_context".into(),
@@ -263,7 +311,7 @@ async fn smoke() -> Result<(), String> {
             tools.join(", ")
         ));
     }
-    let report: Value = json!({"adapter":initialized["agentInfo"],"realTutorContext":true,"liveModel":true,"personalFormationsCreated":3,"explicitContext":true,"goPythonAstronomyGo":true,"activityToolCalled":true,"activityPresented":true,"observationRecorded":false,"replyPersisted":true,"restartPassed":true,"duplicateMessages":false,"tools":tools});
+    let report: Value = json!({"adapter":initialized["agentInfo"],"language":language,"speed":speed,"timings":{"coldConnectMs":cold_start_ms,"tutorContextMs":context_ms,"reopenedConnectMs":reopen_ms,"promptRoundTripsMs":turn_timings_ms,"humanWaitIncluded":false},"realTutorContext":true,"liveModel":true,"personalFormationsCreated":3,"explicitContext":true,"goPythonAstronomyGo":true,"activityToolCalled":true,"activityPresented":true,"observationRecorded":false,"replyPersisted":true,"restartPassed":true,"duplicateMessages":false,"tools":tools});
     std::fs::write(
         directory.join("acceptance.json"),
         serde_json::to_vec_pretty(&report).unwrap(),

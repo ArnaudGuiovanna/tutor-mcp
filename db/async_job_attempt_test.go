@@ -201,6 +201,7 @@ func TestFinalizeAsyncJobAttemptPriorAcceptedDeliveryIsAckOnly(t *testing.T) {
 func TestFinalizeAsyncJobAttemptDSARContinueRefundAndFencing(t *testing.T) {
 	s := setupTestDB(t)
 	owner := ownerPrincipal(t, s)
+	ensureErasureReplacementOwner(t, s, owner)
 	request, err := s.RequestTenantDSAR(t.Context(), owner, "L1", "erase", "verified request")
 	if err != nil {
 		t.Fatal(err)

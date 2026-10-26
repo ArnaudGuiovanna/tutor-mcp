@@ -262,6 +262,73 @@ async fn verify(directory: &Path, url: &str) -> Result<(), String> {
     }
     let owner = IdentityStore::load(&directory.join("owner"))?;
     let owner_keys = owner.active()?;
+    let host_session = native_auth::open_session(url, &owner_keys, "formation:contribute").await?;
+    let action_url = format!("{url}/api/client/v1/institution/actions");
+    let body = serde_json::to_vec(&json!({"action":"overview","input":{}}))
+        .map_err(|_| "Host action JSON serialization failed")?;
+    let unsigned = client
+        .post(&action_url)
+        .bearer_auth(&host_session.access_token)
+        .header("Content-Type", "application/json")
+        .body(body.clone())
+        .send()
+        .await
+        .map_err(|_| "Unsigned host action probe failed")?;
+    if unsigned.status().as_u16() != 401 {
+        return Err("Delegated bearer alone reached an institutional account action".into());
+    }
+    let proof = native_auth::signed_institution_action(
+        &owner_keys,
+        url,
+        &action_url,
+        &host_session.principal.tenant_id,
+        &host_session.session_id,
+        &body,
+    )?;
+    let another_host_session =
+        native_auth::open_session(url, &owner_keys, "formation:contribute").await?;
+    let cross_session = client
+        .post(&action_url)
+        .bearer_auth(&another_host_session.access_token)
+        .header("Content-Type", "application/json")
+        .header("X-Tutor-Action-Proof", &proof)
+        .body(body.clone())
+        .send()
+        .await
+        .map_err(|_| "Host session-binding probe failed")?;
+    if cross_session.status().as_u16() != 401 {
+        return Err("A host proof signed for another native session was accepted".into());
+    }
+    another_host_session.revoke(&owner_keys).await?;
+    for replay in [false, true] {
+        let response = client
+            .post(&action_url)
+            .bearer_auth(&host_session.access_token)
+            .header("Content-Type", "application/json")
+            .header("X-Tutor-Action-Proof", &proof)
+            .body(body.clone())
+            .send()
+            .await
+            .map_err(|_| "Signed host action transport failed")?;
+        if response.status().as_u16() != if replay { 401 } else { 200 } {
+            return Err("Rust host proof or persistent replay protection was rejected".into());
+        }
+        if !replay {
+            let value: Value = response
+                .json()
+                .await
+                .map_err(|_| "Host action JSON invalid")?;
+            if value["institution"]["id"] != host_session.principal.tenant_id
+                || value["membership"]["id"] != host_session.principal.membership_id
+            {
+                return Err(
+                    "Signed host action crossed an institution or membership boundary".into(),
+                );
+            }
+        }
+    }
+    host_session.revoke(&owner_keys).await?;
+    println!("Rust/Go host account proof: exact body signature, tenant/session binding, native membership and single-use nonce verified.");
     let read = native_auth::open_session(url, &owner_keys, "").await?;
     if read.scope != "formation:read" || !read.principal.learner_id.is_empty() {
         return Err("Owner was given implicit write access or a synthetic learner".into());

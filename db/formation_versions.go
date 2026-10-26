@@ -407,17 +407,7 @@ func (s *Store) RemoveFormation(ctx context.Context, actor models.Principal, for
 				return err
 			}
 		} else {
-			for _, table := range []string{"concept_prerequisites", "formation_concepts", "formation_modules"} {
-				if _, err := txs.exec(txCtx, `DELETE FROM `+table+` WHERE tenant_id = ? AND formation_version_id IN (SELECT id FROM formation_versions WHERE tenant_id = ? AND formation_id = ?)`, actor.TenantID, actor.TenantID, formationID); err != nil {
-					return err
-				}
-			}
-			for _, table := range []string{"formation_versions", "formation_trainers"} {
-				if _, err := txs.exec(txCtx, `DELETE FROM `+table+` WHERE tenant_id = ? AND formation_id = ?`, actor.TenantID, formationID); err != nil {
-					return err
-				}
-			}
-			if _, err := txs.exec(txCtx, `DELETE FROM formations WHERE tenant_id = ? AND id = ?`, actor.TenantID, formationID); err != nil {
+			if err := txs.deleteUnpublishedTraining(txCtx, actor.TenantID, formationID); err != nil {
 				return err
 			}
 			status = "deleted"

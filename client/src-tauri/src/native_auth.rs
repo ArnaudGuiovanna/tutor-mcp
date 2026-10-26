@@ -386,6 +386,47 @@ fn signed_event(challenge: &Challenge, keys: &Keys) -> Result<String, String> {
         .map_err(|_| "La signature locale a échoué.")?;
     Ok(STANDARD.encode(event.as_json()))
 }
+/// Host-only proof for institutional account/member actions. The delegated
+/// MCP bearer is deliberately insufficient: only the device's active key can
+/// sign the exact HTTP body, target and a fresh single-use nonce.
+pub fn signed_institution_action(
+    keys: &Keys,
+    origin: &str,
+    url: &str,
+    tenant_id: &str,
+    session_id: &str,
+    body: &[u8],
+) -> Result<String, String> {
+    endpoint(origin, url, "/api/client/v1/institution/actions")?;
+    if [tenant_id, session_id]
+        .iter()
+        .any(|id| id.is_empty() || id.len() > 256 || id.chars().any(char::is_control))
+    {
+        return Err(
+            "La preuve institutionnelle exige une institution et une session natives valides."
+                .into(),
+        );
+    }
+    let values = vec![
+        vec!["u".into(), url.to_string()],
+        vec!["method".into(), "POST".into()],
+        vec!["payload".into(), format!("{:x}", Sha256::digest(body))],
+        vec!["nonce".into(), uuid::Uuid::new_v4().to_string()],
+        vec!["tenant".into(), tenant_id.into()],
+        vec!["session".into(), session_id.into()],
+    ];
+    let tags = values
+        .into_iter()
+        .map(Tag::parse)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "Impossible de préparer la preuve d’identité.")?;
+    let event = EventBuilder::new(Kind::Custom(27235), "")
+        .tags(tags)
+        .sign_with_keys(keys)
+        .map_err(|_| "La signature locale a échoué.")?;
+    Ok(STANDARD.encode(event.as_json()))
+}
+
 async fn submit<T: DeserializeOwned>(
     url: &str,
     challenge: &Challenge,

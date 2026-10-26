@@ -6,17 +6,73 @@ use crate::{discovery::AgentTarget, launch::LaunchSpec};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Component, Path, PathBuf},
-    sync::OnceLock,
+    sync::{Mutex, OnceLock},
+    time::SystemTime,
 };
 
 static ROOT: OnceLock<PathBuf> = OnceLock::new();
+// Only verified bytes are cached. Every launch still revalidates canonical
+// containment, file identity and metadata; replaced/changed assets are hashed
+// again. This cache is process-local and cannot survive an application upgrade.
+static VERIFIED: OnceLock<Mutex<HashMap<PathBuf, VerifiedAsset>>> = OnceLock::new();
+#[derive(Clone, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+    created: Option<SystemTime>,
+    #[cfg(unix)]
+    identity: (u64, u64, i64, i64),
+    #[cfg(windows)]
+    changed: i64,
+}
+struct VerifiedAsset {
+    stamp: FileStamp,
+    expected: String,
+}
+fn file_stamp(file: &std::fs::File) -> Result<FileStamp, String> {
+    let m = file.metadata().map_err(|_| "Ressource illisible.")?;
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+    #[cfg(windows)]
+    let changed = {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FileBasicInfo, GetFileInformationByHandleEx, FILE_BASIC_INFO,
+        };
+        let mut basic = std::mem::MaybeUninit::<FILE_BASIC_INFO>::zeroed();
+        // SAFETY: the file handle remains owned/live, and the output points to
+        // an appropriately sized FILE_BASIC_INFO buffer.
+        if unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FileBasicInfo,
+                basic.as_mut_ptr().cast(),
+                std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+            )
+        } == 0
+        {
+            return Err("Vérification des métadonnées de l’agent impossible.".into());
+        }
+        // SAFETY: the successful call initialized the entire output structure.
+        unsafe { basic.assume_init() }.ChangeTime
+    };
+    Ok(FileStamp {
+        len: m.len(),
+        modified: m.modified().ok(),
+        created: m.created().ok(),
+        #[cfg(unix)]
+        identity: (m.dev(), m.ino(), m.ctime(), m.ctime_nsec()),
+        #[cfg(windows)]
+        changed,
+    })
+}
 pub fn configure(root: PathBuf) {
     let _ = ROOT.set(root);
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Manifest {
     format: u32,
@@ -25,14 +81,14 @@ struct Manifest {
     agents: Vec<Agent>,
     files: Vec<Asset>,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Agent {
     id: String,
     label: String,
     version: String,
     entry: String,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Asset {
     path: String,
     bytes: u64,
@@ -125,13 +181,38 @@ fn launch_from(root: &Path, id: &str, cwd: &str) -> Result<LaunchSpec, String> {
         }
         let path = safe_path(root, &asset.path)?;
         let mut file = std::fs::File::open(&path).map_err(|_| "Ressource illisible.")?;
-        if file.metadata().map_err(|_| "Ressource illisible.")?.len() != asset.bytes {
+        let stamp = file_stamp(&file)?;
+        if stamp.len != asset.bytes {
             return Err("Agent intégré modifié. Réinstallez Tutor.".into());
         }
-        let mut digest = Sha256::new();
-        std::io::copy(&mut file, &mut digest).map_err(|_| "Vérification de l’agent impossible.")?;
-        if format!("{:x}", digest.finalize()) != asset.sha256 {
-            return Err("Agent intégré modifié. Réinstallez Tutor.".into());
+        let cache = VERIFIED.get_or_init(|| Mutex::new(HashMap::new()));
+        let already_verified = cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&path)
+            .is_some_and(|known| known.stamp == stamp && known.expected == asset.sha256);
+        if !already_verified {
+            let mut digest = Sha256::new();
+            std::io::copy(&mut file, &mut digest)
+                .map_err(|_| "Vérification de l’agent impossible.")?;
+            if format!("{:x}", digest.finalize()) != asset.sha256 || file_stamp(&file)? != stamp {
+                cache
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&path);
+                return Err("Agent intégré modifié. Réinstallez Tutor.".into());
+            }
+            let mut verified = cache.lock().unwrap_or_else(|e| e.into_inner());
+            if verified.len() >= 20000 {
+                verified.clear();
+            }
+            verified.insert(
+                path,
+                VerifiedAsset {
+                    stamp,
+                    expected: asset.sha256.clone(),
+                },
+            );
         }
     }
     if !seen.contains(&m.node) || !seen.contains(&agent.entry) {
@@ -165,7 +246,7 @@ fn launch_from(root: &Path, id: &str, cwd: &str) -> Result<LaunchSpec, String> {
     ));
     Ok(LaunchSpec {
         program: node.to_string_lossy().into_owned(),
-        args: vec![entry.to_string_lossy().into_owned()],
+        args: vec![crate::discovery::node_script_argument(&entry)],
         env,
         cwd: Some(PathBuf::from(cwd)),
     })
@@ -205,6 +286,57 @@ mod tests {
             .unwrap_err()
             .contains("modifié"));
     }
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "requires the actual packaged Windows resources"]
+    async fn installed_bundled_agents_use_the_same_rust_launch_as_the_application() {
+        use std::sync::Arc;
+        let root = std::env::var_os("TUTOR_PACKAGED_ROOT")
+            .expect("TUTOR_PACKAGED_ROOT must name the packaged agents");
+        // A verbatim resource root exercises the canonical path returned by
+        // Tauri, including the Node entry-path regression for both agents.
+        let root = PathBuf::from(root).canonicalize().unwrap();
+        configure(root);
+        let mut reports = Vec::new();
+        for target in targets() {
+            let directory = tempfile::Builder::new()
+                .prefix("Tutor intégrés ")
+                .tempdir()
+                .unwrap();
+            let backend =
+                crate::backend::Backend::new(directory.path(), Arc::new(|_, _| {})).unwrap();
+            let mut settings = backend.settings().await;
+            settings.target_id = target.id.clone();
+            backend.save_settings(settings).await.unwrap();
+            let cold = std::time::Instant::now();
+            let response = backend
+                .connect_agent(target.clone(), String::new())
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{} production Rust launch failed: {error}", target.id)
+                });
+            let cold_ms = cold.elapsed().as_millis();
+            assert_eq!(response["protocolVersion"], 1);
+            assert!(response.get("agentInfo").is_some());
+            backend.disconnect_agent().await.unwrap();
+            assert_eq!(backend.snapshot().await["agentConnected"], false);
+            let warm = std::time::Instant::now();
+            backend
+                .connect_agent(target.clone(), String::new())
+                .await
+                .unwrap();
+            let warm_ms = warm.elapsed().as_millis();
+            backend.disconnect_agent().await.unwrap();
+            reports.push(serde_json::json!({"agent":target.id,"agentInfo":response["agentInfo"],"coldStartMs":cold_ms,"warmStartMs":warm_ms,"productionRustBackend":true,"unicodeWorkingDirectory":true,"initialize":"passed","shutdown":"passed","modelPromptTested":false}));
+        }
+        assert_eq!(reports.len(), 2);
+        let report = serde_json::json!({"format":1,"sourceVersion":env!("CARGO_PKG_VERSION"),"platform":"windows-x64","agents":reports});
+        if let Some(path) = std::env::var_os("TUTOR_PACKAGED_REPORT") {
+            std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+        }
+        println!("PACKAGED_RUST_QUALIFICATION {report}");
+    }
+
     #[test]
     fn resource_paths_cannot_escape() {
         let root = std::env::temp_dir();

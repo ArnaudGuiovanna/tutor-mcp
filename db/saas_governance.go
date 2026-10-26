@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -258,7 +259,7 @@ func canonicalJSONEqual(left, right string) bool {
 
 func (s *Store) RequestTenantDSAR(ctx context.Context, actor models.Principal, learnerID, kind, reason string) (*models.TenantDSARRequest, error) {
 	if (!actor.Authorize(models.PermissionTenantManage, models.AuthorizationResource{TenantID: actor.TenantID}) &&
-		!(kind == "export" && actor.LearnerID == learnerID && actor.Authorize(models.PermissionLearningSelf, models.AuthorizationResource{TenantID: actor.TenantID, OwnerUserID: actor.UserID}))) ||
+		!((kind == "export" || kind == "erase") && actor.LearnerID == learnerID && actor.Authorize(models.PermissionLearningSelf, models.AuthorizationResource{TenantID: actor.TenantID, OwnerUserID: actor.UserID}))) ||
 		learnerID == "" || (kind != "export" && kind != "erase" && kind != "rectify") || strings.TrimSpace(reason) == "" {
 		return nil, fmt.Errorf("request tenant DSAR: invalid authorization or input")
 	}
@@ -271,6 +272,34 @@ func (s *Store) RequestTenantDSAR(ctx context.Context, actor models.Principal, l
 		Kind: kind, Status: "pending", RequestedBy: actor.UserID, Reason: reason, ResultJSON: "{}", CreatedAt: now}
 	err = s.WithTenantTx(ctx, actor.TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {
 		txs := scoped.(*Store)
+		if kind == "erase" {
+			if err := txs.lockMembershipChanges(txCtx, actor.TenantID); err != nil {
+				return err
+			}
+			if txs.dialect == DialectPostgres {
+				var locked string
+				if err := txs.queryRow(txCtx, `SELECT id FROM tenants WHERE id=? FOR UPDATE`, actor.TenantID).Scan(&locked); err != nil {
+					return err
+				}
+			}
+			var membershipID, rawRoles, memberStatus string
+			if err := txs.queryRow(txCtx, `SELECT id,roles_json,status FROM tenant_memberships WHERE tenant_id=? AND learner_id=?`, actor.TenantID, learnerID).Scan(&membershipID, &rawRoles, &memberStatus); err != nil {
+				return err
+			}
+			var roles []string
+			if err := json.Unmarshal([]byte(rawRoles), &roles); err != nil {
+				return err
+			}
+			if memberStatus == models.MembershipStatusActive && slices.Contains(roles, models.RoleOwner) {
+				owners, err := txs.countActiveOwners(txCtx, actor.TenantID, membershipID)
+				if err != nil {
+					return err
+				}
+				if owners == 0 {
+					return fmt.Errorf("transfer ownership before erasure")
+				}
+			}
+		}
 		var exists int
 		if err := txs.queryRow(txCtx, `SELECT COUNT(*) FROM learners WHERE tenant_id = ? AND id = ?`, actor.TenantID, learnerID).Scan(&exists); err != nil || exists != 1 {
 			return fmt.Errorf("request tenant DSAR: learner not found")

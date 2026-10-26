@@ -35,6 +35,46 @@ async fn rename_profile(backend: AppBackend<'_>, label: String) -> Result<Value,
 }
 
 #[tauri::command]
+async fn delete_profile(
+    backend: AppBackend<'_>,
+    id: String,
+    confirmation: String,
+) -> Result<Value, String> {
+    backend.delete(id, confirmation).await
+}
+#[tauri::command]
+async fn institution_action(
+    backend: AppBackend<'_>,
+    action: String,
+    input: Value,
+) -> Result<Value, String> {
+    backend
+        .current()
+        .await
+        .institution_action(action, input)
+        .await
+}
+#[tauri::command]
+async fn list_mcp_tools(backend: AppBackend<'_>) -> Result<Value, String> {
+    backend.current().await.list_mcp_tools().await
+}
+#[tauri::command]
+async fn agent_configuration(backend: AppBackend<'_>) -> Result<Value, String> {
+    backend.current().await.agent_configuration().await
+}
+#[tauri::command]
+async fn set_agent_configuration(
+    backend: AppBackend<'_>,
+    configuration: crate::workspace::AgentSettings,
+) -> Result<Value, String> {
+    backend
+        .current()
+        .await
+        .set_agent_configuration(configuration)
+        .await
+}
+
+#[tauri::command]
 async fn select_conversation(backend: AppBackend<'_>, id: Option<String>) -> Result<Value, String> {
     backend.current().await.select_conversation(id).await
 }
@@ -361,6 +401,11 @@ fn command_handler<R: tauri::Runtime>(
         create_profile,
         select_profile,
         rename_profile,
+        delete_profile,
+        institution_action,
+        list_mcp_tools,
+        agent_configuration,
+        set_agent_configuration,
         open_external_link,
         formation_versions,
         bundled_agents,
@@ -502,6 +547,7 @@ mod tests {
                 command: adapter.to_string_lossy().into_owned(),
                 args: vec!["--local".into()],
             },
+            ..Default::default()
         };
         call("save_settings", json!({"settings":settings}));
         assert_eq!(

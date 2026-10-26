@@ -58,7 +58,7 @@ func newMCPHTTPHandler(deps *tools.Deps, maxBodyBytes int64, timeout time.Durati
 			}
 			raw.ServeHTTP(w, r)
 		}))))
-	authenticated := auth.LearnerRateLimitMiddleware(guards.Learner, guards.Concurrency.Middleware(handler))
+	authenticated := auth.LearnerRateLimitMiddleware(guards.Learner, guards.Concurrency.Middleware(tools.ToolPolicyHTTPMiddleware(handler)))
 	var protected http.Handler
 	if guards.NativeOnly {
 		validator, ok := deps.Store.(auth.NativePrincipalValidator)

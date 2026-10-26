@@ -13,11 +13,23 @@ export interface AgentTarget {
 }
 
 export interface Settings {
+  language?: 'fr' | 'en';
+  appearance?: { theme: 'dark' | 'light' | 'system'; fontSize: number; lineHeight: number; reduceMotion: boolean };
+  agent?: { model: string; reasoningEffort: string; speed: string };
+  permissionPolicy?: PermissionPolicy | null;
   targetId: string;
   manualTarget?: AgentTarget;
   cwd: string;
   tutor: { mode: 'local' | 'remote'; activity?: 'auto' | 'author' | 'learn' | 'train'; url: string; command: string; args: string[] };
 }
+
+export type PermissionDecision = 'ask' | 'allow' | 'deny';
+export interface PermissionPolicy { origin: string; institutionId: string; agentId: string; defaultDecision: PermissionDecision; tools: Record<string, PermissionDecision> }
+export interface McpTool { name: string; description?: string; annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean } }
+export interface AgentConfigOption { id: string; name: string; category?: string; type: string; currentValue: string; options?: ({value: string; name: string} | {group: string; options: {value: string; name: string}[]})[] }
+export interface AgentConfiguration { speedOptions?: string[]; connected: boolean; configOptions: AgentConfigOption[]; current: {model: string; reasoningEffort: string; speed: string}; supported: {model: boolean; reasoningEffort: boolean; speed: boolean} }
+export interface InstitutionMember { membership_id: string; user_id: string; name?: string; public_key?: string; recovery_public_key?: string; roles: string[]; status: string }
+export interface InstitutionOverview { institution: {id:string;name:string}; membership:{id:string;roles:string[];status:string}; capabilities:{manage_members:boolean;transfer_ownership:boolean;request_erasure:boolean;last_owner:boolean}; personal_learning:boolean; erasure_requests:{id:string;status:string;created_at:string;completed_at?:string}[] }
 
 export interface Intent {
   id: string;
@@ -153,6 +165,7 @@ export interface ConversationContext {
   conversation_id: string; training_id: string; domain_id: string; revision: string; selection_version: number; name: string;
 }
 export interface Training {
+  can_archive?: boolean; can_restore?: boolean; can_delete?: boolean; can_withdraw?: boolean;
   id: string; learning_version_id?: string; kind: 'personal' | 'institutional' | 'shared'; name: string; description: string;
   domain_id?: string; formation_id?: string; version_id?: string; cohort_id?: string; revision: string; status: string; audience: string; author_id: string;
   can_edit: boolean; can_publish: boolean; can_review: boolean; can_learn: boolean; can_share: boolean; free_publication: boolean;

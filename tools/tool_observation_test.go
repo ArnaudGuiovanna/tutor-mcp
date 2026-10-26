@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,6 +24,26 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
+
+func TestToolObservationLogsBoundedMetadataWithoutPayload(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	ctx := observability.WithRequestID(context.Background())
+	next := func(context.Context, string, mcp.Request) (mcp.Result, error) { return &mcp.CallToolResult{}, nil }
+	h := toolCallObservationMiddleware(map[string]struct{}{"get_next_activity": {}}, logger)(next)
+	_, _ = h(ctx, "tools/call", idempotencyToolRequest(t, "get_next_activity", "private-key", map[string]any{"notes": "private conversation"}))
+	log := output.String()
+	for _, expected := range []string{"get_next_activity", "succeeded", "duration_ms", observability.RequestID(ctx)} {
+		if !strings.Contains(log, expected) {
+			t.Fatalf("missing %s", expected)
+		}
+	}
+	for _, secret := range []string{"private-key", "private conversation", "notes", "arguments"} {
+		if strings.Contains(log, secret) {
+			t.Fatalf("payload leaked: %s", secret)
+		}
+	}
+}
 
 type observedToolPoint struct {
 	name, outcome string

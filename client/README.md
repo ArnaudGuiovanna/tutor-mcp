@@ -22,11 +22,18 @@ de maîtrise. Le client ne crée ni votes ni publication communautaire inexistan
 
 ## Installation Windows et Codex
 
-L’installateur **0.2.1** est distribué comme asset de release avec un
-[lien durable](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/tutor-client-v0.2.1/Tutor_0.2.1_x64-setup.exe).
+L’installateur **0.3.0** est distribué comme asset de release avec un
+[lien durable](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/tutor-client-v0.3.0/Tutor_0.3.0_x64-setup.exe).
 Le workflow **Client → Client (Windows)** construit NSIS, vérifie les agents
 embarqués, installe l’application et teste sa fenêtre ainsi que son arbre
 UI Automation et la saisie au clavier. Le rapport est conservé avec l’artefact CI.
+
+Les paramètres regroupent Agents, Institution, Membres et Ergonomie. La langue
+Français/English, les thèmes et les réglages de lecture sont conservés par compte.
+Les autorisations MCP par outil sont liées au serveur et à l'agent sélectionnés ;
+elles peuvent s'appliquer à toutes les conversations et être retirées ensuite.
+Le [backlog de la version](../docs/backlog-tutor-experience.yaml) fournit les
+critères de validation et les preuves de chaque lot.
 Une compilation Linux ne qualifie pas Windows. Les installateurs de développement
 ne sont pas signés avec un certificat commercial.
 

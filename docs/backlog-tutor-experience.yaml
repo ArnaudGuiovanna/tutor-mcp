@@ -1,0 +1,157 @@
+version: 1
+title: Tutor — fiabilité, fluidité et paramètres
+requested_at: 2026-10-26
+baseline_commit: 52f4fa49da492830dad17d23181594706ef38de1
+status: IMPLEMENTED_PENDING_DELIVERY
+checkpoint: Source préparée avant les contrôles de publication et de distribution.
+delivery_evidence:
+  release: https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/tutor-client-v0.3.0
+  report: https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/tutor-client-v0.3.0/tutor-experience-qualification.json
+  policy: Le rapport de livraison constate les résultats finaux du commit exact ; ce fichier conserve le point de contrôle avant publication.
+status_policy:
+  - DONE exige des preuves correspondant à chaque critère, pas seulement un test de compilation.
+  - Les tests de protocole sans modèle ne valent pas une séance réelle avec un fournisseur.
+  - Une qualification manquante reste ouverte et explicitement signalée.
+invariants:
+  - Préserver les clés, comptes, conversations, formations et progressions existants lors de la mise à jour.
+  - Les autorisations locales ne confèrent aucun rôle ni accès supplémentaire sur le serveur.
+  - Préserver les versions publiées des apprenants et l'isolation entre institutions.
+  - Le BKT collectif conserve les seuils de 30 apprenants contributeurs et cinq observations admissibles chacun, isolés par institution, version et concept ; l'historique privé n'y contribue pas.
+  - Aucun secret, contenu de réponse ou jeton dans les diagnostics techniques.
+  - Publier via le workflow du dépôt sur staging puis main, sans contourner ses contrôles.
+  - Sauvegarder le pilote avant déploiement et fournir un installeur Windows par lien de release durable.
+batches:
+  - id: AUDIT-00
+    title: Diagnostic préalable du pilote
+    status: DONE
+    owner: root
+    acceptance:
+      - Examiner journaux API/worker, disponibilité et données pédagogiques réelles sans mutation.
+      - Distinguer mesures HTTP, utilisation du moteur et qualité pédagogique non encore prouvée.
+      - Identifier les limites des traces et les défauts constatés.
+    evidence:
+      - /tmp/tutor-experience-audit-20261026/findings.json
+      - Requêtes SQL en transactions READ ONLY, 26 octobre 2026.
+      - 144 requêtes, médiane 43 ms, p95 112 ms ; une observation diagnostique BKT effectivement enregistrée.
+  - id: REL-01
+    title: Agents intégrés et maintenance PostgreSQL
+    status: IN_PROGRESS
+    owners: [native_runtime, server_lifecycle]
+    depends_on: [AUDIT-00]
+    acceptance:
+      - Les deux agents intégrés se lancent via le chemin Rust de l'application installée sur Windows, y compris chemins avec espaces et Unicode.
+      - Une erreur de lancement indique sa phase et son code technique sans exposer stderr brut ni secrets.
+      - Le nettoyage périodique réussit avec le rôle worker réel et ses privilèges minimaux, RLS conservé.
+      - Un échec SQL ne produit pas de faux succès ni une cascade de requêtes sur une transaction annulée.
+      - La qualification distingue lancement ACP, authentification fournisseur et génération réelle avec outil MCP.
+    evidence:
+      - client/src-tauri/src/bundled.rs — lancement Rust de production, normalisation Node et cache invalidable.
+      - TestCleanupDeliveredWorkerRoleHasOnlyRequiredMetadata — PostgreSQL réel, rôle worker et métadonnées minimales.
+      - TestCleanupStopsAfterFirstTransactionFailureAndLogsOnlySQLState — erreur arrêtée sans cascade ni contenu SQL.
+      - Recette Windows requise par Client (Windows), rapports tutor-packaged-rust.json et tutor-client-runtime.json ; résultat à constater dans la livraison.
+  - id: PERF-02
+    title: Fluidité, mesure des délais et activité textuelle
+    status: IN_PROGRESS
+    owners: [native_runtime, frontend_experience, server_lifecycle, root]
+    depends_on: [REL-01]
+    acceptance:
+      - Mesurer démarrage froid/reprise, préparation, appels MCP, attentes humaines, génération et affichage séparément.
+      - La reprise d'un agent inchangé évite une relecture intégrale systématique du paquet sans ignorer les changements de ressources.
+      - Le streaming ne réécrit pas synchroniquement tout l'historique à chaque fragment ; arrêt, erreur et reprise conservent un état honnête et récupérable.
+      - Une activité textuelle animée suit les événements réels, distingue lecture serveur, préparation, rédaction, autorisation et échec.
+      - Respecter la réduction des animations et les annonces du lecteur d'écran ; ne pas inventer un raisonnement ou un pourcentage de progression.
+      - Les réglages modèle/effort/vitesse utilisent les capacités réellement exposées par l'agent et persistent sur reprise.
+    evidence:
+      - client/src-tauri/src/workspace.rs — tests de journal, Unicode, reprise, erreur durable et compaction.
+      - client/src-tauri/src/agent_policy.rs — outils généraux Codex désactivés par configuration locale au processus.
+      - tools/tool_observation_test.go — durées, résultat et identifiant de requête, aucun contenu privé.
+      - client/scripts/smoke-learning.rs — mesures connexion, contexte et durée des échanges ; appels MCP horodatés.
+      - client/tests/frontend/App.test.tsx — activité textuelle accessible et événements réels.
+  - id: UX-03
+    title: Compte, paramètres et identité compréhensible
+    status: IN_PROGRESS
+    owners: [frontend_experience, native_runtime, server_lifecycle]
+    depends_on: [REL-01]
+    acceptance:
+      - Deux destinations distinctes Compte et Paramètres, avec onglets Agents, Institution, Membres et Ergonomie.
+      - Expliquer les deux paires compte/récupération, l'identifiant public partageable, la signature locale et la sauvegarde chiffrée avec sa phrase.
+      - Séparer visuellement le compte Tutor des connexions aux fournisseurs ; aucune clé privée n'est exposée dans l'interface.
+      - L'onglet Membres utilise les membres et droits réels ; invitations, rôles, retrait et transfert de propriété sont contrôlés côté serveur.
+      - Proposer thèmes clair/sombre/système, taille 16 à 24 px, interligne et réduction des animations ; conserver les choix après fermeture.
+      - Clavier, zoom, petits écrans et code/tableaux longs ne produisent pas de défilement horizontal.
+    evidence:
+      - client/tests/frontend/SettingsWorkspace.test.tsx — quatre onglets et actions institutionnelles réelles.
+      - client/tests/frontend/App.test.tsx — compte, conversations et conservation du message à envoyer.
+      - Recette Chrome locale : 13 configurations, 390 px, écran bas et équivalent zoom 200 %, zéro débordement horizontal et zéro erreur JavaScript ; backend simulé explicitement.
+      - Recette UI Automation Windows installée requise : navigation clavier, langues, thèmes et fermeture complète ; rapport brut à constater dans la livraison.
+  - id: I18N-04
+    title: Français et anglais dans les paramètres
+    status: IN_PROGRESS
+    owners: [frontend_experience, native_runtime, root]
+    depends_on: [UX-03]
+    acceptance:
+      - Choix explicite Français/English dans les paramètres, français par défaut pour les installations existantes.
+      - Navigation, compte, paramètres, formations/éditeur, confirmations, autorisations et états sont réellement traduits dans les deux langues.
+      - Changement immédiat de l'interface et conservation après redémarrage et changement de profil selon le compte choisi.
+      - Les nouvelles réponses du tuteur suivent la préférence explicite ; ne pas réécrire l'historique ni traduire les identifiants ou le contenu pédagogique stocké.
+      - Mettre à jour la langue du document et les libellés accessibles ; tester les deux langues.
+    evidence:
+      - client/src/i18n.ts et client/src/messages.en.ts — catalogue FR/EN et langue du document.
+      - Tests frontend de changement immédiat et conservation du contenu historique.
+      - client/src-tauri/src/workspace.rs et backend_tests.rs — migration des réglages existants et absence de déconnexion lors du changement de langue.
+      - Prompt réel en anglais et préférence rapide qualifiés séparément de la persistance UI Automation Windows.
+  - id: PERM-05
+    title: Autorisations MCP persistantes
+    status: IN_PROGRESS
+    owners: [root, frontend_experience, native_runtime]
+    depends_on: [UX-03]
+    acceptance:
+      - Afficher la liste réelle des outils accessibles sur le serveur connecté.
+      - Permettre Toujours autoriser, Demander et Refuser par outil, avec Tout autoriser pour Tutor.
+      - Conserver le choix entre conversations et redémarrages, dans le compte et pour l'origine/institution/agent concernés.
+      - Identifier l'outil par les métadonnées MCP vérifiées et la corrélation ACP ; ne pas déduire une autorisation d'un titre rédigé librement.
+      - N'autoriser qu'une option proposée par l'agent pour une demande active et la bonne session ; garder les annulations et refus effectifs.
+      - Une modification/révocation s'applique aux prochains appels ; aucun rôle administratif n'est accordé par la politique locale.
+      - Tester persistance, révocation, requêtes périmées et absence de transfert entre comptes, agents ou institutions.
+    evidence:
+      - client/src-tauri/src/permissions.rs — métadonnées MCP vérifiées, corrélation session/appel et choix proposés.
+      - client/src-tauri/src/experience_acceptance_tests.rs — huit tests catalogue JSON/SSE/local, persistance, révocation, refus, sessions périmées et isolation.
+      - mcp_tool_policy_test.go — vrais HTTP/SDK MCP, refus avant effets, SQLite et PostgreSQL.
+      - tools/tool_policy_test.go — entrées invalides, doublons et limites ; aucune permission de rôle accordée.
+  - id: LIFE-06
+    title: Suppression des comptes et des formations
+    status: IN_PROGRESS
+    owners: [native_runtime, server_lifecycle, frontend_experience]
+    depends_on: [UX-03]
+    acceptance:
+      - Retirer un compte local, y compris le compte initial, arrête ses processus et préserve les autres comptes, leurs clés et leurs données.
+      - Distinguer retrait local et effacement des données institutionnelles ; rendre l'état réel de la demande d'effacement visible.
+      - L'effacement apprenant est asynchrone et peut être bloqué ; sans profil apprenant, le retrait révoque immédiatement l'adhésion. Ces opérations ne suppriment pas l'identité globale ni ses clés publiques sur le serveur.
+      - Protéger le dernier propriétaire et permettre un transfert explicite avant son retrait.
+      - Proposer archiver/restaurer/supprimer une formation personnelle ou un brouillon selon les capacités serveur et expliquer les conséquences.
+      - Le retrait d'une publication bloque les nouvelles inscriptions sans supprimer les versions/progressions des apprenants existants.
+      - Tester révision périmée, idempotence, isolation utilisateur/institution et absence de suppression d'une ressource non autorisée.
+    evidence:
+      - client/src-tauri/src/profiles.rs — compte initial, autres coffres préservés, erreur disque et reprise Windows.
+      - TestTrainingPersonalArchiveRestoreDeletePreservesEvidenceAndReplay.
+      - TestTrainingDraftDeletionAndPublishedWithdrawalKeepEnrolledVersion — progression BKT/FSRS enrichie et inchangée, version conservée, nouvelles inscriptions refusées par les services formation et inscription.
+      - TestTrainingPublishedLifecycleRequiresPublicationAuthority — auteur soumis à validation sans pouvoir de retrait/restauration de publication.
+      - TestInstitutionActionsCannotChangeAnotherTenantOrCreateOwnerByInvitation et TestInstitutionErasureRechecksLastOwnerAtWorkerBoundary.
+      - Tests HTTP et Rust/Go de preuve locale liée au tenant, à la session et au corps exact ; rejeu refusé.
+  - id: SHIP-07
+    title: Recette Windows et livraison sauvegardée
+    status: TODO
+    owner: root
+    depends_on: [REL-01, PERF-02, UX-03, I18N-04, PERM-05, LIFE-06]
+    acceptance:
+      - Vérifier les trois créations personnelles et Go → Python → fermeture → reprise → Go sans duplication ni confusion de progression.
+      - Qualifier chaque fournisseur de bout en bout lorsque ses identifiants sont disponibles ; ne pas assimiler une négociation ACP à une réponse du modèle.
+      - Vérifier FR/EN, clair/sombre, clavier, zoom, autorisations après redémarrage et suppressions sur l'application installée.
+      - Exécuter les vérifications locales et les 18 contrôles requis pour le commit exact avant promotion vers main.
+      - Déployer le pilote après sauvegarde et vérifier disponibilité, privilèges worker et conservation des données existantes.
+      - Diffuser un installeur Windows versionné avec rapports et SHA-256 par une release publique à URL durable.
+    evidence:
+      - scripts/verify-task.sh et scripts/finish_task.py publish — contrôles locaux puis promotion staging/main contrôlée.
+      - client/scripts/smoke-learning.rs — trois créations, fermeture et retour explicite à Go sans doublon, modèles réels sur données synthétiques.
+      - client/tests/windows/test-installed-client.ps1 — profil hors ligne de test, application installée et même espace de données après redémarrage.
+      - La livraison doit joindre rapports bruts Windows, rapport de synthèse, SHA256SUMS et installeur ; déploiement pilote précédé de sauvegarde et comparaison des données.

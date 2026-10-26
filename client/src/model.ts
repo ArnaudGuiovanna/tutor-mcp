@@ -1,3 +1,4 @@
+import { t, dateLocale } from './i18n';
 import type { Intent, JsonRecord, PermissionRequest, ToolActivity, TutorOverview } from './types';
 
 export function record(value: unknown): JsonRecord {
@@ -98,8 +99,8 @@ export function blankIntent(): Intent {
 }
 
 export function validateIntent(intent: Intent): string | undefined {
-  if (!intent.title.trim()) return 'Indiquez ce que vous souhaitez apprendre.';
-  if (!intent.validated) return 'Confirmez que cette intention correspond à ce que vous souhaitez apprendre.';
+  if (!intent.title.trim()) return t('Indiquez ce que vous souhaitez apprendre.');
+  if (!intent.validated) return t('Confirmez que cette intention correspond à ce que vous souhaitez apprendre.');
   return undefined;
 }
 
@@ -111,7 +112,7 @@ export function permissionFromEvent(event: JsonRecord, activities: ToolActivity[
   const content = Array.isArray(tool.content) ? tool.content.map(record) : [];
   const description = content.map((block) => text(record(block.content).text) || text(block.text)).filter(Boolean).join('\n');
   const options = Array.isArray(params.options) ? params.options.map(record).filter((option) => text(option.optionId)).map((option) => ({ optionId: text(option.optionId), name: text(option.name), kind: text(option.kind) })) : [];
-  return { id: event.id, sessionId: text(params.sessionId), title: text(tool.title) || correlated?.title || 'Autorisation demandée par Codex', description, options };
+  return { id: event.id, sessionId: text(params.sessionId), title: text(tool.title) || correlated?.title || t('Autorisation demandée par Codex'), description, options };
 }
 
 export function toolFromEvent(event: JsonRecord): ToolActivity | null {
@@ -131,21 +132,22 @@ export function chunkFromEvent(event: JsonRecord): string {
 }
 
 export function permissionLabel(kind: string, name: string): string {
-  if (kind === 'allow_always' && name.toLowerCase().includes('session')) return 'Autoriser pour cette conversation';
+  if (kind === 'allow_always' && name.toLowerCase().includes('session')) return t('Autoriser pour cette conversation');
   const labels: Record<string, string> = { allow_once: 'Autoriser une fois', allow_always: 'Toujours autoriser', reject_once: 'Refuser', reject_always: 'Toujours refuser' };
-  return labels[kind] || name || 'Choisir';
+  return t(labels[kind] || name || 'Choisir');
 }
 
-export function statusLabel(status: string): string {
-  const labels: Record<string, string> = { draft: 'Brouillon', published: 'Publiée', archived: 'Archivée', pending: 'En attente', in_progress: 'En cours', completed: 'Terminé', failed: 'Échec', active: 'Inscription active', invited: 'Invitation reçue', left: 'Inscription quittée', revoked: 'Accès révoqué', approved: 'Admission approuvée', rejected: 'Admission refusée', requested: 'Admission demandée' };
-  return labels[status] || status;
+export function statusLabel(status: string, context: 'enrollment' | 'member' | 'training' | 'request' = 'enrollment'): string {
+  const labels: Record<string, string> = { draft: 'Brouillon', published: 'Publiée', archived: 'Archivée', pending: 'En attente', in_progress: 'En cours', completed: 'Terminé', failed: 'Échec', active: 'Inscription active', invited: 'Invitation reçue', left: 'Inscription quittée', revoked: 'Accès révoqué', approved: 'Admission approuvée', rejected: 'Admission refusée', requested: 'Admission demandée', queued:'En attente', started:'En cours', running:'En cours', succeeded:'Terminé', cancelled:'Annulé', deleted:'Supprimé', prepared:'Préparée', evaluated:'Évaluée' };
+  const contextual:Record<string,Record<string,string>>={member:{active:'Actif',suspended:'Suspendu',invited:'Invité',revoked:'Accès révoqué'},training:{active:'Active',withdrawn:'Publication retirée'},request:{processing:'Traitement en cours',running:'Traitement en cours',completed:'Effacement terminé',failed:'Échec du traitement',blocked:'Traitement bloqué'}};
+  return t(contextual[context]?.[status] || labels[status] || status);
 }
 
 export function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : typeof error === 'string' ? error : 'L’opération a échoué. Réessayez après avoir vérifié les connexions.';
+  return t(error instanceof Error ? error.message : typeof error === 'string' ? error : 'L’opération a échoué. Réessayez après avoir vérifié les connexions.');
 }
 
 export function displayDate(value: string): string {
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? '' : new Intl.DateTimeFormat('fr', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(date);
+  return Number.isNaN(date.getTime()) ? '' : new Intl.DateTimeFormat(dateLocale(), { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(date);
 }

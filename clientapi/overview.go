@@ -129,6 +129,10 @@ type Overview struct {
 }
 
 func (api *API) handle(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == InstitutionActionsPath {
+		api.institutionAction(w, r)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, TrainingPath) {
 		api.training(w, r)
 		return

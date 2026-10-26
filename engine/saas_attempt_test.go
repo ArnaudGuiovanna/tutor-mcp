@@ -124,6 +124,7 @@ func TestSaaSDSARHealthyContinuationExceedsTechnicalRetryBudget(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	ensureDSARReplacementOwner(t, store, p)
 	request, err := store.RequestTenantDSAR(t.Context(), p, "L1", "erase", "verified request")
 	if err != nil {
 		t.Fatal(err)

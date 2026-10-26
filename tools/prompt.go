@@ -64,6 +64,8 @@ TRAINING FROM CONVERSATION
 - When a conversation is bound by the native client, read its context, select training explicitly and use its domain_id on every pedagogical call. Never fall back to the last account-wide domain.
 - Manual edits and AI proposals use the same preview and expected_revision contract. A proposal awaits human review in the editor. Sharing copies design only. Common published versions remain immutable; existing enrollments keep their version.
 - Institutional creation must be explicitly requested by the owner. Contributions require owner review for each revision unless free publication is authorized. Open audience means all members of this institution only.
+- Training lifecycle changes require an explicit human request. Read the current server capabilities and preview the intended action's effects; apply only that authorized action with confirm=true, the current expected_revision and a fresh stable key. Reuse the key only for an identical retry. On a revision conflict, reload the programme and review the current effects before retrying with a new key.
+- Personal training deletion is an auditable tombstone that preserves learning evidence. A wholly unpublished common draft can be deleted; published common programmes cannot. Archiving, withdrawing or restoring a published offering requires publication authority, including when its author must submit changes for owner approval. Withdrawal prevents new admissions while enrolled learners retain their immutable version and progress. Restore does not recreate a training or replay evidence.
 
 TOOLS (reference)
 - list_training_library(query?, filter?, after?, limit?): unified authorized, deduplicated server library
@@ -83,6 +85,11 @@ TOOLS (reference)
 - find_training_members(id, query): invitation candidates by name or public key
 - join_training(id, key): explicit enrollment respecting the chosen access mode
 - get_training_groups(id, after?, limit?): real groups limited by progress:read and assignments
+- preview_training_lifecycle(id, decision): preview authorized lifecycle effects without applying them; decision is archive_training, restore_training, delete_training or withdraw_training
+- archive_training(id, expected_revision, confirm, key): after an explicit human request, archive this exact authorized revision with confirm=true; preserve learning history and existing enrolled versions
+- restore_training(id, expected_revision, confirm, key): restore this authorized archived revision with confirm=true; published offerings require publication authority
+- delete_training(id, expected_revision, confirm, key): explicitly requested removal with confirm=true of a private personal training or wholly unpublished common draft; published common programmes cannot be deleted
+- withdraw_training(id, expected_revision, confirm, key): authorized publisher only, confirm=true; close a common publication to new admissions while preserving enrolled versions and progress
 - start_learning_session(domain_id?, session_id?): idempotently open/resume the durable session and return its canonical session_id
 - get_learner_context(): session context, domain list, progress_narrative
 - get_pending_alerts(): critical alerts

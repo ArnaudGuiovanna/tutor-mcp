@@ -163,10 +163,7 @@ impl AcpClient {
                             break;
                         }
                     }
-                    Ok(None) => {
-                        fail(&inner, "closed", "La connexion à l’agent a été fermée.");
-                        break;
-                    }
+                    Ok(None) => break,
                     Err(message) => {
                         fail(&inner, "error", &message);
                         break;
@@ -174,6 +171,18 @@ impl AcpClient {
                 }
             }
             let _ = reader_done_tx.send(());
+            // Let the supervisor publish the exit code first. Raw stderr stays
+            // private; EOF must not hide a useful process exit diagnosis.
+            if let Some(inner) = reader_inner.upgrade() {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                if !inner.closed.load(Ordering::Acquire) {
+                    fail(
+                        &inner,
+                        "closed",
+                        "La sortie de l’agent a été fermée avant sa réponse. Reconnectez l’agent.",
+                    );
+                }
+            }
         });
 
         // Drain in fixed chunks: stderr may contain a very long line, provider
@@ -199,10 +208,11 @@ impl AcpClient {
                     let _ = timeout(Duration::from_millis(500), reader_done_rx).await;
                     if let Some(inner) = supervisor_inner.upgrade() {
                         let message = match status {
-                            Ok(status) if status.success() => "Le processus de l’agent s’est arrêté.",
-                            _ => "Le processus de l’agent s’est arrêté avec une erreur.",
+                            Ok(status) if status.success() => "Le processus de l’agent s’est arrêté.".to_string(),
+                            Ok(status) => format!("L’agent s’est arrêté avec une erreur (code {}). Vérifiez sa connexion et son installation.", status.code().map(|code|code.to_string()).unwrap_or_else(||"signal".into())),
+                            Err(_) => "Le statut du processus de l’agent est indisponible.".to_string(),
                         };
-                        fail(&inner, "closed", message);
+                        fail(&inner, "closed", &message);
                     }
                     // Unix process groups can still contain descendants after
                     // their leader exits (for example a local MCP server).

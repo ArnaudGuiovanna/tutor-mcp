@@ -324,6 +324,9 @@ func (s *Store) UpdateTenantMember(ctx context.Context, actor models.Principal, 
 	return s.WithTenantTx(ctx, actor.TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {
 		txs := scoped.(*Store)
 		if txs.dialect == DialectPostgres {
+			if err := txs.lockMembershipChanges(txCtx, actor.TenantID); err != nil {
+				return err
+			}
 			// Membership changes of one tenant run one at a time, so two
 			// concurrent demotions cannot both see the other owner.
 			if _, err := txs.exec(txCtx, `SELECT id FROM tenants WHERE id = ? FOR UPDATE`, actor.TenantID); err != nil {
@@ -414,6 +417,18 @@ func (s *Store) countActiveOwners(ctx context.Context, tenantID, excludedMembers
 func (s *Store) createInvitedLearnerProfile(ctx context.Context, scope models.TenantScope, verifiedAt time.Time) error {
 	learnerID, err := generateID()
 	if err != nil {
+		return err
+	}
+	var identityMode, displayName string
+	if err := s.queryRow(ctx, `SELECT u.identity_mode,COALESCE(n.display_name,'') FROM users u LEFT JOIN native_identities n ON n.user_id=u.id WHERE u.id=?`, scope.UserID).Scan(&identityMode, &displayName); err != nil {
+		return err
+	}
+	if identityMode == "pubkey" {
+		profile, _ := json.Marshal(map[string]string{"name": displayName})
+		if _, err := s.exec(ctx, `INSERT INTO learners(id,email,password_hash,objective,profile_json,created_at,last_active,email_verified_at,tenant_id,user_id,membership_id,identity_mode) VALUES(?,NULL,NULL,'',?,?,?,NULL,?,?,?,'pubkey')`, learnerID, string(profile), verifiedAt, verifiedAt, scope.TenantID, scope.UserID, scope.MembershipID); err != nil {
+			return err
+		}
+		_, err = s.exec(ctx, `UPDATE tenant_memberships SET learner_id=? WHERE tenant_id=? AND id=? AND user_id=? AND learner_id IS NULL`, learnerID, scope.TenantID, scope.MembershipID, scope.UserID)
 		return err
 	}
 	syntheticEmail := scope.TenantID + "+" + learnerID + "@profile.invalid"

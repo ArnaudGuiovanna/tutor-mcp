@@ -39,7 +39,7 @@ func (s *Store) TrainingAction(ctx context.Context, p models.Principal, action s
 	if !models.ValidTrainingAction(action) || len(in.Query) > 200 || len(in.ID) > 255 || len(in.After) > 255 || len(in.ConversationID) > 128 || len(in.Reason) > 4000 {
 		return nil, fmt.Errorf("invalid training request")
 	}
-	commonWrite := slices.Contains([]string{"share_training", "submit_training", "decide_training", "publish_training", "set_training_access", "set_training_policy"}, action) || (strings.HasPrefix(in.ID, "formation:") && slices.Contains([]string{"save_training_edit", "propose_training_edit"}, action))
+	commonWrite := slices.Contains([]string{"share_training", "submit_training", "decide_training", "publish_training", "set_training_access", "set_training_policy"}, action) || (strings.HasPrefix(in.ID, "formation:") && slices.Contains([]string{"save_training_edit", "propose_training_edit", "archive_training", "restore_training", "delete_training", "withdraw_training"}, action))
 	if commonWrite && !models.OAuthScopeAllows(strings.Join(p.Scopes, " "), models.OAuthScopeFormationContribute) {
 		return nil, storeport.ErrInvalidPrincipal
 	}
@@ -81,13 +81,18 @@ func (s *Store) TrainingAction(ctx context.Context, p models.Principal, action s
 			if err != nil {
 				return err
 			}
-			if in.ID != "" {
+			if in.ID != "" && action != "delete_training" {
 				if _, err = tx.trainingDocument(txCtx, p, in.ID); err != nil {
 					return err
 				}
 			}
 			if (action == "decide_training" || action == "set_training_policy" || in.FreePublication != nil) && !trainingOwner(p) {
 				return storeport.ErrInvalidPrincipal
+			}
+			if tx.dialect == DialectPostgres && (action == "archive_training" || action == "restore_training" || action == "delete_training" || action == "withdraw_training") {
+				if _, err = tx.exec(txCtx, `SELECT pg_advisory_xact_lock(hashtext(?))`, p.TenantID+":training:"+in.Key); err != nil {
+					return err
+				}
 			}
 			var operation, hash, author, raw string
 			err = tx.queryRow(txCtx, `SELECT operation,request_hash,actor_user_id,response_json FROM training_receipts WHERE tenant_id=? AND idempotency_key=?`, p.TenantID, "training:"+in.Key).Scan(&operation, &hash, &author, &raw)
@@ -109,6 +114,8 @@ func (s *Store) TrainingAction(ctx context.Context, p models.Principal, action s
 			out, err = tx.trainingGroups(txCtx, p, in)
 		case "get_training":
 			out, err = tx.trainingDocument(txCtx, p, in.ID)
+		case "preview_training_lifecycle", "archive_training", "restore_training", "delete_training", "withdraw_training":
+			out, err = tx.trainingLifecycle(txCtx, p, action, in)
 		case "get_conversation_context":
 			out, err = tx.conversationContext(txCtx, p, in.ConversationID)
 		case "select_conversation_training":
@@ -157,8 +164,11 @@ func (s *Store) trainingLibrary(ctx context.Context, p models.Principal, in mode
 	if validatePage(in.Limit) != nil {
 		return page, fmt.Errorf("invalid page")
 	}
-	if !slices.Contains([]string{"", "personal", "institutional", "shared", "mine", "review"}, in.Filter) {
+	if !slices.Contains([]string{"", "personal", "institutional", "shared", "mine", "review", "archived"}, in.Filter) {
 		return page, fmt.Errorf("invalid filter")
+	}
+	if in.Filter == "archived" {
+		return s.trainingArchivedLibrary(ctx, p, in)
 	}
 	search := "%" + strings.ToLower(in.Query) + "%"
 	designGrant := strings.Join(p.Scopes, " ")
@@ -184,7 +194,7 @@ func (s *Store) trainingLibrary(ctx context.Context, p models.Principal, in mode
  CASE WHEN f.created_by=? OR EXISTS(SELECT 1 FROM enrollments e JOIN formation_versions ev ON ev.tenant_id=e.tenant_id AND ev.id=e.formation_version_id WHERE e.tenant_id=f.tenant_id AND ev.formation_id=f.id AND e.membership_id=?) THEN 1 ELSE 0 END AS mine,
  CASE WHEN EXISTS(SELECT 1 FROM training_submissions ts WHERE ts.tenant_id=f.tenant_id AND ts.formation_id=f.id AND ts.status='pending') THEN 1 ELSE 0 END AS pending
  FROM formations f LEFT JOIN training_workflows w ON w.tenant_id=f.tenant_id AND w.formation_id=f.id
- WHERE f.tenant_id=? AND ` + institutionalFormationSQL + ` AND f.status<>'archived' AND
+ WHERE f.tenant_id=? AND ` + institutionalFormationSQL + ` AND (f.status<>'archived' OR EXISTS(SELECT 1 FROM enrollments ae JOIN formation_versions av ON av.tenant_id=ae.tenant_id AND av.id=ae.formation_version_id WHERE av.tenant_id=f.tenant_id AND av.formation_id=f.id AND ae.membership_id=? AND ae.status IN ('active','completed'))) AND
  (?=1 OR f.created_by=? OR EXISTS(SELECT 1 FROM formation_trainers ft WHERE ft.tenant_id=f.tenant_id AND ft.formation_id=f.id AND ft.membership_id=?) OR
  EXISTS(SELECT 1 FROM cohort_trainers ct JOIN cohorts tc ON tc.tenant_id=ct.tenant_id AND tc.id=ct.cohort_id JOIN formation_versions tv ON tv.tenant_id=tc.tenant_id AND tv.id=tc.formation_version_id WHERE ct.tenant_id=f.tenant_id AND ct.membership_id=? AND tv.formation_id=f.id) OR
  EXISTS(SELECT 1 FROM formation_versions v JOIN cohorts c ON c.tenant_id=v.tenant_id AND c.formation_version_id=v.id
@@ -193,7 +203,7 @@ func (s *Store) trainingLibrary(ctx context.Context, p models.Principal, in mode
  EXISTS(SELECT 1 FROM formation_admissions a WHERE a.tenant_id=c.tenant_id AND a.cohort_id=c.id AND a.membership_id=? AND a.status IN ('invited','approved')) OR
  EXISTS(SELECT 1 FROM enrollments e WHERE e.tenant_id=c.tenant_id AND e.cohort_id=c.id AND e.membership_id=?))))
  ) library WHERE id>? AND lower(name) LIKE ? AND (?='' OR kind=? OR (?='mine' AND mine=1) OR (?='review' AND pending=1 AND ?=1)) ORDER BY id LIMIT ?`
-	rows, err := s.query(ctx, query, p.TenantID, personalLearner, p.UserID, p.MembershipID, p.TenantID, boolInt(trainingOwner(p) && canDesign), authorID, editorID, trainerID, time.Now().UTC(), p.MembershipID, p.MembershipID, in.After, search, in.Filter, in.Filter, in.Filter, in.Filter, boolInt(trainingOwner(p)), in.Limit+1)
+	rows, err := s.query(ctx, query, p.TenantID, personalLearner, p.UserID, p.MembershipID, p.TenantID, p.MembershipID, boolInt(trainingOwner(p) && canDesign), authorID, editorID, trainerID, time.Now().UTC(), p.MembershipID, p.MembershipID, in.After, search, in.Filter, in.Filter, in.Filter, in.Filter, boolInt(trainingOwner(p)), in.Limit+1)
 	if err != nil {
 		return page, err
 	}
@@ -242,7 +252,7 @@ func (s *Store) trainingDocument(ctx context.Context, p models.Principal, id str
 			return nil, storeport.ErrInvalidPrincipal
 		}
 		domain, err := s.GetLearnerDomainByID(ctx, p.LearnerID, domainID)
-		if err != nil || domain.Archived || domain.FormationEnrollmentID != "" {
+		if err != nil || domain.FormationEnrollmentID != "" {
 			return nil, storeport.ErrFormationUnavailable
 		}
 		doc.Curriculum, err = s.EnsureCurriculumBaseline(ctx, p.LearnerID, domainID)
@@ -250,6 +260,11 @@ func (s *Store) trainingDocument(ctx context.Context, p models.Principal, id str
 			return nil, err
 		}
 		*t = models.Training{ID: id, Name: domain.Name, Description: domain.PersonalGoal, Kind: "personal", DomainID: domainID, Revision: strconv.Itoa(domain.GraphVersion), Status: "active", Audience: "private", AuthorID: p.UserID, CanEdit: true, CanLearn: true, CanShare: p.TenantID != models.LegacyTenantID, Progress: []models.TrainingProgress{}}
+		t.CanArchive, t.CanDelete = true, true
+		if domain.Archived {
+			t.Status = "archived"
+			t.CanArchive, t.CanEdit, t.CanLearn, t.CanShare, t.CanRestore = false, false, false, false, true
+		}
 	} else if formationID, ok := strings.CutPrefix(id, "formation:"); ok {
 		var versionID string
 		// Recheck visibility for direct reads as strictly as library searches.
@@ -319,6 +334,22 @@ func (s *Store) trainingDocument(ctx context.Context, p models.Principal, id str
 		}
 		t.FreePublication = free == 1
 		t.CanPublish = models.OAuthScopeAllows(grant, models.OAuthScopeFormationContribute) && (trainingOwner(p) || (editable && t.FreePublication))
+		var publishedVersions int
+		if err = s.queryRow(ctx, `SELECT COUNT(*) FROM formation_versions WHERE tenant_id=? AND formation_id=? AND status<>'draft'`, p.TenantID, formationID).Scan(&publishedVersions); err != nil {
+			return nil, err
+		}
+		// Archiving or restoring an offering changes its publication visibility.
+		// An author who must submit revisions cannot bypass owner approval by
+		// using archive/restore instead of withdraw/publish.
+		canChangeOffering := editable && (publishedVersions == 0 || t.CanPublish)
+		t.CanArchive = canChangeOffering && f.Status != "archived"
+		t.CanRestore = canChangeOffering && f.Status == "archived"
+		t.CanDelete = editable && publishedVersions == 0
+		t.CanWithdraw = t.CanPublish && publishedVersions > 0 && f.Status != "archived"
+		if f.Status == "archived" {
+			t.Status = "archived"
+			t.CanEdit, t.CanPublish, t.CanShare = false, false, false
+		}
 		t.CanLearn = p.LearnerID != "" && (domainID != "" || (cohortID != "" && f.EnrollmentPolicy != "invitation"))
 		if !t.CanLearn && p.LearnerID != "" && cohortID != "" {
 			var admitted int
@@ -326,6 +357,9 @@ func (s *Store) trainingDocument(ctx context.Context, p models.Principal, id str
 				return nil, err
 			}
 			t.CanLearn = admitted > 0
+		}
+		if f.Status == "archived" {
+			t.CanLearn = domainID != ""
 		}
 		for _, m := range detail.Modules {
 			doc.Modules = append(doc.Modules, m.FormationModuleInput)
@@ -349,7 +383,7 @@ func (s *Store) trainingDocument(ctx context.Context, p models.Principal, id str
 				return nil, err
 			}
 			doc.Submission = sub
-			if sub.Status == "pending" {
+			if sub.Status == "pending" && f.Status != "archived" {
 				t.Status = "pending"
 			}
 		}
@@ -450,6 +484,9 @@ func (s *Store) selectConversationTraining(ctx context.Context, p models.Princip
 	doc, err := s.trainingDocument(ctx, p, in.ID)
 	if err != nil {
 		return nil, err
+	}
+	if doc.Training.Status == "archived" && !doc.Training.CanLearn {
+		return nil, storeport.ErrFormationUnavailable
 	}
 	old, err := s.conversationContext(ctx, p, in.ConversationID)
 	if err != nil {

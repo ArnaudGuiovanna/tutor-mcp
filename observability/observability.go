@@ -5,6 +5,7 @@ package observability
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -38,6 +39,22 @@ var (
 	mcpCalls       metric.Int64Counter
 	mcpDuration    metric.Float64Histogram
 )
+
+type requestIDKey struct{}
+
+// WithRequestID creates an opaque correlation ID without accepting caller
+// supplied identifiers or exposing account, conversation or request contents.
+func WithRequestID(ctx context.Context) context.Context {
+	if RequestID(ctx) != "" {
+		return ctx
+	}
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return ctx
+	}
+	return context.WithValue(ctx, requestIDKey{}, hex.EncodeToString(random[:]))
+}
+func RequestID(ctx context.Context) string { id, _ := ctx.Value(requestIDKey{}).(string); return id }
 
 // Setup installs OTLP trace and metric providers when an OTLP endpoint is
 // configured. With no endpoint the API remains a standards-compatible no-op,

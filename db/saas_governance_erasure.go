@@ -5,8 +5,14 @@ package db
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
 	"time"
+	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 )
 
 // These stores expose only routing identifiers to the worker. PostgreSQL's
@@ -19,6 +25,29 @@ var dsarCredentialTables = map[string]bool{
 }
 
 func (s *Store) revokeErasedLearnerAccess(ctx context.Context, tenant, learner string, now time.Time) error {
+	if err := s.lockMembershipChanges(ctx, tenant); err != nil {
+		return err
+	}
+	var membership, rawRoles, status string
+	err := s.queryRow(ctx, `SELECT id,roles_json,status FROM tenant_memberships WHERE tenant_id=? AND learner_id=?`, tenant, learner).Scan(&membership, &rawRoles, &status)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if err == nil && status == models.MembershipStatusActive {
+		var roles []string
+		if err = json.Unmarshal([]byte(rawRoles), &roles); err != nil {
+			return err
+		}
+		if slices.Contains(roles, models.RoleOwner) {
+			others, err := s.countActiveOwners(ctx, tenant, membership)
+			if err != nil {
+				return err
+			}
+			if others == 0 {
+				return fmt.Errorf("transfer ownership before erasure: %w", storeport.ErrTenantDSARBlocked)
+			}
+		}
+	}
 	// The membership row is also the lock used by authenticated write
 	// transactions. Wait for those to finish before the first erasure phase,
 	// then make every existing bearer/browser session fail its live check.

@@ -39,3 +39,24 @@ it('retire une invitation ou une délégation par le service de formation',async
  const remove=screen.getByRole('button',{name:'Retirer l’autorisation de modification'});await waitFor(()=>expect(remove).toHaveProperty('disabled',false));await user.click(remove);
  await waitFor(()=>expect(api.trainingAction).toHaveBeenCalledWith('set_training_access',expect.objectContaining({member_id:'member',decision:'remove_editor'})));
 });
+
+it('prévisualise puis supprime une formation avec la révision confirmée du serveur',async()=>{
+ const {api}=client(initialState(true));const doc=trainingFixture();doc.training.can_delete=true;
+ vi.mocked(api.trainingAction).mockImplementation(async(action)=>{
+  if(action==='get_training')return doc;
+  if(action==='get_training_policy')return {personal_learning:true,can_manage:false};
+  if(action==='preview_training_lifecycle')return {id:doc.training.id,action:'delete_training',revision:'server-revision',can_apply:true,effects:{enrolled_learners:0,conversations_affected:1,preserves_learning_history:true,will_archive:false}};
+  if(action==='delete_training')return {deleted:true};
+  return {items:[],next_after:''};
+ });
+ render(<TrainingWorkspace api={api} connected epoch={0} initialId={doc.training.id} canCreate={false} busy={false} onLearn={vi.fn()} onDiscuss={vi.fn()} onConnect={vi.fn()}/>);
+ await userEvent.click(await screen.findByRole('button',{name:'Supprimer cette formation'}));await screen.findByRole('region',{name:'Conséquences de cette action'});
+ expect(api.trainingAction).not.toHaveBeenCalledWith('delete_training',expect.anything());const confirm=screen.getByRole('button',{name:'Confirmer'});expect(confirm).toHaveProperty('disabled',true);
+ await userEvent.click(screen.getByLabelText('J’ai lu les conséquences et je confirme cette action.'));await userEvent.click(confirm);
+ await waitFor(()=>expect(api.trainingAction).toHaveBeenCalledWith('delete_training',expect.objectContaining({id:doc.training.id,expected_revision:'server-revision',confirm:true,key:expect.any(String)})));
+ expect(await screen.findByText('Aucune formation trouvée')).toBeTruthy();
+});
+it('retrouve les formations archivées via le filtre serveur',async()=>{
+ const {api}=client(initialState(true));render(<TrainingWorkspace api={api} connected epoch={0} canCreate={false} busy={false} onLearn={vi.fn()} onDiscuss={vi.fn()} onConnect={vi.fn()}/>);
+ await userEvent.selectOptions(screen.getByLabelText('Afficher'),'archived');await waitFor(()=>expect(api.trainingAction).toHaveBeenCalledWith('list_training_library',expect.objectContaining({filter:'archived'})));
+});

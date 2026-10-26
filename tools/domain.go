@@ -380,6 +380,7 @@ func registerInitDomain(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
+		var confirmedConversation any
 		if conversationID := storeport.ConversationID(ctx); conversationID != "" {
 			p, _ := auth.GetPrincipal(ctx)
 			training, ok := deps.Store.(storeport.TrainingStore)
@@ -390,7 +391,7 @@ func registerInitDomain(server *mcp.Server, deps *Deps) {
 			selected, selectErr := training.TrainingAction(ctx, p, "get_conversation_context", models.TrainingRequest{ConversationID: conversationID})
 			if selectErr == nil {
 				c := selected.(*models.ConversationContext)
-				_, selectErr = training.TrainingAction(ctx, p, "select_conversation_training", models.TrainingRequest{ID: "personal:" + domain.ID, ConversationID: conversationID, ExpectedSelection: &c.SelectionVersion, Key: "init-selection:" + domain.ID})
+				confirmedConversation, selectErr = training.TrainingAction(ctx, p, "select_conversation_training", models.TrainingRequest{ID: "personal:" + domain.ID, ConversationID: conversationID, ExpectedSelection: &c.SelectionVersion, Key: "init-selection:" + domain.ID})
 			}
 			if selectErr != nil {
 				r, _ := safeErrorResult(deps.Logger, "failed to select training", selectErr)
@@ -406,6 +407,10 @@ func registerInitDomain(server *mcp.Server, deps *Deps) {
 			"graph_quality_report":   graphQualityReport,
 			"graph_quality_guidance": graphQualityGuidance(graphQualityReport),
 			"message":                fmt.Sprintf("Domain %q was created with %d concepts. Existing progress was preserved.", params.Name, len(params.Concepts)),
+		}
+		if confirmedConversation != nil {
+			response["conversation_context"] = confirmedConversation
+			response["selection_confirmed"] = true
 		}
 		if domain.HighStakes {
 			response["high_stakes_policy"] = "demonstrated claims and intrusive notifications remain blocked until a trusted human-reviewed evaluation exists"

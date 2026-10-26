@@ -155,6 +155,7 @@ async fn connected(
             command: target.adapter_path.clone().unwrap(),
             args: vec!["--local".into()],
         },
+        ..Default::default()
     };
     backend.save_settings(settings).await.unwrap();
     if let Err(error) = backend
@@ -181,6 +182,61 @@ async fn intent(backend: &Backend, validated: bool) -> String {
         .await
         .unwrap();
     backend.store.lock().await.data.intents[0].id.clone()
+}
+
+#[tokio::test]
+async fn agent_options_and_language_survive_sessions_and_reject_unknown_choices() {
+    let directory = tempfile::tempdir().unwrap();
+    let (backend, _) = connected(directory.path()).await;
+    let available = backend.agent_configuration().await.unwrap();
+    assert_eq!(available["supported"]["model"], true);
+    assert_eq!(available["supported"]["reasoningEffort"], true);
+    let wanted = crate::workspace::AgentSettings {
+        model: "fixture-fast".into(),
+        reasoning_effort: "high".into(),
+        speed: "deep".into(),
+    };
+    backend
+        .set_agent_configuration(wanted.clone())
+        .await
+        .unwrap();
+    {
+        let mut store = backend.store.lock().await;
+        store
+            .transaction(|data| {
+                data.settings.language = "en".into();
+                Ok(())
+            })
+            .unwrap();
+    }
+    let conversation = backend.start_conversation(None, None).await.unwrap();
+    backend
+        .send_prompt(conversation.id.clone(), "Hello".into())
+        .await
+        .unwrap();
+    let sessions: Value = serde_json::from_slice(
+        &std::fs::read(directory.path().join("fixture-agent-sessions.json")).unwrap(),
+    )
+    .unwrap();
+    let active = &sessions[conversation.agent_session_id.as_deref().unwrap()];
+    assert!(active["lastPrompt"]
+        .as_str()
+        .unwrap()
+        .starts_with("LANGUE / LANGUAGE: English."));
+    assert_eq!(active["fixtureConfig"][0]["currentValue"], "fixture-fast");
+    assert_eq!(active["fixtureConfig"][1]["currentValue"], "high");
+    let restored = WorkspaceStore::load(directory.path()).unwrap();
+    assert_eq!(restored.data.settings.language, "en");
+    assert_eq!(restored.data.settings.agent.model, wanted.model);
+    assert!(backend
+        .set_agent_configuration(crate::workspace::AgentSettings {
+            model: "invented".into(),
+            ..Default::default()
+        })
+        .await
+        .is_err());
+    assert_eq!(backend.settings().await.agent.model, "fixture-fast");
+    backend.shutdown().await;
 }
 
 #[tokio::test]
@@ -339,6 +395,40 @@ async fn changed_tutor_binding_cannot_replay_a_conversation_into_another_profile
         .as_array()
         .unwrap()
         .is_empty());
+    backend.shutdown().await;
+}
+
+#[tokio::test]
+async fn replacing_a_manual_agent_drops_its_previous_tool_consent() {
+    let directory = tempfile::tempdir().unwrap();
+    let (backend, _) = connected(directory.path()).await;
+    let mut settings = backend.settings().await;
+    settings.permission_policy = Some(crate::permissions::PermissionPolicy {
+        origin: "https://institution.example".into(),
+        institution_id: "tenant-test".into(),
+        agent_id: "manual".into(),
+        default_decision: crate::permissions::PermissionDecision::Allow,
+        tools: Default::default(),
+    });
+    backend.save_settings(settings.clone()).await.unwrap();
+    assert!(backend.settings().await.permission_policy.is_some());
+    settings.manual_target.as_mut().unwrap().adapter_path = Some("/different/program.js".into());
+    backend.save_settings(settings).await.unwrap();
+    assert!(backend.settings().await.permission_policy.is_none());
+    backend.shutdown().await;
+}
+
+#[tokio::test]
+async fn reading_and_language_changes_preserve_the_live_connections() {
+    let directory = tempfile::tempdir().unwrap();
+    let (backend, _) = connected(directory.path()).await;
+    let mut settings = backend.settings().await;
+    settings.language = "en".into();
+    settings.appearance.font_size = 24;
+    settings.appearance.theme = "light".into();
+    backend.save_settings(settings).await.unwrap();
+    assert_eq!(backend.snapshot().await["agentConnected"], true);
+    assert_eq!(backend.snapshot().await["tutorStatus"]["connected"], true);
     backend.shutdown().await;
 }
 
@@ -1269,3 +1359,6 @@ async fn queued_message_survives_restart_and_is_consumed_with_one_user_turn() {
     );
     resumed.shutdown().await;
 }
+
+#[path = "experience_acceptance_tests.rs"]
+mod experience_acceptance;

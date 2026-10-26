@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: MIT
 
 pub mod acp;
+pub mod agent_policy;
 pub mod backend;
 pub mod discovery;
 pub mod identity;
 pub mod launch;
 pub mod native_auth;
+pub mod permissions;
 pub mod profiles;
 pub mod vault;
 pub mod workspace;

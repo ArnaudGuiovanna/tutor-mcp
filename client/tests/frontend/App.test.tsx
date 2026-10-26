@@ -69,7 +69,7 @@ describe('Apprendre depuis la conversation', () => {
   });
 
   it('sélectionne une installation WSL et conserve son chemin Codex explicite', async () => {
-    const {api}=client();await ready(api);const user=userEvent.setup();await user.click(screen.getByRole('button',{name:'Agents'}));
+    const {api}=client();await ready(api);const user=userEvent.setup();await user.click(screen.getByRole('button',{name:'Paramètres'}));
     await user.click(screen.getByRole('button',{name:'Rechercher les installations'}));await user.click(await screen.findByRole('radio',{name:/Codex — Ubuntu/}));
     await user.click(screen.getByRole('button',{name:'Connecter Codex'}));await waitFor(()=>expect(api.connectAgent).toHaveBeenCalledWith(target,'/home/lea/apprendre'));
     expect(api.saveSettings).toHaveBeenCalledWith(expect.objectContaining({targetId:target.id}));
@@ -88,9 +88,27 @@ describe('Apprendre depuis la conversation', () => {
     expect(await screen.findByText(/Réponse interrompue. Vos échanges/)).toBeTruthy();
   });
 
+  it('signale une nouvelle tentative du fournisseur puis reprend l’activité sans interrompre la réponse', async () => {
+    const fixture=client(initialState(true));let finish!:(value:{stopReason:string})=>void;
+    vi.mocked(fixture.api.sendPrompt).mockImplementation(()=>new Promise(resolve=>{finish=resolve;}));await ready(fixture.api);
+    await userEvent.type(screen.getByLabelText('Votre message au tuteur'),'Bonjour');await userEvent.click(screen.getByRole('button',{name:'Envoyer'}));await waitFor(()=>expect(fixture.api.sendPrompt).toHaveBeenCalled());
+    const retry={type:'provider_status',severity:'warning',category:'connection',message:'Le fournisseur réessaie la requête…'};
+    act(()=>fixture.emit(retry));
+    expect((await screen.findByText(retry.message)).closest('[role="status"]')?.getAttribute('aria-live')).toBe('polite');
+    expect(screen.queryByRole('alert')).toBeNull();expect(fixture.api.cancelPrompt).not.toHaveBeenCalled();expect(fixture.getState().agentConnected).toBe(true);
+    act(()=>fixture.emit({method:'session/update',params:{sessionId:'agent-1',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'La réponse reprend.'}}}}));
+    expect(await screen.findByText('La réponse reprend.')).toBeTruthy();expect(screen.queryByText(retry.message)).toBeNull();expect(screen.getByText('Je rédige la réponse…')).toBeTruthy();
+    act(()=>fixture.emit(retry));expect(screen.getByText(retry.message)).toBeTruthy();
+    act(()=>fixture.emit({method:'session/update',params:{sessionId:'agent-1',update:{sessionUpdate:'tool_call',toolCallId:'tool-1',title:'get_learner_context',status:'in_progress'}}}));
+    expect(screen.queryByText(retry.message)).toBeNull();expect(screen.getByText('Je consulte votre progression…')).toBeTruthy();
+    act(()=>fixture.emit(retry));await act(async()=>finish({stopReason:'end_turn'}));
+    expect(screen.queryByText(retry.message)).toBeNull();
+    act(()=>fixture.emit(retry));expect(screen.queryByText(retry.message)).toBeNull();expect(fixture.api.sendPrompt).toHaveBeenCalledTimes(1);
+  });
+
   it('garde la saisie et signale une erreur réelle de connexion', async () => {
     const {api}=client();vi.mocked(api.connectAgent).mockRejectedValue(new Error('Adaptateur incompatible'));await ready(api);const user=userEvent.setup();
-    await user.click(screen.getByRole('button',{name:'Agents'}));await user.click(screen.getByRole('button',{name:'Rechercher les installations'}));await user.click(screen.getByRole('button',{name:'Connecter Codex'}));
+    await user.click(screen.getByRole('button',{name:'Paramètres'}));await user.click(screen.getByRole('button',{name:'Rechercher les installations'}));await user.click(screen.getByRole('button',{name:'Connecter Codex'}));
     expect(await screen.findByRole('alert')).toHaveProperty('textContent',expect.stringContaining('Adaptateur incompatible'));expect(api.sendPrompt).not.toHaveBeenCalled();
   });
 
@@ -104,7 +122,7 @@ describe('Apprendre depuis la conversation', () => {
   it('change de compte sans conserver les droits ni accepter les anciens événements', async () => {
     const state=initialState(true);state.profile={id:'one',label:'Compte un'};state.profileEpoch=1;state.profiles=[state.profile,{id:'two',label:'Compte deux'}];const fixture=client(state);
     vi.mocked(fixture.api.selectProfile).mockImplementation(async()=>{const next=initialState();next.profile={id:'two',label:'Compte deux'};next.profileEpoch=2;fixture.setState(next);return next;});
-    await ready(fixture.api);await userEvent.click(screen.getByRole('button',{name:'Compte un'}));await userEvent.click(screen.getByRole('button',{name:'Compte deux'}));
+    await ready(fixture.api);await userEvent.click(screen.getByRole('button',{name:'Mon compte'}));await userEvent.click(screen.getByRole('button',{name:'Compte deux'}));
     await screen.findByRole('heading',{name:'Qu’avez-vous envie d’apprendre ?'});act(()=>fixture.emit({profileEpoch:1,type:'connection',status:'error',message:'Ancien compte'}));expect(screen.queryByText('Ancien compte')).toBeNull();expect(fixture.api.sendPrompt).not.toHaveBeenCalled();
   });
 });

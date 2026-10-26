@@ -82,7 +82,7 @@ GRANT SELECT, UPDATE ON tenant_dsar_requests, tenant_dsar_phases TO tutor_worker
 GRANT INSERT ON tenant_dsar_phases TO tutor_worker;
 GRANT UPDATE ON learners TO tutor_worker;
 -- Erasure revokes only the institution membership, before deleting any data.
-GRANT SELECT (tenant_id, learner_id, status, version), UPDATE (status, version, updated_at)
+GRANT SELECT (id, tenant_id, learner_id, roles_json, status, version), UPDATE (status, version, updated_at)
     ON tenant_memberships TO tutor_worker;
 GRANT UPDATE (reserved_seats, version, updated_at) ON cohorts TO tutor_worker;
 GRANT UPDATE (rubric_score_json) ON assessment_reviews TO tutor_worker;
@@ -108,6 +108,19 @@ TO tutor_worker;
 
 -- The maintenance job only deletes expired rows from these stores. It cannot
 -- create or rotate credentials and does not need to select their payloads.
+-- PostgreSQL DELETE predicates need SELECT on the referenced columns too.
+-- Grant only expiry/link metadata: never token hashes, secrets or payloads.
+GRANT SELECT (expires_at) ON oauth_codes TO tutor_worker;
+GRANT SELECT (expires_at, family_id, client_id, revoked_at) ON refresh_tokens TO tutor_worker;
+GRANT UPDATE (revoked_at) ON refresh_tokens TO tutor_worker;
+GRANT SELECT (expires_at, consumed_at) ON account_tokens TO tutor_worker;
+GRANT SELECT (active, expires_at, trusted_until, consumed_at) ON login_challenges TO tutor_worker;
+GRANT SELECT (client_id, registration_token_id, expires_at) ON oauth_clients TO tutor_worker;
+GRANT SELECT (client_id) ON oauth_codes, learner_approved_clients TO tutor_worker;
+GRANT SELECT (updated_at) ON rate_limit_buckets TO tutor_worker;
+GRANT SELECT (last_attempt_at) ON login_failure_windows TO tutor_worker;
+GRANT SELECT (attempted_at) ON login_failures TO tutor_worker;
+GRANT INSERT ON oauth_dcr_audit TO tutor_worker;
 GRANT DELETE ON
     account_tokens, oauth_codes, oauth_clients, refresh_tokens,
     rate_limit_buckets, login_failure_windows, login_failures

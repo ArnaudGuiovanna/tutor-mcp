@@ -17,6 +17,7 @@ func TestTenantDSARResumeRearmsExhaustedJobAtomically(t *testing.T) {
 	s := setupTestDB(t)
 	ctx := context.Background()
 	owner := ownerPrincipal(t, s)
+	ensureErasureReplacementOwner(t, s, owner)
 	request, err := s.RequestTenantDSAR(ctx, owner, owner.LearnerID, "erase", "verified request")
 	if err != nil {
 		t.Fatal(err)
@@ -70,6 +71,7 @@ func TestTenantDSARResumeRefusesLiveJobAndActiveHold(t *testing.T) {
 	s := setupTestDB(t)
 	ctx := context.Background()
 	owner := ownerPrincipal(t, s)
+	ensureErasureReplacementOwner(t, s, owner)
 	request, err := s.RequestTenantDSAR(ctx, owner, owner.LearnerID, "erase", "verified request")
 	if err != nil {
 		t.Fatal(err)
@@ -98,6 +100,7 @@ func TestTenantDSARParkingFencesStaleWorkerAndResume(t *testing.T) {
 	ctx := context.Background()
 	owner := ownerPrincipal(t, s)
 	scope := owner.TenantScope()
+	ensureErasureReplacementOwner(t, s, owner)
 	request, err := s.RequestTenantDSAR(ctx, owner, owner.LearnerID, "erase", "verified request")
 	if err != nil {
 		t.Fatal(err)

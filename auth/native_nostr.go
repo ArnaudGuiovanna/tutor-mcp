@@ -109,6 +109,10 @@ func nativeEventID(event nativeNostrEvent) [32]byte {
 }
 
 func verifyNativeNostr(header string, prefixRequired bool, publicKey string, expected map[string]string, now time.Time) error {
+	return verifyNativeNostrWindow(header, prefixRequired, publicKey, expected, now, 120, 30)
+}
+
+func verifyNativeNostrWindow(header string, prefixRequired bool, publicKey string, expected map[string]string, now time.Time, pastSeconds, futureSeconds int64) error {
 	if len(header) > 16*1024 || strings.ContainsAny(header, "\r\n\t") {
 		return errors.New("invalid Nostr authorization")
 	}
@@ -140,7 +144,7 @@ func verifyNativeNostr(header string, prefixRequired bool, publicKey string, exp
 		}
 	}
 	if event.Kind != nativeEventKind || event.Content != "" || event.PublicKey != publicKey ||
-		event.CreatedAt < now.Unix()-120 || event.CreatedAt > now.Unix()+30 || len(event.Tags) != len(expected) {
+		event.CreatedAt < now.Unix()-pastSeconds || event.CreatedAt > now.Unix()+futureSeconds || len(event.Tags) != len(expected) {
 		return errors.New("invalid Nostr event binding")
 	}
 	seen := make(map[string]bool, len(expected))

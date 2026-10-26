@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -1360,6 +1361,24 @@ func fallbackDailyRecap(_ *models.Learner) discordPayload {
 
 // ─── Cleanup (hourly) ─────────────────────────────────────────────────────
 
+// cleanupSQLState exposes only the bounded SQLSTATE code. Never log query text,
+// credential values or the database error detail from a maintenance failure.
+func cleanupSQLState(err error) string {
+	var state interface{ SQLState() string }
+	if errors.As(err, &state) {
+		code := state.SQLState()
+		if len(code) == 5 {
+			for _, ch := range code {
+				if !(ch >= '0' && ch <= '9' || ch >= 'A' && ch <= 'Z') {
+					return "unknown"
+				}
+			}
+			return code
+		}
+	}
+	return "unknown"
+}
+
 func (s *Scheduler) cleanupExpiredData() scheduledJobResult {
 	result := scheduledJobSucceeded()
 	ctx, cancel := context.WithTimeout(context.Background(), schedulerDBTimeout)
@@ -1368,7 +1387,8 @@ func (s *Scheduler) cleanupExpiredData() scheduledJobResult {
 	codes, err := s.store.CleanupExpiredCodes(ctx)
 	if err != nil {
 		result.recordFailure("cleanup_partial_failure")
-		s.logger.Error("scheduler: cleanup codes", "err", err)
+		s.logger.Error("scheduler: cleanup codes", "sqlstate", cleanupSQLState(err))
+		return result
 	} else if codes > 0 {
 		s.logger.Info("scheduler: cleaned expired codes", "count", codes)
 	}
@@ -1376,7 +1396,8 @@ func (s *Scheduler) cleanupExpiredData() scheduledJobResult {
 	tokens, err := s.store.CleanupExpiredRefreshTokens(ctx)
 	if err != nil {
 		result.recordFailure("cleanup_partial_failure")
-		s.logger.Error("scheduler: cleanup tokens", "err", err)
+		s.logger.Error("scheduler: cleanup tokens", "sqlstate", cleanupSQLState(err))
+		return result
 	} else if tokens > 0 {
 		s.logger.Info("scheduler: cleaned expired refresh tokens", "count", tokens)
 	}
@@ -1384,7 +1405,8 @@ func (s *Scheduler) cleanupExpiredData() scheduledJobResult {
 	accountTokens, err := s.store.CleanupExpiredAccountTokens(ctx)
 	if err != nil {
 		result.recordFailure("cleanup_partial_failure")
-		s.logger.Error("scheduler: cleanup account tokens", "err", err)
+		s.logger.Error("scheduler: cleanup account tokens", "sqlstate", cleanupSQLState(err))
+		return result
 	} else if accountTokens > 0 {
 		s.logger.Info("scheduler: cleaned account tokens", "count", accountTokens)
 	}
@@ -1392,7 +1414,8 @@ func (s *Scheduler) cleanupExpiredData() scheduledJobResult {
 	oauthClients, err := s.store.CleanupExpiredOAuthClients(ctx)
 	if err != nil {
 		result.recordFailure("cleanup_partial_failure")
-		s.logger.Error("scheduler: cleanup OAuth clients", "err", err)
+		s.logger.Error("scheduler: cleanup OAuth clients", "sqlstate", cleanupSQLState(err))
+		return result
 	} else if oauthClients > 0 {
 		s.logger.Info("scheduler: cleaned OAuth clients", "count", oauthClients)
 	}
@@ -1402,7 +1425,8 @@ func (s *Scheduler) cleanupExpiredData() scheduledJobResult {
 	)
 	if err != nil {
 		result.recordFailure("cleanup_partial_failure")
-		s.logger.Error("scheduler: cleanup shared auth limits", "err", err)
+		s.logger.Error("scheduler: cleanup shared auth limits", "sqlstate", cleanupSQLState(err))
+		return result
 	} else if rateBuckets > 0 || loginFailures > 0 {
 		s.logger.Info("scheduler: cleaned shared auth limits", "rate_buckets", rateBuckets, "login_failures", loginFailures)
 	}
@@ -1410,7 +1434,8 @@ func (s *Scheduler) cleanupExpiredData() scheduledJobResult {
 	requeued, err := s.store.RequeueStaleWebhookClaims(ctx, now.Add(-15*time.Minute), now)
 	if err != nil {
 		result.recordFailure("cleanup_partial_failure")
-		s.logger.Error("scheduler: requeue stale webhook claims", "err", err)
+		s.logger.Error("scheduler: requeue stale webhook claims", "sqlstate", cleanupSQLState(err))
+		return result
 	} else if requeued > 0 {
 		s.logger.Info("scheduler: requeued stale webhook claims", "count", requeued)
 	}
@@ -1418,7 +1443,8 @@ func (s *Scheduler) cleanupExpiredData() scheduledJobResult {
 	expired, err := s.store.ExpirePastWebhookMessages(ctx, now)
 	if err != nil {
 		result.recordFailure("cleanup_partial_failure")
-		s.logger.Error("scheduler: expire webhook queue", "err", err)
+		s.logger.Error("scheduler: expire webhook queue", "sqlstate", cleanupSQLState(err))
+		return result
 	} else if expired > 0 {
 		s.logger.Info("scheduler: expired webhook messages", "count", expired)
 	}
@@ -1428,7 +1454,8 @@ func (s *Scheduler) cleanupExpiredData() scheduledJobResult {
 	// table is simply empty) and never fails the cleanup tick.
 	if purged, err := s.store.PurgeJobRunsBefore(ctx, time.Now().Add(-7*24*time.Hour)); err != nil {
 		result.recordFailure("cleanup_partial_failure")
-		s.logger.Error("scheduler: purge job runs", "err", err)
+		s.logger.Error("scheduler: purge job runs", "sqlstate", cleanupSQLState(err))
+		return result
 	} else if purged > 0 {
 		s.logger.Info("scheduler: purged old job runs", "count", purged)
 	}

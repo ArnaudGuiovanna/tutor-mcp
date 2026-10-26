@@ -140,6 +140,7 @@ func testPedagogicalDecisionDSAR(t *testing.T, legacy bool) {
 			t.Fatalf("%s missing from export manifest: %s", table, raw)
 		}
 	}
+	ensureErasureReplacementOwner(t, s, owner)
 	erasure, err := s.RequestTenantDSAR(ctx, owner, owner.LearnerID, "erase", "verified erasure request")
 	if err != nil {
 		t.Fatal(err)

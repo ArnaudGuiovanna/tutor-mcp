@@ -101,6 +101,7 @@ func TestTenantDSARErasureIsBoundedBlockedByHoldAndResumable(t *testing.T) {
 		Reason: "pending litigation", CreatedBy: "legal", CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
+	ensureErasureReplacementOwner(t, s, owner)
 	request, err := s.RequestTenantDSAR(ctx, owner, owner.LearnerID, "erase", "verified erasure request")
 	if err != nil {
 		t.Fatal(err)

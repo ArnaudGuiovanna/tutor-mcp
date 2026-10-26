@@ -29,12 +29,27 @@ import (
 const NativeChallengeTTL = 120 * time.Second
 
 type nativeClientContextKey struct{}
+type nativeClientOriginKey struct{}
+type nativeClientSessionIDKey struct{}
 
 // IsNativeClientSession identifies the already-verified native transport. It
 // only controls discovery; every call still checks its scope and live role.
 func IsNativeClientSession(ctx context.Context) bool {
 	value, _ := ctx.Value(nativeClientContextKey{}).(bool)
 	return value
+}
+
+// NativeClientOrigin is set only after durable native-session validation.
+func NativeClientOrigin(ctx context.Context) string {
+	origin, _ := ctx.Value(nativeClientOriginKey{}).(string)
+	return origin
+}
+
+// NativeClientSessionID comes from the durable, validated native bearer, never
+// from a request argument or an agent-supplied header.
+func NativeClientSessionID(ctx context.Context) string {
+	id, _ := ctx.Value(nativeClientSessionIDKey{}).(string)
+	return id
 }
 
 const nativeIdentityPrefix = "/api/client/v1/identity/"
@@ -518,6 +533,9 @@ func BearerMiddlewareWithNativePrincipalValidator(baseURL, initialScope string, 
 			deny()
 			return
 		}
-		protected.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), nativeClientContextKey{}, true)))
+		ctx := context.WithValue(r.Context(), nativeClientContextKey{}, true)
+		ctx = context.WithValue(ctx, nativeClientOriginKey{}, baseURL)
+		ctx = context.WithValue(ctx, nativeClientSessionIDKey{}, strings.TrimPrefix(claims.AuthorizedParty, "native:"))
+		protected.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

@@ -6,6 +6,7 @@ package tools
 import (
 	"context"
 	"errors"
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"tutor-mcp/auth"
 	"tutor-mcp/models"
@@ -13,11 +14,16 @@ import (
 )
 
 var trainingTools = map[string]string{
+	"preview_training_lifecycle":   "Preview archival, restoration, withdrawal or deletion effects for this authorized training. decision names the intended lifecycle action. Does not mutate data.",
+	"archive_training":             "After an explicit human request and confirm=true, archive this exact revision. Personal learning evidence and existing common learner versions are preserved.",
+	"restore_training":             "After human confirmation, restore an archived training without recreating it or replaying its evidence.",
+	"delete_training":              "After an explicit human request and confirm=true, remove a personal training or wholly unpublished draft. Published common programmes cannot be deleted. Preserve historical learning evidence.",
+	"withdraw_training":            "Authorized publisher only: withdraw a published common training from new admissions. Existing learners keep their enrolled version. Requires confirm=true and expected_revision.",
 	"get_training_groups":          "Read the paginated real cohorts assigned to this trainer, limited to this formation. Requires progress:read; personal learning data is excluded.",
 	"list_training_library":        "Search the server's unified, paginated library. Each training appears once. Use query to resume an existing training; present ambiguous matches before selecting. Never recreate an existing training.",
 	"get_training":                 "Read the authorized programme, personal progress, review decision and proposed edit. id comes from list_training_library or init_domain (personal:domain_id).",
 	"get_conversation_context":     "Read this account's confirmed active training and revision for conversation_id. Always use its explicit domain_id for teaching and observations.",
-	"select_conversation_training": "Explicitly switch this conversation's active training. Read get_conversation_context first and supply expected_selection. Tell the learner which training is now selected.",
+	"select_conversation_training": "Explicitly switch this conversation's active training. Required: id, key (stable idempotency key), expected_selection (the latest selection_version from get_conversation_context). init_domain already selects its new training and returns the confirmed context; do not repeat that selection with the old version. For a later switch read the current context first, then use its latest selection_version and a fresh key. Tell the learner which training is now selected.",
 	"preview_training_edit":        "Validate a complete proposed programme against expected_revision. Returns server-computed learning consequences without changing the programme. Manual and AI editing use this same contract.",
 	"propose_training_edit":        "Save an examinable proposal in the training's editor. Supply the complete document and expected_revision read from get_training. Does not apply changes or publish. Invite the human to review the editor.",
 	"save_training_edit":           "After human review, apply the complete programme using expected_revision. Changes to published common programmes create the next draft; existing learners retain their immutable version.",
@@ -44,7 +50,7 @@ func contributionTool(name string) bool {
 // The store narrows each grant to the actual document and fields requested.
 func contributionCompatibleTool(name string) bool {
 	switch name {
-	case "list_training_library", "get_training", "get_training_policy", "preview_training_edit", "propose_training_edit", "save_training_edit":
+	case "list_training_library", "get_training", "get_training_policy", "preview_training_edit", "propose_training_edit", "save_training_edit", "preview_training_lifecycle", "archive_training", "restore_training", "delete_training", "withdraw_training":
 		return true
 	}
 	return false
@@ -55,7 +61,20 @@ func registerTrainingTools(server *mcp.Server, deps *Deps) {
 		return
 	}
 	for name, description := range trainingTools {
-		addTool(server, &mcp.Tool{Name: name, Description: description}, func(ctx context.Context, _ *mcp.CallToolRequest, in models.TrainingRequest) (*mcp.CallToolResult, any, error) {
+		schema, err := jsonschema.For[models.TrainingRequest](&jsonschema.ForOptions{})
+		if err != nil {
+			panic("cannot infer training input schema: " + err.Error())
+		}
+		if !models.TrainingReadAction(name) {
+			schema.Required = append(schema.Required, "key")
+			minimum, maximum := 1, 128
+			schema.Properties["key"].MinLength = &minimum
+			schema.Properties["key"].MaxLength = &maximum
+		}
+		if name == "select_conversation_training" {
+			schema.Required = append(schema.Required, "id", "expected_selection")
+		}
+		addTool(server, &mcp.Tool{Name: name, Description: description, InputSchema: schema}, func(ctx context.Context, _ *mcp.CallToolRequest, in models.TrainingRequest) (*mcp.CallToolResult, any, error) {
 			p, ok := auth.GetPrincipal(ctx)
 			if !ok {
 				r, _ := errorResult("authenticated principal required")
@@ -70,7 +89,11 @@ func registerTrainingTools(server *mcp.Server, deps *Deps) {
 			}
 			out, err := deps.Store.(storeport.TrainingStore).TrainingAction(ctx, p, name, in)
 			if errors.Is(err, storeport.ErrCurriculumVersionConflict) {
-				r, _ := jsonResult(map[string]any{"error": "revision_conflict", "message": "Reload the current programme and review the proposal before trying again."})
+				message := "Reload the current programme and review the proposal before trying again."
+				if name == "select_conversation_training" {
+					message = "Read get_conversation_context again and use its current selection_version as expected_selection, with a fresh key. init_domain already selects a newly created training."
+				}
+				r, _ := jsonResult(map[string]any{"error": "revision_conflict", "message": message})
 				r.IsError = true
 				return r, nil, nil
 			}

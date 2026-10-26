@@ -77,7 +77,8 @@ var readOnlyTools = map[string]bool{
 // their primary read payload, while a read-only grant must not authorize their
 // side effects, so these tools require both granular capabilities.
 var readWriteTools = map[string]bool{
-	"list_training_library": true, "get_training": true, "get_conversation_context": true, "preview_training_edit": true, "get_training_policy": true, "find_training_members": true,
+	"preview_training_lifecycle": true,
+	"list_training_library":      true, "get_training": true, "get_conversation_context": true, "preview_training_edit": true, "get_training_policy": true, "find_training_members": true,
 	"get_curriculum_snapshot":  true,
 	"get_memory_state":         true,
 	"get_next_activity":        true,
@@ -85,6 +86,7 @@ var readWriteTools = map[string]bool{
 }
 
 var writeTools = map[string]bool{
+	"archive_training": true, "restore_training": true, "delete_training": true, "withdraw_training": true,
 	"select_conversation_training": true, "save_training_edit": true, "propose_training_edit": true, "share_training": true, "submit_training": true, "decide_training": true, "publish_training": true, "set_training_access": true, "set_training_policy": true, "join_training": true,
 	"publish_formation_to_catalog":    true,
 	"join_formation":                  true,
@@ -602,7 +604,12 @@ func RegisterTools(server *mcp.Server, deps *Deps) {
 	if deps != nil && deps.ToolCallTimeout != 0 {
 		server.AddReceivingMiddleware(ToolCallDeadlineMiddleware(deps.ToolCallTimeout))
 	}
-	server.AddReceivingMiddleware(toolCallObservationMiddleware(names))
+	server.AddReceivingMiddleware(ToolPolicyMiddleware())
+	var observationLogger *slog.Logger
+	if deps != nil {
+		observationLogger = deps.Logger
+	}
+	server.AddReceivingMiddleware(toolCallObservationMiddleware(names, observationLogger))
 }
 
 var errToolApplicationFailure = errors.New("MCP tool returned an application error")

@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"tutor-mcp/auth"
@@ -27,7 +28,7 @@ func recordToolCall(ctx context.Context, name, outcome string, started time.Time
 // Install outside deadlines, scope checks, tenant transactions and replay
 // handling. The final result includes commit failures and deadline replacement.
 // Direct addTool embedders do not install this server-level observation.
-func toolCallObservationMiddleware(registered map[string]struct{}) mcp.Middleware {
+func toolCallObservationMiddleware(registered map[string]struct{}, loggers ...*slog.Logger) mcp.Middleware {
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (result mcp.Result, err error) {
 			if method != "tools/call" {
@@ -41,7 +42,16 @@ func toolCallObservationMiddleware(registered map[string]struct{}) mcp.Middlewar
 			observation := &toolCallObservation{}
 			ctx = context.WithValue(ctx, toolCallObservationKey{}, observation)
 			outcome := "failed" // Also records a panic, while leaving recovery to the caller.
-			defer func() { recordToolCall(ctx, name, outcome, started) }()
+			defer func() {
+				recordToolCall(ctx, name, outcome, started)
+				if len(loggers) > 0 && loggers[0] != nil {
+					attrs := []any{"tool", name, "outcome", outcome, "duration_ms", time.Since(started).Milliseconds(), "request_id", observability.RequestID(ctx)}
+					if traceID := observability.TraceID(ctx); traceID != "" {
+						attrs = append(attrs, "trace_id", traceID)
+					}
+					loggers[0].Info("MCP tool completed", attrs...)
+				}
+			}()
 			result, err = next(ctx, method, req)
 			if err == nil && ctx.Err() == nil {
 				if call, ok := result.(*mcp.CallToolResult); ok && call != nil && !call.IsError {

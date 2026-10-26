@@ -147,7 +147,11 @@ async fn discover_native() -> AgentTarget {
 pub async fn launch_spec(target: &AgentTarget, cwd: &str) -> Result<LaunchSpec, String> {
     validate_text(cwd, "Le dossier de travail")?;
     if target.id.starts_with("bundled:") {
-        return crate::bundled::launch(&target.id, cwd);
+        let id = target.id.clone();
+        let cwd = cwd.to_string();
+        return tokio::task::spawn_blocking(move || crate::bundled::launch(&id, &cwd))
+            .await
+            .map_err(|_| "La vérification des agents intégrés a été interrompue.".to_string())?;
     }
     let adapter = target
         .adapter_path
@@ -566,7 +570,7 @@ fn node_invocation(script: &Path, paths: &[PathBuf]) -> Result<LaunchSpec, Strin
     })
 }
 
-fn node_script_argument(script: &Path) -> String {
+pub(crate) fn node_script_argument(script: &Path) -> String {
     // canonicalize() returns an extended Windows path. Node 24.13's entry
     // loader fails while resolving its drive root (nodejs/node#62446, #65378).
     // Keep canonical paths for package containment; use the ordinary spelling

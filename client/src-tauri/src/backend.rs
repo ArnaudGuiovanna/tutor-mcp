@@ -5,13 +5,17 @@ use crate::acp::AcpClient;
 use crate::discovery::{self, AgentTarget};
 use crate::identity::{IdentityStore, KeyPair, PublicIdentity};
 use crate::native_auth::{self, NativeCredential, Session};
+use crate::permissions::{automatic_outcome, PermissionContext, ToolCallRegistry};
 use crate::workspace::{now, Conversation, LearningIntent, Message, Settings, WorkspaceStore};
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, OnceLock,
+};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 pub type EventSink = Arc<dyn Fn(&str, Value) + Send + Sync>;
@@ -37,6 +41,9 @@ struct Agent {
     permissions: HashMap<String, (Value, String)>,
     replaying: bool,
     mcp_configurations: HashMap<String, String>,
+    configuration_session: Option<String>,
+    configuration: Value,
+    tool_calls: ToolCallRegistry,
 }
 
 #[derive(Clone)]
@@ -50,6 +57,65 @@ struct Prompt {
     truncated: bool,
 }
 
+struct ProviderFailure {
+    severity: &'static str,
+    category: &'static str,
+    message: &'static str,
+}
+
+impl ProviderFailure {
+    fn from_metadata(meta: &Value, failure: &Value, language: &str) -> Self {
+        let valid = meta.get("version").and_then(Value::as_u64) == Some(1)
+            && matches!(
+                failure.get("severity").and_then(Value::as_str),
+                Some("warning" | "error")
+            );
+        let severity = if valid && failure["severity"] == "warning" {
+            "warning"
+        } else {
+            "error"
+        };
+        let category = match valid
+            .then(|| failure.get("category").and_then(Value::as_str))
+            .flatten()
+        {
+            Some("limit") => "limit",
+            Some("access") => "access",
+            Some("service") => "service",
+            Some("connection") => "connection",
+            Some("request") => "request",
+            _ => "unknown",
+        };
+        let has_action = |action: &str| {
+            failure
+                .get("actions")
+                .and_then(Value::as_array)
+                .is_some_and(|actions| actions.iter().any(|value| value.as_str() == Some(action)))
+        };
+        let (fr, en) = if severity == "warning" {
+            (
+                "Le fournisseur réessaie la requête…",
+                "The provider is retrying the request…",
+            )
+        } else {
+            match category {
+                "limit" if has_action("retry") => ("Le fournisseur limite temporairement les requêtes. Réessayez plus tard.", "The provider is temporarily limiting requests. Try again later."),
+                "limit" if has_action("new_session") => ("La limite de cette session est atteinte. Ouvrez une nouvelle conversation.", "This session has reached its limit. Start a new conversation."),
+                "limit" => ("Le quota du fournisseur est atteint. Vérifiez votre accès ou choisissez un autre modèle.", "The provider quota has been reached. Check your access or choose another model."),
+                "access" => ("Votre connexion au fournisseur a expiré. Reconnectez votre agent.", "Your provider sign-in has expired. Reconnect your agent."),
+                "connection" => ("La connexion au fournisseur a été interrompue. Reconnectez l’agent.", "The connection to the provider was interrupted. Reconnect the agent."),
+                "request" => ("Le fournisseur a refusé cette demande. Modifiez votre message ou choisissez un autre modèle.", "The provider rejected this request. Change your message or choose another model."),
+                _ => ("Le fournisseur n’a pas pu terminer la réponse. Réessayez plus tard.", "The provider could not finish the response. Try again later."),
+            }
+        };
+        Self {
+            severity,
+            category,
+            message: if language == "en" { en } else { fr },
+        }
+    }
+}
+
 #[derive(Default)]
 struct Tutor {
     credentials: Option<Session>,
@@ -59,6 +125,9 @@ struct Tutor {
     local_rpc: Option<AcpClient>,
     local_binding: String,
     login_generation: String,
+    tool_catalog: BTreeSet<String>,
+    tool_catalog_binding: String,
+    tool_catalog_refreshed: Option<std::time::Instant>,
 }
 
 pub struct Backend {
@@ -72,6 +141,7 @@ pub struct Backend {
     provider_login: Mutex<Option<tokio::process::Child>>,
     emit: EventSink,
     profile: Option<crate::profiles::ProfileContext>,
+    retired: AtomicBool,
 }
 
 impl Backend {
@@ -125,6 +195,7 @@ impl Backend {
             provider_login: Mutex::new(None),
             emit,
             profile,
+            retired: AtomicBool::new(false),
         }))
     }
 
@@ -155,6 +226,9 @@ impl Backend {
     }
 
     async fn idle(&self) -> Result<(), String> {
+        if self.retired.load(Ordering::Acquire) {
+            return Err("Ce compte a été retiré de cet appareil.".into());
+        }
         if self.prompt.lock().await.is_some() {
             Err("Interrompez la réponse en cours avant de modifier la connexion.".into())
         } else {
@@ -162,11 +236,22 @@ impl Backend {
         }
     }
 
-    pub async fn save_settings(&self, settings: Settings) -> Result<Value, String> {
+    pub async fn save_settings(&self, mut settings: Settings) -> Result<Value, String> {
         let _operation = self.operation.lock().await;
         self.idle().await?;
+        if let Some(policy) = &settings.permission_policy {
+            policy.validate()?;
+        }
         if !["local", "remote"].contains(&settings.tutor.mode.as_str())
             || !["auto", "author", "learn", "train"].contains(&settings.tutor.activity.as_str())
+            || !["fr", "en"].contains(&settings.language.as_str())
+            || !["dark", "light", "system"].contains(&settings.appearance.theme.as_str())
+            || !(16..=24).contains(&settings.appearance.font_size)
+            || !settings.appearance.line_height.is_finite()
+            || !(1.2..=2.2).contains(&settings.appearance.line_height)
+            || settings.agent.model.len() > 256
+            || settings.agent.reasoning_effort.len() > 64
+            || !["balanced", "fast", "deep"].contains(&settings.agent.speed.as_str())
             || settings.cwd.len() > 32768
             || settings.tutor.args.len() > 32
             || settings
@@ -180,20 +265,52 @@ impl Backend {
         if settings.tutor.mode == "remote" && !settings.tutor.url.is_empty() {
             native_auth::validate_origin(&settings.tutor.url)?;
         }
-        let changed;
+        let reconnect_tutor;
+        let restart_agent;
         {
             let mut store = self.store.lock().await;
             let previous = store.data.settings.clone();
-            changed = serde_json::to_value(&previous).unwrap()
-                != serde_json::to_value(&settings).unwrap();
+            if previous.target_id != settings.target_id
+                || serde_json::to_value(&previous.manual_target).unwrap()
+                    != serde_json::to_value(&settings.manual_target).unwrap()
+            {
+                // A manual target label is not an executable identity. Consent
+                // must be granted again after replacing its program/adapter.
+                settings.permission_policy = None;
+            }
+            reconnect_tutor = serde_json::to_value((
+                &previous.target_id,
+                &previous.manual_target,
+                &previous.cwd,
+                &previous.tutor,
+            ))
+            .unwrap()
+                != serde_json::to_value((
+                    &settings.target_id,
+                    &settings.manual_target,
+                    &settings.cwd,
+                    &settings.tutor,
+                ))
+                .unwrap();
+            restart_agent = reconnect_tutor
+                || serde_json::to_value(&previous.permission_policy).unwrap()
+                    != serde_json::to_value(&settings.permission_policy).unwrap()
+                || serde_json::to_value(&previous.agent).unwrap()
+                    != serde_json::to_value(&settings.agent).unwrap();
             store.transaction(|data| {
                 data.settings = settings;
                 Ok(())
             })?;
         }
-        let mut stop_result = Ok(());
-        if changed {
-            stop_result = self.stop_agent().await;
+        // Reading/language changes apply immediately and preserve both live
+        // connections. A changed consent policy discards provider allow_always
+        // decisions by restarting the agent, while retaining the Tutor account.
+        let stop_result = if restart_agent {
+            self.stop_agent().await
+        } else {
+            Ok(())
+        };
+        if reconnect_tutor {
             let mut tutor = self.tutor.lock().await;
             tutor.login_generation = uuid::Uuid::new_v4().to_string();
             if let Some(local) = tutor.local_rpc.take() {
@@ -228,19 +345,34 @@ impl Backend {
         self.stop_agent().await?;
         let agent_cwd = discovery::agent_cwd(&target, &cwd).await?;
         let mut spec = discovery::launch_spec(&target, &cwd).await?;
+        crate::agent_policy::restrict_tutor_agent(&target, &mut spec)?;
         // Filesystem operations remain bounded to a read-only agent session.
         // MCP mutations retain the learner's server-side authorization.
         spec.env
             .push(("INITIAL_AGENT_MODE".into(), "read-only".into()));
         let (events, mut receiver) = mpsc::unbounded_channel();
         let rpc = AcpClient::spawn(spec, events.clone()).await?;
+        let mut client_capabilities =
+            json!({"auth":{"terminal":cfg!(windows) && target.id=="bundled:claude"}});
+        if target.id == "bundled:codex"
+            || target
+                .adapter_path
+                .as_deref()
+                .is_some_and(|path| path.to_ascii_lowercase().contains("codex-acp"))
+        {
+            // The pinned Codex adapter otherwise reports provider failures as
+            // assistant prose followed by end_turn. Advertise only the typed
+            // failure extension; AIR rendering changes Claude tool metadata.
+            client_capabilities["_meta"] =
+                json!({"jetbrains":{"air":{"version":1,"capabilities":["sessionFailure"]}}});
+        }
         let initialized = match rpc.request("initialize", json!({
             "protocolVersion": 1,
-            "clientCapabilities": {"auth":{"terminal":cfg!(windows) && target.id=="bundled:claude"}},
+            "clientCapabilities": client_capabilities,
             "clientInfo": {"name":"tutor", "title":"Tutor", "version":env!("CARGO_PKG_VERSION")}
         })).await {
             Ok(value) => value,
-            Err(error) => { let _ = rpc.stop().await; return Err(error); }
+            Err(error) => { let _ = rpc.stop().await; return Err(format!("Initialisation de l’agent : {error}")); }
         };
         if initialized.get("protocolVersion").and_then(Value::as_u64) != Some(1) {
             let _ = rpc.stop().await;
@@ -268,6 +400,9 @@ impl Backend {
             permissions: HashMap::new(),
             replaying: false,
             mcp_configurations: HashMap::new(),
+            configuration_session: None,
+            configuration: json!({}),
+            tool_calls: ToolCallRegistry::default(),
         });
         let weak = Arc::downgrade(self);
         tokio::spawn(async move {
@@ -306,6 +441,133 @@ impl Backend {
             return Ok(cwd);
         }
         Ok(requested.into())
+    }
+
+    pub async fn agent_configuration(&self) -> Result<Value, String> {
+        let _operation = self.operation.lock().await;
+        self.idle().await?;
+        self.read_agent_configuration().await
+    }
+    async fn read_agent_configuration(&self) -> Result<Value, String> {
+        let settings = self.settings().await.agent;
+        let (rpc, cwd, existing) = {
+            let guard = self.agent.lock().await;
+            let Some(agent) = guard.as_ref() else {
+                return Ok(configuration_view(false, &json!({}), &settings));
+            };
+            (
+                agent.rpc.clone(),
+                agent.cwd.clone(),
+                agent.configuration_session.clone(),
+            )
+        };
+        if existing.is_none() {
+            let response=rpc.request("session/new",json!({"cwd":cwd,"mcpServers":[],"_meta":{"disableBuiltInTools":true,"claudeCode":{"options":{"allowDangerouslySkipPermissions":false,"tools":[]}}}})).await?;
+            let session = session_id(&response)?;
+            let response = apply_agent_settings(&rpc, &session, response, &settings).await?;
+            if let Some(agent) = self.agent.lock().await.as_mut() {
+                agent.configuration_session = Some(session);
+                agent.configuration = response;
+            }
+        }
+        let guard = self.agent.lock().await;
+        let agent = guard.as_ref().ok_or("Reconnectez l’agent.")?;
+        Ok(configuration_view(true, &agent.configuration, &settings))
+    }
+    pub async fn set_agent_configuration(
+        &self,
+        configuration: crate::workspace::AgentSettings,
+    ) -> Result<Value, String> {
+        let _operation = self.operation.lock().await;
+        self.idle().await?;
+        if configuration.model.len() > 256
+            || configuration.reasoning_effort.len() > 64
+            || !["balanced", "fast", "deep"].contains(&configuration.speed.as_str())
+        {
+            return Err("Configuration de modèle invalide.".into());
+        }
+        self.read_agent_configuration().await?;
+        let (rpc, session, response) = {
+            let guard = self.agent.lock().await;
+            let agent = guard
+                .as_ref()
+                .ok_or("Connectez l’agent avant de choisir son modèle.")?;
+            (
+                agent.rpc.clone(),
+                agent
+                    .configuration_session
+                    .clone()
+                    .ok_or("Session agent introuvable.")?,
+                agent.configuration.clone(),
+            )
+        };
+        let applied = apply_agent_settings(&rpc, &session, response, &configuration).await;
+        let response = match applied {
+            Ok(v) => v,
+            Err(error) => {
+                let _ = self.stop_agent().await;
+                self.state_changed().await;
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.store.lock().await.transaction(|data| {
+            data.settings.agent = configuration.clone();
+            Ok(())
+        }) {
+            let _ = self.stop_agent().await;
+            return Err(error);
+        }
+        if let Some(agent) = self.agent.lock().await.as_mut() {
+            agent.configuration = response.clone();
+        }
+        self.state_changed().await;
+        Ok(configuration_view(true, &response, &configuration))
+    }
+    async fn configure_conversation_session(
+        &self,
+        rpc: &AcpClient,
+        session: &str,
+        response: Value,
+    ) -> Result<(), String> {
+        let settings = self.settings().await.agent;
+        let response = apply_agent_settings(rpc, session, response, &settings).await?;
+        if let Some(agent) = self.agent.lock().await.as_mut() {
+            agent.configuration_session = Some(session.into());
+            agent.configuration = response;
+        }
+        Ok(())
+    }
+
+    pub async fn institution_action(&self, action: String, input: Value) -> Result<Value, String> {
+        let _operation = self.operation.lock().await;
+        self.idle().await?;
+        if action.len() > 64 || !input.is_object() {
+            return Err("Action institutionnelle invalide.".into());
+        }
+        let result = self
+            .native_request(
+                reqwest::Method::POST,
+                &["api", "client", "v1", "institution", "actions"],
+                Some(json!({"action":action,"input":input})),
+                None,
+                None,
+            )
+            .await?;
+        if result.get("reconnect_required").and_then(Value::as_bool) == Some(true) {
+            self.stop_agent().await?;
+            crate::vault::delete(&self.directory, "native-session.json")?;
+            let mut tutor = self.tutor.lock().await;
+            tutor.credentials = None;
+            tutor.binding.clear();
+            tutor.overview = None;
+            tutor.status = TutorStatus {
+                connected: false,
+                label: "Tutor".into(),
+                message: Some("Vos accès ont changé. Reconnectez ce compte.".into()),
+            };
+        }
+        self.state_changed().await;
+        Ok(result)
     }
 
     pub async fn authenticate_agent(&self, method_id: String) -> Result<Value, String> {
@@ -669,6 +931,9 @@ impl Backend {
                 }
             }
         }
+        let requires_action_proof = segments == ["api", "client", "v1", "institution", "actions"]
+            && method == reqwest::Method::POST;
+        let action_url = url.to_string();
         let mut request = http_client()?
             .request(method, url)
             .bearer_auth(&credentials.access_token);
@@ -676,13 +941,40 @@ impl Backend {
             request = request.header("Idempotency-Key", key)
         }
         if let Some(body) = body {
-            request = request.json(&body)
+            let bytes =
+                serde_json::to_vec(&body).map_err(|_| "Action institutionnelle invalide.")?;
+            if requires_action_proof {
+                request = request.header(
+                    "X-Tutor-Action-Proof",
+                    native_auth::signed_institution_action(
+                        &keys,
+                        &credentials.origin,
+                        &action_url,
+                        &credentials.principal.tenant_id,
+                        &credentials.session_id,
+                        &bytes,
+                    )?,
+                );
+            }
+            request = request
+                .header("Content-Type", "application/json")
+                .body(bytes);
         }
         let response = request
             .send()
             .await
             .map_err(|_| "L’institution ne répond pas. Réessayez sans recréer la formation.")?;
         if !response.status().is_success() {
+            if requires_action_proof {
+                return Err(match response.status().as_u16() {
+                    401 => "Cette action du compte n’a pas pu être authentifiée. Reconnectez Tutor.",
+                    403 => "Votre rôle ne permet pas cette action sur les membres.",
+                    404 => "Ce membre ou cette demande n’est pas accessible.",
+                    409 => "Cette action a déjà changé ou ce membre existe déjà. Actualisez la liste.",
+                    400 | 422 => "Vérifiez les identifiants publics, le rôle choisi et la confirmation de l’action.",
+                    _ => "L’institution ne peut pas terminer cette action pour le moment.",
+                }.into());
+            }
             return Err(match response.status().as_u16(){
             401=>"La session a expiré ou a été révoquée. Reconnectez ce compte.",
             403=>"Votre rôle actuel n’autorise pas cette action dans l’institution.",
@@ -756,6 +1048,10 @@ impl Backend {
             "set_training_policy",
             "find_training_members",
             "join_training",
+            "archive_training",
+            "restore_training",
+            "delete_training",
+            "withdraw_training",
         ];
         if !ACTIONS.contains(&action.as_str())
             || !input.is_object()
@@ -1153,10 +1449,122 @@ impl Backend {
         Ok(overview)
     }
 
+    pub async fn list_mcp_tools(&self) -> Result<Value, String> {
+        self.tutor_overview().await?;
+        let (remote, local, binding) = {
+            let tutor = self.tutor.lock().await;
+            match tutor.credentials.as_ref() {
+                Some(credentials) => (
+                    Some(credentials.clone()),
+                    None,
+                    tool_catalog_binding(credentials),
+                ),
+                None => (None, tutor.local_rpc.clone(), tutor.local_binding.clone()),
+            }
+        };
+        let mut tools = Vec::<Value>::new();
+        let mut names = BTreeSet::new();
+        let mut cursor = None::<String>;
+        let mut cursors = HashSet::new();
+        for page in 0..100 {
+            let params = match &cursor {
+                Some(cursor) => json!({"cursor":cursor}),
+                None => json!({}),
+            };
+            let value = match (&remote, &local) {
+                (Some(credentials), _) => {
+                    let id = format!("tutor-tool-catalog-{page}");
+                    let response = http_client()?
+                        .post(credentials.resource())
+                        .bearer_auth(&credentials.access_token)
+                        .header("Accept", "application/json, text/event-stream")
+                        .header("Mcp-Protocol-Version", "2025-06-18")
+                        .json(
+                            &json!({"jsonrpc":"2.0","id":id,"method":"tools/list","params":params}),
+                        )
+                        .send()
+                        .await
+                        .map_err(|_| "La lecture des outils MCP a échoué.")?;
+                    if !response.status().is_success() {
+                        return Err("Reconnectez Tutor pour consulter ses outils.".into());
+                    }
+                    bounded_mcp_json(response, &id).await?
+                }
+                (_, Some(rpc)) => rpc.request("tools/list", params).await?,
+                _ => return Err("Reconnectez Tutor pour consulter ses outils.".into()),
+            };
+            let items = value
+                .get("tools")
+                .and_then(Value::as_array)
+                .ok_or("La liste des outils MCP est invalide.")?;
+            for item in items {
+                let name = item
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| {
+                        !name.is_empty()
+                            && name.len() <= 128
+                            && name
+                                .bytes()
+                                .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+                    })
+                    .ok_or("La liste des outils MCP est invalide.")?;
+                if !names.insert(name.to_string()) || names.len() > 4096 {
+                    return Err("La liste des outils MCP est invalide.".into());
+                }
+                tools.push(json!({"name":name,"description":item.get("description"),"annotations":item.get("annotations")}));
+            }
+            cursor = match value.get("nextCursor") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(cursor)) if cursor.is_empty() => None,
+                Some(Value::String(cursor)) if cursor.len() <= 4096 => Some(cursor.clone()),
+                _ => return Err("La liste des outils MCP est invalide.".into()),
+            };
+            if let Some(cursor) = &cursor {
+                if !cursors.insert(cursor.clone()) {
+                    return Err("La liste des outils MCP est invalide.".into());
+                }
+            } else {
+                let mut tutor = self.tutor.lock().await;
+                let current = tutor
+                    .credentials
+                    .as_ref()
+                    .map(tool_catalog_binding)
+                    .unwrap_or_else(|| tutor.local_binding.clone());
+                if current != binding {
+                    return Err("Le compte Tutor a changé pendant la lecture des outils.".into());
+                }
+                tutor.tool_catalog = names;
+                tutor.tool_catalog_binding = binding;
+                tutor.tool_catalog_refreshed = Some(std::time::Instant::now());
+                return Ok(json!({"tools":tools}));
+            }
+        }
+        Err("La liste des outils MCP est invalide.".into())
+    }
+
     async fn mcp_servers(&self, conversation_id: &str) -> Result<(Value, String), String> {
         // Always obtain current identity/state; cached labels confer no rights.
         self.tutor_overview().await?;
         let settings = self.store.lock().await.data.settings.clone();
+        let refresh_catalog = {
+            let tutor = self.tutor.lock().await;
+            tutor.credentials.as_ref().is_some_and(|credentials| {
+                settings.permission_policy.as_ref().is_some_and(|policy| {
+                    policy.matches(
+                        &credentials.origin,
+                        &credentials.principal.tenant_id,
+                        &settings.target_id,
+                    )
+                }) && (tutor.tool_catalog_binding != tool_catalog_binding(credentials)
+                    || tutor
+                        .tool_catalog_refreshed
+                        .is_none_or(|last| last.elapsed() > std::time::Duration::from_secs(300)))
+            })
+        };
+        if refresh_catalog {
+            self.list_mcp_tools().await?;
+        }
         let tutor = self.tutor.lock().await;
         if settings.tutor.mode == "local" {
             if settings.tutor.command.trim().is_empty() {
@@ -1171,8 +1579,21 @@ impl Backend {
                 .credentials
                 .as_ref()
                 .ok_or("Connectez votre compte Tutor.")?;
+            let mut headers = vec![
+                json!({"name":"Tutor-Conversation-ID","value":conversation_id}),
+                json!({"name":"Authorization","value":format!("Bearer {}",credentials.access_token)}),
+            ];
+            if let Some(header) = settings.permission_policy.as_ref().and_then(|policy| {
+                policy.transport_header(
+                    &credentials.origin,
+                    &credentials.principal.tenant_id,
+                    &settings.target_id,
+                )
+            }) {
+                headers.push(json!({"name":"Tutor-Tool-Policy","value":header}));
+            }
             Ok((
-                json!([{"type":"http","name":"tutor","url":credentials.resource(),"headers":[{"name":"Tutor-Conversation-ID","value":conversation_id},{"name":"Authorization","value":format!("Bearer {}",credentials.access_token)}]}]),
+                json!([{"type":"http","name":"tutor","url":credentials.resource(),"headers":headers}]),
                 tutor.binding.clone(),
             ))
         }
@@ -1252,16 +1673,26 @@ impl Backend {
         let mut conversation = if let Some(mut old) = existing {
             if old.runtime_binding == runtime_binding && can_load && old.agent_session_id.is_some()
             {
-                self.load_session(
+                let configuration = self
+                    .load_session(
+                        &rpc,
+                        json!({"sessionId":old.agent_session_id,"cwd":cwd,"mcpServers":servers}),
+                    )
+                    .await?;
+                self.configure_conversation_session(
                     &rpc,
-                    json!({"sessionId":old.agent_session_id,"cwd":cwd,"mcpServers":servers}),
+                    old.agent_session_id.as_deref().unwrap(),
+                    configuration,
                 )
                 .await?;
             } else {
                 let session = rpc
                     .request("session/new", json!({"cwd":cwd,"mcpServers":servers,"_meta":{"disableBuiltInTools":true,"claudeCode":{"options":{"allowDangerouslySkipPermissions":false,"tools":[]}}}}))
                     .await?;
-                old.agent_session_id = Some(session_id(&session)?);
+                let id = session_id(&session)?;
+                self.configure_conversation_session(&rpc, &id, session)
+                    .await?;
+                old.agent_session_id = Some(id);
                 old.target_id = target_id;
                 old.runtime_binding = runtime_binding;
             }
@@ -1269,6 +1700,9 @@ impl Backend {
         } else {
             let session = rpc
                 .request("session/new", json!({"cwd":cwd,"mcpServers":servers,"_meta":{"disableBuiltInTools":true,"claudeCode":{"options":{"allowDangerouslySkipPermissions":false,"tools":[]}}}}))
+                .await?;
+            let id = session_id(&session)?;
+            self.configure_conversation_session(&rpc, &id, session)
                 .await?;
             Conversation {
                 id: conversation_id,
@@ -1278,7 +1712,7 @@ impl Backend {
                     .map(|i| i.title.clone())
                     .unwrap_or("Séance d’apprentissage".into()),
                 intent_id: intent.map(|i| i.id),
-                agent_session_id: Some(session_id(&session)?),
+                agent_session_id: Some(id),
                 target_id,
                 tutor_binding,
                 runtime_binding,
@@ -1368,17 +1802,20 @@ impl Backend {
                 .intent_id
                 .as_ref()
                 .and_then(|id| store.data.intents.iter().find(|i| &i.id == id));
-            let context = pedagogical_prompt(intent, conversation, &text, tutor_context.as_ref());
+            let context = format!("LANGUE / LANGUAGE: {}. Reply in this language, regardless of quoted historical messages.\n{}", if store.data.settings.language == "en" { "English" } else { "français" }, pedagogical_prompt(intent, conversation, &text, tutor_context.as_ref()));
             (session, context)
         };
         // Refresh scoped MCP credentials on the existing agent session. Loading
         // does not replay or resubmit any prior user request.
         if can_load {
-            self.load_session(
-                &rpc,
-                json!({"sessionId":session,"cwd":cwd,"mcpServers":servers}),
-            )
-            .await?;
+            let configuration = self
+                .load_session(
+                    &rpc,
+                    json!({"sessionId":session,"cwd":cwd,"mcpServers":servers}),
+                )
+                .await?;
+            self.configure_conversation_session(&rpc, &session, configuration)
+                .await?;
         } else {
             let changed = self
                 .agent
@@ -1395,6 +1832,8 @@ impl Backend {
                     .request("session/new", json!({"cwd":cwd,"mcpServers":servers,"_meta":{"disableBuiltInTools":true,"claudeCode":{"options":{"allowDangerouslySkipPermissions":false,"tools":[]}}}}))
                     .await?;
                 session = session_id(&replacement)?;
+                self.configure_conversation_session(&rpc, &session, replacement)
+                    .await?;
                 self.store.lock().await.transaction(|data| {
                     let conversation = data
                         .conversations
@@ -1445,11 +1884,14 @@ impl Backend {
                 Ok(())
             })?;
         }
+        if let Some(agent) = self.agent.lock().await.as_mut() {
+            agent.tool_calls.clear_session(&session);
+        }
         *self.prompt.lock().await = Some(Prompt {
             conversation_id: conversation_id.clone(),
             session_id: session.clone(),
             assistant_message_id,
-            generation,
+            generation: generation.clone(),
             cancelled: false,
             failure: None,
             truncated: false,
@@ -1464,6 +1906,12 @@ impl Backend {
         // RPC completion and event persistence run on separate tasks. Drain all
         // earlier chunks before marking the assistant response terminal.
         let drained = self.drain_agent_events(false).await;
+        // A terminal provider failure may be returned only as prompt metadata,
+        // including when ACP stopReason is end_turn. It is not a successful turn.
+        if let Ok(response) = &result {
+            self.record_provider_status(&generation, &session, response)
+                .await;
+        }
         let prompt = self.prompt.lock().await.clone();
         let cancelled = prompt.as_ref().is_some_and(|p| p.cancelled);
         let stop_reason = result
@@ -1674,12 +2122,57 @@ impl Backend {
         }
     }
 
+    async fn record_provider_status(&self, generation: &str, session: &str, value: &Value) -> bool {
+        let Some(meta) = value.pointer("/_meta/jetbrains/air") else {
+            return false;
+        };
+        let Some(failure) = meta.get("sessionFailure") else {
+            return false;
+        };
+        // Always consume typed metadata here: provider titles/details can
+        // include credentials or private request content and never reach UI.
+        if failure.is_null() {
+            return true;
+        }
+        let language = self.store.lock().await.data.settings.language.clone();
+        let status = ProviderFailure::from_metadata(meta, failure, &language);
+        let mut guard = self.prompt.lock().await;
+        let Some(prompt) = guard.as_mut().filter(|prompt| {
+            prompt.generation == generation
+                && prompt.session_id == session
+                && !prompt.cancelled
+                && prompt.failure.is_none()
+        }) else {
+            return true;
+        };
+        if status.severity == "error" {
+            prompt.failure = Some(status.message.into());
+        }
+        drop(guard);
+        (self.emit)(
+            "acp:event",
+            json!({"type":"provider_status","severity":status.severity,"category":status.category,"message":status.message}),
+        );
+        true
+    }
+
     async fn on_agent_event(&self, generation: &str, event: Value) {
         {
             let mut guard = self.agent.lock().await;
             let Some(agent) = guard.as_mut().filter(|a| a.generation == generation) else {
                 return;
             };
+            if event.pointer("/params/sessionId").and_then(Value::as_str)
+                == agent.configuration_session.as_deref()
+                && event
+                    .pointer("/params/update/sessionUpdate")
+                    .and_then(Value::as_str)
+                    == Some("config_option_update")
+            {
+                if let Some(options) = event.pointer("/params/update/configOptions") {
+                    agent.configuration["configOptions"] = options.clone();
+                }
+            }
             if let Some(id) = event.get("_tutorBarrier").and_then(Value::as_str) {
                 if let Some(done) = agent.barriers.remove(id) {
                     if event.get("endReplay").and_then(Value::as_bool) == Some(true) {
@@ -1694,6 +2187,21 @@ impl Backend {
             {
                 return;
             }
+            agent.tool_calls.observe(&event);
+        }
+        if event.get("method").and_then(Value::as_str) == Some("session/update") {
+            let session = event
+                .pointer("/params/sessionId")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if let Some(update) = event.pointer("/params/update") {
+                if self
+                    .record_provider_status(generation, session, update)
+                    .await
+                {
+                    return;
+                }
+            }
         }
         if event.get("method").and_then(Value::as_str) == Some("session/request_permission") {
             let session = event
@@ -1707,7 +2215,27 @@ impl Backend {
                     && !prompt.cancelled
                     && prompt.failure.is_none()
             });
-            let rpc = {
+            let policy = self
+                .store
+                .lock()
+                .await
+                .data
+                .settings
+                .permission_policy
+                .clone();
+            let policy_binding = {
+                let tutor = self.tutor.lock().await;
+                tutor.credentials.as_ref().and_then(|credentials| {
+                    (tutor.tool_catalog_binding == tool_catalog_binding(credentials)).then(|| {
+                        (
+                            credentials.origin.clone(),
+                            credentials.principal.tenant_id.clone(),
+                            tutor.tool_catalog.clone(),
+                        )
+                    })
+                })
+            };
+            let (rpc, automatic) = {
                 let mut guard = self.agent.lock().await;
                 let Some(agent) = guard
                     .as_mut()
@@ -1715,17 +2243,40 @@ impl Backend {
                 else {
                     return;
                 };
-                if valid {
+                let automatic = if valid {
+                    policy_binding
+                        .as_ref()
+                        .and_then(|(origin, institution, tools)| {
+                            automatic_outcome(
+                                policy.as_ref(),
+                                &PermissionContext {
+                                    origin,
+                                    institution_id: institution,
+                                    agent_id: &agent.target.id,
+                                    known_tools: tools,
+                                },
+                                &agent.tool_calls,
+                                &event,
+                            )
+                        })
+                } else {
+                    None
+                };
+                if valid && automatic.is_none() {
                     agent
                         .permissions
                         .insert(request.to_string(), (request.clone(), session.into()));
                 }
-                agent.rpc.clone()
+                (agent.rpc.clone(), automatic)
             };
             if !valid {
                 let _ = rpc
                     .reply(request, json!({"outcome":{"outcome":"cancelled"}}))
                     .await;
+                return;
+            }
+            if let Some(outcome) = automatic {
+                let _ = rpc.reply(request, json!({"outcome":outcome})).await;
                 return;
             }
         }
@@ -1745,35 +2296,18 @@ impl Backend {
                         .and_then(Value::as_str)
                         == Some("text")
                 {
+                    if prompt.failure.is_some() {
+                        return;
+                    }
                     if let Some(text) = event
                         .pointer("/params/update/content/text")
                         .and_then(Value::as_str)
                     {
-                        let result = self.store.lock().await.transaction(|data| {
-                            let conversation = data
-                                .conversations
-                                .iter_mut()
-                                .find(|c| c.id == prompt.conversation_id)
-                                .ok_or("Séance introuvable.")?;
-                            let message = conversation
-                                .messages
-                                .iter_mut()
-                                .find(|m| m.id == prompt.assistant_message_id)
-                                .ok_or("Réponse introuvable.")?;
-                            const LIMIT: usize = 2 * 1024 * 1024;
-                            let mut length =
-                                text.len().min(LIMIT.saturating_sub(message.text.len()));
-                            while !text.is_char_boundary(length) {
-                                length -= 1;
-                            }
-                            message.text.push_str(&text[..length]);
-                            let truncated = length < text.len();
-                            if truncated {
-                                message.status = "interrupted".into();
-                            }
-                            conversation.updated_at = now();
-                            Ok(truncated)
-                        });
+                        let result = self.store.lock().await.append_stream(
+                            &prompt.conversation_id,
+                            &prompt.assistant_message_id,
+                            text,
+                        );
                         match result {
                             Ok(true) => {
                                 prompt.truncated = true;
@@ -1904,6 +2438,21 @@ impl Backend {
         Ok(())
     }
 
+    pub async fn prepare_local_removal(&self) -> Option<String> {
+        self.retired.store(true, Ordering::Release);
+        let result = self.disconnect_tutor().await;
+        match result {
+            Ok(value) => value
+                .pointer("/tutorStatus/message")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            Err(error) => Some(error),
+        }
+    }
+    pub fn cancel_local_removal(&self) {
+        self.retired.store(false, Ordering::Release);
+    }
+
     pub async fn shutdown(&self) {
         let _ = self.disconnect_agent().await;
         if let Some(local) = self.tutor.lock().await.local_rpc.take() {
@@ -1963,12 +2512,17 @@ fn digest(value: &Value) -> String {
 }
 
 fn http_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|_| "Impossible d’initialiser la connexion HTTP.".into())
+    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .map_err(|_| "Impossible d’initialiser la connexion HTTP.".into())
+        })
+        .clone()
 }
 
 fn catalog_page(value: &Value, name: &str) -> Result<(Vec<Value>, Option<String>), String> {
@@ -2150,7 +2704,59 @@ async fn remote_overview(credentials: &Session) -> Result<Value, String> {
     Ok(overview)
 }
 
+fn tool_catalog_binding(credentials: &Session) -> String {
+    digest(&json!([
+        credentials.origin,
+        credentials.principal.tenant_id,
+        credentials.principal.user_id,
+        credentials.principal.membership_id,
+        credentials.scope,
+    ]))
+}
+
 async fn bounded_json(response: reqwest::Response) -> Result<Value, String> {
+    let data = bounded_response_bytes(response).await?;
+    serde_json::from_slice(&data)
+        .map_err(|_| "Le serveur n’a pas retourné une réponse Tutor valide.".into())
+}
+
+async fn bounded_mcp_json(response: reqwest::Response, id: &str) -> Result<Value, String> {
+    let data = bounded_response_bytes(response).await?;
+    let mut messages = Vec::new();
+    if let Ok(value) = serde_json::from_slice::<Value>(&data) {
+        messages.push(value);
+    } else {
+        let text = std::str::from_utf8(&data)
+            .map_err(|_| "La liste des outils MCP est invalide.")?
+            .replace("\r\n", "\n");
+        for frame in text.split("\n\n") {
+            let payload = frame
+                .lines()
+                .filter_map(|line| line.strip_prefix("data:").map(str::trim_start))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !payload.is_empty() {
+                messages.push(
+                    serde_json::from_str(&payload)
+                        .map_err(|_| "La liste des outils MCP est invalide.")?,
+                );
+            }
+        }
+    }
+    let mut matched = messages.into_iter().filter(|message| message["id"] == id);
+    let result = matched
+        .next()
+        .ok_or("La liste des outils MCP est invalide.")?;
+    if matched.next().is_some() || result["jsonrpc"] != "2.0" || result.get("error").is_some() {
+        return Err("La liste des outils MCP est invalide.".into());
+    }
+    result
+        .get("result")
+        .cloned()
+        .ok_or_else(|| "La liste des outils MCP est invalide.".into())
+}
+
+async fn bounded_response_bytes(response: reqwest::Response) -> Result<Vec<u8>, String> {
     if response
         .content_length()
         .is_some_and(|n| n > 8 * 1024 * 1024)
@@ -2169,8 +2775,7 @@ async fn bounded_json(response: reqwest::Response) -> Result<Value, String> {
         }
         data.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&data)
-        .map_err(|_| "Le serveur n’a pas retourné une réponse Tutor valide.".into())
+    Ok(data)
 }
 
 async fn mcp_tool(rpc: &AcpClient, name: &str, args: Value) -> Result<Value, String> {
@@ -2193,6 +2798,139 @@ async fn mcp_tool(rpc: &AcpClient, name: &str, args: Value) -> Result<Value, Str
         })
         .ok_or("Réponse d’outil Tutor sans contenu structuré.")?;
     serde_json::from_str(text).map_err(|_| "L’outil Tutor a retourné un contenu illisible.".into())
+}
+
+fn config_option(response: &Value, category: &str) -> Option<Value> {
+    response
+        .get("configOptions")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|o| o.get("category").and_then(Value::as_str) == Some(category))
+        .cloned()
+}
+fn config_values(option: &Value) -> Vec<String> {
+    fn collect(v: &Value, out: &mut Vec<String>) {
+        if let Some(value) = v.get("value").and_then(Value::as_str) {
+            out.push(value.into());
+        }
+        if let Some(options) = v.get("options").and_then(Value::as_array) {
+            for v in options {
+                collect(v, out);
+            }
+        }
+    }
+    let mut values = Vec::new();
+    collect(option, &mut values);
+    values
+}
+fn fast_option(response: &Value) -> Option<Value> {
+    response
+        .get("configOptions")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|o| o.get("id").and_then(Value::as_str) == Some("fast-mode"))
+        .cloned()
+}
+fn configuration_view(
+    connected: bool,
+    response: &Value,
+    current: &crate::workspace::AgentSettings,
+) -> Value {
+    let model = config_option(response, "model");
+    let thought = config_option(response, "thought_level");
+    let speed = fast_option(response).is_some()
+        || thought.as_ref().is_some_and(|o| config_values(o).len() > 1);
+    let mut speeds = vec!["balanced"];
+    if speed {
+        speeds.push("fast");
+    }
+    if thought.as_ref().is_some_and(|o| config_values(o).len() > 1) {
+        speeds.push("deep");
+    }
+    json!({"connected":connected,"configOptions":response.get("configOptions").cloned().unwrap_or(json!([])),"current":current,"speedOptions":speeds,"supported":{"model":model.is_some(),"reasoningEffort":thought.is_some(),"speed":speed}})
+}
+async fn set_session_option(
+    rpc: &AcpClient,
+    session: &str,
+    mut response: Value,
+    option: &Value,
+    value: Value,
+) -> Result<Value, String> {
+    if option.get("currentValue") == Some(&value) {
+        return Ok(response);
+    }
+    let id = option
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or("Option de modèle invalide.")?;
+    let updated = rpc
+        .request(
+            "session/set_config_option",
+            json!({"sessionId":session,"configId":id,"value":value}),
+        )
+        .await?;
+    if updated.get("configOptions").is_some() {
+        response["configOptions"] = updated["configOptions"].clone();
+    }
+    Ok(response)
+}
+async fn apply_agent_settings(
+    rpc: &AcpClient,
+    session: &str,
+    mut response: Value,
+    settings: &crate::workspace::AgentSettings,
+) -> Result<Value, String> {
+    if !settings.model.is_empty() {
+        let option = config_option(&response, "model")
+            .ok_or("Cet agent ne propose pas de choix de modèle pour cette session.")?;
+        if !config_values(&option).contains(&settings.model) {
+            return Err("Le modèle enregistré n’est plus proposé par cet agent. Choisissez un modèle disponible.".into());
+        }
+        response =
+            set_session_option(rpc, session, response, &option, json!(settings.model)).await?;
+    }
+    let thought = config_option(&response, "thought_level");
+    let mut effort = settings.reasoning_effort.clone();
+    if effort.is_empty() && settings.speed != "balanced" {
+        if let Some(option) = &thought {
+            let values = config_values(option);
+            let preferences = if settings.speed == "deep" {
+                ["high", "xhigh", "max", "ultra", "medium"]
+            } else {
+                ["low", "minimal", "none", "medium", "high"]
+            };
+            if let Some(value) = preferences
+                .into_iter()
+                .find(|v| values.iter().any(|s| s == v))
+            {
+                effort = value.into();
+            }
+        }
+    }
+    if !effort.is_empty() {
+        let option = thought.ok_or("Cet agent ne propose pas de réglage de raisonnement.")?;
+        if !config_values(&option).contains(&effort) {
+            return Err("Le niveau de raisonnement n’est pas proposé pour ce modèle.".into());
+        }
+        response = set_session_option(rpc, session, response, &option, json!(effort)).await?;
+    } else if settings.speed == "deep" {
+        return Err("Ce modèle ne propose pas de mode approfondi.".into());
+    }
+    if let Some(option) = fast_option(&response) {
+        let value = if option.get("type").and_then(Value::as_str) == Some("boolean") {
+            json!(settings.speed == "fast")
+        } else {
+            json!(if settings.speed == "fast" {
+                "on"
+            } else {
+                "off"
+            })
+        };
+        response = set_session_option(rpc, session, response, &option, value).await?;
+    } else if settings.speed == "fast" && config_option(&response, "thought_level").is_none() {
+        return Err("Ce modèle ne propose pas de réglage rapide.".into());
+    }
+    Ok(response)
 }
 
 fn pedagogical_prompt(
@@ -2221,11 +2959,11 @@ fn pedagogical_prompt(
         .and_then(|value| value.get("identity"))
         .cloned()
         .unwrap_or(Value::Null);
-    format!("Tu es le tuteur de cette personne. Réponds dans sa langue. Utilise le serveur MCP tutor et ses schémas réels. Une demande d’apprentissage crée par défaut une formation PERSONNELLE PRIVÉE, même pour un propriétaire ou un formateur. Commence par list_training_library(query) pour retrouver un programme existant. Si plusieurs correspondent, présente une courte liste dans le fil et attends son choix. Si aucun ne correspond, enregistre immédiatement un programme initial et ses concepts avec init_domain, puis commence l’activité via get_next_activity avec son domain_id explicite. Aucun formulaire d’intention ni validation préalable n’est requis pour cette création personnelle. Enrichis ensuite les définitions, objectifs observables et critères avec le contrat d’édition.
+    format!("Tu es le tuteur de cette personne. Réponds dans sa langue. Utilise le serveur MCP tutor et ses schémas réels. Une demande d’apprentissage crée par défaut une formation PERSONNELLE PRIVÉE, même pour un propriétaire ou un formateur. Commence par list_training_library(query) pour retrouver un programme existant. Si plusieurs correspondent, présente une courte liste dans le fil et attends son choix. Si aucun ne correspond, enregistre immédiatement un programme initial et ses concepts avec init_domain, puis commence l’activité via get_next_activity avec son domain_id explicite. Aucun formulaire d’intention ni validation préalable n’est requis pour cette création personnelle. Le programme initial doit rester concis et directement utilisable : fournis dès init_domain les détails des concepts, leurs objectifs observables et leurs critères selon le schéma. init_domain confirme déjà la formation et sa sélection ; utilise le contexte retourné et évite de sélectionner à nouveau la même formation. Prépare ensuite la première activité. Ne crée aucune proposition d’édition pendant une simple demande d’apprentissage.
 \
     Cette conversation a l’identifiant {conversation_id}. Lis get_conversation_context et utilise select_conversation_training(expected_selection) pour tout changement explicite. Le transport est lié à cette conversation et refuse un domaine différent. Ne route jamais vers le dernier domaine global. Chaque observation, tentative et séance porte le domain_id confirmé. Pour apprendre, lis get_curriculum_snapshot avec ce domain_id, pas le brouillon de conception commun. Annonce sobrement tout changement de formation.
 \
-    Pour modifier un programme, lis get_training et sa revision, puis utilise preview_training_edit et propose_training_edit avec expected_revision et le document complet. La proposition sera examinée et retouchée dans l’éditeur commun. Ne la valide pas à la place de la personne. Les versions communes publiées restent immuables, les inscrits conservent leur version.
+    Seulement quand la personne demande de modifier un programme, lis get_training et sa revision, puis utilise preview_training_edit et propose_training_edit avec expected_revision et le document complet. La proposition sera examinée et retouchée dans l’éditeur commun. Ne la valide pas à la place de la personne. Les versions communes publiées restent immuables, les inscrits conservent leur version.
 \
     Une création institutionnelle doit être demandée explicitement par le propriétaire : share_training sans id, avec name, audience et document. Partager une formation personnelle utilise share_training avec son id et copie uniquement sa conception. Les contributions sont soumises au propriétaire à chaque version sauf autorisation explicite de publication libre. Publier et approuver exige la demande humaine correspondante, ne crée jamais d’inscription implicite. Ouvert signifie tous les membres de CETTE institution. Les capacités du serveur prévalent. Le suivi de groupe utilise seulement les outils de progression autorisés.
 \
