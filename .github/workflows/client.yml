@@ -141,8 +141,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (-not (Test-Path -LiteralPath $report -PathType Leaf)) { throw 'The UI Automation report is missing from RUNNER_TEMP.' }
           $receipt = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
-          if (-not $receipt.languageSwitchFrEnFr -or -not $receipt.themeSwitchLightDark -or -not $receipt.persistenceAfterProcessRestart -or -not $receipt.testOwnedOfflineProfile) {
-            throw 'The UI Automation report does not prove language, theme and process-restart acceptance.'
+          if (-not $receipt.languageSwitchFrEnFr -or -not $receipt.commandPaletteKeyboardNavigation -or -not $receipt.themeSwitchLightDark -or -not $receipt.persistenceAfterProcessRestart -or -not $receipt.testOwnedOfflineProfile) {
+            throw 'The UI Automation report does not prove command palette, language, theme and process-restart acceptance.'
           }
           if ($receipt.sourceCommit -ne $env:GITHUB_SHA) { throw 'The UI Automation report belongs to another commit.' }
           if (@($receipt.settingsTabs).Count -ne 4) { throw 'The UI Automation report is missing settings tabs.' }

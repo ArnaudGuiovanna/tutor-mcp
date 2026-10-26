@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/banner.svg" alt="Tutor MCP — Self-learning is a superpower." width="100%" />
+  <img src="docs/banner.svg" alt="Tutor-MCP — lifelong learning and learning communities" width="100%" />
 </p>
 
 <p align="center">
@@ -55,9 +55,11 @@ on an unseen debugging scenario, and the outcome is recorded against the frozen 
 
 ## Installation
 
-**For an institution or learning community, start with [Tutor ACP 0.0.1 for Windows x64](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.0/Tutor_ACP_0.0.1_windows_x64-setup.exe).** Codex and Claude adapters and their Node.js runtime are included. Connect your provider account, then connect to your institution's Tutor service. The [desktop client guide](client/README.md) covers setup, identities and backups, native Windows and WSL2.
+**For an institution or learning community, start with [Tutor ACP 0.0.2 for Windows x64](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.1/Tutor_ACP_0.0.2_windows_x64-setup.exe).** Codex and Claude adapters and their Node.js runtime are included. Connect your provider account, then connect to your institution's Tutor service. The [desktop client guide](client/README.md) covers setup, identities and backups, native Windows and WSL2.
 
 The client offers French/English, light/dark/system themes and adjustable reading settings saved per account. MCP tool permissions can be remembered across conversations and restarts for the selected account, server and agent, and changed in Settings. The server controls access and progress; published programmes retain their versions for enrolled learners until an explicit migration.
+
+Version 0.0.2 follows the [Tutor-MCP graphic charter](ui/charte-tutor-mcp.html), with self-hosted Inter and JetBrains Mono fonts. **Ctrl+K** opens the command palette to find a conversation, navigate to settings or change the theme from the keyboard.
 
 Choose where your learning data lives. Every profile uses the same learning engine.
 
@@ -67,13 +69,13 @@ Choose where your learning data lives. Every profile uses the same learning engi
 | **Local** | Learning on your own computer | One binary + `--local`. Your MCP client starts it; SQLite stores your history. No account or server setup. [Local setup](docs/installation.md#local-client-configuration) |
 | **Hobby** | A personal VPS or a small group using MCP clients | `--profile hobby`, SQLite and an HTTPS proxy. Invite users over SSH; they sign in with a username and password. [Native installation](docs/installation.md#native-hobby-vps-binary-systemd-and-caddy) · [Docker Compose](docs/installation.md#hobby-vps-with-docker-compose) |
 
-Binaries target **Linux, macOS and Windows**, on amd64 and arm64. Profiles require **v0.6.0+**; install [v0.7.0](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/v0.7.0) for the current server and the ACP client 0.0.1. See [installation details](docs/installation.md) for installers, service configuration and backups.
+Binaries target **Linux, macOS and Windows**, on amd64 and arm64. Profiles require **v0.6.0+**; install [v0.7.1](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/v0.7.1) for the current server and the ACP client 0.0.2. See [installation details](docs/installation.md) for installers, service configuration and backups.
 
 ## Quickstart
 
 ### 1. Get the binary
 
-For the institutional desktop experience, [install Tutor ACP for Windows](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.0/Tutor_ACP_0.0.1_windows_x64-setup.exe). Your organization provides the Tutor server; administrators can follow the [institutional setup](docs/installation.md#institutional-deployment) using the [server release](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/v0.7.0).
+For the institutional desktop experience, [install Tutor ACP for Windows](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.1/Tutor_ACP_0.0.2_windows_x64-setup.exe). Your organization provides the Tutor server; administrators can follow the [institutional setup](docs/installation.md#institutional-deployment) using the [server release](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/v0.7.1).
 
 For local use or development, build the MCP server from source with Git and [Go 1.26.10 or a newer patched release](https://go.dev/dl/):
 

@@ -1,6 +1,6 @@
 # Qualification du client
 
-La recette du client **0.0.1** couvre Codex et Claude par leurs adaptateurs ACP.
+La recette du client **0.0.2** couvre Codex et Claude par leurs adaptateurs ACP.
 Elle distingue le lancement du processus, le protocole, le serveur pédagogique,
 l’interface Windows installée et l’utilisation réelle d’un modèle. Le succès
 d’une de ces étapes ne vaut pas qualification des autres.
@@ -12,7 +12,7 @@ sur le commit concerné et reliée à ses rapports bruts.
 | Preuve | Périmètre | Limite |
 |---|---|---|
 | `tutor-packaged-rust.json` | Les deux agents Windows passent par `Backend::connect_agent`, le lancement Rust utilisé par l’application ; premier lancement, reprise et arrêt. | Négociation ACP sans génération ; le parcours d’identification fournisseur n’est pas exercé. |
-| `tutor-client-accessibility.json` | Application installée depuis NSIS : noms UI Automation, clavier, quatre onglets, changement FR/EN/FR, sélection des thèmes et persistance après fermeture du processus. | Profil de test hors ligne, sans séance MCP ni audit manuel de Narrator. |
+| `tutor-client-accessibility.json` | Application installée depuis NSIS : noms UI Automation, clavier, palette Ctrl+K, quatre onglets, changement FR/EN/FR, sélection des thèmes et persistance après fermeture du processus. | Profil de test hors ligne, sans séance MCP ni audit manuel de Narrator. |
 | `tutor-client-runtime.json` | Découverte native de l’adaptateur, négociation ACP et, avec `-TutorBinary`, persistance d’appels MCP directs. | Les appels directs ne prouvent pas leur utilisation par un modèle. |
 | `tutor-client-wsl-runtime.json` | Découverte et exécution dans une véritable distribution WSL2 depuis Windows, arrêt des processus et choix du CLI. | Ne qualifie ni l’interface graphique Linux ni une génération de modèle. |
 | Rapport distinct d’une séance avec fournisseur authentifié | Réponses réelles et appels MCP dans le profil pédagogique de test, avec OS, versions et données de test identifiés. | Un essai Linux avec données synthétiques ne qualifie pas l’exécutable Windows installé. |
@@ -120,7 +120,7 @@ Le rapport est relié au commit par le workflow et le nom de son artefact.
 
 ## Interface Windows installée et persistance après fermeture
 
-La recette utilise l’installeur **0.0.1**, pas une prévisualisation web. Elle doit
+La recette utilise l’installeur **0.0.2**, pas une prévisualisation web. Elle doit
 être exécutée sur un compte Windows de test sans données Tutor existantes : le
 script refuse de remplacer un profil présent et ne nettoie que ses propres
 dossiers de test.
@@ -128,13 +128,15 @@ dossiers de test.
 ```powershell
 $env:GITHUB_SHA = (git rev-parse HEAD).Trim()
 ./client/tests/windows/test-installed-client.ps1 `
-  -Installer 'client/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Tutor_0.0.1_x64-setup.exe' `
+  -Installer 'client/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Tutor_0.0.2_x64-setup.exe' `
   -Report (Join-Path (Get-Location) 'tutor-client-accessibility.json')
 ```
 
 Le profil semé pour ce test est hors ligne, sans URL ni commande Tutor et sans
 identité native. Le script UI Automation tape un message sans l’envoyer, vérifie
-les noms accessibles et la navigation clavier, puis parcourt les quatre onglets
+les noms accessibles et la navigation clavier. Il ouvre la palette avec Ctrl+K,
+recherche « ergonomie », valide par Entrée et contrôle l’onglet sélectionné.
+Il parcourt ensuite les quatre onglets
 **Agents / Institution / Membres / Ergonomie**. Il change la langue
 **Français → English → Français**, vérifie les libellés des paramètres dans les deux langues et
 sélectionne les thèmes clair et sombre avec les contrôles accessibles.
@@ -148,7 +150,7 @@ thème sombre.
 Le rapport brut `tutor-client-accessibility.json` contient les preuves des deux
 passes dans `exercise` et `reopened`, ainsi que `sourceCommit`, `sourceVersion`,
 `binaryProductVersion`, `settingsTabs`, `languageSwitchFrEnFr`,
-`themeSwitchLightDark`, `persistenceAfterProcessRestart` et
+`commandPaletteKeyboardNavigation`, `themeSwitchLightDark`, `persistenceAfterProcessRestart` et
 `persistedValuesVerifiedInWorkspace`. Le workflow exige ce fichier à l’emplacement
 explicite sous `RUNNER_TEMP`, contrôle son commit et ses indicateurs avant de
 l’ajouter à l’artefact. Une ligne de log ou un récépissé reconstruit ne remplace

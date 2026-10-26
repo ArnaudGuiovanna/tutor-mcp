@@ -14,6 +14,11 @@ exécuté nativement ou dans une distribution **WSL2** choisie explicitement.
   serveur, conversation progressive, permissions explicites et interruption.
 - Conservation des échanges sur l’appareil et reprise de la séance agent avec
   le même compte Tutor. Les réponses interrompues restent identifiées comme telles.
+- Interface 0.0.2 conforme à la [charte Tutor-MCP](../ui/charte-tutor-mcp.html) :
+  bleu nuit, accent bleu, wordmark à curseur et polices Inter/JetBrains Mono embarquées.
+- **Ctrl+K** ouvre la palette : recherche sans accents, conversations, formations,
+  compte, réglages et thèmes. Les flèches et Entrée choisissent une commande ;
+  Échap ferme la palette et Tab reste dans le dialogue.
 
 Les programmes sont enregistrés dans Tutor dès le premier échange. La bibliothèque
 Formations provient d’une projection serveur paginée et recherchable. Les inscriptions, les permissions et les observations
@@ -22,8 +27,8 @@ de maîtrise. Le client ne crée ni votes ni publication communautaire inexistan
 
 ## Installation Windows et Codex
 
-Le client ACP **0.0.1** est distribué comme asset de release avec un
-[lien durable](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.0/Tutor_ACP_0.0.1_windows_x64-setup.exe).
+Le client ACP **0.0.2** est distribué comme asset de release avec un
+[lien durable](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.1/Tutor_ACP_0.0.2_windows_x64-setup.exe).
 Le workflow **Client → Client (Windows)** construit NSIS, vérifie les agents
 embarqués, installe l’application et teste sa fenêtre ainsi que son arbre
 UI Automation et la saisie au clavier. Le rapport est conservé avec l’artefact CI.

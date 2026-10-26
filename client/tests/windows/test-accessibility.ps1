@@ -169,6 +169,40 @@ function Open-Settings([bool]$English) {
     }
 }
 
+function Find-CommandControl([string]$Name, [System.Windows.Automation.ControlType[]]$Types) {
+    $condition = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::NameProperty, $Name)
+    $deadline = [DateTime]::UtcNow.AddSeconds(20)
+    do {
+        foreach ($element in $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition)) {
+            if ($Types -contains $element.Current.ControlType -and $element.Current.IsEnabled -and -not $element.Current.IsOffscreen) { return $element }
+        }
+        Start-Sleep -Milliseconds 150
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Command palette control missing: $Name. $(Get-FocusDescription)"
+}
+
+function Exercise-CommandPalette {
+    [System.Windows.Forms.SendKeys]::SendWait('^k')
+    # Chromium can expose an editable ARIA combobox as ComboBox or Edit.
+    $search = Find-CommandControl 'Rechercher une commande' @($comboType, $editType)
+    $search.SetFocus()
+    Assert-ControlFocus 'Rechercher une commande' $search.Current.ControlType
+    [System.Windows.Forms.SendKeys]::SendWait('ergonomie')
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    $stableQuery = 0
+    do {
+        if ((Read-ComboValue $search) -eq 'ergonomie') { $stableQuery++ } else { $stableQuery = 0 }
+        if ($stableQuery -ge 2) { break }
+        Start-Sleep -Milliseconds 150
+    } while ([DateTime]::UtcNow -lt $deadline)
+    if ($stableQuery -lt 2) { throw 'The command palette did not receive the search text.' }
+    [void](Find-CommandControl 'Ergonomie' @($buttonType, [System.Windows.Automation.ControlType]::ListItem))
+    [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+    Focus-Control 'Ergonomie' $tabType
+    Assert-TabFocus 'Ergonomie'
+}
+
 if ($Mode -eq 'Exercise') {
     $conversation = Find-Control 'Conversation' $buttonType
     $formations = Find-Control 'Formations' $buttonType
@@ -185,6 +219,7 @@ if ($Mode -eq 'Exercise') {
     [System.Windows.Forms.SendKeys]::SendWait('{TAB}')
     Assert-ControlFocus 'Envoyer' $buttonType
 
+    Exercise-CommandPalette
     Open-Settings $false
     Assert-ComboValue 'Langue de Tutor' @('Français', 'fr')
     Select-ComboByKeyboard 'Langue de Tutor' 1
@@ -229,6 +264,7 @@ if ($parent -and -not (Test-Path -LiteralPath $parent)) { [void](New-Item -ItemT
     keyboardNavigation = $true
     settingsTabs = @('agents', 'institution', 'members', 'ergonomics')
     settingsTabKeyboardNavigation = $true
+    commandPaletteKeyboardNavigation = ($Mode -eq 'Exercise')
     languageSwitchFrEnFr = ($Mode -eq 'Exercise')
     themeSwitchLightDark = $true
     persistenceAfterProcessRestart = ($Mode -eq 'VerifyPersistence')

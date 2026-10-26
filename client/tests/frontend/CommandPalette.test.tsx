@@ -10,6 +10,21 @@ async function ready(api: ReturnType<typeof client>['api']) {
 }
 
 describe('Palette de commandes', () => {
+  it('garde Tab dans le dialogue et restitue le focus à sa fermeture', async () => {
+    const {api}=client();await ready(api);
+    const trigger=screen.getByRole('button',{name:'Palette de commandes'});
+    await userEvent.click(trigger);
+    const search=await screen.findByRole('combobox',{name:'Rechercher une commande'});
+    await waitFor(()=>expect(document.activeElement).toBe(search));
+    await userEvent.tab();
+    expect(document.activeElement).toBe(search);
+    await userEvent.tab({shift:true});
+    expect(document.activeElement).toBe(search);
+    await userEvent.keyboard('{Escape}');
+    await waitFor(()=>expect(screen.queryByRole('dialog',{name:'Palette de commandes'})).toBeNull());
+    expect(document.activeElement).toBe(trigger);
+  });
+
   it('s’ouvre avec Ctrl K, filtre sans accents et navigue vers les réglages', async () => {
     const {api}=client();await ready(api);
     expect(screen.queryByRole('dialog',{name:'Palette de commandes'})).toBeNull();

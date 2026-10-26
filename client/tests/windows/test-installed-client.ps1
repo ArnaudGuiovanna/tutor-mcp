@@ -121,7 +121,7 @@ try {
     Assert-SavedSettings 'fr' 'dark'
     $exercise = Get-Content -LiteralPath $exerciseReport -Raw | ConvertFrom-Json
     $reopened = Get-Content -LiteralPath $restartReport -Raw | ConvertFrom-Json
-    if (-not $exercise.languageSwitchFrEnFr -or -not $reopened.persistenceAfterProcessRestart) {
+    if (-not $exercise.languageSwitchFrEnFr -or -not $exercise.commandPaletteKeyboardNavigation -or -not $reopened.persistenceAfterProcessRestart) {
         throw 'Incomplete language or process-restart evidence.'
     }
     $reportParent = Split-Path -Parent $Report
@@ -133,6 +133,7 @@ try {
         uiaNames = $true; keyboardInput = $true; keyboardNavigation = $true
         settingsTabs = @('agents', 'institution', 'members', 'ergonomics')
         languageSwitchFrEnFr = $true; themeSwitchLightDark = $true
+        commandPaletteKeyboardNavigation = $true
         persistenceAfterProcessRestart = $true; persistedValuesVerifiedInWorkspace = $true
         networkRequestSent = $false; testOwnedOfflineProfile = $true
         sendBeforeSetup = $true; narratorManualAudit = $false
