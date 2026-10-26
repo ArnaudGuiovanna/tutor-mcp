@@ -835,6 +835,161 @@ async fn native_login_requires_backup_and_preserves_legacy_credentials() {
     );
     assert!(backend.snapshot().await["identity"].get("secret").is_none());
 }
+
+#[tokio::test]
+async fn native_login_negotiates_contribution_owner_trainer_and_learner_grants() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use nostr::{Event, JsonUtil};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+
+    for (role, allowed, expected, learner) in [
+        (
+            "owner",
+            vec![
+                "formation:contribute",
+                "formation:read",
+                "formation:write",
+                "progress:read",
+            ],
+            "formation:contribute formation:read progress:read",
+            "",
+        ),
+        (
+            "trainer",
+            vec!["formation:contribute", "progress:read"],
+            "formation:contribute progress:read",
+            "",
+        ),
+        (
+            "learner",
+            vec!["learner:read", "learner:write", "formation:contribute"],
+            "learner:read learner:write formation:contribute",
+            "learner1",
+        ),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = Backend::new(directory.path(), Arc::new(|_, _| {})).unwrap();
+        let pair = KeyPair::generate();
+        backend.identity.lock().await.install(&pair).unwrap();
+        let public = pair.primary.public_key().to_hex();
+        let recovery = pair.recovery.public_key().to_hex();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let mut credentials = api_credentials(&origin);
+        credentials.identity.public_key = public.clone();
+        credentials.identity.recovery_public_key = recovery.clone();
+        credentials.principal.roles = vec![role.into()];
+        credentials.principal.learner_id = learner.into();
+        let issued = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let observed = issued.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let mut buffer = [0u8; 2048];
+                let (headers, body) = loop {
+                    let count = stream.read(&mut buffer).await.unwrap();
+                    assert!(count > 0);
+                    bytes.extend_from_slice(&buffer[..count]);
+                    if let Some(index) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let headers = String::from_utf8(bytes[..index].to_vec()).unwrap();
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if bytes.len() >= index + 4 + length {
+                            break (headers, bytes[index + 4..index + 4 + length].to_vec());
+                        }
+                    }
+                };
+                let path = headers.split_whitespace().nth(1).unwrap();
+                let result = if path == "/.well-known/tutor-institution" {
+                    serde_json::to_value(&credentials.institution).unwrap()
+                } else if path == "/api/client/v1/identity/challenge" {
+                    let mut request: Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(request["public_key"], public);
+                    assert!(request.get("private_key").is_none());
+                    request["challenge"] = json!("N".repeat(43));
+                    request["key_version"] = json!(1);
+                    let url = if request["action"] == "logout" {
+                        &credentials.institution.identity.logout_url
+                    } else {
+                        &credentials.institution.identity.session_url
+                    };
+                    let body = request.to_string();
+                    json!({"challenge":request["challenge"],"expires_at":chrono::Utc::now().timestamp()+120,"key_version":1,"url":url,"method":"POST","request_body":body,"payload_hash":format!("{:x}",Sha256::digest(body.as_bytes())),"tenant_id":"tenant1","public_key":public,"action":request["action"],"scope":request["scope"]})
+                } else if path == "/api/client/v1/identity/session"
+                    || path == "/api/client/v1/identity/logout"
+                {
+                    let authorization = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("authorization")
+                                .then(|| value.trim())
+                        })
+                        .unwrap()
+                        .strip_prefix("Nostr ")
+                        .unwrap();
+                    let event = Event::from_json(STANDARD.decode(authorization).unwrap()).unwrap();
+                    event.verify().unwrap();
+                    assert_eq!(event.pubkey.to_hex(), public);
+                    let hash = format!("{:x}", Sha256::digest(&body));
+                    assert!(event
+                        .tags
+                        .iter()
+                        .any(|tag| tag.as_slice() == ["payload", hash.as_str()]));
+                    let request: Value = serde_json::from_slice(&body).unwrap();
+                    if path.ends_with("logout") {
+                        assert_eq!(request["scope"], "formation:contribute");
+                        json!({"revoked":true,"session_id":request["session_id"]})
+                    } else {
+                        let scope = request["scope"].as_str().unwrap();
+                        let mut scopes = observed.lock().unwrap();
+                        scopes.push(scope.into());
+                        json!({"access_token":format!("test-native-token-{}",scopes.len()),"token_type":"Bearer","expires_in":1800,"scope":scope,"session_id":format!("test-native-session-{}",scopes.len()),"identity":credentials.identity,"principal":credentials.principal,"allowed_scopes":allowed})
+                    }
+                } else if path.starts_with("/api/client/v1/overview") {
+                    let mut page = overview_page();
+                    page["identity"]["learnerId"] = json!(learner);
+                    page["identity"]["roles"] = json!([role]);
+                    page
+                } else {
+                    panic!("Unexpected request: {path}")
+                };
+                let body = result.to_string();
+                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let mut settings = backend.settings().await;
+        settings.tutor.mode = "remote".into();
+        settings.tutor.activity = "auto".into();
+        settings.tutor.url = origin.clone();
+        backend.save_settings(settings).await.unwrap();
+        backend.connect_tutor(origin, false).await.unwrap();
+        assert_eq!(
+            issued.lock().unwrap().as_slice(),
+            &["formation:contribute", expected]
+        );
+        let session = backend.tutor.lock().await.credentials.clone().unwrap();
+        assert_eq!(session.scope, expected);
+        assert_eq!(session.principal.roles, vec![role]);
+        assert_eq!(session.principal.learner_id, learner);
+        assert!(!session
+            .scope
+            .split_whitespace()
+            .any(|scope| scope == "formation:write"));
+        backend.shutdown().await;
+        server.abort();
+    }
+}
 #[tokio::test]
 async fn backup_export_and_confirmation_broadcast_the_public_identity_state() {
     let directory = tempfile::tempdir().unwrap();

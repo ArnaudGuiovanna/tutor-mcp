@@ -22,8 +22,8 @@ de maîtrise. Le client ne crée ni votes ni publication communautaire inexistan
 
 ## Installation Windows et Codex
 
-L’installateur **0.2.0** est distribué comme asset de release avec un
-[lien durable](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/tutor-client-v0.2.0/Tutor_0.2.0_x64-setup.exe).
+L’installateur **0.2.1** est distribué comme asset de release avec un
+[lien durable](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/tutor-client-v0.2.1/Tutor_0.2.1_x64-setup.exe).
 Le workflow **Client → Client (Windows)** construit NSIS, vérifie les agents
 embarqués, installe l’application et teste sa fenêtre ainsi que son arbre
 UI Automation et la saisie au clavier. Le rapport est conservé avec l’artefact CI.

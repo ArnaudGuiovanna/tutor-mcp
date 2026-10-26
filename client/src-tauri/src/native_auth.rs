@@ -426,15 +426,39 @@ async fn submit<T: DeserializeOwned>(
     })?)
     .await
 }
-pub async fn open_session(origin: &str, keys: &Keys, scope: &str) -> Result<Session, String> {
-    if ![
-        "",
-        "learner:read learner:write",
+// Native grants use the server's canonical capability order. Accept each
+// supported subset, while rejecting unknown, duplicate or reordered tokens
+// before any discovery request or local signature is made.
+fn valid_session_scope(scope: &str) -> bool {
+    if scope.is_empty() {
+        return true;
+    }
+    const CAPABILITIES: &[&str] = &[
+        "learner:read",
+        "learner:write",
+        "formation:contribute",
         "formation:read",
-        "formation:read formation:write",
-    ]
-    .contains(&scope)
-    {
+        "formation:write",
+        "progress:read",
+    ];
+    let mut previous = None;
+    for token in scope.split(' ') {
+        let Some(index) = CAPABILITIES
+            .iter()
+            .position(|candidate| *candidate == token)
+        else {
+            return false;
+        };
+        if previous.is_some_and(|last| index <= last) {
+            return false;
+        }
+        previous = Some(index);
+    }
+    true
+}
+
+pub async fn open_session(origin: &str, keys: &Keys, scope: &str) -> Result<Session, String> {
+    if !valid_session_scope(scope) {
         return Err("Permissions de session inconnues.".into());
     }
     let origin = validate_origin(origin)?;
@@ -509,6 +533,45 @@ pub async fn replace_keys(
 mod tests {
     use super::*;
     use nostr::{Event, SecretKey, Timestamp};
+    #[tokio::test]
+    async fn session_scope_accepts_role_combinations_and_rejects_unconsented_tokens() {
+        let capabilities = [
+            "learner:read",
+            "learner:write",
+            "formation:contribute",
+            "formation:read",
+            "formation:write",
+            "progress:read",
+        ];
+        for mask in 0..(1 << capabilities.len()) {
+            let scope = capabilities
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| mask & (1 << index) != 0)
+                .map(|(_, scope)| *scope)
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(valid_session_scope(&scope), "{scope}");
+        }
+        for scope in [
+            "admin:write",
+            "formation:contribute admin:write",
+            "formation:contribute formation:contribute",
+            "progress:read formation:contribute",
+            " learner:read",
+            "learner:read ",
+            "learner:read  learner:write",
+            "learner:read\nlearner:write",
+        ] {
+            assert_eq!(
+                open_session("invalid-origin", &keys(), scope)
+                    .await
+                    .err()
+                    .as_deref(),
+                Some("Permissions de session inconnues.")
+            );
+        }
+    }
     fn request() -> Value {
         json!({"tenant_id":"tenant_interop","public_key":keys().public_key().to_hex(),"action":"session","scope":"learner:read learner:write"})
     }
