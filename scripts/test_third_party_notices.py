@@ -2,6 +2,7 @@
 import hashlib
 import io
 import json
+import runpy
 from pathlib import Path
 import subprocess
 import sys
@@ -15,6 +16,44 @@ from third_party_notices import collect, copy_component, run_json, source_commen
 
 
 class NoticeTests(unittest.TestCase):
+    def test_release_notice_assets_retain_original_payload_and_exclude_executable(self):
+        packaging = runpy.run_path(str(Path(__file__).with_name('package-release.py')))
+        for suffix, binary_name in [('tar.gz', 'tutor-mcp'), ('zip', 'tutor-mcp.exe')]:
+            with self.subTest(suffix=suffix), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                binary = root / binary_name
+                binary.write_bytes(b'qualified binary fixture')
+                (root / 'LICENSE').write_bytes(b'Project MIT licence\n')
+                notices = root / 'THIRD_PARTY_NOTICES'
+                component = notices / 'components/go/LICENSE'
+                component.parent.mkdir(parents=True)
+                terms = b'Original runtime terms\r\nCopyright original author\r\n'
+                component.write_bytes(terms)
+                (notices / 'README.txt').write_text('Original notice instructions\n')
+                inventory = {'format_version': 1, 'binary': binary_name,
+                             'binary_sha256': hashlib.sha256(binary.read_bytes()).hexdigest(),
+                             'components': [{'path': 'go', 'notices': [{'file': 'components/go/LICENSE',
+                                            'sha256': hashlib.sha256(terms).hexdigest()}]}]}
+                (notices / 'inventory.json').write_text(json.dumps(inventory))
+                asset = root / ('notices.' + suffix)
+                original = dict(inventory)
+                checked = packaging['write_notice_supplement'](asset, binary, root, notices, 1700000000)
+                self.assertEqual(checked, original)
+                prepared = asset.read_bytes()
+                packaging['write_notice_supplement'](asset, binary, root, notices, 1700000000)
+                self.assertEqual(asset.read_bytes(), prepared)
+                if suffix == 'zip':
+                    with zipfile.ZipFile(asset) as archive:
+                        self.assertNotIn(binary_name, archive.namelist())
+                        self.assertEqual(archive.read('THIRD_PARTY_NOTICES/components/go/LICENSE'), terms)
+                else:
+                    with tarfile.open(asset) as archive:
+                        self.assertNotIn(binary_name, archive.getnames())
+                        self.assertEqual(archive.extractfile('THIRD_PARTY_NOTICES/components/go/LICENSE').read(), terms)
+                component.write_bytes(b'Changed terms')
+                with self.assertRaisesRegex(ValueError, 'changed notice'):
+                    packaging['write_notice_supplement'](asset, binary, root, notices, 1700000000)
+
     def test_go_json_utf8_survives_windows_cp1252_default(self):
         documents = [{'Dir': 'C:/Users/Zoë/学習', 'Doc': '“MCP” — apprendre'},
                      {'ImportPath': 'example.org/日本語', 'Doc': 'Deuxième document'}]

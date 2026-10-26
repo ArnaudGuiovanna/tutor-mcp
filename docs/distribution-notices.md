@@ -29,6 +29,13 @@ licence in `docs/assets/logos/LICENSE`. They are not embedded in the binary.
 
 ## Installation and older archives
 
+The v0.7.0 release also publishes six standalone notice archives and their
+provenance alongside the six binary archives. These are generated from the
+same verified notice payload during packaging. `SHA256SUMS` covers both asset
+families and their provenance; `THIRD_PARTY_NOTICES_SHA256SUMS` covers the six
+standalone notice archives. Binary archives already contain their notices, so
+the installers use them directly without entering the legacy fallback.
+
 Current shell and PowerShell installers verify the downloaded archive, its
 inventory's binary hash and target, and every notice file before changing an
 existing installation. They retain the texts in `tutor-mcp-notices/` beside the
