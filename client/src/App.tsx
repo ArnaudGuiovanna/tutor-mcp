@@ -9,11 +9,16 @@ import { AccountMenu } from './AccountMenu';
 import { Connections } from './Connections';
 import { TrainingWorkspace } from './TrainingWorkspace';
 import { SettingsWorkspace, defaultAppearance } from './SettingsWorkspace';
+import { CommandPalette } from './CommandPalette';
+import type { Command } from './CommandPalette';
 import { chunkFromEvent, displayDate, errorMessage, permissionFromEvent, permissionLabel, record, text, toolFromEvent } from './model';
 import type { AgentConnection, AgentTarget, Conversation, ConversationContext, PermissionRequest, Settings, Snapshot, ToolActivity, TutorOverview } from './types';
 
-type Page = 'conversation' | 'formations' | 'account' | 'settings' | 'agents' | 'institution';
-const labels: Record<Page, string> = { conversation: 'Conversation', formations: 'Formations', account: 'Mon compte', settings: 'Paramètres', agents: 'Agents', institution: 'Institution' };
+type Page = 'conversation' | 'formations' | 'account' | 'settings' | 'agents' | 'institution' | 'members' | 'ergonomics';
+const labels: Record<Page, string> = { conversation: 'Conversation', formations: 'Formations', account: 'Mon compte', settings: 'Paramètres', agents: 'Agents', institution: 'Institution', members: 'Membres', ergonomics: 'Ergonomie' };
+const settingsPages: Page[] = ['settings', 'agents', 'institution', 'members', 'ergonomics'];
+// Windows is the reference target; macOS users read ⌘ for the same shortcut.
+const modifier = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl';
 const empty: Snapshot = { settings: { targetId: '', cwd: '', tutor: { mode: 'remote', activity: 'auto', url: '', command: 'tutor-mcp', args: ['--local'] } }, identity: { exists: false, backupConfirmed: false, needsBackup: false }, intents: [], conversations: [], tutorStatus: { connected: false, label: 'Tutor non connecté' }, agentConnected: false };
 
 export default function App({ api = bridge }: { api?: ClientBridge }) {
@@ -44,6 +49,7 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   const [libraryEpoch, setLibraryEpoch] = useState(0);
   const appearance = {...defaultAppearance,...state.settings.appearance};
   const [preparing,setPreparing] = useState('');
+  const [paletteOpen,setPaletteOpen] = useState(false);
   const conversation = newConversation ? undefined : state.conversations.find(item => item.id === (activeId || state.activeConversationId)) || [...state.conversations].sort((a,b) => b.updatedAt.localeCompare(a.updatedAt))[0];
   const activeTraining = conversation?.activeTraining;
   const locked = !!busy || !!pending || sending.current;
@@ -182,7 +188,17 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
     });
   }
 
-  const settingsPage = page === 'settings' || page === 'agents' || page === 'institution';
+  const settingsPage = settingsPages.includes(page);
+  useEffect(()=>{const onKey=(event:KeyboardEvent)=>{if((event.ctrlKey||event.metaKey)&&!event.altKey&&event.key.toLowerCase()==='k'){event.preventDefault();setPaletteOpen(value=>!value);}};window.addEventListener('keydown',onKey);return()=>window.removeEventListener('keydown',onKey);},[]);
+  async function openNewConversation(){await perform('Nouvelle conversation…', async () => { await api.selectConversation(); setNewConversation(true); setActiveId(undefined); setPage('conversation'); setTools([]); setDraft(''); });}
+  async function openConversation(id:string){await perform('Lecture de la conversation…', async () => { const next = await api.selectConversation(id); setState(next); setActiveId(id); setNewConversation(false); setPage('conversation'); setDraft(''); setTools([]); });}
+  const commands:Command[]=[
+    ...(['conversation','formations','account','settings','agents','institution','members','ergonomics'] as Page[]).map(item=>({id:`page-${item}`,group:t('Aller à'),label:t(labels[item]),icon:(item==='conversation'?'chat':item==='formations'?'book':item==='account'?'shield':item==='members'?'users':item==='agents'?'plug':'gear') as Command['icon'],hint:settingsPages.includes(item)&&item!=='settings'?t('Paramètres'):undefined,run:()=>{setPage(item);if(item==='formations')setTrainingId(undefined);}})),
+    {id:'new-conversation',group:t('Conversations'),label:t('Nouvelle conversation'),icon:'plus',disabled:locked||!!state.pendingMessage,run:()=>void openNewConversation()},
+    ...[...state.conversations].sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt)).map(item=>({id:`conversation-${item.id}`,group:t('Conversations'),label:item.title,icon:'clock' as const,hint:displayDate(item.updatedAt),disabled:locked||!!state.pendingMessage,run:()=>void openConversation(item.id)})),
+    ...([['dark','Sombre'],['light','Clair'],['system','Selon le système']] as const).map(([theme,label])=>({id:`theme-${theme}`,group:t('Apparence'),label:t(label),icon:'sun' as const,disabled:locked||appearance.theme===theme,run:()=>void perform('Enregistrement des réglages…',async()=>saved(await api.saveSettings({...state.settings,appearance:{...appearance,theme}})))})),
+    ...([['fr','Français'],['en','English']] as const).map(([language,label])=>({id:`language-${language}`,group:t('Langue de Tutor'),label,disabled:locked||(state.settings.language||'fr')===language,run:()=>void perform('Enregistrement des réglages…',async()=>saved(await api.saveSettings({...state.settings,language})))})),
+  ];
   useEffect(()=>{setInterfaceLanguage(state.settings.language||'fr');},[state.settings.language]);
   useEffect(()=>{const media=window.matchMedia?.('(prefers-color-scheme: light)');const update=()=>{document.documentElement.dataset.theme=appearance.theme==='system'?(media?.matches?'light':'dark'):appearance.theme;document.documentElement.dataset.reduceMotion=String(appearance.reduceMotion);};update();media?.addEventListener?.('change',update);return()=>media?.removeEventListener?.('change',update);},[appearance.theme,appearance.reduceMotion]);
   function saved(next:Snapshot){stateRef.current=next;setState(next);setInterfaceLanguage(next.settings.language||'fr');}
@@ -199,12 +215,14 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   return <div className="app-shell" style={{ '--reading-size': `${appearance.fontSize}px`, '--reading-line-height':String(appearance.lineHeight) } as CSSProperties}>
     <a className="skip-link" href="#main-content">{t("Aller au contenu principal")}</a>
     <aside className="sidebar">
-      <div className="brand"><span className="brand-symbol">{t("t")}</span><span>{t("Tutor")}</span></div>
-      <nav className="navigation" aria-label={t("Navigation principale")}>{(['conversation','formations'] as Page[]).map(item => <button className={`nav-item ${page === item ? 'active' : ''}`} aria-label={t(labels[item])} title={t(labels[item])} key={item} aria-current={page === item ? 'page' : undefined} onClick={() => { setPage(item); if (item === 'formations') setTrainingId(undefined); }}><Icon name={item === 'conversation' ? 'chat' : 'book'} /><span>{t(labels[item])}</span></button>)}</nav>
-      <button className="new-conversation" aria-label={t("Nouvelle conversation")} title={t("Nouvelle conversation")} disabled={locked || !!state.pendingMessage} onClick={() => void perform('Nouvelle conversation…', async () => { await api.selectConversation(); setNewConversation(true); setActiveId(undefined); setPage('conversation'); setTools([]); setDraft(''); })}><Icon name="plus" size={16} /><span>{t("Nouvelle conversation")}</span></button>
-      <nav className="conversation-history" aria-label={t("Historique des conversations")}><p className="sidebar-caption">{t("Conversations")}</p>{[...state.conversations].sort((a,b) => b.updatedAt.localeCompare(a.updatedAt)).map(item => <button key={item.id} className="history-item" aria-label={item.title} title={item.title} aria-current={conversation?.id === item.id ? 'true' : undefined} disabled={locked || !!state.pendingMessage} onClick={() => void perform('Lecture de la conversation…', async () => { const next = await api.selectConversation(item.id); setState(next); setActiveId(item.id); setNewConversation(false); setPage('conversation'); setDraft(''); setTools([]); })}><span>{item.title}</span><small>{displayDate(item.updatedAt)}</small></button>)}</nav>
-      <nav className="sidebar-bottom" aria-label={t("Compte et réglages")}>{(['account','settings'] as Page[]).map(item=><button className={`nav-item ${page===item||(item==='settings'&&settingsPage)?'active':''}`} aria-label={t(labels[item])} title={t(labels[item])} key={item} aria-current={page===item||(item==='settings'&&settingsPage)?'page':undefined} onClick={()=>setPage(item)}><Icon name={item==='account'?'shield':'sun'} size={18}/><span>{t(labels[item])}</span></button>)}</nav>
+      <div className="brand"><span className="wm">Tutor-MCP<span className="cursor still" aria-hidden="true" /></span></div>
+      <nav className="navigation" aria-label={t("Navigation principale")}>{(['conversation','formations'] as Page[]).map(item => <button className={`nav-item ${page === item ? 'active' : ''}`} aria-label={t(labels[item])} title={t(labels[item])} key={item} aria-current={page === item ? 'page' : undefined} onClick={() => { setPage(item); if (item === 'formations') setTrainingId(undefined); }}><Icon name={item === 'conversation' ? 'chat' : 'book'} /><span>{t(labels[item])}</span></button>)}
+      <button className="nav-item" aria-label={t("Palette de commandes")} title={t("Palette de commandes")} aria-keyshortcuts="Control+K Meta+K" onClick={() => setPaletteOpen(true)}><Icon name="search" /><span>{t("Rechercher ou aller à…")}</span><span className="kbd" aria-hidden="true">{modifier} K</span></button></nav>
+      <button className="new-conversation" aria-label={t("Nouvelle conversation")} title={t("Nouvelle conversation")} disabled={locked || !!state.pendingMessage} onClick={() => void openNewConversation()}><Icon name="plus" size={16} /><span>{t("Nouvelle conversation")}</span></button>
+      <nav className="conversation-history" aria-label={t("Historique des conversations")}><p className="sidebar-caption">{t("Conversations")}</p>{[...state.conversations].sort((a,b) => b.updatedAt.localeCompare(a.updatedAt)).map(item => <button key={item.id} className="history-item" aria-label={item.title} title={item.title} aria-current={conversation?.id === item.id ? 'true' : undefined} disabled={locked || !!state.pendingMessage} onClick={() => void openConversation(item.id)}><span>{item.title}</span><small>{displayDate(item.updatedAt)}</small></button>)}</nav>
+      <nav className="sidebar-bottom" aria-label={t("Compte et réglages")}>{(['account','settings'] as Page[]).map(item=><button className={`nav-item ${page===item||(item==='settings'&&settingsPage)?'active':''}`} aria-label={t(labels[item])} title={t(labels[item])} key={item} aria-current={page===item||(item==='settings'&&settingsPage)?'page':undefined} onClick={()=>setPage(item)}><Icon name={item==='account'?'users':'gear'} size={18}/><span>{t(labels[item])}</span></button>)}</nav>
     </aside>
+    <CommandPalette open={paletteOpen} commands={commands} onClose={() => setPaletteOpen(false)} />
     <main id="main-content" className={`main-shell ${page === 'conversation' ? 'conversation-main' : ''}`} tabIndex={-1}>
       <header className="workspace-heading"><h1>{t(settingsPage?'Paramètres':labels[page])}</h1>{page === 'conversation' && <><span className="active-training">{activeTraining?.name || t('À votre rythme')}</span>{activeTraining?.training_id && <button className="link-button" onClick={() => { setTrainingId(activeTraining.training_id); setPage('formations'); }}>{t("Voir la formation")}</button>}</>}<span className="connection-status" aria-label={t("État des connexions")}><span className={`dot ${state.tutorStatus.connected && state.agentConnected ? 'online' : ''}`} />{state.tutorStatus.connected && state.agentConnected ? t("Prêt") : t("À connecter")}</span></header>
       {error && <Notice kind="error" onDismiss={() => setError('')}>{t(error)}</Notice>}
@@ -217,12 +235,12 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
         {(pending||preparing)&&<TutorActivity tools={tools} streaming={!!stream} permission={!!permissions.length} preparing={preparing} providerStatus={providerStatus}/>}
         <form className="composer" onSubmit={event => { event.preventDefault(); void dispatch(draft,conversation); }}>
           <label className="visually-hidden" htmlFor="prompt">{t("Votre message au tuteur")}</label><textarea autoFocus id="prompt" value={draft} onChange={event => setDraft(event.target.value)} disabled={!!pending || !!state.pendingMessage} placeholder={t("Je veux apprendre le Go…")} maxLength={64000} onKeyDown={event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
-          <div className="composer-footer"><span className="composer-hint">{t("Ctrl + Entrée pour envoyer · L’IA peut se tromper.")}</span>{pending ? <button type="button" className="button secondary" onClick={() => void api.cancelPrompt(pending).catch(reason => setError(errorMessage(reason)))}><Icon name="pause" size={16} />{t("Interrompre")}</button> : <button className="button primary" disabled={locked || !draft.trim() || !!state.pendingMessage}>{t("Envoyer")}<Icon name="arrow" size={16} /></button>}</div>
+          <div className="composer-footer"><span className="composer-hint">{t("Ctrl + Entrée pour envoyer · L’IA peut se tromper.")}</span>{pending ? <button type="button" className="button secondary" onClick={() => void api.cancelPrompt(pending).catch(reason => setError(errorMessage(reason)))}><Icon name="pause" size={16} />{t("Interrompre")}</button> : <button className="button blue" disabled={locked || !draft.trim() || !!state.pendingMessage}>{t("Envoyer")}<span className="kbd" aria-hidden="true">{modifier} ⏎</span></button>}</div>
         </form>
       </section>}
       {page === 'formations' && <TrainingWorkspace key={`${state.profile?.id}:${state.settings.tutor.url}:${overview?.identity?.tenantId}:${state.tutorStatus.connected}`} api={api} connected={state.tutorStatus.connected} epoch={libraryEpoch} initialId={trainingId} canCreate={overview?.identity?.roles?.includes('owner') === true} busy={locked} onLearn={learn} onDiscuss={discuss} onConnect={() => setPage('institution')} />}
       {page==='account'&&<div className="settings-content"><AccountMenu key={state.profile?.id} snapshot={state} overview={overview} busy={locked} api={api} onSelect={id=>void perform('Changement de compte…',async()=>applyProfile(await api.selectProfile(id)))} onCreate={label=>void perform('Création du compte…',async()=>{applyProfile(await api.createProfile(label));await api.createIdentity();saved(await api.loadState());setPage('account');})} onRename={label=>void perform('Enregistrement du nom…',async()=>saved(await api.renameProfile(label)))} onDelete={id=>void perform('Retrait du compte…',async()=>{applyProfile(await api.deleteProfile(id,id));setPage('account');})}/>{connections('account')}</div>}
-      {settingsPage&&<div className="settings-content"><SettingsWorkspace key={`${state.profile?.id}:${page}:${state.settings.tutor.url}:${overview?.identity?.tenantId}`} api={api} snapshot={state} overview={overview} busy={locked} initialTab={page==='institution'?'institution':'agents'} renderConnection={connections} onSaved={saved}/></div>}
+      {settingsPage&&<div className="settings-content"><SettingsWorkspace key={`${state.profile?.id}:${page}:${state.settings.tutor.url}:${overview?.identity?.tenantId}`} api={api} snapshot={state} overview={overview} busy={locked} initialTab={page==='settings'?'agents':page as 'agents'|'institution'|'members'|'ergonomics'} renderConnection={connections} onSaved={saved}/></div>}
 
     </main>
   </div>;
@@ -236,7 +254,7 @@ function ConversationMessages({ conversation,streamText,streaming,openLink }: { 
   useEffect(() => { if (nearEnd.current) end.current?.scrollIntoView?.({block:'nearest'}); else setUnread(true); },[conversation?.messages.length,streamText]);
   const messages = conversation?.messages || [];
   return <div className="conversation-messages" role="log" aria-label={t("Messages de la conversation")} aria-live={streaming ? 'off' : 'polite'} aria-relevant="additions" tabIndex={0} onScroll={event => { const element = event.currentTarget; nearEnd.current = element.scrollHeight - element.scrollTop - element.clientHeight < 96; if (nearEnd.current) setUnread(false); }}>
-    {!messages.length && !streamText && <div className="conversation-welcome"><span className="welcome-mark" aria-hidden="true">✳</span><h2>{t("Qu’avez-vous envie d’apprendre ?")}</h2><p>{t("Un sujet, une question, une envie.")}<br />{t("Votre formation commence ici.")}</p><div className="welcome-examples"><span>{t("« Je veux apprendre le Go »")}</span><span>{t("« Reprenons ma formation Python »")}</span></div></div>}
+    {!messages.length && !streamText && <div className="conversation-welcome"><span className="welcome-mark" aria-hidden="true"><span className="wm">T<span className="cursor" /></span></span><h2>{t("Qu’avez-vous envie d’apprendre ?")}</h2><p>{t("Un sujet, une question, une envie.")}<br />{t("Votre formation commence ici.")}</p><div className="welcome-examples"><span>{t("« Je veux apprendre le Go »")}</span><span>{t("« Reprenons ma formation Python »")}</span></div></div>}
     {messages.map((message,index) => {
       const visible = message.status === 'streaming' && streamText.length > message.text.length ? streamText : message.text;
       const context: ConversationContext | undefined = message.trainingContext;
@@ -260,5 +278,5 @@ export function TutorActivity({tools,streaming,permission,preparing,providerStat
  else if(providerStatus)message=providerStatus;
  else if(active){message=/next_activity|assessment|curriculum/.test(name)?t('Je prépare la prochaine activité…'):/progress|interaction|mastery|learner_context/.test(name)?t('Je consulte votre progression…'):/training|domain|formation|library/.test(name)?t('Je retrouve votre formation…'):t('Je consulte le serveur Tutor…');}
  else if(streaming)message=t('Je rédige la réponse…');else if(latest?.status==='failed')message=t('Un outil a rencontré une erreur. Le tuteur examine le résultat…');
- return <div className="tutor-activity" role="status" aria-live="polite" aria-atomic="true"><span className={`activity-mark ${permission?'waiting':''}`} aria-hidden="true">✳</span><div><p>{message}</p>{finished>0&&<small>{t('{count} appel(s) terminé(s)',{count:finished})}</small>}</div></div>;
+ return <div className="tutor-activity" role="status" aria-live="polite" aria-atomic="true"><span className={`activity-mark ${permission?'waiting':''}`} aria-hidden="true" /><div><p>{message}</p>{finished>0&&<small>{t('{count} appel(s) terminé(s)',{count:finished})}</small>}</div></div>;
 }

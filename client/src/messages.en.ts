@@ -402,6 +402,14 @@ export const english: Record<string, string> = {
   'Sélectionnez votre identifiant puis utilisez Ctrl + C.': 'Select your identifier and press Ctrl + C.',
   'Clés publiques copiées.': 'Public identifiers copied.',
   'Sélectionnez les clés publiques puis utilisez Ctrl + C.': 'Select the public identifiers and press Ctrl + C.',
+  'Palette de commandes': 'Command palette',
+  'Rechercher ou aller à…': 'Search or go to…',
+  'Aller à': 'Go to',
+  'Aller à, ouvrir, changer…': 'Go to, open, switch…',
+  'Rechercher une commande': 'Search a command',
+  'Commandes': 'Commands',
+  'Aucune commande ne correspond.': 'No command matches.',
+  'Seuil de routage': 'Routing threshold',
 };
 
 Object.assign(english, {

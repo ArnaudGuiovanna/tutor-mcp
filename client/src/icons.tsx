@@ -1,9 +1,13 @@
 import type { CSSProperties } from 'react';
 
-type IconName = 'sun' | 'book' | 'chat' | 'plug' | 'arrow' | 'check' | 'close' | 'refresh' | 'pause' | 'spark' | 'shield' | 'external' | 'clock' | 'plus' | 'chevron';
+type IconName = 'sun' | 'gear' | 'users' | 'search' | 'command' | 'book' | 'chat' | 'plug' | 'arrow' | 'check' | 'close' | 'refresh' | 'pause' | 'spark' | 'shield' | 'external' | 'clock' | 'plus' | 'chevron';
 
 const paths: Record<IconName, React.ReactNode> = {
   sun: <><circle cx="12" cy="12" r="4" /><path d="M12 2v2m0 16v2M2 12h2m16 0h2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></>,
+  gear: <><circle cx="12" cy="12" r="3.2" /><path d="M12 2.5v2.6m0 13.8v2.6M2.5 12h2.6m13.8 0h2.6M5.3 5.3l1.8 1.8m9.8 9.8 1.8 1.8M5.3 18.7l1.8-1.8m9.8-9.8 1.8-1.8" /></>,
+  users: <><circle cx="9" cy="8" r="3.4" /><path d="M2.8 19.5c.6-3.3 3.2-5.2 6.2-5.2s5.6 1.9 6.2 5.2M15.5 4.9a3.3 3.3 0 0 1 0 6.3M17.8 14.5c1.9.6 3.1 2.4 3.4 5" /></>,
+  search: <><circle cx="10.5" cy="10.5" r="6.5" /><path d="m15.5 15.5 5 5" /></>,
+  command: <><path d="M9 9V6a3 3 0 1 0-3 3h3Zm0 0h6m-6 0v6m6-6V6a3 3 0 1 1 3 3h-3Zm0 6v3a3 3 0 1 0 3-3h-3Zm0 0H9m0 0v3a3 3 0 1 1-3-3h3Z" /></>,
   book: <><path d="M12 5.5C9 3.5 5.5 3.5 3 4.5v15c3-1 6-1 9 1 3-2 6-2 9-1v-15c-2.5-1-6-1-9 1Z" /><path d="M12 5.5v15" /></>,
   chat: <path d="M20 11.5a8 8 0 0 1-8 8 9 9 0 0 1-4-.9L3 20l1.4-4.8a8 8 0 1 1 15.6-3.7Z" />,
   plug: <><path d="M8 3v5m8-5v5M6 8h12v3a6 6 0 0 1-6 6v4M4 8h16" /></>,
