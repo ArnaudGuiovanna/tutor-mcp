@@ -4,6 +4,7 @@
 package auth
 
 import (
+	"context"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 )
 
 var retryKeyPattern = regexp.MustCompile(`name="idempotency_key" value="([^"]+)"`)
@@ -135,8 +137,24 @@ func TestLearnerPortalEnrollmentCSRFAndSessionIsolation(t *testing.T) {
 	}
 }
 
+// Keep the browser ceremony's two TOTP checks on the same time step. Codes
+// still reach the real Store unchanged, including its drift and replay checks;
+// browser session lifetimes and MFA gate checks retain their normal clocks.
+type learnerPortalMFAFixture struct {
+	storeport.InstitutionAccountStore
+	at time.Time
+}
+
+func (fixture learnerPortalMFAFixture) ConfirmTOTPEnrollment(ctx context.Context, actor models.Principal, credentialID, code string, _ time.Time) ([]string, error) {
+	return fixture.InstitutionAccountStore.ConfirmTOTPEnrollment(ctx, actor, credentialID, code, fixture.at)
+}
+
+func (fixture learnerPortalMFAFixture) VerifySecondFactor(ctx context.Context, scope models.TenantScope, code string, _ time.Time) error {
+	return fixture.InstitutionAccountStore.VerifySecondFactor(ctx, scope, code, fixture.at)
+}
+
 func TestLearnerPortalRequiresMFAForDualRole(t *testing.T) {
-	_, store, server := institutionTestServer(t, false)
+	oauth, store, server := institutionTestServer(t, false)
 	id := seedLearner(t, store, "dual@portal.test", "dual-password-2026")
 	p, err := store.GetPrincipalForLearner(t.Context(), id, []string{models.OAuthScopeLearner})
 	if err != nil {
@@ -145,6 +163,8 @@ func TestLearnerPortalRequiresMFAForDualRole(t *testing.T) {
 	if _, err := store.SetMembershipAuthorization(t.Context(), p.TenantScope(), models.MembershipStatusActive, []string{models.RolePedagogyManager, models.RoleLearner}); err != nil {
 		t.Fatal(err)
 	}
+	fixtureNow := time.Now().UTC()
+	oauth.accounts = learnerPortalMFAFixture{InstitutionAccountStore: oauth.accounts, at: fixtureNow}
 	b := newTestBrowser(t, server)
 	_, page := b.get("/learn/login")
 	resp, page := b.post("/learn/login", url.Values{"csrf_token": {field(t, csrfPattern, page)}, "email": {"dual@portal.test"}, "password": {"dual-password-2026"}})
@@ -152,7 +172,7 @@ func TestLearnerPortalRequiresMFAForDualRole(t *testing.T) {
 		t.Fatalf("dual role bypassed MFA: %s", resp.Request.URL.Path)
 	}
 	secret := field(t, secretPattern, page)
-	resp, page = b.post("/learn/mfa/setup", url.Values{"csrf_token": {field(t, csrfPattern, page)}, "credential_id": {field(t, credentialPattern, page)}, "code": {testTOTP(t, secret, time.Now().Add(-30*time.Second))}})
+	resp, page = b.post("/learn/mfa/setup", url.Values{"csrf_token": {field(t, csrfPattern, page)}, "credential_id": {field(t, credentialPattern, page)}, "code": {testTOTP(t, secret, fixtureNow.Add(-30*time.Second))}})
 	if resp.StatusCode != 200 || !strings.Contains(page, "Save your recovery codes") {
 		t.Fatalf("setup: %d %.500s", resp.StatusCode, page)
 	}
@@ -166,7 +186,7 @@ func TestLearnerPortalRequiresMFAForDualRole(t *testing.T) {
 	if resp.Request.URL.Path != "/learn/mfa" {
 		t.Fatalf("new session reused old MFA: %s", resp.Request.URL.Path)
 	}
-	resp, _ = b.post("/learn/mfa", url.Values{"csrf_token": {field(t, csrfPattern, page)}, "code": {testTOTP(t, secret, time.Now())}})
+	resp, _ = b.post("/learn/mfa", url.Values{"csrf_token": {field(t, csrfPattern, page)}, "code": {testTOTP(t, secret, fixtureNow)}})
 	if resp.Request.URL.Path != "/learn" {
 		t.Fatalf("MFA verification: %s", resp.Request.URL.Path)
 	}

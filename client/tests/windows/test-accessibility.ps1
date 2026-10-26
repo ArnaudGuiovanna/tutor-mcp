@@ -49,6 +49,57 @@ function Find-Control([string]$Name, [System.Windows.Automation.ControlType]$Typ
     } while ([DateTime]::UtcNow -lt $deadline)
     throw "Accessible control missing: $Name ($Type)"
 }
+function Get-FocusDescription {
+    try {
+        $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+        if ($null -eq $focused) { return 'FocusedElement=<null>' }
+        $current = $focused.Current
+        return "Name='$($current.Name)'; ControlType=$($current.ControlType.ProgrammaticName); HasKeyboardFocus=$($current.HasKeyboardFocus); IsKeyboardFocusable=$($current.IsKeyboardFocusable); IsEnabled=$($current.IsEnabled); IsOffscreen=$($current.IsOffscreen)"
+    } catch [System.Windows.Automation.ElementNotAvailableException] {
+        return 'FocusedElement was replaced while reading the accessibility tree.'
+    }
+}
+function Assert-ControlFocus([string]$Name, [System.Windows.Automation.ControlType]$Type, [bool]$Prefix = $false) {
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    $stableSamples = 0
+    do {
+        try {
+            $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+            if ($null -ne $focused) {
+                $current = $focused.Current
+                $matchesName = $current.Name -eq $Name -or ($Prefix -and $current.Name.StartsWith($Name, [StringComparison]::Ordinal))
+                if ($matchesName -and $current.ControlType -eq $Type -and $current.HasKeyboardFocus -and $current.IsKeyboardFocusable -and $current.IsEnabled) {
+                    $stableSamples++
+                    if ($stableSamples -ge 2) { return }
+                } else { $stableSamples = 0 }
+            } else { $stableSamples = 0 }
+        } catch [System.Windows.Automation.ElementNotAvailableException] {
+            $stableSamples = 0
+        }
+        Start-Sleep -Milliseconds 150
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Keyboard focus did not settle on '$Name' ($($Type.ProgrammaticName)). $(Get-FocusDescription)"
+}
+function Find-ReadyControl([string]$Name, [System.Windows.Automation.ControlType]$Type, [bool]$Prefix = $false) {
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    do {
+        $element = Find-Control $Name $Type $Prefix
+        try {
+            if ($element.Current.IsEnabled -and $element.Current.IsKeyboardFocusable) { return $element }
+        } catch [System.Windows.Automation.ElementNotAvailableException] {
+            # A React navigation or settings save may replace this element.
+        }
+        Start-Sleep -Milliseconds 150
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Accessible control did not become ready: $Name ($($Type.ProgrammaticName)). $(Get-FocusDescription)"
+}
+function Focus-Control([string]$Name, [System.Windows.Automation.ControlType]$Type, [bool]$Prefix = $false) {
+    $element = Find-ReadyControl $Name $Type $Prefix
+    $element.SetFocus()
+    # SetFocus and WebView2's UI Automation focus event are asynchronous.
+    # Confirm the actual descendant before sending any keyboard input.
+    Assert-ControlFocus $Name $Type $Prefix
+}
 function Activate-Control([System.Windows.Automation.AutomationElement]$Element) {
     $pattern = $null
     if ($Element.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$pattern)) {
@@ -57,14 +108,16 @@ function Activate-Control([System.Windows.Automation.AutomationElement]$Element)
         ([System.Windows.Automation.InvokePattern]$pattern).Invoke()
     } else {
         $Element.SetFocus()
+        Assert-ControlFocus $Element.Current.Name $Element.Current.ControlType
         [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
     }
 }
 function Assert-TabFocus([string]$Name) {
+    Assert-ControlFocus $Name $tabType
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     do {
         $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
-        if ($null -ne $focused -and $focused.Current.Name -eq $Name -and $focused.Current.IsKeyboardFocusable) {
+        if ($null -ne $focused -and $focused.Current.Name -eq $Name -and $focused.Current.ControlType -eq $tabType -and $focused.Current.HasKeyboardFocus -and $focused.Current.IsKeyboardFocusable) {
             $pattern = $null
             $selected = $true
             if ($focused.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$pattern)) {
@@ -74,18 +127,10 @@ function Assert-TabFocus([string]$Name) {
         }
         Start-Sleep -Milliseconds 150
     } while ([DateTime]::UtcNow -lt $deadline)
-    throw "Keyboard navigation did not select the settings tab: $Name"
+    throw "Keyboard navigation did not select the settings tab: $Name. $(Get-FocusDescription)"
 }
 function Select-ComboByKeyboard([string]$Name, [int]$Index, [bool]$Prefix = $false) {
-    $element = Find-Control $Name $comboType $Prefix
-    $deadline = [DateTime]::UtcNow.AddSeconds(15)
-    while (-not $element.Current.IsEnabled) {
-        if ([DateTime]::UtcNow -ge $deadline) { throw "Settings control remained disabled: $Name" }
-        Start-Sleep -Milliseconds 150
-        $element = Find-Control $Name $comboType $Prefix
-    }
-    if (-not $element.Current.IsKeyboardFocusable) { throw "Settings control cannot receive keyboard focus: $Name" }
-    $element.SetFocus()
+    Focus-Control $Name $comboType $Prefix
     $keys = '{HOME}' + ('{DOWN}' * $Index) + '{ENTER}'
     [System.Windows.Forms.SendKeys]::SendWait($keys)
 }
@@ -115,8 +160,7 @@ function Open-Settings([bool]$English) {
     Activate-Control (Find-Control $label $buttonType)
     $names = if ($English) { @('Agents', 'Institution', 'Members', 'Reading and appearance') } else { @('Agents', 'Institution', 'Membres', 'Ergonomie') }
     foreach ($name in $names) { [void](Find-Control $name $tabType) }
-    $agents = Find-Control 'Agents' $tabType
-    $agents.SetFocus()
+    Focus-Control 'Agents' $tabType
     [System.Windows.Forms.SendKeys]::SendWait('{HOME}')
     Assert-TabFocus 'Agents'
     foreach ($name in $names[1..3]) {
@@ -128,22 +172,18 @@ function Open-Settings([bool]$English) {
 if ($Mode -eq 'Exercise') {
     $conversation = Find-Control 'Conversation' $buttonType
     $formations = Find-Control 'Formations' $buttonType
-    $composer = Find-Control 'Votre message au tuteur' $editType
-    if (-not $composer.Current.IsKeyboardFocusable) { throw 'The composer cannot receive keyboard focus.' }
-    $composer.SetFocus()
+    Focus-Control 'Votre message au tuteur' $editType
     [System.Windows.Forms.SendKeys]::SendWait('Je veux apprendre le Go')
-    Start-Sleep -Milliseconds 300
-    $send = Find-Control 'Envoyer' $buttonType
-    if (-not $send.Current.IsEnabled) { throw 'Typing did not enable sending before setup.' }
+    [void](Find-ReadyControl 'Envoyer' $buttonType)
     # The message is typed but never submitted. The test profile is offline.
     Activate-Control $formations
-    [void](Find-Control 'Formations' $buttonType)
+    # Wait for actual page content, not the sidebar button that never leaves.
+    [void](Find-Control 'Connecter Tutor' $buttonType)
     Activate-Control $conversation
-    $composer = Find-Control 'Votre message au tuteur' $editType
-    $composer.SetFocus()
+    Focus-Control 'Votre message au tuteur' $editType
+    [void](Find-ReadyControl 'Envoyer' $buttonType)
     [System.Windows.Forms.SendKeys]::SendWait('{TAB}')
-    $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
-    if ($null -eq $focused -or -not $focused.Current.IsKeyboardFocusable) { throw 'Keyboard navigation lost accessible focus.' }
+    Assert-ControlFocus 'Envoyer' $buttonType
 
     Open-Settings $false
     Assert-ComboValue 'Langue de Tutor' @('Français', 'fr')
@@ -165,7 +205,7 @@ if ($Mode -eq 'Exercise') {
     Select-ComboByKeyboard 'Appearance' 1 $true
     Assert-ComboValue 'Appearance' @('Light', 'light') $true
     Activate-Control (Find-Control 'Conversation' $buttonType)
-    [void](Find-Control 'Your message to the tutor' $editType)
+    Focus-Control 'Your message to the tutor' $editType
 } else {
     # This process has reopened the same test profile, without re-seeding it.
     [void](Find-Control 'Settings' $buttonType)
@@ -177,7 +217,7 @@ if ($Mode -eq 'Exercise') {
     Select-ComboByKeyboard 'Apparence' 0 $true
     Assert-ComboValue 'Apparence' @('Sombre', 'dark') $true
     Activate-Control (Find-Control 'Conversation' $buttonType)
-    [void](Find-Control 'Votre message au tuteur' $editType)
+    Focus-Control 'Votre message au tuteur' $editType
 }
 $parent = Split-Path -Parent $Report
 if ($parent -and -not (Test-Path -LiteralPath $parent)) { [void](New-Item -ItemType Directory -Path $parent) }

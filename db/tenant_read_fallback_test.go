@@ -24,6 +24,7 @@ type tenantReadDriver struct {
 	opened, closed, active, resets       atomic.Int32
 	failReset                            atomic.Bool
 	badResetContext, resetBeforeRollback atomic.Bool
+	rollbackStarted, rollbackRelease     chan struct{}
 }
 
 func (d *tenantReadDriver) Open(name string) (driver.Conn, error) {
@@ -88,8 +89,15 @@ type tenantReadTx struct {
 	state *tenantReadDriver
 }
 
-func (tx *tenantReadTx) Commit() error   { defer tx.state.active.Add(-1); return tx.Tx.Commit() }
-func (tx *tenantReadTx) Rollback() error { defer tx.state.active.Add(-1); return tx.Tx.Rollback() }
+func (tx *tenantReadTx) Commit() error { defer tx.state.active.Add(-1); return tx.Tx.Commit() }
+func (tx *tenantReadTx) Rollback() error {
+	defer tx.state.active.Add(-1)
+	if tx.state.rollbackStarted != nil {
+		close(tx.state.rollbackStarted)
+		<-tx.state.rollbackRelease
+	}
+	return tx.Tx.Rollback()
+}
 
 func tenantReadFallback(t *testing.T) (*Store, *tenantReadDriver) {
 	t.Helper()
@@ -196,18 +204,77 @@ func TestTenantReadFallbackCleanupCancellationAndDiscard(t *testing.T) {
 			if d.active.Load() != 0 || d.resetBeforeRollback.Load() {
 				t.Fatal("guard reset before transaction finished")
 			}
-			if d.resets.Load() != 1 || d.badResetContext.Load() {
+			wantResets := int32(1)
+			if mode == "cancel" {
+				wantResets = 0
+			}
+			if d.resets.Load() != wantResets || d.badResetContext.Load() {
 				t.Fatalf("cleanup did not use independent bounded context: resets=%d", d.resets.Load())
 			}
-			if mode != "cancel" && d.closed.Load() != 1 {
+			if d.closed.Load() != 1 {
 				t.Fatalf("uncertain guarded connection not discarded: closed=%d", d.closed.Load())
 			}
 			if _, err := s.root.ExecContext(t.Context(), `UPDATE read_probe SET value='writer still works' WHERE id=1`); err != nil {
 				t.Fatalf("writer poisoned: %v", err)
 			}
-			if mode != "cancel" && d.opened.Load() != 2 {
+			if d.opened.Load() != 2 {
 				t.Fatalf("writer reused discarded connection: opens=%d", d.opened.Load())
 			}
 		})
+	}
+}
+
+func TestTenantReadCancellationDiscardsAfterAutomaticRollbackCompletes(t *testing.T) {
+	s, d := tenantReadFallback(t)
+	d.rollbackStarted, d.rollbackRelease = make(chan struct{}), make(chan struct{})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- s.WithTenantReadTx(ctx, models.LegacyPrincipal("L1").TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {
+			var value string
+			if err := scoped.(*Store).queryRow(txCtx, `SELECT value FROM read_probe WHERE id=1`).Scan(&value); err != nil {
+				return err
+			}
+			cancel()
+			// awaitDone now owns rollback and has marked sql.Tx done, but the
+			// driver transaction is still active behind the explicit barrier.
+			<-d.rollbackStarted
+			return ctx.Err()
+		})
+	}()
+	select {
+	case <-d.rollbackStarted:
+	case <-time.After(5 * time.Second):
+		close(d.rollbackRelease)
+		t.Fatal("automatic rollback did not reach the driver barrier")
+	}
+	if d.active.Load() != 1 {
+		close(d.rollbackRelease)
+		t.Fatal("driver transaction finished before the barrier was released")
+	}
+	select {
+	case err := <-done:
+		close(d.rollbackRelease)
+		t.Fatalf("cleanup returned while automatic rollback was pending: %v", err)
+	default:
+	}
+	close(d.rollbackRelease)
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancellation lost: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cleanup did not finish after rollback")
+	}
+	if d.active.Load() != 0 || d.resets.Load() != 0 || d.resetBeforeRollback.Load() || d.closed.Load() != 1 {
+		t.Fatalf("cancelled transaction guard was reset or reused: active=%d resets=%d closed=%d", d.active.Load(), d.resets.Load(), d.closed.Load())
+	}
+	if _, err := s.root.ExecContext(t.Context(), `UPDATE read_probe SET value='new connection works' WHERE id=1`); err != nil {
+		t.Fatalf("replacement writer failed: %v", err)
+	}
+	if d.opened.Load() != 2 {
+		t.Fatalf("cancelled connection returned to the pool: opens=%d", d.opened.Load())
 	}
 }

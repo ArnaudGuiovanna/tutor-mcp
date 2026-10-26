@@ -72,7 +72,7 @@ jobs:
   test:
     name: Test (race detector)
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -85,7 +85,10 @@ jobs:
           cache: true
 
       - name: Run tests
-        run: go test -race -count=1 -timeout 30m -covermode=atomic -coverprofile=coverage.out ./...
+        # Race instrumentation plus coverage exceeds 30 minutes for the full
+        # engine package on hosted runners. Preserve every uncached test and
+        # the coverage gate, with five minutes of runner headroom.
+        run: go test -race -count=1 -timeout 40m -covermode=atomic -coverprofile=coverage.out ./...
 
       - name: Enforce paired-handler microbenchmark budget
         env:

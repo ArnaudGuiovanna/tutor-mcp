@@ -79,13 +79,32 @@ func beginSQLiteReadFallback(ctx context.Context, pool *sql.DB) (*sql.Tx, func()
 		_ = conn.Close()
 		return nil, nil, err
 	}
+	discard := func() error {
+		// Raw marks the physical connection bad and Conn.Close waits for the
+		// transaction to release it. Keep query_only enabled throughout that
+		// wait; an automatic rollback may still be executing in database/sql.
+		err := conn.Raw(func(any) error { return driver.ErrBadConn })
+		if errors.Is(err, driver.ErrBadConn) || errors.Is(err, sql.ErrConnDone) {
+			err = nil
+		}
+		closeErr := conn.Close()
+		if errors.Is(closeErr, sql.ErrConnDone) {
+			closeErr = nil
+		}
+		return errors.Join(err, closeErr)
+	}
 	cleanup := func() error {
+		if ctx.Err() != nil {
+			// Tx.Rollback can return ErrTxDone while awaitDone's automatic
+			// rollback is still running. Do not reset the guard in that gap.
+			return discard()
+		}
 		resetCtx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 		_, resetErr := conn.ExecContext(resetCtx, fmt.Sprintf(`PRAGMA query_only=%d`, previous))
 		if resetErr != nil {
 			// Never return a connection with an uncertain guard to the pool.
-			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+			return errors.Join(resetErr, discard())
 		}
 		closeErr := conn.Close()
 		return errors.Join(resetErr, closeErr)
