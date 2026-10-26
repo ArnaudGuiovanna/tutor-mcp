@@ -907,11 +907,17 @@ func (s *Store) trainingPublication(ctx context.Context, p models.Principal, act
 	if _, err = s.exec(ctx, `INSERT INTO cohorts(id,tenant_id,formation_version_id,name,capacity,reserved_seats,status,version,created_by,created_at,updated_at) VALUES(?,?,?,?,1000000,0,'open',1,?,?,?)`, cohortID, p.TenantID, t.VersionID, t.Name, p.UserID, now, now); err != nil {
 		return nil, err
 	}
-	// Carry only explicit access grants into the next offering. Never enroll.
+	// Carry only the latest explicit decision for each member. A revoked grant
+	// on a newer offering must not be resurrected from an older invitation.
 	if _, err = s.exec(ctx, `INSERT INTO formation_admissions(tenant_id,cohort_id,membership_id,status,version,updated_at)
  SELECT a.tenant_id,?,a.membership_id,a.status,1,? FROM formation_admissions a JOIN cohorts c ON c.tenant_id=a.tenant_id AND c.id=a.cohort_id
- WHERE a.tenant_id=? AND c.formation_version_id IN (SELECT id FROM formation_versions WHERE tenant_id=? AND formation_id=?) AND a.status IN ('invited','approved')
- ON CONFLICT(tenant_id,cohort_id,membership_id) DO NOTHING`, cohortID, now, p.TenantID, p.TenantID, t.FormationID); err != nil {
+ JOIN formation_versions v ON v.tenant_id=c.tenant_id AND v.id=c.formation_version_id
+ WHERE a.tenant_id=? AND v.formation_id=? AND a.status IN ('invited','approved') AND NOT EXISTS (
+ SELECT 1 FROM formation_admissions newer JOIN cohorts nc ON nc.tenant_id=newer.tenant_id AND nc.id=newer.cohort_id
+ JOIN formation_versions nv ON nv.tenant_id=nc.tenant_id AND nv.id=nc.formation_version_id
+ WHERE newer.tenant_id=a.tenant_id AND newer.membership_id=a.membership_id AND nv.formation_id=v.formation_id
+ AND (nv.version>v.version OR (nv.version=v.version AND (newer.updated_at>a.updated_at OR (newer.updated_at=a.updated_at AND newer.status IN ('revoked','rejected'))))))
+ ON CONFLICT(tenant_id,cohort_id,membership_id) DO NOTHING`, cohortID, now, p.TenantID, t.FormationID); err != nil {
 		return nil, err
 	}
 	if _, err = s.exec(ctx, `UPDATE cohorts SET status='closed',version=version+1,updated_at=? WHERE tenant_id=? AND substr(id,1,8)='catalog_' AND id<>? AND formation_version_id IN (SELECT id FROM formation_versions WHERE tenant_id=? AND formation_id=?)`, now, p.TenantID, cohortID, p.TenantID, t.FormationID); err != nil {
@@ -986,6 +992,13 @@ func (s *Store) trainingAccess(ctx context.Context, p models.Principal, in model
 			decision := "invited"
 			if in.Decision == "revoke" {
 				decision = "revoked"
+				// Access is managed for the whole formation. Existing enrollments
+				// retain their immutable learning version, but old invitations end.
+				if _, err = s.exec(ctx, `UPDATE formation_admissions SET status='revoked',version=version+1,updated_at=? WHERE tenant_id=? AND membership_id=? AND cohort_id IN (SELECT c.id FROM cohorts c JOIN formation_versions v ON v.tenant_id=c.tenant_id AND v.id=c.formation_version_id WHERE c.tenant_id=? AND v.formation_id=?)`, time.Now().UTC(), p.TenantID, member, p.TenantID, t.FormationID); err != nil {
+					return nil, err
+				}
+			} else if in.Decision != "invite" && in.Decision != "" {
+				return nil, fmt.Errorf("invalid access decision")
 			}
 			if err = s.setFormationAdmission(ctx, p.TenantID, t.CohortID, member, decision); err != nil {
 				return nil, err

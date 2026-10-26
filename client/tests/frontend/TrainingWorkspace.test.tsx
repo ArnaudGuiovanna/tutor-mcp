@@ -21,3 +21,21 @@ it('recherche et pagine sur le serveur et ne fusionne pas les résultats localem
  await userEvent.click(await screen.findByRole('button',{name:'Voir les formations suivantes'}));await screen.findByRole('button',{name:/Python/});expect(api.trainingAction).toHaveBeenCalledWith('list_training_library',expect.objectContaining({after:'cursor'}));
  await userEvent.type(screen.getByLabelText('Rechercher une formation'),'Go');await waitFor(()=>expect(api.trainingAction).toHaveBeenCalledWith('list_training_library',expect.objectContaining({query:'Go',limit:20})));
 });
+
+it('retire une invitation ou une délégation par le service de formation',async()=>{
+ const {api}=client(initialState(true));const doc=trainingFixture();doc.curriculum=undefined;
+ doc.training={...doc.training,id:'formation:shared',kind:'shared',formation_id:'shared',domain_id:undefined,cohort_id:'offering',status:'published',audience:'invitation'};
+ vi.mocked(api.trainingAction).mockImplementation(async(action)=>{
+  if(action==='get_training'||action==='set_training_access')return doc;
+  if(action==='find_training_members')return [{membership_id:'member',name:'Camille',public_key:'public-key'}];
+  if(action==='get_training_policy')return {personal_learning:true,can_manage:false};
+  return {items:[],next_after:''};
+ });
+ render(<TrainingWorkspace api={api} connected epoch={0} initialId={doc.training.id} canCreate={false} busy={false} onLearn={vi.fn()} onDiscuss={vi.fn()} onConnect={vi.fn()}/>);
+ const user=userEvent.setup();await user.click(await screen.findByRole('button',{name:'Partage et accès'}));
+ await user.type(screen.getByLabelText('Nom ou clé publique'),'Camille');await user.click(screen.getByRole('button',{name:'Rechercher un membre'}));
+ await user.click(await screen.findByRole('button',{name:'Retirer l’invitation'}));
+ await waitFor(()=>expect(api.trainingAction).toHaveBeenCalledWith('set_training_access',expect.objectContaining({id:'formation:shared',member_id:'member',decision:'revoke',expected_revision:'1'})));
+ const remove=screen.getByRole('button',{name:'Retirer l’autorisation de modification'});await waitFor(()=>expect(remove).toHaveProperty('disabled',false));await user.click(remove);
+ await waitFor(()=>expect(api.trainingAction).toHaveBeenCalledWith('set_training_access',expect.objectContaining({member_id:'member',decision:'remove_editor'})));
+});

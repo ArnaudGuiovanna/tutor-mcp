@@ -276,6 +276,58 @@ func TestTrainingContributionGrantCannotReadPrivateLearningOrPublishWithoutConse
 	}
 }
 
+func TestTrainingRevocationSurvivesPublicationAndRemovesOldInvitations(t *testing.T) {
+	s := setupTestDB(t)
+	tenant := nativeTestTenant(t, s, "training-revocation")
+	owner := trainingPrincipal(t, s, tenant, 141, true)
+	author := trainingPrincipal(t, s, tenant, 143, false)
+	guest := trainingPrincipal(t, s, tenant, 145, false)
+	legacyGuest := trainingPrincipal(t, s, tenant, 147, false)
+	d := trainingDomain(t, s, author, "Conception privée")
+	doc := trainingCall[models.TrainingDocument](t, s, author, "share_training", models.TrainingRequest{ID: "personal:" + d.ID, Name: "Destinataires nominatifs", ExpectedRevision: "1", Key: "share"})
+	free := true
+	doc = trainingCall[models.TrainingDocument](t, s, owner, "set_training_access", models.TrainingRequest{ID: doc.Training.ID, ExpectedRevision: doc.Training.Revision, FreePublication: &free, Key: "free"})
+	doc = trainingCall[models.TrainingDocument](t, s, author, "publish_training", models.TrainingRequest{ID: doc.Training.ID, ExpectedRevision: doc.Training.Revision, Key: "publish-one"})
+	for _, p := range []models.Principal{guest, legacyGuest} {
+		trainingCall[models.TrainingDocument](t, s, author, "set_training_access", models.TrainingRequest{ID: doc.Training.ID, ExpectedRevision: doc.Training.Revision, MemberID: p.MembershipID, Decision: "invite", Key: "invite-" + p.MembershipID})
+	}
+	publishNext := func(key string) {
+		t.Helper()
+		doc.Concepts[0].Description = key
+		doc = trainingCall[models.TrainingDocument](t, s, author, "save_training_edit", models.TrainingRequest{ID: doc.Training.ID, ExpectedRevision: doc.Training.Revision, Document: &doc, Key: "edit-" + key})
+		doc = trainingCall[models.TrainingDocument](t, s, author, "publish_training", models.TrainingRequest{ID: doc.Training.ID, ExpectedRevision: doc.Training.Revision, Key: "publish-" + key})
+	}
+	publishNext("two")
+	trainingCall[models.TrainingDocument](t, s, author, "set_training_access", models.TrainingRequest{ID: doc.Training.ID, ExpectedRevision: doc.Training.Revision, MemberID: guest.MembershipID, Decision: "revoke", Key: "revoke-all"})
+	if _, err := s.TrainingAction(t.Context(), guest, "get_training", models.TrainingRequest{ID: doc.Training.ID}); err == nil {
+		t.Fatal("revoked member still reads an older invitation")
+	}
+	// Historic cohort decisions also supersede invitations on earlier versions.
+	if _, _, err := s.DecideFormationAdmission(t.Context(), owner, "legacy-revoke", doc.Training.CohortID, legacyGuest.MembershipID, "revoked", 1); err != nil {
+		t.Fatal(err)
+	}
+	publishNext("three")
+	for _, p := range []models.Principal{guest, legacyGuest} {
+		if _, err := s.GetLearnerFormation(t.Context(), p, doc.Training.CohortID); err == nil {
+			t.Fatal("publication resurrected a revoked invitation")
+		}
+	}
+	identity := nativeTestMember(t, s, tenant, 149, []string{models.RoleTrainer})
+	editor, err := s.CreateNativeSession(t.Context(), nativeTestSession(identity, "editor", []string{models.OAuthScopeFormationContribute}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	trainingCall[models.TrainingDocument](t, s, author, "set_training_access", models.TrainingRequest{ID: doc.Training.ID, ExpectedRevision: doc.Training.Revision, MemberID: editor.MembershipID, Decision: "edit", Key: "editor-grant"})
+	allowed := trainingCall[models.TrainingDocument](t, s, editor, "get_training", models.TrainingRequest{ID: doc.Training.ID})
+	if !allowed.Training.CanEdit {
+		t.Fatal("assigned trainer cannot edit")
+	}
+	trainingCall[models.TrainingDocument](t, s, author, "set_training_access", models.TrainingRequest{ID: doc.Training.ID, ExpectedRevision: doc.Training.Revision, MemberID: editor.MembershipID, Decision: "remove_editor", Key: "editor-revoke"})
+	if _, err := s.TrainingAction(t.Context(), editor, "get_training", models.TrainingRequest{ID: doc.Training.ID}); err == nil {
+		t.Fatal("former editor retains nominative design access")
+	}
+}
+
 func TestTrainingLegacyCatalogueCannotExposePrivateDesignOrBypassReview(t *testing.T) {
 	s := setupTestDB(t)
 	tenant := nativeTestTenant(t, s, "training-old-api")

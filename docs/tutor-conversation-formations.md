@@ -43,6 +43,9 @@ Une révision ultérieure ne réutilise jamais une ancienne approbation.
 La publication conserve l’audience choisie. Les invitations peuvent être reportées
 vers l’offre de la nouvelle version, sans créer d’inscription. Les inscrits
 gardent leur version ; les migrations existantes restent explicites.
+Retirer une invitation ferme également les invitations des anciennes offres.
+Une publication ultérieure ne rétablit pas une invitation retirée, y compris
+si la décision provient de l’ancienne API de gestion des cohortes.
 
 La politique `allow_free_domains` est exposée dans Formations pour le propriétaire.
 Les institutions existantes gardent leur valeur explicite. Le déploiement du pilote
