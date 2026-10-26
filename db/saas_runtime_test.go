@@ -212,9 +212,24 @@ func TestPostgresRollingWriterLearningScopeTriggers(t *testing.T) {
 		t.Skip("PostgreSQL rolling-writer trigger gate")
 	}
 	ctx := context.Background()
+	// Other packages migrate their own schemas in the same CI database. Keep
+	// another schema present so this gate must inspect only its own tables.
+	other := setupTestDB(t)
+	var schema, otherSchema string
+	if err := s.queryRow(ctx, `SELECT current_schema()`).Scan(&schema); err != nil {
+		t.Fatal(err)
+	}
+	if err := other.queryRow(ctx, `SELECT current_schema()`).Scan(&otherSchema); err != nil {
+		t.Fatal(err)
+	}
+	if schema == otherSchema {
+		t.Fatal("trigger isolation fixture reused the same schema")
+	}
 	var triggerCount int
-	if err := s.queryRow(ctx, `SELECT COUNT(*) FROM pg_trigger
-		WHERE NOT tgisinternal AND tgname IN
+	if err := s.queryRow(ctx, `SELECT COUNT(*) FROM pg_trigger AS trigger
+		JOIN pg_class AS relation ON relation.oid = trigger.tgrelid
+		JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+		WHERE namespace.nspname = current_schema() AND NOT trigger.tgisinternal AND trigger.tgname IN
 		('zz_fill_learning_scope','zz_concept_states_fill_learning_scope',
 		 'zz_interactions_fill_learning_scope','zz_assessment_attempts_fill_learning_scope',
 		 'zz_learning_sessions_fill_learning_scope','zz_affect_states_fill_learning_scope')`).Scan(&triggerCount); err != nil {
