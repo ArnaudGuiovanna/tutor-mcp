@@ -158,11 +158,11 @@ function Assert-ComboValue([string]$Name, [string[]]$Expected, [bool]$Prefix = $
 function Open-Settings([bool]$English) {
     $label = if ($English) { 'Settings' } else { 'Paramètres' }
     Activate-Control (Find-Control $label $buttonType)
-    $names = if ($English) { @('Agents', 'Institution', 'Members', 'Reading and appearance') } else { @('Agents', 'Institution', 'Membres', 'Ergonomie') }
+    $names = if ($English) { @('Connection and tools', 'Institution', 'Members', 'Reading and appearance') } else { @('Connexion et outils', 'Institution', 'Membres', 'Ergonomie') }
     foreach ($name in $names) { [void](Find-Control $name $tabType) }
-    Focus-Control 'Agents' $tabType
+    Focus-Control $names[0] $tabType
     [System.Windows.Forms.SendKeys]::SendWait('{HOME}')
-    Assert-TabFocus 'Agents'
+    Assert-TabFocus $names[0]
     foreach ($name in $names[1..3]) {
         [System.Windows.Forms.SendKeys]::SendWait('{RIGHT}')
         Assert-TabFocus $name
@@ -234,7 +234,11 @@ function Exercise-CommandPalette {
     Assert-TabFocus 'Ergonomie'
 }
 
+. (Join-Path $PSScriptRoot 'test-window-chrome.ps1')
+$windowEvidence = $null
 if ($Mode -eq 'Exercise') {
+    $windowEvidence = Exercise-WindowChrome
+    Save-WindowCapture ($Report + '.window.png')
     $conversation = Find-Control 'Conversation' $buttonType
     $formations = Find-Control 'Formations' $buttonType
     Focus-Control 'Votre message au tuteur' $editType
@@ -252,6 +256,7 @@ if ($Mode -eq 'Exercise') {
 
     Exercise-CommandPalette
     Open-Settings $false
+    Save-WindowCapture ($Report + '.settings.png')
     Assert-ComboValue 'Langue de Tutor' @('Français', 'fr')
     Select-ComboByKeyboard 'Langue de Tutor' 1
     [void](Find-Control 'Settings' $buttonType)
@@ -289,6 +294,7 @@ $parent = Split-Path -Parent $Report
 if ($parent -and -not (Test-Path -LiteralPath $parent)) { [void](New-Item -ItemType Directory -Path $parent) }
 @{
     platform = 'Windows'
+    windowChrome = $windowEvidence
     mode = $Mode
     uiaNames = $true
     keyboardInput = $true
@@ -305,3 +311,7 @@ if ($parent -and -not (Test-Path -LiteralPath $parent)) { [void](New-Item -ItemT
     narratorManualAudit = $false
 } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $Report -Encoding UTF8
 Write-Host "UI Automation names, keyboard settings, language and themes passed ($Mode)."
+
+# The parent confirms the real OS process exits, then reopens the same profile.
+$closeName = if ($Mode -eq 'Exercise') { 'Close window' } else { 'Fermer la fenêtre' }
+Activate-Control (Find-ReadyControl $closeName $buttonType)

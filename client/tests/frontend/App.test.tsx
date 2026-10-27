@@ -126,3 +126,8 @@ describe('Apprendre depuis la conversation', () => {
     await screen.findByRole('heading',{name:'Qu’avez-vous envie d’apprendre ?'});act(()=>fixture.emit({profileEpoch:1,type:'connection',status:'error',message:'Ancien compte'}));expect(screen.queryByText('Ancien compte')).toBeNull();expect(fixture.api.sendPrompt).not.toHaveBeenCalled();
   });
 });
+
+it('prépare une suggestion sans l’envoyer et rend la saisie au clavier',async()=>{
+ const fixture=client(initialState(true));await ready(fixture.api);await userEvent.click(screen.getByRole('button',{name:'Je veux apprendre le Go'}));
+ const input=screen.getByLabelText('Votre message au tuteur')as HTMLTextAreaElement;expect(input.value).toBe('Je veux apprendre le Go');expect(document.activeElement).toBe(input);expect(fixture.api.sendPrompt).not.toHaveBeenCalled();
+});

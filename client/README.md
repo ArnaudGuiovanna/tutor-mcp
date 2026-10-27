@@ -33,12 +33,16 @@ Le workflow **Client → Client (Windows)** construit NSIS, vérifie les agents
 embarqués, installe l’application et teste sa fenêtre ainsi que son arbre
 UI Automation et la saisie au clavier. Le rapport est conservé avec l’artefact CI.
 
-Les paramètres regroupent Agents, Institution, Membres et Ergonomie. La langue
+Les paramètres regroupent Connexion et outils, Institution, Membres et Ergonomie.
+Tutor, l’identité nécessaire, l’agent et les autorisations se règlent dans le premier
+onglet, sans aller-retour entre plusieurs pages. La langue
 Français/English, les thèmes et les réglages de lecture sont conservés par compte.
 Les autorisations MCP par outil sont liées au serveur et à l'agent sélectionnés ;
 elles peuvent s'appliquer à toutes les conversations et être retirées ensuite.
 Le [backlog de la version](../docs/backlog-tutor-experience.yaml) fournit les
 critères de validation et les preuves de chaque lot.
+La fenêtre sans barre native, les commandes de fenêtre, les espacements et les
+interactions sont décrits dans la [fiche de finition du client](docs/desktop-experience.md).
 Une compilation Linux ne qualifie pas Windows. Les installateurs de développement
 ne sont pas signés avec un certificat commercial.
 

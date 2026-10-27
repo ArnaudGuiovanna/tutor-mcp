@@ -137,9 +137,14 @@ identité native. Le script UI Automation tape un message sans l’envoyer, vér
 les noms accessibles et la navigation clavier. Il ouvre la palette avec Ctrl+K,
 recherche « ergonomie », valide par Entrée et contrôle l’onglet sélectionné.
 Il parcourt ensuite les quatre onglets
-**Agents / Institution / Membres / Ergonomie**. Il change la langue
+**Connexion et outils / Institution / Membres / Ergonomie**. Il change la langue
 **Français → English → Français**, vérifie les libellés des paramètres dans les deux langues et
 sélectionne les thèmes clair et sombre avec les contrôles accessibles.
+
+La recette observe également l’absence de barre de titre native, puis utilise
+les boutons personnalisés pour réduire et agrandir/restaurer la fenêtre. Elle
+déplace la fenêtre par le titre, teste son double clic et redimensionne un bord.
+Les captures de la fenêtre installée accompagnent le reçu JSON.
 
 Il laisse ensuite la langue anglaise et le thème clair, ferme proprement le
 processus et relance le même exécutable avec le même profil, sans réinitialiser
@@ -150,7 +155,8 @@ thème sombre.
 Le rapport brut `tutor-client-accessibility.json` contient les preuves des deux
 passes dans `exercise` et `reopened`, ainsi que `sourceCommit`, `sourceVersion`,
 `binaryProductVersion`, `settingsTabs`, `languageSwitchFrEnFr`,
-`commandPaletteKeyboardNavigation`, `themeSwitchLightDark`, `persistenceAfterProcessRestart` et
+`framelessWindow`, `customClose`, `commandPaletteKeyboardNavigation`,
+`themeSwitchLightDark`, `persistenceAfterProcessRestart` et
 `persistedValuesVerifiedInWorkspace`. Le workflow exige ce fichier à l’emplacement
 explicite sous `RUNNER_TEMP`, contrôle son commit et ses indicateurs avant de
 l’ajouter à l’artefact. Une ligne de log ou un récépissé reconstruit ne remplace

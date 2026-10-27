@@ -1,8 +1,9 @@
 import type { CSSProperties } from 'react';
 
-type IconName = 'sun' | 'gear' | 'users' | 'search' | 'command' | 'book' | 'chat' | 'plug' | 'arrow' | 'check' | 'close' | 'refresh' | 'pause' | 'spark' | 'shield' | 'external' | 'clock' | 'plus' | 'chevron';
+type IconName = 'copy' | 'sun' | 'gear' | 'users' | 'search' | 'command' | 'book' | 'chat' | 'plug' | 'arrow' | 'check' | 'close' | 'refresh' | 'pause' | 'spark' | 'shield' | 'external' | 'clock' | 'plus' | 'chevron';
 
 const paths: Record<IconName, React.ReactNode> = {
+  copy: <><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></>,
   sun: <><circle cx="12" cy="12" r="4" /><path d="M12 2v2m0 16v2M2 12h2m16 0h2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></>,
   gear: <><circle cx="12" cy="12" r="3.2" /><path d="M12 2.5v2.6m0 13.8v2.6M2.5 12h2.6m13.8 0h2.6M5.3 5.3l1.8 1.8m9.8 9.8 1.8 1.8M5.3 18.7l1.8-1.8m9.8-9.8 1.8-1.8" /></>,
   users: <><circle cx="9" cy="8" r="3.4" /><path d="M2.8 19.5c.6-3.3 3.2-5.2 6.2-5.2s5.6 1.9 6.2 5.2M15.5 4.9a3.3 3.3 0 0 1 0 6.3M17.8 14.5c1.9.6 3.1 2.4 3.4 5" /></>,

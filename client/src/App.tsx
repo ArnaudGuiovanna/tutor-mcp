@@ -1,5 +1,5 @@
 import { t, useTranslation, setInterfaceLanguage } from './i18n';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { bridge } from './bridge';
 import type { ClientBridge } from './bridge';
@@ -9,13 +9,14 @@ import { AccountMenu } from './AccountMenu';
 import { Connections } from './Connections';
 import { TrainingWorkspace } from './TrainingWorkspace';
 import { SettingsWorkspace, defaultAppearance } from './SettingsWorkspace';
+import { WindowChrome } from './WindowChrome';
 import { CommandPalette } from './CommandPalette';
 import type { Command } from './CommandPalette';
 import { chunkFromEvent, displayDate, errorMessage, permissionFromEvent, permissionLabel, record, text, toolFromEvent } from './model';
 import type { AgentConnection, AgentTarget, Conversation, ConversationContext, PermissionRequest, Settings, Snapshot, ToolActivity, TutorOverview } from './types';
 
 type Page = 'conversation' | 'formations' | 'account' | 'settings' | 'agents' | 'institution' | 'members' | 'ergonomics';
-const labels: Record<Page, string> = { conversation: 'Conversation', formations: 'Formations', account: 'Mon compte', settings: 'Paramètres', agents: 'Agents', institution: 'Institution', members: 'Membres', ergonomics: 'Ergonomie' };
+const labels: Record<Page, string> = { conversation: 'Conversation', formations: 'Formations', account: 'Mon compte', settings: 'Paramètres', agents: 'Connexion et outils', institution: 'Institution', members: 'Membres', ergonomics: 'Ergonomie' };
 const settingsPages: Page[] = ['settings', 'agents', 'institution', 'members', 'ergonomics'];
 // Windows is the reference target; macOS users read ⌘ for the same shortcut.
 const modifier = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl';
@@ -141,7 +142,7 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
     try {
       if (!alreadyQueued) { const next = await api.queuePrompt(value.trim(), resume?.id); setState(next); stateRef.current = next; }
       setDraft('');
-      if (!stateRef.current.tutorStatus.connected) { setPage('institution'); setNotice(t('Votre message est conservé « À envoyer ». Terminez la connexion pour reprendre.')); return; }
+      if (!stateRef.current.tutorStatus.connected) { setPage('agents'); setNotice(t('Votre message est conservé « À envoyer ». Terminez la connexion pour reprendre.')); return; }
       const next = await ensureConversation(resume);
       pendingRef.current = next.id; setPending(next.id); setPreparing(''); setStream(''); setTools([]); toolEvents.current=[]; setPage('conversation');
       setState(previous => ({...previous,conversations:previous.conversations.map(item=>item.id===next.id?{...item,messages:[...item.messages,{id:crypto.randomUUID(),role:'user',text:value.trim(),status:'complete',createdAt:new Date().toISOString()}]}:item)}));
@@ -184,7 +185,7 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
       if (settings.tutor.mode === 'remote') await api.connectTutor(settings.tutor.url, authoring); else await api.tutorOverview();
       const next = await api.loadState(); setState(next); stateRef.current = next;
       setOverview(await api.tutorOverview()); setNotice(next.pendingMessage ? t("Votre message est conservé. Connectez l’agent pour poursuivre.") : t("Tutor est connecté."));
-      if (next.pendingMessage) setPage(next.agentConnected ? 'conversation' : 'agents');
+      // Stay in the connection workspace; the outbox resumes when both connections are ready.
     });
   }
 
@@ -201,8 +202,8 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   ];
   useEffect(()=>{setInterfaceLanguage(state.settings.language||'fr');},[state.settings.language]);
   useEffect(()=>{const media=window.matchMedia?.('(prefers-color-scheme: light)');const update=()=>{document.documentElement.dataset.theme=appearance.theme==='system'?(media?.matches?'light':'dark'):appearance.theme;document.documentElement.dataset.reduceMotion=String(appearance.reduceMotion);};update();media?.addEventListener?.('change',update);return()=>media?.removeEventListener?.('change',update);},[appearance.theme,appearance.reduceMotion]);
-  function saved(next:Snapshot){stateRef.current=next;setState(next);setInterfaceLanguage(next.settings.language||'fr');}
-  function connections(section:'account'|'agents'|'institution'){return <Connections key={`${state.profile?.id}:${section}`} section={section} settings={state.settings} targets={targets} connected={state.agentConnected} tutorStatus={state.tutorStatus} connection={connection} identity={state.identity} api={api} busy={locked}
+  function saved(next:Snapshot){if((next.profileEpoch||0)<(stateRef.current.profileEpoch||0)||(next.profile?.id&&stateRef.current.profile?.id&&next.profile.id!==stateRef.current.profile.id))return;stateRef.current=next;setState(next);setInterfaceLanguage(next.settings.language||'fr');}
+  function connections(section:'account'|'agents'|'institution',sectionBusy=locked){return <Connections key={`${state.profile?.id}:${section}`} section={section} settings={state.settings} targets={targets} connected={state.agentConnected} tutorStatus={state.tutorStatus} connection={connection} identity={state.identity} api={api} busy={sectionBusy}
     onIdentityAction={(label,action)=>perform(label,async()=>{await action();saved(await api.loadState());return true;}).then(result=>result===true)}
     onDiscover={()=>void perform('Recherche des installations…',async()=>setTargets(await api.discoverAgents()))}
     onSave={settings=>void perform('Enregistrement des réglages…',async()=>saved(await api.saveSettings(settings)))}
@@ -211,36 +212,34 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
     onDisconnectAgent={()=>void perform('Déconnexion…',async()=>{await api.disconnectAgent();setConnection(null);saved(await api.loadState());})}
     onConnectTutor={(settings,authoring)=>void configureTutor(settings,authoring)}
     onDisconnectTutor={()=>void perform('Déconnexion de Tutor…',async()=>saved(await api.disconnectTutor()))}/>;}
-  if (loading) return <div className="loading-screen" role="status">{t("Ouverture de Tutor…")}</div>;
+  if (loading) return <div className="app-shell loading-shell"><WindowChrome /><div className="loading-screen" role="status"><span className="spinner" />{t("Ouverture de Tutor…")}</div></div>;
   return <div className="app-shell" style={{ '--reading-size': `${appearance.fontSize}px`, '--reading-line-height':String(appearance.lineHeight) } as CSSProperties}>
+    <WindowChrome />
     <a className="skip-link" href="#main-content">{t("Aller au contenu principal")}</a>
     <aside className="sidebar">
-      <div className="brand"><span className="wm">Tutor-MCP<span className="cursor still" aria-hidden="true" /></span></div>
+      <p className="sidebar-caption sidebar-space">{state.profile?.label || t("Mon espace")}</p>
       <nav className="navigation" aria-label={t("Navigation principale")}>{(['conversation','formations'] as Page[]).map(item => <button className={`nav-item ${page === item ? 'active' : ''}`} aria-label={t(labels[item])} title={t(labels[item])} key={item} aria-current={page === item ? 'page' : undefined} onClick={() => { setPage(item); if (item === 'formations') setTrainingId(undefined); }}><Icon name={item === 'conversation' ? 'chat' : 'book'} /><span>{t(labels[item])}</span></button>)}
-      <button className="nav-item" aria-label={t("Palette de commandes")} title={t("Palette de commandes")} aria-keyshortcuts="Control+K Meta+K" onClick={() => setPaletteOpen(true)}><Icon name="search" /><span>{t("Rechercher ou aller à…")}</span><span className="kbd" aria-hidden="true">{modifier} K</span></button></nav>
+      <button className="nav-item" aria-label={t("Palette de commandes")} title={t("Palette de commandes")} aria-keyshortcuts="Control+K Meta+K" onClick={() => setPaletteOpen(true)}><Icon name="search" /><span>{t("Rechercher")}</span><span className="kbd" aria-hidden="true">{modifier} K</span></button></nav>
       <button className="new-conversation" aria-label={t("Nouvelle conversation")} title={t("Nouvelle conversation")} disabled={locked || !!state.pendingMessage} onClick={() => void openNewConversation()}><Icon name="plus" size={16} /><span>{t("Nouvelle conversation")}</span></button>
       <nav className="conversation-history" aria-label={t("Historique des conversations")}><p className="sidebar-caption">{t("Conversations")}</p>{[...state.conversations].sort((a,b) => b.updatedAt.localeCompare(a.updatedAt)).map(item => <button key={item.id} className="history-item" aria-label={item.title} title={item.title} aria-current={conversation?.id === item.id ? 'true' : undefined} disabled={locked || !!state.pendingMessage} onClick={() => void openConversation(item.id)}><span>{item.title}</span><small>{displayDate(item.updatedAt)}</small></button>)}</nav>
       <nav className="sidebar-bottom" aria-label={t("Compte et réglages")}>{(['account','settings'] as Page[]).map(item=><button className={`nav-item ${page===item||(item==='settings'&&settingsPage)?'active':''}`} aria-label={t(labels[item])} title={t(labels[item])} key={item} aria-current={page===item||(item==='settings'&&settingsPage)?'page':undefined} onClick={()=>setPage(item)}><Icon name={item==='account'?'users':'gear'} size={18}/><span>{t(labels[item])}</span></button>)}</nav>
     </aside>
     <CommandPalette open={paletteOpen} commands={commands} onClose={() => setPaletteOpen(false)} />
     <main id="main-content" className={`main-shell ${page === 'conversation' ? 'conversation-main' : ''}`} tabIndex={-1}>
-      <header className="workspace-heading"><h1>{t(settingsPage?'Paramètres':labels[page])}</h1>{page === 'conversation' && <><span className="active-training">{activeTraining?.name || t('À votre rythme')}</span>{activeTraining?.training_id && <button className="link-button" onClick={() => { setTrainingId(activeTraining.training_id); setPage('formations'); }}>{t("Voir la formation")}</button>}</>}<span className="connection-status" aria-label={t("État des connexions")}><span className={`dot ${state.tutorStatus.connected && state.agentConnected ? 'online' : ''}`} />{state.tutorStatus.connected && state.agentConnected ? t("Prêt") : t("À connecter")}</span></header>
+      <header className="workspace-heading"><h1>{t(settingsPage?'Paramètres':labels[page])}</h1>{page === 'conversation' && <><span className="active-training">{activeTraining?.name || t('À votre rythme')}</span>{activeTraining?.training_id && <button className="link-button" onClick={() => { setTrainingId(activeTraining.training_id); setPage('formations'); }}>{t("Voir la formation")}</button>}</>}<button type="button" className="connection-status" aria-label={t("État des connexions")} title={t("Configurer la connexion et les outils")} onClick={() => setPage('agents')}><span className={`dot ${state.tutorStatus.connected && state.agentConnected ? 'online' : ''}`} />{state.tutorStatus.connected && state.agentConnected ? t("Prêt") : t("À connecter")}<Icon name="chevron" size={12} /></button></header>
       {error && <Notice kind="error" onDismiss={() => setError('')}>{t(error)}</Notice>}
       {notice && <Notice kind="info" onDismiss={() => setNotice('')}>{t(notice)}</Notice>}
       {busy && <div className="notice" role="status"><span className="spinner" />{busy}</div>}
-      {state.pendingMessage && !pending && <section className="outbox" aria-label={t("Message à envoyer")}><div><strong>{t("À envoyer")}</strong><p>{state.pendingMessage.text}</p></div><div className="button-row"><button className="button secondary" disabled={locked} onClick={() => void perform('Retrait du message…', async () => { setDraft(state.pendingMessage!.text); setState(await api.queuePrompt(null)); setPage('conversation'); })}>{t("Modifier")}</button><button className="button primary" disabled={locked} onClick={() => { if (!state.tutorStatus.connected) setPage('institution'); else if (!state.agentConnected) setPage('agents'); else void dispatch(state.pendingMessage!.text, state.conversations.find(item => item.id === state.pendingMessage!.conversationId), true); }}>{state.tutorStatus.connected && state.agentConnected ? t("Envoyer le message conservé") : t("Terminer la connexion")}</button></div></section>}
+      {state.pendingMessage && !pending && <section className="outbox" aria-label={t("Message à envoyer")}><div><strong>{t("À envoyer")}</strong><p>{state.pendingMessage.text}</p></div><div className="button-row"><button className="button secondary" disabled={locked} onClick={() => void perform('Retrait du message…', async () => { setDraft(state.pendingMessage!.text); setState(await api.queuePrompt(null)); setPage('conversation'); })}>{t("Modifier")}</button><button className="button primary" disabled={locked} onClick={() => { if (!state.tutorStatus.connected) setPage('agents'); else if (!state.agentConnected) setPage('agents'); else void dispatch(state.pendingMessage!.text, state.conversations.find(item => item.id === state.pendingMessage!.conversationId), true); }}>{state.tutorStatus.connected && state.agentConnected ? t("Envoyer le message conservé") : t("Terminer la connexion")}</button></div></section>}
       {page === 'conversation' && <section className="conversation-panel" aria-label={t("Conversation avec votre tuteur")}>
-        <ConversationMessages conversation={conversation} streamText={stream} streaming={!!pending} openLink={api.openExternalLink} />
+        <ConversationMessages conversation={conversation} streamText={stream} streaming={!!pending} openLink={api.openExternalLink} onSuggestion={value => { setDraft(value); document.getElementById('prompt')?.focus(); }} />
         {permissions.map((permission,index) => <PermissionCard key={JSON.stringify(permission.id)} permission={permission} disabled={permissionBusy || index > 0} onAnswer={optionId => void (async () => { setPermissionBusy(true); try { await api.answerPermission(permission.id,optionId); setPermissions(previous => previous.filter(item => JSON.stringify(item.id) !== JSON.stringify(permission.id))); } catch (reason) { setError(errorMessage(reason)); } finally { setPermissionBusy(false); } })()} />)}
         {(pending||preparing)&&<TutorActivity tools={tools} streaming={!!stream} permission={!!permissions.length} preparing={preparing} providerStatus={providerStatus}/>}
-        <form className="composer" onSubmit={event => { event.preventDefault(); void dispatch(draft,conversation); }}>
-          <label className="visually-hidden" htmlFor="prompt">{t("Votre message au tuteur")}</label><textarea autoFocus id="prompt" value={draft} onChange={event => setDraft(event.target.value)} disabled={!!pending || !!state.pendingMessage} placeholder={t("Je veux apprendre le Go…")} maxLength={64000} onKeyDown={event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
-          <div className="composer-footer"><span className="composer-hint">{t("Ctrl + Entrée pour envoyer · L’IA peut se tromper.")}</span>{pending ? <button type="button" className="button secondary" onClick={() => void api.cancelPrompt(pending).catch(reason => setError(errorMessage(reason)))}><Icon name="pause" size={16} />{t("Interrompre")}</button> : <button className="button blue" disabled={locked || !draft.trim() || !!state.pendingMessage}>{t("Envoyer")}<span className="kbd" aria-hidden="true">{modifier} ⏎</span></button>}</div>
-        </form>
+        <Composer draft={draft} onChange={setDraft} disabled={!!pending || !!state.pendingMessage} canSend={!locked && !!draft.trim() && !state.pendingMessage} pending={!!pending} onSend={() => void dispatch(draft,conversation)} onCancel={() => void api.cancelPrompt(pending!).catch(reason => setError(errorMessage(reason)))} />
       </section>}
-      {page === 'formations' && <TrainingWorkspace key={`${state.profile?.id}:${state.settings.tutor.url}:${overview?.identity?.tenantId}:${state.tutorStatus.connected}`} api={api} connected={state.tutorStatus.connected} epoch={libraryEpoch} initialId={trainingId} canCreate={overview?.identity?.roles?.includes('owner') === true} busy={locked} onLearn={learn} onDiscuss={discuss} onConnect={() => setPage('institution')} />}
+      {page === 'formations' && <TrainingWorkspace key={`${state.profile?.id}:${state.settings.tutor.url}:${overview?.identity?.tenantId}:${state.tutorStatus.connected}`} api={api} connected={state.tutorStatus.connected} epoch={libraryEpoch} initialId={trainingId} canCreate={overview?.identity?.roles?.includes('owner') === true} busy={locked} onLearn={learn} onDiscuss={discuss} onConnect={() => setPage('agents')} />}
       {page==='account'&&<div className="settings-content"><AccountMenu key={state.profile?.id} snapshot={state} overview={overview} busy={locked} api={api} onSelect={id=>void perform('Changement de compte…',async()=>applyProfile(await api.selectProfile(id)))} onCreate={label=>void perform('Création du compte…',async()=>{applyProfile(await api.createProfile(label));await api.createIdentity();saved(await api.loadState());setPage('account');})} onRename={label=>void perform('Enregistrement du nom…',async()=>saved(await api.renameProfile(label)))} onDelete={id=>void perform('Retrait du compte…',async()=>{applyProfile(await api.deleteProfile(id,id));setPage('account');})}/>{connections('account')}</div>}
-      {settingsPage&&<div className="settings-content"><SettingsWorkspace key={`${state.profile?.id}:${page}:${state.settings.tutor.url}:${overview?.identity?.tenantId}`} api={api} snapshot={state} overview={overview} busy={locked} initialTab={page==='settings'?'agents':page as 'agents'|'institution'|'members'|'ergonomics'} renderConnection={connections} onSaved={saved}/></div>}
+      {settingsPage&&<div className="settings-content"><SettingsWorkspace key={`${state.profile?.id}:${page}`} api={api} snapshot={state} overview={overview} busy={locked} initialTab={page==='settings'?'agents':page as 'agents'|'institution'|'members'|'ergonomics'} renderConnection={connections} onSaved={saved}/></div>}
 
     </main>
   </div>;
@@ -248,13 +247,13 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
 
 function Notice({ children,kind,onDismiss }: { children: ReactNode;kind:'error'|'info';onDismiss:()=>void }) { return <div className={`notice ${kind}`} role={kind === 'error' ? 'alert' : 'status'}><div>{children}</div><button className="icon-button" aria-label={t("Fermer le message")} onClick={onDismiss}><Icon name="close" size={16} /></button></div>; }
 
-function ConversationMessages({ conversation,streamText,streaming,openLink }: { conversation?: Conversation;streamText:string;streaming:boolean;openLink:ClientBridge['openExternalLink'] }) {
+function ConversationMessages({ conversation,streamText,streaming,openLink,onSuggestion }: { conversation?: Conversation;streamText:string;streaming:boolean;openLink:ClientBridge['openExternalLink'];onSuggestion:(value:string)=>void }) {
   const end = useRef<HTMLDivElement>(null); const nearEnd = useRef(true); const [unread,setUnread] = useState(false);
   useEffect(() => { nearEnd.current = true; setUnread(false); end.current?.scrollIntoView?.({block:'nearest'}); },[conversation?.id]);
   useEffect(() => { if (nearEnd.current) end.current?.scrollIntoView?.({block:'nearest'}); else setUnread(true); },[conversation?.messages.length,streamText]);
   const messages = conversation?.messages || [];
   return <div className="conversation-messages" role="log" aria-label={t("Messages de la conversation")} aria-live={streaming ? 'off' : 'polite'} aria-relevant="additions" tabIndex={0} onScroll={event => { const element = event.currentTarget; nearEnd.current = element.scrollHeight - element.scrollTop - element.clientHeight < 96; if (nearEnd.current) setUnread(false); }}>
-    {!messages.length && !streamText && <div className="conversation-welcome"><span className="welcome-mark" aria-hidden="true"><span className="wm">T<span className="cursor" /></span></span><h2>{t("Qu’avez-vous envie d’apprendre ?")}</h2><p>{t("Un sujet, une question, une envie.")}<br />{t("Votre formation commence ici.")}</p><div className="welcome-examples"><span>{t("« Je veux apprendre le Go »")}</span><span>{t("« Reprenons ma formation Python »")}</span></div></div>}
+    {!messages.length && !streamText && <div className="conversation-welcome"><span className="welcome-mark" aria-hidden="true"><span className="wm">T<span className="cursor still" /></span></span><h2>{t("Qu’avez-vous envie d’apprendre ?")}</h2><p>{t("Un sujet, une question, une envie.")}<br />{t("Votre formation commence ici.")}</p><div className="welcome-examples">{["Je veux apprendre le Go", "Reprenons ma formation Python"].map(value=><button type="button" key={value} onClick={()=>onSuggestion(t(value))}><Icon name={value.startsWith("Je")?"plus":"clock"} size={16}/>{t(value)}<Icon name="arrow" size={14}/></button>)}</div></div>}
     {messages.map((message,index) => {
       const visible = message.status === 'streaming' && streamText.length > message.text.length ? streamText : message.text;
       const context: ConversationContext | undefined = message.trainingContext;
@@ -278,5 +277,15 @@ export function TutorActivity({tools,streaming,permission,preparing,providerStat
  else if(providerStatus)message=providerStatus;
  else if(active){message=/next_activity|assessment|curriculum/.test(name)?t('Je prépare la prochaine activité…'):/progress|interaction|mastery|learner_context/.test(name)?t('Je consulte votre progression…'):/training|domain|formation|library/.test(name)?t('Je retrouve votre formation…'):t('Je consulte le serveur Tutor…');}
  else if(streaming)message=t('Je rédige la réponse…');else if(latest?.status==='failed')message=t('Un outil a rencontré une erreur. Le tuteur examine le résultat…');
- return <div className="tutor-activity" role="status" aria-live="polite" aria-atomic="true"><span className={`activity-mark ${permission?'waiting':''}`} aria-hidden="true" /><div><p>{message}</p>{finished>0&&<small>{t('{count} appel(s) terminé(s)',{count:finished})}</small>}</div></div>;
+ return <div className="tutor-activity" role="status" aria-live="polite" aria-atomic="true"><span className={`activity-mark ${permission?'waiting':''}`} aria-hidden="true"><i/><i/><i/></span><div><p key={message} className="activity-text">{message}</p>{finished>0&&<small>{t('{count} appel(s) terminé(s)',{count:finished})}</small>}</div></div>;
+}
+
+function Composer({draft,onChange,disabled,canSend,pending,onSend,onCancel}:{draft:string;onChange:(value:string)=>void;disabled:boolean;canSend:boolean;pending:boolean;onSend:()=>void;onCancel:()=>void}) {
+  const input=useRef<HTMLTextAreaElement>(null);
+  useLayoutEffect(()=>{const element=input.current;if(!element)return;const resize=()=>{element.style.height='auto';element.style.height=`${element.scrollHeight}px`;};resize();window.addEventListener('resize',resize);return()=>window.removeEventListener('resize',resize);},[draft]);
+  return <form className="composer" onSubmit={event=>{event.preventDefault();if(canSend)onSend();}}>
+    <label className="visually-hidden" htmlFor="prompt">{t("Votre message au tuteur")}</label>
+    <textarea ref={input} autoFocus id="prompt" rows={1} value={draft} onChange={event=>onChange(event.target.value)} disabled={disabled} placeholder={t("Je veux apprendre le Go…")} maxLength={64000} onKeyDown={event=>{if(event.key==='Enter'&&(event.ctrlKey||event.metaKey)&&!event.nativeEvent.isComposing){event.preventDefault();event.currentTarget.form?.requestSubmit();}}}/>
+    <div className="composer-footer"><span className="composer-hint"><kbd>{modifier} ↵</kbd>{t("pour envoyer · L’IA peut se tromper.")}</span>{pending?<button type="button" className="button secondary" onClick={onCancel}><Icon name="pause" size={16}/>{t("Interrompre")}</button>:<button className="button blue" disabled={!canSend}>{t("Envoyer")}<Icon name="arrow" size={16}/></button>}</div>
+  </form>;
 }

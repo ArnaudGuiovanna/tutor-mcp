@@ -13,6 +13,9 @@
   "app": {
     "windows": [{
       "title": "Tutor",
+      "decorations": false,
+      "shadow": true,
+      "backgroundColor": "#0C131F",
       "width": 1240,
       "height": 840,
       "minWidth": 640,

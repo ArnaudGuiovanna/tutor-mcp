@@ -27,11 +27,11 @@ describe('Compte et paramètres persistants',()=>{
   const state=initialState(true);state.settings.tutor.mode='remote';state.settings.tutor.url='https://institution.example/';const fixture=client(state);
   vi.mocked(fixture.api.tutorOverview).mockResolvedValue({identity:{tenantId:'tenant-1',userId:'u',membershipId:'member-1'},context:{},formations:{},availableFormations:{}});
   vi.mocked(fixture.api.listMcpTools).mockResolvedValue({tools:[{name:'get_next_activity',description:'Next activity'},{name:'record_interaction'}]});await settings(fixture.api);
-  await screen.findByText('get_next_activity');await userEvent.selectOptions(screen.getByLabelText('Règle pour les outils Tutor'),'allow');
+  await userEvent.click(screen.getByText('Autorisations par outil'));await screen.findByText('get_next_activity');await userEvent.selectOptions(screen.getByLabelText('Règle pour les outils Tutor'),'allow');
   await waitFor(()=>expect(fixture.getState().settings.permissionPolicy).toEqual({origin:'https://institution.example',institutionId:'tenant-1',agentId:state.settings.targetId,defaultDecision:'allow',tools:{}}));
   await userEvent.selectOptions(screen.getByLabelText('Autorisation pour record_interaction'),'deny');await waitFor(()=>expect(fixture.getState().settings.permissionPolicy?.tools.record_interaction).toBe('deny'));
-  await userEvent.click(screen.getByRole('tab',{name:'Ergonomie'}));await userEvent.click(screen.getByRole('tab',{name:'Agents'}));expect((await screen.findByLabelText('Règle pour les outils Tutor')as HTMLSelectElement).value).toBe('allow');
-  expect((screen.getByLabelText('Autorisation pour record_interaction')as HTMLSelectElement).value).toBe('deny');
+  await userEvent.click(screen.getByRole('tab',{name:'Ergonomie'}));await userEvent.click(screen.getByRole('tab',{name:'Connexion et outils'}));expect((await screen.findByLabelText('Règle pour les outils Tutor')as HTMLSelectElement).value).toBe('allow');
+  await userEvent.click(screen.getByText('Autorisations par outil'));expect((screen.getByLabelText('Autorisation pour record_interaction')as HTMLSelectElement).value).toBe('deny');
  });
  it('n’affiche pas comme active une politique d’une autre institution',async()=>{
   const state=initialState(true);state.settings.tutor.mode='remote';state.settings.tutor.url='https://institution.example';state.settings.permissionPolicy={origin:'https://elsewhere.example',institutionId:'tenant-other',agentId:state.settings.targetId,defaultDecision:'allow',tools:{}};const fixture=client(state);
@@ -64,7 +64,7 @@ it('propose seulement les options de modèle, réflexion et vitesse réellement 
  const state=initialState(true);const fixture=client(state);
  const config={connected:true,configOptions:[{id:'model',name:'Model',category:'model',type:'select',currentValue:'model-a',options:[{group:'Provider',options:[{value:'model-a',name:'Model A'},{value:'model-b',name:'Model B'}]}]},{id:'thought_level',name:'Reasoning',category:'thought_level',type:'select',currentValue:'low',options:[{value:'low',name:'Low'},{value:'high',name:'High'}]}],current:{model:'model-a',reasoningEffort:'low',speed:'balanced'},supported:{model:true,reasoningEffort:true,speed:true},speedOptions:['balanced','fast']};
  vi.mocked(fixture.api.agentConfiguration).mockResolvedValue(config);vi.mocked(fixture.api.setAgentConfiguration).mockImplementation(async configuration=>({...config,current:configuration}));await settings(fixture.api);
- const select=await screen.findByLabelText('Modèle');await userEvent.selectOptions(select,'model-b');await waitFor(()=>expect(fixture.api.setAgentConfiguration).toHaveBeenCalledWith({model:'model-b',reasoningEffort:'low',speed:'balanced'}));
+ await userEvent.click(screen.getAllByText('Modèle et rapidité')[0]);const select=await screen.findByLabelText('Modèle');await userEvent.selectOptions(select,'model-b');await waitFor(()=>expect(fixture.api.setAgentConfiguration).toHaveBeenCalledWith({model:'model-b',reasoningEffort:'low',speed:'balanced'}));
  expect([...screen.getByLabelText('Préférence de réponse').querySelectorAll('option')].map(option=>(option as HTMLOptionElement).value)).toEqual(['balanced','fast']);
 });
 
@@ -84,4 +84,40 @@ it('conserve le reçu pending d’un effacement accepté lorsque le serveur reti
  render(<App api={fixture.api}/>);await screen.findByRole('button',{name:'Mon compte'});await userEvent.click(screen.getByRole('button',{name:'Mon compte'}));await waitFor(()=>expect((screen.getByLabelText('Je demande la suppression de mes données dans cette institution.')as HTMLInputElement).disabled).toBe(false));
  await userEvent.click(screen.getByLabelText('Je demande la suppression de mes données dans cette institution.'));await userEvent.click(screen.getByRole('button',{name:'Demander l’effacement institutionnel'}));
  expect(await screen.findByText('Demande d’effacement : En attente')).toBeTruthy();expect(screen.queryByText(/Effacement terminé/)).toBeNull();expect(await screen.findByRole('alert')).toHaveProperty('textContent',expect.stringContaining('La demande est enregistrée.'));
+});
+
+it('connecte Tutor puis l’agent et règle les outils sur le même écran, sans écraser la nouvelle adresse',async()=>{
+ const state=initialState();state.settings.tutor={mode:'remote',url:'https://old.example',command:'tutor-mcp',args:['--local']};state.identity={exists:true,backupConfirmed:true,needsBackup:false};
+ const fixture=client(state);vi.mocked(fixture.api.tutorOverview).mockResolvedValue({identity:{tenantId:'tenant-1',userId:'u',membershipId:'member-1'},context:{},formations:{},availableFormations:{}});
+ vi.mocked(fixture.api.listMcpTools).mockResolvedValue({tools:[{name:'record_interaction'}]});
+ await settings(fixture.api);const user=userEvent.setup();
+ const address=screen.getByLabelText('Adresse de Tutor');await user.clear(address);await user.type(address,'https://new.example');
+ await user.click(screen.getByRole('button',{name:'Vérifier l’institution'}));await waitFor(()=>expect((screen.getByRole('button',{name:'Connecter avec ma clé'})as HTMLButtonElement).disabled).toBe(false));
+ await user.click(screen.getByRole('button',{name:'Connecter avec ma clé'}));await waitFor(()=>expect(fixture.api.connectTutor).toHaveBeenCalledWith('https://new.example',false));
+ expect(screen.getByRole('tab',{name:'Connexion et outils'}).getAttribute('aria-selected')).toBe('true');
+ await waitFor(()=>expect((screen.getByRole('button',{name:'Rechercher les installations'})as HTMLButtonElement).disabled).toBe(false));
+ await user.click(screen.getByRole('button',{name:'Rechercher les installations'}));await screen.findByRole('radio',{name:/Codex — Ubuntu/});
+ await user.click(screen.getByRole('button',{name:'Connecter Codex'}));await waitFor(()=>expect(fixture.getState().agentConnected).toBe(true));
+ expect(fixture.getState().settings.tutor.url).toBe('https://new.example');
+ await user.selectOptions(screen.getByLabelText('Règle pour les outils Tutor'),'allow');
+ await waitFor(()=>expect(fixture.getState().settings.permissionPolicy).toMatchObject({origin:'https://new.example',institutionId:'tenant-1',agentId:state.settings.targetId,defaultDecision:'allow'}));
+ expect(screen.getByRole('tab',{name:'Connexion et outils'}).getAttribute('aria-selected')).toBe('true');
+ await user.click(screen.getByRole('tab',{name:'Institution'}));expect(screen.queryByLabelText('Adresse de Tutor')).toBeNull();
+ await user.click(screen.getByRole('button',{name:'Gérer la connexion et les outils'}));expect(screen.getByRole('tab',{name:'Connexion et outils'}).getAttribute('aria-selected')).toBe('true');
+});
+
+it('préserve une exception refusée lorsque la règle générale change',async()=>{
+ const state=initialState(true);state.settings.tutor={mode:'remote',url:'https://institution.example',command:'',args:[]};state.settings.permissionPolicy={origin:'https://institution.example',institutionId:'tenant-1',agentId:state.settings.targetId,defaultDecision:'ask',tools:{record_interaction:'deny'}};
+ const fixture=client(state);vi.mocked(fixture.api.tutorOverview).mockResolvedValue({identity:{tenantId:'tenant-1',userId:'u',membershipId:'m'},context:{},formations:{},availableFormations:{}});
+ await settings(fixture.api);await userEvent.selectOptions(screen.getByLabelText('Règle pour les outils Tutor'),'allow');
+ await waitFor(()=>expect(fixture.getState().settings.permissionPolicy?.defaultDecision).toBe('allow'));expect(fixture.getState().settings.permissionPolicy?.tools.record_interaction).toBe('deny');
+});
+
+it('crée et sauvegarde l’identité nécessaire directement dans la connexion Tutor',async()=>{
+ const state=initialState();state.settings.tutor={mode:'remote',url:'https://institution.example',command:'',args:[]};const fixture=client(state);await settings(fixture.api);
+ await userEvent.click(screen.getByRole('button',{name:'Créer mon identité'}));
+ expect(await screen.findByRole('region',{name:'Sauvegarde obligatoire'})).toBeTruthy();expect(screen.getByRole('tab',{name:'Connexion et outils'}).getAttribute('aria-selected')).toBe('true');
+ await userEvent.type(screen.getByLabelText('Phrase pour chiffrer la sauvegarde'),'une phrase de test');await userEvent.type(screen.getByLabelText('Confirmer la phrase de sauvegarde'),'une phrase de test');
+ await userEvent.click(screen.getByRole('button',{name:'Enregistrer ma sauvegarde chiffrée'}));await waitFor(()=>expect(fixture.getState().identity.backupConfirmed).toBe(true));
+ expect(await screen.findByRole('button',{name:'Connecter avec ma clé'})).toBeTruthy();expect(screen.queryByRole('region',{name:'Sauvegarde obligatoire'})).toBeNull();
 });

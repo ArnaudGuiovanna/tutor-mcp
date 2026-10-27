@@ -106,7 +106,7 @@ try {
     & powershell.exe -NoProfile -STA -File $accessibility -NativeHandle ($launch.Window.ToInt64()) -Report $exerciseReport -TestWorkspace $workspacePath -Mode Exercise
     if ($LASTEXITCODE -ne 0) { throw 'La navigation accessible du client installé a échoué.' }
     Assert-SavedSettings 'en' 'light'
-    if (-not $application.CloseMainWindow() -or -not $application.WaitForExit(10000)) {
+    if (-not $application.WaitForExit(10000)) {
         throw 'The application did not close cleanly before persistence qualification.'
     }
     $application.Dispose()
@@ -119,10 +119,14 @@ try {
     & powershell.exe -NoProfile -STA -File $accessibility -NativeHandle ($launch.Window.ToInt64()) -Report $restartReport -TestWorkspace $workspacePath -Mode VerifyPersistence
     if ($LASTEXITCODE -ne 0) { throw 'La persistance et la navigation après réouverture ont échoué.' }
     Assert-SavedSettings 'fr' 'dark'
+    if (-not $application.WaitForExit(10000)) { throw 'The custom close button did not close the reopened application.' }
     $exercise = Get-Content -LiteralPath $exerciseReport -Raw | ConvertFrom-Json
     $reopened = Get-Content -LiteralPath $restartReport -Raw | ConvertFrom-Json
     if (-not $exercise.languageSwitchFrEnFr -or -not $exercise.commandPaletteKeyboardNavigation -or -not $reopened.persistenceAfterProcessRestart) {
         throw 'Incomplete language or process-restart evidence.'
+    }
+    foreach ($check in @('nativeCaptionAbsent','customMinimize','customMaximizeRestore','titlebarDrag','titlebarDoubleClick','edgeResize')) {
+        if (-not $exercise.windowChrome.$check) { throw "Missing actual native window evidence: $check" }
     }
     $reportParent = Split-Path -Parent $Report
     if ($reportParent -and -not (Test-Path -LiteralPath $reportParent)) { [void](New-Item -ItemType Directory -Path $reportParent) }
@@ -134,6 +138,7 @@ try {
         settingsTabs = @('agents', 'institution', 'members', 'ergonomics')
         languageSwitchFrEnFr = $true; themeSwitchLightDark = $true
         commandPaletteKeyboardNavigation = $true
+        framelessWindow = $true; customClose = $true
         persistenceAfterProcessRestart = $true; persistedValuesVerifiedInWorkspace = $true
         networkRequestSent = $false; testOwnedOfflineProfile = $true
         sendBeforeSetup = $true; narratorManualAudit = $false

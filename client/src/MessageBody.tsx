@@ -4,11 +4,18 @@ import type { ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { ClientBridge } from './bridge';
+import { Icon } from './icons';
 
 function childText(value:ReactNode):string { return Children.toArray(value).map(child=>typeof child==='string'||typeof child==='number'?String(child):isValidElement<{children?:ReactNode}>(child)?childText(child.props.children):'').join(''); }
 function CodeBlock({children}:{children:ReactNode}) {
   const [copied,setCopied]=useState(false);const [error,setError]=useState(false);
-  return <div className="code-block"><div className="code-block-header"><button className="link-button" onClick={()=>void navigator.clipboard.writeText(childText(children)).then(()=>{setCopied(true);setError(false);}).catch(()=>setError(true))}>{copied?t("Copié"):t("Copier le code")}</button>{error&&<span role="status">{t("La copie a échoué. Sélectionnez le code.")}</span>}</div><pre tabIndex={0} role="region" aria-label={t("Extrait de code")}>{children}</pre></div>;
+  const code=childText(children);
+  const element=Children.toArray(children).find(isValidElement<{className?:string}>);
+  const language=element?.props.className?.match(/language-([^\s]+)/)?.[1] || t('Code');
+  useEffect(()=>{setCopied(false);setError(false);},[code]);
+  useEffect(()=>{if(!copied)return;const timer=setTimeout(()=>setCopied(false),2200);return()=>clearTimeout(timer);},[copied]);
+  async function copy(){try{await navigator.clipboard.writeText(code);setCopied(true);setError(false);}catch{setError(true);}}
+  return <div className="code-block"><div className="code-block-header"><span className="mono">{language}</span><button className="link-button" onClick={()=>void copy()}><Icon name={copied?'check':'copy'} size={14}/>{copied?t("Copié"):t("Copier le code")}</button></div><span role="status" className={error?'code-copy-error':'visually-hidden'}>{error?t("La copie a échoué. Sélectionnez le code."):copied?t('Code copié.'):''}</span><pre tabIndex={0} role="region" aria-label={t("Extrait de code")}>{children}</pre></div>;
 }
 function ResponsiveTable({children}:{children:ReactNode}) {
   const root=useRef<HTMLDivElement>(null);const [width,setWidth]=useState(800);
@@ -21,7 +28,7 @@ function ResponsiveTable({children}:{children:ReactNode}) {
 }
 export function MessageBody({text,openLink}:{text:string;openLink?:ClientBridge['openExternalLink']}) {
   return <div className="markdown-body"><ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={{
-    h1:({children})=><h3>{children}</h3>,h2:({children})=><h3>{children}</h3>,h3:({children})=><h4>{children}</h4>,h4:({children})=><h5>{children}</h5>,h5:({children})=><h6>{children}</h6>,
+    h1:({children})=><h3 className="markdown-h1">{children}</h3>,h2:({children})=><h3 className="markdown-h2">{children}</h3>,h3:({children})=><h4>{children}</h4>,h4:({children})=><h5>{children}</h5>,h5:({children})=><h6>{children}</h6>,
     a:({href,children})=><a href={href} rel="noopener noreferrer" target="_blank" onClick={openLink?event=>{event.preventDefault();if(href)void openLink(href);}:undefined}>{children}</a>,
     img:({src,alt})=><span className="message-image-reference">{t("Image :")} {alt||'illustration'}{src&&<a href={src} rel="noopener noreferrer" target="_blank" onClick={openLink?event=>{event.preventDefault();void openLink(src);}:undefined}>{t("Ouvrir l’image")}</a>}</span>,
     table:({children})=><ResponsiveTable>{children}</ResponsiveTable>,pre:({children})=><CodeBlock>{children}</CodeBlock>,
