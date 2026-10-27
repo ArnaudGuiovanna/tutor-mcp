@@ -1,0 +1,241 @@
+version: 1
+title: Tutor-ACP — compte, configuration guidée et communautés d’apprentissage
+requested_at: 2026-10-27
+baseline:
+  release: v0.7.2
+  client_version: 0.0.3
+  commit: 0342cfbf39331369cb81e5c3a1aa495a4d35ce2d
+status: PLANNED
+scope:
+  requested: Les correctifs UX et de dénomination ci-dessous sont demandés, mais ne sont pas encore implémentés.
+  proposed: Les trois pistes communautaires sont des hypothèses produit à explorer, sans engagement de réalisation.
+  previous_backlog: docs/backlog-tutor-experience.yaml
+status_policy:
+  - TODO désigne un correctif demandé et non réalisé.
+  - DISCOVERY désigne une proposition à tester avec des utilisateurs avant engagement.
+  - DONE exige des preuves des critères dans l’application Windows installée.
+product_direction:
+  tutor_mcp: Accompagner l’apprentissage tout au long de la vie, avec une progression personnelle durable.
+  tutor_acp: Faire vivre des communautés où chacun apprend, réalise et transmet avec les autres.
+  institution: Fournir le cadre de confiance, les membres, les droits et les formations partagées.
+  community: Donner des raisons de se retrouver, des projets communs et des occasions concrètes d’entraide.
+invariants:
+  - Conserver la charte actuelle, la fenêtre sans barre native et les préférences de lecture.
+  - Préserver comptes, clés, sauvegardes, conversations, formations, progressions et permissions explicites existantes.
+  - Conserver l’identifiant fr.aguiovanna.tutor et les emplacements des données lors du changement de nom affiché.
+  - Une coche décrit un état réellement vérifié ou un choix enregistré ; elle ne signifie jamais une permission supplémentaire.
+  - Les conversations et difficultés personnelles restent privées ; tout partage communautaire est choisi par leur auteur.
+  - Les droits et la progression restent calculés côté serveur ; l’isolation des institutions et des versions est conservée.
+  - Une réalisation collective ne prouve pas automatiquement la maîtrise individuelle de chaque participant.
+
+requested_batches:
+  - id: ACP-ACCOUNT-01
+    priority: P1
+    status: TODO
+    title: Corriger le padding de Votre identité locale et rendre Mon compte plus compact
+    observed:
+      - L’écran empile la gestion des comptes et le panneau d’identité complet.
+      - Les explications, champs et actions secondaires allongent la page et diluent les actions courantes.
+    design:
+      - Aligner titre, description, badge, champs et boutons sur une même grille de retraits.
+      - Utiliser les espacements de la charte pour les marges internes et l’écart entre sections.
+      - Organiser Mon compte en Vue d’ensemble, Identité et sauvegarde, et Gestion des comptes dans la zone centrale.
+      - Montrer d’abord le compte actif, l’état de l’identité et de la sauvegarde, l’institution et les actions courantes.
+      - Afficher les explications longues et les opérations de récupération uniquement dans leur section dédiée.
+      - Garder une alerte de sauvegarde nécessaire visible dans la vue d’ensemble, avec accès direct à l’action.
+      - Séparer clairement retrait du compte sur l’appareil et effacement institutionnel.
+    acceptance:
+      - À 1240 × 840 et zoom 100 %, la vue d’ensemble et ses actions principales sont visibles sans défilement vertical.
+      - Les états sans identité, identité à sauvegarder, sauvegarde confirmée et comptes multiples ont chacun une composition vérifiée.
+      - À faible hauteur, à 200 % de zoom et avec texte agrandi, tous les contrôles restent accessibles par un défilement vertical unique.
+      - Aucun contenu essentiel masqué, texte réduit pour faire tenir la page, défilement horizontal ou panneau défilant imbriqué.
+      - Les captures avant/après montrent des retraits cohérents en thèmes clair et sombre, en français et anglais.
+    code_references:
+      - client/src/App.tsx
+      - client/src/AccountMenu.tsx
+      - client/src/IdentityPanel.tsx
+      - client/src/styles.css
+
+  - id: ACP-SETUP-02
+    priority: P1
+    status: TODO
+    title: Transformer la frise 1–2–3 en trois écrans de configuration
+    depends_on: [ACP-PERM-03]
+    observed:
+      - Les trois boutons actuels déplacent le défilement vers des sections d’une même longue page.
+    design:
+      - Conserver une frise toujours visible avec Tutor-MCP, Agent IA et Outils et autorisations.
+      - Un clic sélectionne une étape et remplace le contenu central par son écran, sans fenêtre superposée.
+      - Tutor-MCP contient la connexion au serveur et les prérequis d’identité et de sauvegarde nécessaires.
+      - Agent IA contient le choix du fournisseur, la connexion et les options réellement disponibles.
+      - Outils et autorisations contient le choix général explicite et les exceptions par outil.
+      - Proposer Continuer après une étape réussie et Commencer à apprendre après la configuration complète.
+      - Permettre de revenir sur les trois étapes ; expliquer un prérequis manquant sur l’écran concerné.
+    completion_rules:
+      tutor_mcp: Coche après connexion vérifiée pour le compte et le serveur sélectionnés, avec les prérequis d’identité satisfaits.
+      agent: Coche après connexion effective et disponibilité de l’agent sélectionné, pas après sa simple sélection dans une liste.
+      tools: Coche après choix explicite et enregistrement réussi de la politique correspondant au contexte actif.
+      persistence: Distinguer configuration validée et disponibilité actuelle ; afficher Reconnexion ou Hors ligne séparément sans refaire choisir les autorisations.
+    acceptance:
+      - Une seule étape est affichée à la fois ; la frise indique distinctement étape active, terminée et restant à configurer.
+      - Les trois étapes sont utilisables au clavier et leurs états sont annoncés au lecteur d’écran sans dépendre uniquement de la couleur.
+      - Une erreur de connexion ou d’enregistrement ne produit jamais une coche de succès.
+      - Changer d’étape conserve les saisies de configuration nécessaires sans écrire implicitement une autorisation.
+      - Changer de compte, serveur, institution ou agent recalcule les états et n’applique pas les permissions d’un autre contexte.
+      - Le message À envoyer est conservé et reprend une seule fois après validation des prérequis effectifs du parcours.
+      - Une reconnexion avec une politique déjà enregistrée ne redemande pas de choisir la même règle.
+    code_references:
+      - client/src/SettingsWorkspace.tsx
+      - client/src/Connections.tsx
+      - client/src/App.tsx
+
+  - id: ACP-PERM-03
+    priority: P1
+    status: TODO
+    title: Demander un choix explicite pour les outils et afficher la coche après validation
+    observed:
+      - Le troisième indicateur de la frise reçoit actuellement une valeur false fixe.
+      - En l’absence de politique correspondante, la liste affiche déjà Demander une autorisation.
+    design:
+      - Pour une configuration nouvelle, afficher Sélectionner une option comme valeur initiale non valide.
+      - Proposer Demander une autorisation, Tout autoriser pour Tutor et Tout refuser pour Tutor.
+      - Ajouter une action explicite Enregistrer les autorisations, inactive tant qu’aucun choix valide n’est fait.
+      - Après succès, afficher un résumé du choix enregistré et la coche de l’étape 3.
+      - Une règle Demander ou Tout refuser est une configuration terminée au même titre que Tout autoriser.
+      - Conserver les exceptions par outil lorsqu’on modifie la règle générale.
+    acceptance:
+      - Afficher la liste ou sélectionner son placeholder n’enregistre rien et n’accorde aucune autorisation.
+      - Le comportement de protection existant reste effectif tant qu’aucun choix n’est confirmé ; ne jamais autoriser par défaut.
+      - Une valeur en cours de modification ou une erreur de sauvegarde ne peut pas être présentée comme enregistrée.
+      - Le choix et sa confirmation persistent après changement de conversation et redémarrage.
+      - Une politique explicite déjà enregistrée pour le bon contexte est affichée et conservée lors de la mise à jour.
+      - Si l’ancien format ne permet pas de distinguer un choix confirmé d’une valeur par défaut, proposer une confirmation sans supprimer ni élargir les permissions existantes.
+      - Réinitialiser les autorisations rétablit le placeholder et l’état À configurer pour ce contexte.
+      - Le mode local sans politique persistante disponible explique sa limite et ne reçoit pas une fausse coche.
+    code_references:
+      - client/src/SettingsWorkspace.tsx
+      - client/src/types.ts
+      - client/src-tauri/src/workspace.rs
+      - client/src-tauri/src/permissions.rs
+
+  - id: ACP-NAME-04
+    priority: P1
+    status: TODO
+    title: Renommer l’application en Tutor-ACP
+    design:
+      - Employer Tutor-ACP pour le nom visible du client dans la fenêtre, les libellés accessibles, l’installation et la documentation utilisateur.
+      - Conserver Tutor-MCP pour le serveur pédagogique, notamment à l’étape 1 de la configuration.
+      - Préserver les identifiants techniques et chemins historiques nécessaires à une mise à jour sans perte de données.
+    acceptance:
+      - La fenêtre, les informations de l’application, les raccourcis Windows et le nom de l’application installée affichent Tutor-ACP.
+      - Le nom du client et celui du serveur restent distingués dans les parcours français et anglais.
+      - Installer la nouvelle version sur ACP 0.0.3 reprend les mêmes comptes, clés, sauvegardes, conversations et réglages.
+      - Le changement de nom ne crée pas de second espace de données ni de régénération silencieuse d’identité.
+      - Les futurs assets, liens de téléchargement et notes de release utilisent une convention cohérente, sans casser les anciennes releases.
+    code_references:
+      - client/src/WindowChrome.tsx
+      - client/src/messages.en.ts
+      - client/src-tauri/tauri.conf.json
+      - client/README.md
+
+  - id: ACP-FOOTER-05
+    priority: P1
+    status: TODO
+    title: Afficher la version et la signature du créateur dans la sidebar
+    depends_on: [ACP-NAME-04]
+    copy:
+      version: v{version_installee}
+      credit: Built by Arnaud Guiovanna
+      portfolio: https://aguiovanna.fr
+    design:
+      - Placer une signature discrète au bas de la sidebar, avec la version sur une ligne et le crédit sur une autre si nécessaire.
+      - Rendre Arnaud Guiovanna cliquable vers son portfolio dans le navigateur système.
+      - Lire la version réelle du paquet installé, avec une source unique liée aux métadonnées de build.
+    acceptance:
+      - Le numéro affiché correspond à la version réelle de l’exécutable installé et change automatiquement avec la release.
+      - Le lien fonctionne à la souris et au clavier et n’ouvre pas une page web dans la fenêtre pédagogique.
+      - Version et signature restent lisibles et accessibles en sidebar compacte, sans tronquer une action ni agrandir artificiellement le défilement.
+      - Le footer garde sa place avec un historique vide ou long, dans les deux thèmes.
+    references:
+      - ui/site/components/chrome.tsx
+      - https://aguiovanna.fr
+
+community_discovery:
+  status: PROPOSALS_NOT_COMMITTED
+  design_principles:
+    - Organiser les interactions autour d’un projet, d’une question ou d’une réalisation à partager.
+    - Conserver un espace personnel avec son tuteur à côté des espaces collectifs.
+    - Permettre aux membres de choisir leur disponibilité, ce qu’ils partagent et les personnes qui peuvent les contacter.
+    - Prévoir dès le pilote des invitations, des responsables et des moyens de quitter, signaler ou modérer un espace.
+    - Mesurer une progression démontrée et des échanges utiles, plutôt que le nombre de messages ou le temps passé.
+  proposals:
+    - id: COM-01
+      status: DISCOVERY
+      title: Projets collectifs, parcours personnels
+      promise: Réaliser quelque chose ensemble, même avec des niveaux et des rythmes différents.
+      scenario: Une association prépare une exposition ; chaque membre apprend ce dont il a besoin pour contribuer à la communication, au budget ou à la médiation.
+      experience:
+        - Un petit groupe rejoint un projet concret avec un résultat commun et des étapes visibles.
+        - Chaque membre choisit sa contribution ; son tuteur prépare un parcours personnel adapté.
+        - Un atelier commun permet de montrer le travail, demander un retour et décider de la prochaine étape.
+        - Le projet terminé rejoint une galerie choisie par ses auteurs ; chacun conserve aussi ses acquis personnels.
+      differentiation_hypothesis: Le client pourrait rendre compatibles l’accompagnement individuel et la satisfaction de construire avec les autres.
+      first_pilot: Un projet, quatre à six volontaires, un espace partagé, des tutorats privés et une restitution finale.
+      validation:
+        - Le groupe termine un livrable utilisable et chaque membre peut identifier sa contribution.
+        - Une courte activité individuelle vérifie ce que chacun sait refaire sans aide.
+        - Les membres souhaitent réaliser un deuxième projet ensemble.
+      open_decisions:
+        - Choisir le premier contexte avec des membres volontaires de l’institution pilote.
+        - Déterminer le rôle de l’animateur et le rythme des rendez-vous avec le groupe.
+
+    - id: COM-02
+      status: DISCOVERY
+      title: Trouver la bonne personne au bon moment
+      promise: Une difficulté peut devenir une rencontre utile entre deux apprenants.
+      scenario: Une apprenante bloque sur une présentation ; elle choisit de demander un retour à un membre disponible qui a déjà réalisé un travail comparable.
+      experience:
+        - L’apprenant formule une demande d’aide liée à une activité et choisit l’extrait qu’il partage.
+        - Le client propose des volontaires pertinents selon leurs réalisations partageables et leur disponibilité déclarée.
+        - Les deux personnes acceptent un échange court, asynchrone ou à un créneau convenu.
+        - Après l’échange, le tuteur propose à chacun une courte activité pour vérifier ce qu’il a compris en expliquant ou en recevant l’aide.
+      differentiation_hypothesis: Les progrès d’un membre pourraient devenir une ressource humaine utile aux autres, puis susciter de la réciprocité.
+      first_pilot: Demandes explicites dans une seule institution, volontaires identifiés et mise en relation initialement supervisée.
+      validation:
+        - Une demande reçoit une aide acceptée et jugée utile par son auteur.
+        - La personne aidée réussit ensuite une activité proche sans reproduire simplement la réponse reçue.
+        - Les volontaires souhaitent continuer sans subir une charge excessive de sollicitations.
+      open_decisions:
+        - Définir la disponibilité et la fréquence maximale de sollicitation avec les volontaires.
+        - Choisir les preuves partageables sans rendre publics les scores cognitifs ni les difficultés privées.
+
+    - id: COM-03
+      status: DISCOVERY
+      title: Un passeport vivant des acquis
+      promise: Changer de communauté, de projet ou d’agent sans repartir de zéro.
+      scenario: Après une formation dans une association, une personne rejoint un collectif professionnel et présente les réalisations qu’elle souhaite faire reconnaître pour préparer son prochain parcours.
+      experience:
+        - Un espace personnel rassemble projets réalisés, productions et acquis démontrés, avec leur date et leur contexte.
+        - La personne choisit les éléments à présenter à une communauté ou à un accompagnateur.
+        - Un nouveau projet peut commencer par une vérification courte des acquis pertinents, puis un parcours adapté.
+        - À partir de ce nouveau projet, le tuteur peut proposer des communautés et activités pertinentes que la personne choisit de rejoindre.
+        - Le passeport accueille aussi les retours à l’apprentissage après une pause et les changements de centres d’intérêt.
+      differentiation_hypothesis: La continuité de l’apprentissage pourrait appartenir à la personne tout en donnant aux communautés des preuves concrètes pour l’accueillir.
+      first_pilot: Quelques réalisations choisies, un export lisible et un partage explicite vers une seconde communauté volontaire.
+      validation:
+        - Le destinataire comprend ce qui a été réalisé, quand et avec quel niveau de validation.
+        - Le partage ne donne pas accès aux conversations, scores privés ou données des autres membres.
+        - Le nouveau parcours tient compte des acquis encore démontrables sans présumer qu’une compétence est acquise pour toujours.
+      open_decisions:
+        - Distinguer déclaration personnelle, production examinée et compétence vérifiée ; ne pas présenter une attestation comme une certification automatique.
+        - Définir les éléments personnels exportables et les conditions de partage entre institutions, sans synchronisation générale de leurs historiques.
+  suggested_order:
+    - Stabiliser les correctifs ACP demandés avant le pilote communautaire.
+    - Tester COM-01 pour créer une activité collective et une première galerie de réalisations.
+    - Tester COM-02 avec les participants volontaires et les réalisations issues de ces projets.
+    - Explorer COM-03 lorsque le passage entre deux communautés devient un besoin observé.
+
+future_delivery:
+  - Qualifier les correctifs sur Windows, y compris la mise à jour depuis ACP 0.0.3 et les états incomplets de configuration.
+  - Publier toute implémentation terminée via le workflow staging puis main et les contrôles du dépôt.
+  - Une nouvelle release d’application sera une tâche de livraison distincte ; ce backlog ne vaut pas implémentation.
