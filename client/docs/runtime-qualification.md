@@ -1,6 +1,6 @@
 # Qualification du client
 
-La recette du client **0.0.2** couvre Codex et Claude par leurs adaptateurs ACP.
+La recette du client **0.0.3** couvre Codex et Claude par leurs adaptateurs ACP.
 Elle distingue le lancement du processus, le protocole, le serveur pédagogique,
 l’interface Windows installée et l’utilisation réelle d’un modèle. Le succès
 d’une de ces étapes ne vaut pas qualification des autres.
@@ -120,7 +120,7 @@ Le rapport est relié au commit par le workflow et le nom de son artefact.
 
 ## Interface Windows installée et persistance après fermeture
 
-La recette utilise l’installeur **0.0.2**, pas une prévisualisation web. Elle doit
+La recette utilise l’installeur **0.0.3**, pas une prévisualisation web. Elle doit
 être exécutée sur un compte Windows de test sans données Tutor existantes : le
 script refuse de remplacer un profil présent et ne nettoie que ses propres
 dossiers de test.
@@ -128,7 +128,7 @@ dossiers de test.
 ```powershell
 $env:GITHUB_SHA = (git rev-parse HEAD).Trim()
 ./client/tests/windows/test-installed-client.ps1 `
-  -Installer 'client/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Tutor_0.0.2_x64-setup.exe' `
+  -Installer 'client/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/Tutor_0.0.3_x64-setup.exe' `
   -Report (Join-Path (Get-Location) 'tutor-client-accessibility.json')
 ```
 

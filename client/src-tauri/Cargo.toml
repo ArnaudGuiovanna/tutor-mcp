@@ -1,6 +1,6 @@
 [package]
 name = "tutor-client"
-version = "0.0.2"
+version = "0.0.3"
 description = "Tutor desktop client for Agent Client Protocol"
 authors = ["Arnaud Guiovanna"]
 license = "MIT"
