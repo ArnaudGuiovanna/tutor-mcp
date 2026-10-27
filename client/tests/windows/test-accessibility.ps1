@@ -182,12 +182,42 @@ function Find-CommandControl([string]$Name, [System.Windows.Automation.ControlTy
     throw "Command palette control missing: $Name. $(Get-FocusDescription)"
 }
 
+function Assert-CommandPaletteFocus([System.Windows.Automation.AutomationElement]$Search) {
+    $commands = Find-Control 'Commandes' ([System.Windows.Automation.ControlType]::List)
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    $stableSamples = 0
+    do {
+        try {
+            $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+            $ownedFocus = $false
+            if ($null -ne $focused -and $focused.Current.HasKeyboardFocus -and $focused.Current.IsEnabled) {
+                $ownedFocus = [System.Windows.Automation.Automation]::Compare($focused, $Search)
+                # UIA may report the ARIA active descendant while DOM focus stays
+                # in the editable combobox. Accept only an option in its list.
+                if (-not $ownedFocus -and @($buttonType, [System.Windows.Automation.ControlType]::ListItem) -contains $focused.Current.ControlType) {
+                    $ancestor = $focused
+                    while ($null -ne $ancestor -and -not $ownedFocus) {
+                        $ownedFocus = [System.Windows.Automation.Automation]::Compare($ancestor, $commands)
+                        $ancestor = [System.Windows.Automation.TreeWalker]::RawViewWalker.GetParent($ancestor)
+                    }
+                }
+            }
+            if ($ownedFocus) { $stableSamples++ } else { $stableSamples = 0 }
+            if ($stableSamples -ge 2) { return }
+        } catch [System.Windows.Automation.ElementNotAvailableException] {
+            $stableSamples = 0
+        }
+        Start-Sleep -Milliseconds 150
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Keyboard focus did not settle in the command palette. $(Get-FocusDescription)"
+}
+
 function Exercise-CommandPalette {
     [System.Windows.Forms.SendKeys]::SendWait('^k')
     # Chromium can expose an editable ARIA combobox as ComboBox or Edit.
     $search = Find-CommandControl 'Rechercher une commande' @($comboType, $editType)
     $search.SetFocus()
-    Assert-ControlFocus 'Rechercher une commande' $search.Current.ControlType
+    Assert-CommandPaletteFocus $search
     [System.Windows.Forms.SendKeys]::SendWait('ergonomie')
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
     $stableQuery = 0
@@ -197,7 +227,8 @@ function Exercise-CommandPalette {
         Start-Sleep -Milliseconds 150
     } while ([DateTime]::UtcNow -lt $deadline)
     if ($stableQuery -lt 2) { throw 'The command palette did not receive the search text.' }
-    [void](Find-CommandControl 'Ergonomie' @($buttonType, [System.Windows.Automation.ControlType]::ListItem))
+    # The accessible option name includes its visible settings hint.
+    [void](Find-CommandControl 'Ergonomie Paramètres' @($buttonType, [System.Windows.Automation.ControlType]::ListItem))
     [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
     Focus-Control 'Ergonomie' $tabType
     Assert-TabFocus 'Ergonomie'
