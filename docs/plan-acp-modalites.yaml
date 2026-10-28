@@ -1,0 +1,65 @@
+title: Quiz, flashcards et planning des révisions dans Tutor-ACP
+status: implemente_et_verifie_localement
+publication:
+  autorisation: demandee_par_le_mainteneur
+  client_version: 0.0.4
+  release: v0.7.3
+  circuit: staging, controles_CI, main, release_latest
+scope:
+  - Client ACP uniquement ; aucun changement du serveur MCP.
+  - Commandes /quiz et /flashcards dans la saisie, composants interactifs dans le fil.
+  - Planning dans la sidebar, activation et choix du format par formation.
+  - Un clic sur une révision sélectionne la formation et démarre l'activité dans le chat.
+  - Échéances issues de Tutor-MCP ; aucune planification ou maîtrise recalculée dans le client.
+  - Activation locale du planning ; le suivi pédagogique serveur reste actif.
+lots:
+  - id: composants
+    owner: learning_components
+    deliverables: [protocole_structuré_validé, quiz, flashcards, feedback, accessibilité]
+  - id: planning
+    owner: review_planning
+    deliverables: [bibliothèque_paginée, échéances_serveur, préférences_par_formation, lancement_direct]
+  - id: persistance_et_agent
+    owner: learning_native
+    deliverables: [préférences_par_profil, consignes_agent, validation_réponses, prévention_doublons]
+  - id: intégration_et_recette
+    owner: root
+    deliverables: [menu_slash, navigation, sélection_confirmée, reprise_historique, traduction, vérification_visuelle]
+invariants:
+  - La réponse du quiz et le verso restent cachés jusqu'à l'action de l'apprenant.
+  - Les données structurées incomplètes ou invalides ne dévoilent pas les réponses.
+  - Les autoévaluations de flashcards ne constituent pas des preuves de maîtrise.
+  - Chaque activité et réponse reste liée à son compte, sa formation et son domaine.
+  - Aucun succès serveur ni prochaine échéance ne sont inventés par l'interface.
+  - Une réponse déjà envoyée ne peut pas être soumise une seconde fois après fermeture.
+recette:
+  - Choisir les deux modalités avec la souris et au clavier depuis /.
+  - Répondre au quiz, recevoir le feedback, retourner une carte et s'autoévaluer.
+  - Activer, désactiver et changer le format dans Planning ; retrouver les choix après relance.
+  - Lancer une révision Go depuis un chat Python, vérifier le contexte Go avant tout envoi.
+  - Conserver les demandes non envoyées et reprendre une seule fois après reconnexion.
+  - Vérifier les données absentes, erreurs, conflits, changements de compte et de serveur.
+  - Vérifier l'affichage sombre et clair, le clavier et l'absence de débordement à 360 px.
+verification:
+  frontend:
+    command: npm --prefix client test
+    result: 99 tests réussis dans 15 fichiers
+  compilation:
+    command: npm --prefix client run build
+    result: TypeScript et compilation Vite réussis
+  native:
+    command: cargo test --manifest-path client/src-tauri/Cargo.toml --locked --no-default-features --features qualification
+    result: 120 tests réussis, 1 test d'adaptateur réel ignoré ; 18 tests ciblés repassés après ajustements finaux
+  rust_quality:
+    result: cargo fmt --check et cargo clippy all-targets avec -D warnings réussis
+  packaging:
+    result: 14 tests Python réussis (notices et agents embarqués)
+  visual:
+    command: node client/scripts/qualify-study-layout.mjs /tmp/tutor-study-layout
+    report: /tmp/tutor-study-layout/study-layout-report.json
+    result: 22 captures, 15 assertions réussies, aucun débordement ni erreur navigateur
+    scope: Application réelle avec réponses IPC de démonstration ; thèmes clair et sombre, souris, clavier, largeurs 1440/360/320 px
+limits:
+  - Aucune séance fournisseur réelle Codex ou Claude exécutée pendant cette qualification.
+  - La qualification Windows est assurée par le contrôle Client (Windows), avant promotion et publication de la release.
+  - Le rapport local ci-dessus précède la publication ; les preuves CI finales accompagnent la release. Aucun déploiement du pilote prévu.

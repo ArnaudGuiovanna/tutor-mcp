@@ -252,6 +252,9 @@ if ($Mode -eq 'Exercise') {
     Focus-Control 'Votre message au tuteur' $editType
     [void](Find-ReadyControl 'Envoyer' $buttonType)
     [System.Windows.Forms.SendKeys]::SendWait('{TAB}')
+    # The visual-activity menu is now the first keyboard action after input.
+    Assert-ControlFocus 'Choisir Quiz ou Flashcards' $buttonType
+    [System.Windows.Forms.SendKeys]::SendWait('{TAB}')
     Assert-ControlFocus 'Envoyer' $buttonType
 
     Exercise-CommandPalette

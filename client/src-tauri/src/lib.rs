@@ -7,6 +7,7 @@ pub mod backend;
 pub mod discovery;
 pub mod identity;
 pub mod launch;
+pub mod learning_ui;
 pub mod native_auth;
 pub mod permissions;
 pub mod profiles;

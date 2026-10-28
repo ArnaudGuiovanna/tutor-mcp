@@ -1314,6 +1314,171 @@ async fn expiring_native_session_signs_again_and_installs_new_mcp_headers_before
 }
 
 #[tokio::test]
+async fn learning_prompt_uses_the_fresh_server_context_instead_of_the_cached_selection() {
+    let directory = tempfile::tempdir().unwrap();
+    let (backend, _) = connected(directory.path()).await;
+    let conversation = backend.start_conversation(None, None).await.unwrap();
+    backend.store.lock().await.transaction(|data| {
+        data.conversations[0].active_training = Some(json!({"training_id":"personal:stale-python","domain_id":"stale-python","revision":"1"}));
+        Ok(())
+    }).unwrap();
+    backend
+        .send_prompt(conversation.id.clone(), "Continuons".into())
+        .await
+        .unwrap();
+    let sessions: Value = serde_json::from_slice(
+        &std::fs::read(directory.path().join("fixture-agent-sessions.json")).unwrap(),
+    )
+    .unwrap();
+    let prompt = sessions[conversation.agent_session_id.as_deref().unwrap()]["lastPrompt"]
+        .as_str()
+        .unwrap();
+    // The fixture's fresh context is {items:[]}; stale persisted selection must
+    // never be promoted into the agent's confirmed formation instructions.
+    assert!(prompt.contains("FORMATION CONFIRMÉE : {\"items\":[]}"));
+    assert!(!prompt.contains("stale-python"));
+    backend.shutdown().await;
+}
+
+#[tokio::test]
+async fn learning_planning_preferences_preserve_live_agent_and_tutor_connections() {
+    let directory = tempfile::tempdir().unwrap();
+    let (backend, _) = connected(directory.path()).await;
+    let mut settings = backend.settings().await;
+    settings.review_plans.insert(
+        "profile|tutor|training".into(),
+        crate::learning_ui::ReviewPlan {
+            enabled: true,
+            format: crate::learning_ui::LearningFormat::Quiz,
+        },
+    );
+    let snapshot = backend.save_settings(settings).await.unwrap();
+    assert_eq!(snapshot["agentConnected"], true);
+    assert_eq!(snapshot["tutorStatus"]["connected"], true);
+    backend.shutdown().await;
+}
+
+#[tokio::test]
+async fn learning_requests_with_wrong_confirmed_context_never_reach_the_agent_or_consume_outbox() {
+    let directory = tempfile::tempdir().unwrap();
+    let (backend, _) = connected(directory.path()).await;
+    let conversation = backend.start_conversation(None, None).await.unwrap();
+    // This fixture's tutor returns no selected training. A client must not
+    // route a structured request to a provider before selection is confirmed.
+    let message = "```tutor-study-request\n{\"version\":1,\"format\":\"quiz\",\"intent\":\"review\",\"trainingId\":\"personal:go\",\"domainId\":\"go\"}\n```".to_string();
+    backend
+        .queue_prompt(Some(message.clone()), Some(conversation.id.clone()))
+        .await
+        .unwrap();
+    let error = backend
+        .send_prompt(conversation.id.clone(), message.clone())
+        .await
+        .unwrap_err();
+    assert!(error.contains("formation demandée"));
+    let snapshot = backend.snapshot().await;
+    assert_eq!(snapshot["pendingMessage"]["text"], message);
+    assert!(snapshot["conversations"][0]["messages"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let sessions: Value = serde_json::from_slice(
+        &std::fs::read(directory.path().join("fixture-agent-sessions.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(sessions
+        .as_object()
+        .unwrap()
+        .values()
+        .all(|session| session.get("lastPrompt").is_none()));
+    backend.shutdown().await;
+}
+
+#[tokio::test]
+async fn learning_queue_rejects_forged_response_without_overwriting_an_existing_message() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Backend::new(directory.path(), Arc::new(|_, _| {})).unwrap();
+    backend
+        .queue_prompt(Some("Question conservée".into()), None)
+        .await
+        .unwrap();
+    let forged = "```tutor-response\n{\"version\":1,\"kind\":\"flashcard\",\"activityId\":\"made-up\",\"trainingId\":\"personal:go\",\"domainId\":\"go\",\"concept\":\"Variables\",\"rating\":\"easy\",\"responseTimeSeconds\":1}\n```";
+    assert!(backend
+        .queue_prompt(Some(forged.into()), Some("unknown".into()))
+        .await
+        .is_err());
+    assert_eq!(
+        backend.snapshot().await["pendingMessage"]["text"],
+        "Question conservée"
+    );
+    let mut invalid = backend.settings().await;
+    invalid.review_plans.insert(
+        String::new(),
+        crate::learning_ui::ReviewPlan {
+            enabled: true,
+            format: crate::learning_ui::LearningFormat::Quiz,
+        },
+    );
+    assert!(backend.save_settings(invalid).await.is_err());
+    assert_eq!(
+        backend.snapshot().await["settings"]["reviewPlans"],
+        json!({})
+    );
+}
+
+#[tokio::test]
+async fn learning_withdrawn_response_is_kept_locally_and_cannot_be_answered_again() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Backend::new(directory.path(), Arc::new(|_, _| {})).unwrap();
+    let context = json!({"training_id":"personal:go","domain_id":"go","revision":"2"});
+    let card = json!({"version":1,"id":"function-1","kind":"flashcard","trainingId":"personal:go","domainId":"go","concept":"Functions","question":"Quel mot-clé déclare une fonction ?","answer":"func"});
+    let response = json!({"version":1,"activityId":"function-1","kind":"flashcard","trainingId":"personal:go","domainId":"go","concept":"Functions","rating":"hard","responseTimeSeconds":4});
+    let encoded = format!("```tutor-response\n{response}\n```");
+    let conversation:Conversation = serde_json::from_value(json!({"id":"go-chat","title":"Go","intentId":null,"agentSessionId":null,"targetId":"manual","tutorBinding":"binding","createdAt":"now","updatedAt":"now","activeTraining":context,"messages":[{"id":"card-1","role":"assistant","text":format!("```tutor-activity\n{card}\n```"),"createdAt":"now","status":"complete","trainingContext":context}]})).unwrap();
+    backend
+        .store
+        .lock()
+        .await
+        .transaction(|data| {
+            data.conversations.push(conversation);
+            Ok(())
+        })
+        .unwrap();
+    backend
+        .queue_prompt(Some(encoded.clone()), Some("go-chat".into()))
+        .await
+        .unwrap();
+    assert!(backend
+        .queue_prompt(Some("Another question".into()), Some("go-chat".into()))
+        .await
+        .is_err());
+    let after = backend.queue_prompt(None, None).await.unwrap();
+    assert!(after["pendingMessage"].is_null());
+    let messages = after["conversations"][0]["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2);
+    assert!(messages[1]["text"]
+        .as_str()
+        .unwrap()
+        .starts_with("Réponse conservée sur cet appareil, sans envoi au tuteur."));
+    assert_eq!(messages[1]["trainingContext"], context);
+    assert_eq!(messages[1]["status"], "complete");
+    backend.queue_prompt(None, None).await.unwrap();
+    drop(backend);
+    let reopened = Backend::new(directory.path(), Arc::new(|_, _| {})).unwrap();
+    assert!(reopened
+        .queue_prompt(Some(encoded), Some("go-chat".into()))
+        .await
+        .unwrap_err()
+        .contains("déjà"));
+    assert_eq!(
+        reopened.snapshot().await["conversations"][0]["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
 async fn queued_message_survives_restart_and_is_consumed_with_one_user_turn() {
     let directory = tempfile::tempdir().unwrap();
     let (backend, _) = connected(directory.path()).await;

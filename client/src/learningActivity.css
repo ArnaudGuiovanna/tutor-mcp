@@ -1,0 +1,40 @@
+.learning-card { margin:16px 0; padding:24px; border:1px solid var(--line-strong); border-radius:var(--r-lg); background:var(--surface); max-width:100%; overflow-wrap:anywhere; }
+.learning-card-heading { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:12px; margin-bottom:24px; font-size:13px; }
+.learning-card-kind { display:flex; align-items:center; gap:8px; color:var(--blue-hi); font-weight:600; }
+.learning-card-concept { color:var(--fg-2); }
+.learning-question { font-size:var(--reading-size,20px); line-height:var(--reading-line-height,1.65); margin-bottom:24px; }
+.learning-question .markdown-body>:last-child,.learning-feedback .markdown-body>:last-child,.learning-flashcard-back .markdown-body>:last-child { margin-bottom:0; }
+.learning-quiz-options { display:grid; gap:12px; border:0; padding:0; margin:0; }
+.learning-quiz-option { position:relative; display:flex; align-items:center; gap:12px; padding:16px; border:1px solid var(--line-strong); border-radius:var(--r-md); background:var(--bg); cursor:pointer; min-height:58px; }
+.learning-quiz-option input { position:absolute; inset-inline-start:16px; width:28px; height:28px; opacity:0; margin:0; }
+.learning-quiz-option:focus-within { outline:2px solid var(--blue); outline-offset:3px; }
+.learning-quiz-option:hover { background:var(--raised); }
+.learning-quiz-option.selected { border-color:var(--blue); background:var(--blue-soft); }
+.learning-quiz-option.correct { border-color:var(--mastery); }
+.learning-quiz-option.incorrect { border-color:var(--review); }
+.learning-quiz-options:disabled .learning-quiz-option { cursor:default; }
+.learning-option-letter { display:grid; place-items:center; flex:none; width:28px; height:28px; border:1px solid var(--line-strong); border-radius:6px; font-size:13px; color:var(--fg-2); }
+.learning-quiz-option.selected .learning-option-letter { border-color:var(--blue); color:var(--blue-hi); }
+.learning-option-text { flex:1; font-size:var(--reading-size,20px); line-height:1.5; white-space:pre-wrap; }
+.learning-answer-mark { color:var(--mastery); }
+.learning-card-actions { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:16px; margin-top:24px; }
+.learning-card-hint { color:var(--fg-2); font-size:13px; line-height:1.6; }
+.learning-card-actions>.learning-card-hint { flex:1 1 220px; }
+.learning-card .button { min-height:44px; white-space:normal; }
+.learning-feedback { padding:20px; margin-top:24px; border-inline-start:3px solid var(--blue); background:var(--bg); border-radius:0 var(--r-md) var(--r-md) 0; }
+.learning-feedback.correct { border-inline-start-color:var(--mastery); }
+.learning-feedback.incorrect { border-inline-start-color:var(--review); }
+.learning-feedback-title { display:flex; align-items:center; gap:8px; margin:0 0 12px; font-weight:600; }
+.learning-feedback>p:last-child { margin-bottom:0; }
+.learning-flashcard-front { min-height:156px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:20px; text-align:center; border-top:1px solid var(--line); padding-top:24px; }
+.learning-flashcard-front p { color:var(--fg-2); font-size:15px; max-width:45ch; margin:0; }
+.learning-flashcard-back { padding:24px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); animation:learning-reveal 180ms ease-out; }
+.learning-answer-label { font-size:12px; color:var(--blue-hi); margin:0 0 12px; }
+.learning-recall { margin:24px 0 0; padding:0; border:0; }
+.learning-recall legend { font-size:15px; margin-bottom:12px; }
+.learning-recall-buttons { display:flex; flex-wrap:wrap; gap:10px; }
+.learning-recall-buttons .button { flex:1 1 180px; }
+.learning-card-error { color:var(--alert); font-size:14px; margin-bottom:0; }
+@keyframes learning-reveal { from { opacity:.4; transform:translateY(4px); } to { opacity:1; transform:none; } }
+@media (prefers-reduced-motion:reduce) { .learning-flashcard-back { animation:none; } }
+@media (max-width:600px) { .learning-card { padding:16px; } .learning-card-heading { margin-bottom:16px; } .learning-quiz-option { padding:12px; gap:10px; } .learning-feedback { padding:14px; } .learning-card-actions>.button { width:100%; } }

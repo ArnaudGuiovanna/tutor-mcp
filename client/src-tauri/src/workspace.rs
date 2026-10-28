@@ -83,6 +83,7 @@ pub struct Settings {
     pub appearance: Appearance,
     pub agent: AgentSettings,
     pub permission_policy: Option<crate::permissions::PermissionPolicy>,
+    pub review_plans: std::collections::BTreeMap<String, crate::learning_ui::ReviewPlan>,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -95,6 +96,7 @@ impl Default for Settings {
             appearance: Appearance::default(),
             agent: AgentSettings::default(),
             permission_policy: None,
+            review_plans: Default::default(),
         }
     }
 }
@@ -565,6 +567,7 @@ mod tests {
         assert_eq!(settings.appearance.font_size, 20);
         assert_eq!(settings.appearance.theme, "dark");
         assert_eq!(settings.target_id, "existing-agent");
+        assert!(settings.review_plans.is_empty());
     }
     #[test]
     fn response_journal_recovers_unicode_without_rewriting_or_duplicating_history() {

@@ -13,6 +13,7 @@ export interface AgentTarget {
 }
 
 export interface Settings {
+  reviewPlans?: Record<string, { enabled: boolean; format: 'quiz' | 'flashcard' }>;
   language?: 'fr' | 'en';
   appearance?: { theme: 'dark' | 'light' | 'system'; fontSize: number; lineHeight: number; reduceMotion: boolean };
   agent?: { model: string; reasoningEffort: string; speed: string };

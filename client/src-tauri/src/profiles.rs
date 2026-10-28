@@ -109,6 +109,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn learning_review_plans_remain_private_to_each_local_account() {
+        let directory = tempfile::tempdir().unwrap();
+        let profiles = ClientProfiles::new(directory.path(), Arc::new(|_, _| {})).unwrap();
+        let backend = profiles.current().await;
+        let mut settings = backend.settings().await;
+        settings.review_plans.insert(
+            "institution|go".into(),
+            crate::learning_ui::ReviewPlan {
+                enabled: true,
+                format: crate::learning_ui::LearningFormat::Flashcard,
+            },
+        );
+        backend.save_settings(settings).await.unwrap();
+        let other = profiles.create("Other learner".into()).await.unwrap();
+        assert_eq!(other["settings"]["reviewPlans"], json!({}));
+        let restored = profiles.select(LEGACY.into()).await.unwrap();
+        assert_eq!(
+            restored["settings"]["reviewPlans"]["institution|go"]["format"],
+            "flashcard"
+        );
+        drop(profiles);
+        let reopened = ClientProfiles::new(directory.path(), Arc::new(|_, _| {})).unwrap();
+        assert_eq!(
+            reopened.snapshot().await["settings"]["reviewPlans"]["institution|go"]["enabled"],
+            true
+        );
+    }
+
+    #[tokio::test]
     async fn profile_names_never_grant_roles_and_invalid_switches_preserve_the_active_account() {
         let directory = tempfile::tempdir().unwrap();
         let profiles = ClientProfiles::new(directory.path(), Arc::new(|_, _| {})).unwrap();
