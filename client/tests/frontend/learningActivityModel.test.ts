@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { parseLearningContent, parseLearningResponse, responseMatchesActivity, serializeLearningResponse, validateLearningActivity, validateLearningResponse } from '../../src/learningActivity';
-import type { LearningActivity, LearningResponse } from '../../src/learningActivity';
+import { parseLearningContent, parseLearningResponse, responseMatchesActivity, serializeLearningResponse, validateLearningActivity, validateLearningResponse } from '../../src/learningActivityModel';
+import type { LearningActivity, LearningResponse } from '../../src/learningActivityModel';
 
 const activity: LearningActivity = { version: 1, id: 'activity-1', kind: 'quiz', trainingId: 'personal:go', domainId: 'go', concept: 'variables',
   question: 'Quelle valeur contient x ?', attemptId: 'attempt-1', activityType: 'PRACTICE', rubricJson: '{"criteria":[{"id":"value","max_score":1}],"passing_score":1}', options: [{ id: 'a', text: '3' }, { id: 'b', text: '5' }], correctOptionId: 'b', explanation: 'On ajoute deux à trois.' };

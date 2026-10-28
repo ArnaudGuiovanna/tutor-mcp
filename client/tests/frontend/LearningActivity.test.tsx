@@ -2,7 +2,7 @@ import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { LearningActivityCard } from '../../src/LearningActivity';
-import type { FlashcardActivity, LearningResponse, QuizActivity } from '../../src/learningActivity';
+import type { FlashcardActivity, LearningResponse, QuizActivity } from '../../src/learningActivityModel';
 
 const quiz: QuizActivity = { version: 1, id: 'quiz-1', kind: 'quiz', trainingId: 'personal:go', domainId: 'go', concept: 'variables',
   question: 'Quelle valeur contient x ?', options: [{ id: 'a', text: '3' }, { id: 'b', text: '5' }], correctOptionId: 'b', explanation: 'On ajoute deux à trois.', attemptId: 'attempt-1', activityType: 'PRACTICE', rubricJson: '{"criteria":[{"id":"value","max_score":1}],"passing_score":1}' };

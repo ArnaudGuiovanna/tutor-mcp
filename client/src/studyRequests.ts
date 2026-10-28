@@ -1,6 +1,6 @@
 import type { ClientBridge } from './bridge';
 import { t } from './i18n';
-import { learningProtocolFences } from './learningActivity';
+import { learningProtocolFences } from './learningActivityModel';
 import type { ConversationContext, Settings, Snapshot, TutorOverview } from './types';
 
 export type StudyFormat = 'quiz' | 'flashcard';

@@ -4,8 +4,8 @@ import { Icon } from './icons';
 import { dateLocale, t, useTranslation } from './i18n';
 import { errorMessage } from './model';
 import type { Training } from './types';
-import { loadReviewTrainings, reviewGroup, reviewPreference, reviewTimestamp, scheduledReviews } from './reviewPlanning';
-import type { ReviewFormat, ReviewGroup, ReviewPlanPreference } from './reviewPlanning';
+import { loadReviewTrainings, reviewGroup, reviewPreference, reviewTimestamp, scheduledReviews } from './reviewPlanningModel';
+import type { ReviewFormat, ReviewGroup, ReviewPlanPreference } from './reviewPlanningModel';
 import './reviewPlanning.css';
 
 export interface ReviewPlanningProps {

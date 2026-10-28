@@ -5,8 +5,8 @@ import { t } from './i18n';
 import { Icon } from './icons';
 import { MessageBody } from './MessageBody';
 import type { ClientBridge } from './bridge';
-import { responseMatchesActivity } from './learningActivity';
-import type { LearningActivity, LearningResponse, RecallRating } from './learningActivity';
+import { responseMatchesActivity } from './learningActivityModel';
+import type { LearningActivity, LearningResponse, RecallRating } from './learningActivityModel';
 import './learningActivity.css';
 
 export interface LearningActivityCardProps {
