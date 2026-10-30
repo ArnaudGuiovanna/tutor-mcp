@@ -4,7 +4,7 @@ authority: Backlog de référence pour toute l’implémentation H00–H12 conve
 status: IN_PROGRESS
 scope:
   objective: Livrer et qualifier le harness local intégré au client ACP, jusqu’à la distribution Windows.
-  current_increment: Construire et vérifier le moteur GGUF natif et son protocole ACP ; les gates matériels restent ouverts.
+  current_increment: Intégrer journal durable, reprise ACP, projection bornée et premières briques de découverte/transport MCP ; exécuteur et gates matériels restent ouverts.
   preserve_full_goal: true
   server_changes_allowed: false
   exclusions: [LoRA, Needle, modification du serveur Tutor MCP]
@@ -81,9 +81,9 @@ architecture:
     desktop_manifest: client/src-tauri/Cargo.toml
     desktop_target: tutor-client
     desktop_integration: client/src-tauri/src
-    journal_module_later: client/local-agent/src/journal.rs
-    journal_storage_later: SQLite par profil dans les données applicatives ; chemin final à définir en H04.
-    path_status: Agent et intégration native créés ; journal, orchestration et distribution restent à intégrer.
+    journal_module: client/local-agent/src/journal.rs
+    journal_storage: Données privées du profil/local-agent/empreinte_du_propriétaire/UUID_session.sqlite3.
+    path_status: Agent, journal et projection intégrés ; orchestration MCP, pédagogie et distribution restent à intégrer.
   context_budget:
     total_tokens: 4096
     default_input_max_tokens: 3072
@@ -98,6 +98,8 @@ architecture:
     provenance: Identifier origine utilisateur, MCP, état du parcours ou résumé secondaire de chaque élément.
     retention: Définir rétention et effacement explicites sans supprimer les opérations à réconcilier.
     workspace_constraint: Stockage distinct du fichier workspace actuel plafonné à 32 Mio.
+    implementation: SQLite DELETE, verrou exclusif par session et synchronous FULL ; entrées et événements immuables, références vérifiées par SHA-256.
+    limitations: API de rétention disponible mais interface d’effacement à intégrer ; journal non chiffré ; réconciliation explicite des opérations inconnues à raccorder en H05.
 
 observed_h00_evidence:
   desktop:
@@ -142,6 +144,46 @@ observed_h00_evidence:
         - Test natif release séparé réussi pour grammaire, budget, annulation et compteur de chargement unique.
         - Test ignoré du client Rust exécuté avec le vrai agent pour découverte, lancement, initialisation et fermeture ACP.
       limitations: Ces observations sur VM CPU ne qualifient ni P2000, ni Windows, ni interface pédagogique complète ; outils et reprise durable sont encore absents.
+
+observed_increment_evidence:
+  foundation_publication:
+    commit: a2dbd60915066b13c4ed09cfed89f980569b193c
+    foundation_commit: 56dedf67182923686610eb12b1fd0edaef46de70
+    branches: [staging, main]
+    github_checks: Tous les contrôles requis ont réussi sur a2dbd6091506, dont Local agent (Windows) et Client (Windows).
+    limitation: Binaire agent CPU construit ; ni P2000 ni distribution de cet agent dans l’installateur ne sont qualifiés.
+  journal_and_context:
+    environment: VM Linux CPU, Rust 1.95.0.
+    automated_checks: 81 tests agent réussis sans puis avec inférence native, deux tests GGUF ignorés par défaut ; 18 tests du qualificateur et 140 tests du client réussis ; clippy et format vérifiés.
+    evidence:
+      - Tests SQLite avec arrêt forcé du processus, reprise des mutations dispatchées en résultat inconnu et originaux conservés.
+      - Tests de références, isolation des propriétaires, refus des écritures et rétention au-delà de 32 Mio de journal.
+      - Test ACP de 30 tours puis fermeture/reprise, relecture des 60 messages exacts et contexte suivant borné ; moteur simulé pour le protocole.
+      - Renouvellement MCP sans replay via _tutor/rebind ; changement de propriétaire refusé.
+      - Test natif exact_qwen_projection_after_hundred_turns réussi avec le GGUF épinglé ; comptage du template identique à celui de la génération.
+    native_projection:
+      context_tokens: 4096
+      reserved_output_tokens: 32
+      safety_margin_tokens: 256
+      measured_input_tokens: 3400
+      historical_turns_supplied: 100
+      omitted_records: 99
+      required_learner_evidence: Préservée exactement et vérifiée par égalité JSON.
+    limitations: Le test natif projette un historique de 100 tours ; il ne représente pas 100 générations ni une qualification d’endurance. Parcours pédagogique et UI réelle de reprise encore à qualifier.
+    live_restart_check:
+      scope: Vérification ACP directe, binaire release Linux CPU et GGUF épinglé, session SQLite temporaire.
+      binary_sha256: 6ec0912a21352652224fbb410a113e612f07be3a79bc9159b5a6209bef2cac6f
+      result: PASS
+      observations:
+        - Réponse arithmétique correcte, arrêt propre du processus, relecture exacte de la question et de la réponse après redémarrage.
+        - Relecture observée en 5.016 ms ; renouvellement de connexion sans replay puis nouvelle génération correcte.
+        - Entrées mesurées de 219 puis 254 tokens ; sortie réservée de 32 tokens pour cet essai.
+      limitation: Vérification ponctuelle de reprise, sans interface graphique, outils MCP ni qualification matérielle Windows/P2000.
+  mcp_components:
+    catalogue: Recherche lexicale française, trois résumés maximum, schéma exact sur demande et invalidation par liaison.
+    http: Dix tests de transport HTTP réels sur loopback réussis ; handshake, JSON/SSE, pagination, notifications, annulation et absence de rejeu automatique.
+    idempotency: Clé transmise dans params._meta.idempotency_key selon le contrat du serveur existant.
+    limitations: Transport et catalogue non encore raccordés à l’exécuteur ACP ; stdio et corpus français de 60 formulations restent à qualifier.
 
 items:
   - id: H00
@@ -189,7 +231,7 @@ items:
   - id: H03
     title: Catalogue et découverte sélective
     priority: P0
-    status: TODO
+    status: IN_PROGRESS
     depends_on: [H01]
     work:
       - Conserver schémas complets, annotations et identités des outils dans un registre lié à la connexion et aux droits.
@@ -202,7 +244,7 @@ items:
   - id: H04
     title: Journal exact d’exécution
     priority: P0
-    status: TODO
+    status: IN_PROGRESS
     depends_on: [H01]
     work:
       - Créer SQLite par profil pour tours, opérations, arguments, résultats, références pédagogiques et états d’avancement.
@@ -230,7 +272,7 @@ items:
   - id: H06
     title: Construction et réduction du contexte
     priority: P0
-    status: TODO
+    status: IN_PROGRESS
     depends_on: [H02, H04]
     work:
       - Construire une projection par tâche avec instructions, contrat actif, données indispensables et échanges récents.

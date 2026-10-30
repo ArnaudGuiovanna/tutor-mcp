@@ -17,6 +17,7 @@ pub struct Config {
     pub gpu_layers: u32,
     pub threads: i32,
     pub batch: u32,
+    pub data_dir: Option<PathBuf>,
 }
 
 impl Config {
@@ -29,6 +30,7 @@ impl Config {
             gpu_layers: 0,
             threads: 6,
             batch: 128,
+            data_dir: None,
         };
         let mut args = args.into_iter();
         let mut seen = std::collections::BTreeSet::new();
@@ -39,6 +41,7 @@ impl Config {
             let value = args.next().ok_or("missing_option_value")?;
             match key.as_str() {
                 "--model" => config.model = value.into(),
+                "--data-dir" => config.data_dir = Some(value.into()),
                 "--sha256" => config.expected_sha256 = Some(value.to_ascii_lowercase()),
                 "--context" => config.context = value.parse().map_err(|_| "invalid_context")?,
                 "--max-output" => {
@@ -59,6 +62,13 @@ impl Config {
     pub fn validate(&self) -> Result<(), String> {
         if !self.model.is_absolute() || !self.model.is_file() {
             return Err("model_file_unavailable".into());
+        }
+        if self
+            .data_dir
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute() || path.is_file())
+        {
+            return Err("invalid_data_directory".into());
         }
         if !(1024..=CONTEXT_LIMIT).contains(&self.context)
             || self.max_output == 0

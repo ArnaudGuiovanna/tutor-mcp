@@ -353,6 +353,9 @@ impl Backend {
         self.stop_agent().await?;
         let agent_cwd = discovery::agent_cwd(&target, &cwd).await?;
         let mut spec = discovery::launch_spec(&target, &cwd).await?;
+        if target.id == crate::local_agent::TARGET_ID {
+            crate::local_agent::bind_data_directory(&mut spec, &self.directory)?;
+        }
         crate::agent_policy::restrict_tutor_agent(&target, &mut spec)?;
         // Filesystem operations remain bounded to a read-only agent session.
         // MCP mutations retain the learner's server-side authorization.
@@ -1567,7 +1570,10 @@ impl Backend {
         Err("La liste des outils MCP est invalide.".into())
     }
 
-    async fn mcp_servers(&self, conversation_id: &str) -> Result<(Value, String), String> {
+    async fn mcp_servers(
+        &self,
+        conversation_id: &str,
+    ) -> Result<(Value, String, Option<Value>), String> {
         // Always obtain current identity/state; cached labels confer no rights.
         self.tutor_overview().await?;
         let settings = self.store.lock().await.data.settings.clone();
@@ -1589,7 +1595,22 @@ impl Backend {
         if refresh_catalog {
             self.list_mcp_tools().await?;
         }
+        let is_local_agent = self
+            .agent
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|agent| agent.target.id == crate::local_agent::TARGET_ID);
         let tutor = self.tutor.lock().await;
+        let owner = if is_local_agent {
+            Some(local_journal_owner(
+                &self.directory,
+                &tutor,
+                &settings.tutor.mode,
+            )?)
+        } else {
+            None
+        };
         if settings.tutor.mode == "local" {
             if settings.tutor.command.trim().is_empty() {
                 return Err("Indiquez le chemin de Tutor local.".into());
@@ -1597,6 +1618,7 @@ impl Backend {
             Ok((
                 json!([{"name":"tutor","command":settings.tutor.command,"args":settings.tutor.args,"env":[{"name":"TUTOR_CONVERSATION_ID","value":conversation_id}]}]),
                 tutor.binding.clone(),
+                owner,
             ))
         } else {
             let credentials = tutor
@@ -1619,6 +1641,7 @@ impl Backend {
             Ok((
                 json!([{"type":"http","name":"tutor","url":credentials.resource(),"headers":headers}]),
                 tutor.binding.clone(),
+                owner,
             ))
         }
     }
@@ -1633,7 +1656,7 @@ impl Backend {
         let conversation_id = resume_id
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let (servers, tutor_binding) = self.mcp_servers(&conversation_id).await?;
+        let (servers, tutor_binding, owner) = self.mcp_servers(&conversation_id).await?;
         let (rpc, target_id, cwd, capabilities, runtime_binding) = {
             let agent = self.agent.lock().await;
             let agent = agent
@@ -1698,9 +1721,16 @@ impl Backend {
             if old.runtime_binding == runtime_binding && can_load && old.agent_session_id.is_some()
             {
                 let configuration = self
-                    .load_session(
+                    .refresh_learning_session(
                         &rpc,
-                        json!({"sessionId":old.agent_session_id,"cwd":cwd,"mcpServers":servers}),
+                        &target_id,
+                        old.agent_session_id.as_deref().unwrap(),
+                        learning_session_params(
+                            &cwd,
+                            &servers,
+                            old.agent_session_id.as_deref(),
+                            owner.as_ref(),
+                        ),
                     )
                     .await?;
                 self.configure_conversation_session(
@@ -1711,7 +1741,10 @@ impl Backend {
                 .await?;
             } else {
                 let session = rpc
-                    .request("session/new", json!({"cwd":cwd,"mcpServers":servers,"_meta":{"disableBuiltInTools":true,"claudeCode":{"options":{"allowDangerouslySkipPermissions":false,"tools":[]}}}}))
+                    .request(
+                        "session/new",
+                        learning_session_params(&cwd, &servers, None, owner.as_ref()),
+                    )
                     .await?;
                 let id = session_id(&session)?;
                 self.configure_conversation_session(&rpc, &id, session)
@@ -1723,7 +1756,10 @@ impl Backend {
             old
         } else {
             let session = rpc
-                .request("session/new", json!({"cwd":cwd,"mcpServers":servers,"_meta":{"disableBuiltInTools":true,"claudeCode":{"options":{"allowDangerouslySkipPermissions":false,"tools":[]}}}}))
+                .request(
+                    "session/new",
+                    learning_session_params(&cwd, &servers, None, owner.as_ref()),
+                )
                 .await?;
             let id = session_id(&session)?;
             self.configure_conversation_session(&rpc, &id, session)
@@ -1787,8 +1823,8 @@ impl Backend {
             &text,
             Some(&conversation_id),
         )?;
-        let (servers, binding) = self.mcp_servers(&conversation_id).await?;
-        let (rpc, generation, cwd, can_load, runtime_binding) = {
+        let (servers, binding, owner) = self.mcp_servers(&conversation_id).await?;
+        let (rpc, generation, cwd, can_load, runtime_binding, target_id) = {
             let agent = self.agent.lock().await;
             let agent = agent.as_ref().ok_or("Reconnectez Codex.")?;
             (
@@ -1801,6 +1837,7 @@ impl Backend {
                     .and_then(Value::as_bool)
                     == Some(true),
                 digest(&json!([agent.target, agent.cwd])),
+                agent.target.id.clone(),
             )
         };
         let tutor_context = self.tutor.lock().await.overview.clone();
@@ -1841,13 +1878,16 @@ impl Backend {
             let context = format!("LANGUE / LANGUAGE: {}. Reply in this language, regardless of quoted historical messages.\n{}", if store.data.settings.language == "en" { "English" } else { "français" }, pedagogical_prompt(intent, &confirmed_conversation, &text, tutor_context.as_ref()));
             (session, context)
         };
-        // Refresh scoped MCP credentials on the existing agent session. Loading
-        // does not replay or resubmit any prior user request.
+        // Local resident sessions refresh credentials without history replay.
+        // A process restart restores through session/load; external agents keep
+        // their existing load/refresh behavior and replay suppression.
         if can_load {
             let configuration = self
-                .load_session(
+                .refresh_learning_session(
                     &rpc,
-                    json!({"sessionId":session,"cwd":cwd,"mcpServers":servers}),
+                    &target_id,
+                    &session,
+                    learning_session_params(&cwd, &servers, Some(&session), owner.as_ref()),
                 )
                 .await?;
             self.configure_conversation_session(&rpc, &session, configuration)
@@ -1865,7 +1905,10 @@ impl Backend {
                 // grant before another prompt. Prior messages remain context,
                 // never replayed user turns or tool mutations.
                 let replacement = rpc
-                    .request("session/new", json!({"cwd":cwd,"mcpServers":servers,"_meta":{"disableBuiltInTools":true,"claudeCode":{"options":{"allowDangerouslySkipPermissions":false,"tools":[]}}}}))
+                    .request(
+                        "session/new",
+                        learning_session_params(&cwd, &servers, None, owner.as_ref()),
+                    )
                     .await?;
                 session = session_id(&replacement)?;
                 self.configure_conversation_session(&rpc, &session, replacement)
@@ -2108,6 +2151,26 @@ impl Backend {
             agent.permissions.remove(&key);
         }
         Ok(())
+    }
+
+    async fn refresh_learning_session(
+        &self,
+        rpc: &AcpClient,
+        target_id: &str,
+        session: &str,
+        params: Value,
+    ) -> Result<Value, String> {
+        let known = self
+            .agent
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|agent| agent.mcp_configurations.contains_key(session));
+        if session_refresh_method(target_id, known) == "_tutor/rebind" {
+            rpc.request("_tutor/rebind", params).await
+        } else {
+            self.load_session(rpc, params).await
+        }
     }
 
     async fn load_session(&self, rpc: &AcpClient, params: Value) -> Result<Value, String> {
@@ -2545,6 +2608,102 @@ fn digest(value: &Value) -> String {
         "{:x}",
         Sha256::digest(serde_json::to_vec(value).expect("JSON serialization"))
     )
+}
+
+/// Derive journal ownership only after a successful Tutor overview. This is
+/// separate from MCP grant/catalog fingerprints: token rotation and changing
+/// rights must not create another account's journal namespace.
+fn local_journal_owner(directory: &Path, tutor: &Tutor, mode: &str) -> Result<Value, String> {
+    let invalid = || "L’identité Tutor du journal local n’est pas vérifiée.".to_string();
+    if !tutor.status.connected || tutor.binding.is_empty() {
+        return Err(invalid());
+    }
+    let overview = tutor.overview.as_ref().ok_or_else(invalid)?;
+    // ProfileContext's identifiers are private to profiles.rs. Its private
+    // directory provides a stable profile namespace without epoch or labels.
+    let directory = directory.canonicalize().map_err(|_| invalid())?;
+    let directory = directory.to_str().ok_or_else(invalid)?;
+    let profile_id = digest(&json!(["tutor-local-profile-v1", directory]));
+    let valid_id =
+        |id: &str| !id.trim().is_empty() && id.len() <= 2048 && !id.chars().any(char::is_control);
+    let (account_id, tenant_id, server_id) = match mode {
+        "remote" => {
+            let credentials = tutor.credentials.as_ref().ok_or_else(invalid)?;
+            let identity = overview.get("identity").ok_or_else(invalid)?;
+            let ids = ["tenantId", "userId", "membershipId", "learnerId"]
+                .map(|key| identity.get(key).and_then(Value::as_str).unwrap_or(""));
+            if ids[..3].iter().any(|id| !valid_id(id))
+                || (!ids[3].is_empty() && !valid_id(ids[3]))
+                || ids
+                    != [
+                        credentials.principal.tenant_id.as_str(),
+                        credentials.principal.user_id.as_str(),
+                        credentials.principal.membership_id.as_str(),
+                        credentials.principal.learner_id.as_str(),
+                    ]
+                || tutor.binding != digest(&json!([credentials.origin, ids]))
+            {
+                return Err(invalid());
+            }
+            (
+                digest(&json!(["tutor-local-account-v1", ids[1], ids[2], ids[3]])),
+                ids[0].to_owned(),
+                digest(&json!([
+                    "tutor-local-server-v1",
+                    credentials.origin,
+                    credentials.resource()
+                ])),
+            )
+        }
+        "local" => {
+            if tutor.local_binding.is_empty() || tutor.binding != tutor.local_binding {
+                return Err(invalid());
+            }
+            // The stdio server exposes learner_id, without institutional
+            // user/membership/tenant IDs. Scope it to the verified transport;
+            // never borrow credentials left over from a remote connection.
+            let learner = overview
+                .pointer("/context/learner_id")
+                .and_then(Value::as_str)
+                .filter(|id| valid_id(id))
+                .ok_or_else(invalid)?;
+            (
+                digest(&json!(["tutor-local-stdio-account-v1", learner])),
+                digest(&json!(["tutor-local-stdio-tenant-v1", tutor.local_binding])),
+                digest(&json!(["tutor-local-stdio-server-v1", tutor.local_binding])),
+            )
+        }
+        _ => return Err(invalid()),
+    };
+    Ok(
+        json!({"profileId":profile_id,"accountId":account_id,"tenantId":tenant_id,"serverId":server_id}),
+    )
+}
+
+fn learning_session_params(
+    cwd: &str,
+    servers: &Value,
+    session: Option<&str>,
+    owner: Option<&Value>,
+) -> Value {
+    let mut params = json!({"cwd":cwd,"mcpServers":servers});
+    if let Some(session) = session {
+        params["sessionId"] = json!(session);
+    } else {
+        params["_meta"] = json!({"disableBuiltInTools":true,"claudeCode":{"options":{"allowDangerouslySkipPermissions":false,"tools":[]}}});
+    }
+    if let Some(owner) = owner {
+        params["_meta"]["tutorLocal"] = json!({"owner":owner});
+    }
+    params
+}
+
+fn session_refresh_method(target_id: &str, known: bool) -> &'static str {
+    if target_id == crate::local_agent::TARGET_ID && known {
+        "_tutor/rebind"
+    } else {
+        "session/load"
+    }
 }
 
 fn http_client() -> Result<reqwest::Client, String> {
@@ -3017,3 +3176,309 @@ MESSAGE ACTUEL : {message}", conversation_id=conversation.id, history=serde_json
 #[cfg(test)]
 #[path = "backend_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod local_journal_tests {
+    use super::*;
+
+    fn remote_tutor() -> Tutor {
+        let credentials: Session = serde_json::from_value(json!({
+            "origin":"https://tutor.example", "access_token":"fixture-bearer-secret",
+            "expires_at":12345, "scope":"learner:read", "session_id":"rotating-session",
+            "identity":{"public_key":"public", "recovery_public_key":"recovery", "key_version":1},
+            "principal":{"user_id":"user", "tenant_id":"tenant", "membership_id":"member", "learner_id":"learner"},
+            "institution":{
+                "version":1, "institution_id":"tenant", "name":"Fixture",
+                "issuer":"https://tutor.example", "mcp_url":"https://tutor.example/mcp",
+                "identity":{
+                    "scheme":"nostr-nip98", "challenge_url":"", "session_url":"",
+                    "rotate_url":"", "recover_url":"", "logout_url":"",
+                    "event_kind":27235, "challenge_ttl_seconds":120
+                }
+            }
+        })).unwrap();
+        let mut tutor = Tutor {
+            credentials: Some(credentials),
+            ..Default::default()
+        };
+        verify_remote_fixture(&mut tutor);
+        tutor
+    }
+
+    fn verify_remote_fixture(tutor: &mut Tutor) {
+        let credentials = tutor.credentials.as_ref().unwrap();
+        let p = &credentials.principal;
+        tutor.overview = Some(json!({"identity":{
+            "tenantId":p.tenant_id, "userId":p.user_id,
+            "membershipId":p.membership_id, "learnerId":p.learner_id
+        }}));
+        tutor.binding = digest(&json!([
+            credentials.origin,
+            [p.tenant_id, p.user_id, p.membership_id, p.learner_id]
+        ]));
+        tutor.status.connected = true;
+    }
+
+    #[test]
+    fn owner_is_stable_across_bearer_refresh_and_isolates_every_identity_dimension() {
+        let directory = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let mut tutor = remote_tutor();
+        let owner = local_journal_owner(directory.path(), &tutor, "remote").unwrap();
+        assert_eq!(owner.as_object().unwrap().len(), 4);
+        assert_ne!(
+            owner["profileId"],
+            local_journal_owner(other.path(), &tutor, "remote").unwrap()["profileId"]
+        );
+        let credentials = tutor.credentials.as_mut().unwrap();
+        credentials.access_token = "replacement-bearer-secret".into();
+        credentials.session_id = "another-credential-session".into();
+        credentials.expires_at += 3600;
+        credentials.scope = "learner:read learner:write".into();
+        credentials.principal.roles = vec!["owner".into()];
+        assert_eq!(
+            owner,
+            local_journal_owner(directory.path(), &tutor, "remote").unwrap()
+        );
+        assert!(!owner.to_string().contains("secret"));
+        assert!(!owner
+            .to_string()
+            .contains(directory.path().to_str().unwrap()));
+        for (field, expected) in [
+            (0, "accountId"),
+            (1, "accountId"),
+            (2, "accountId"),
+            (3, "tenantId"),
+            (4, "serverId"),
+            (5, "serverId"),
+        ] {
+            let mut changed = remote_tutor();
+            let credentials = changed.credentials.as_mut().unwrap();
+            match field {
+                0 => credentials.principal.user_id.push('2'),
+                1 => credentials.principal.membership_id.push('2'),
+                2 => credentials.principal.learner_id.push('2'),
+                3 => credentials.principal.tenant_id.push('2'),
+                4 => credentials.origin = "https://other.example".into(),
+                _ => credentials.institution.mcp_url.push_str("/other"),
+            }
+            verify_remote_fixture(&mut changed);
+            assert_ne!(
+                owner[expected],
+                local_journal_owner(directory.path(), &changed, "remote").unwrap()[expected]
+            );
+        }
+        // Institutional owners may legitimately have no learner yet.
+        tutor
+            .credentials
+            .as_mut()
+            .unwrap()
+            .principal
+            .learner_id
+            .clear();
+        verify_remote_fixture(&mut tutor);
+        assert!(local_journal_owner(directory.path(), &tutor, "remote").is_ok());
+    }
+
+    #[test]
+    fn owner_refuses_unverified_or_mismatched_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        for scenario in 0..6 {
+            let mut tutor = remote_tutor();
+            match scenario {
+                0 => tutor.status.connected = false,
+                1 => tutor.binding = "old-binding".into(),
+                2 => tutor.overview = None,
+                3 => tutor.overview.as_mut().unwrap()["identity"]["userId"] = json!("another"),
+                4 => tutor.credentials = None,
+                _ => tutor.overview.as_mut().unwrap()["identity"]["membershipId"] = json!(""),
+            }
+            assert!(local_journal_owner(directory.path(), &tutor, "remote").is_err());
+        }
+    }
+
+    #[test]
+    fn stdio_owner_uses_verified_local_binding_and_learner_without_remote_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut tutor = remote_tutor();
+        tutor.binding = digest(&json!(["verified-stdio-installation"]));
+        tutor.local_binding = tutor.binding.clone();
+        tutor.overview = Some(json!({"context":{"learner_id":"local-learner"}}));
+        let owner = local_journal_owner(directory.path(), &tutor, "local").unwrap();
+        tutor.credentials = None;
+        assert_eq!(
+            owner,
+            local_journal_owner(directory.path(), &tutor, "local").unwrap()
+        );
+        tutor.overview.as_mut().unwrap()["context"]["learner_id"] = json!("another");
+        assert_ne!(
+            owner["accountId"],
+            local_journal_owner(directory.path(), &tutor, "local").unwrap()["accountId"]
+        );
+        tutor.binding = digest(&json!(["different-stdio-installation"]));
+        assert!(local_journal_owner(directory.path(), &tutor, "local").is_err());
+        tutor.local_binding = tutor.binding.clone();
+        let changed = local_journal_owner(directory.path(), &tutor, "local").unwrap();
+        assert_ne!(owner["serverId"], changed["serverId"]);
+        assert_ne!(owner["tenantId"], changed["tenantId"]);
+        tutor.overview = Some(json!({"context":{}}));
+        assert!(local_journal_owner(directory.path(), &tutor, "local").is_err());
+    }
+
+    // Protocol-only subprocess fixture: exercises the desktop's real routing,
+    // transport and event barrier, without claiming native/model qualification.
+    const RUNTIME: &str = r#"
+const fs = require('node:fs');
+const path = require('node:path');
+const readline = require('node:readline');
+const local = process.argv.includes('--mcp');
+const file = path.join(process.cwd(), 'sessions.json');
+const sessions = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file)) : {};
+const resident = new Set();
+const send = value => process.stdout.write(JSON.stringify(value) + '\n');
+readline.createInterface({input:process.stdin}).on('line', line => {
+  const request = JSON.parse(line), p = request.params || {};
+  if (!local) fs.appendFileSync('requests.jsonl', JSON.stringify(request) + '\n');
+  const reply = result => send({jsonrpc:'2.0',id:request.id,result});
+  const fail = () => send({jsonrpc:'2.0',id:request.id,error:{code:-32602,message:'Fixture rejected request'}});
+  if (request.method === 'initialize') reply(local ? {protocolVersion:p.protocolVersion,capabilities:{tools:{}}} : {protocolVersion:1,authMethods:[],agentCapabilities:{loadSession:true,mcpCapabilities:{http:true}}});
+  else if (request.method === 'tools/call') reply({structuredContent:p.name === 'get_learner_context' ? {learner_id:'local-learner'} : {}});
+  else if (request.method === 'session/new') {
+    const sessionId = 'session-' + (Object.keys(sessions).length + 1);
+    sessions[sessionId] = p; resident.add(sessionId); fs.writeFileSync(file, JSON.stringify(sessions)); reply({sessionId});
+  } else if (request.method === 'session/load' || request.method === '_tutor/rebind') {
+    if (!sessions[p.sessionId] || (request.method === '_tutor/rebind' && !resident.has(p.sessionId))) return fail();
+    if (JSON.stringify(sessions[p.sessionId]._meta?.tutorLocal) !== JSON.stringify(p._meta?.tutorLocal)) return fail();
+    resident.add(p.sessionId);
+    if (request.method === 'session/load') send({jsonrpc:'2.0',method:'session/update',params:{sessionId:p.sessionId,update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'HISTORY REPLAY'}}}});
+    reply({});
+  } else if (request.method === 'session/prompt') {
+    if (!resident.has(p.sessionId)) return fail();
+    send({jsonrpc:'2.0',method:'session/update',params:{sessionId:p.sessionId,update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'Bonjour.'}}}});
+    reply({stopReason:'end_turn'});
+  } else if (request.id !== undefined) fail();
+});
+"#;
+
+    async fn connect_fixture(backend: &Arc<Backend>, target: &AgentTarget, cwd: &str, local: bool) {
+        backend
+            .connect_agent(target.clone(), cwd.into())
+            .await
+            .unwrap();
+        if local {
+            // The fixture uses Node; native discovery remains covered by
+            // local_agent tests. Select the local protocol branch after spawn.
+            backend.agent.lock().await.as_mut().unwrap().target.id =
+                crate::local_agent::TARGET_ID.into();
+        }
+    }
+
+    #[tokio::test]
+    async fn local_sessions_rebind_until_restart_while_external_sessions_keep_loading() {
+        for local in [true, false] {
+            let directory = tempfile::tempdir().unwrap();
+            let script = directory.path().join("fixture.cjs");
+            std::fs::write(&script, RUNTIME).unwrap();
+            let backend = Backend::new(directory.path(), Arc::new(|_, _| {})).unwrap();
+            let target = AgentTarget {
+                id: "manual".into(),
+                label: "Protocol fixture".into(),
+                environment: "native".into(),
+                distribution: None,
+                wsl_user: None,
+                adapter_path: Some(script.to_str().unwrap().into()),
+                codex_path: None,
+                adapter_version: None,
+                codex_version: None,
+                available: true,
+                detail: String::new(),
+            };
+            let cwd = directory.path().to_str().unwrap();
+            let mut settings = backend.settings().await;
+            settings.target_id = if local {
+                crate::local_agent::TARGET_ID.into()
+            } else {
+                target.id.clone()
+            };
+            settings.cwd = cwd.into();
+            settings.tutor.mode = "local".into();
+            settings.tutor.command = script.to_str().unwrap().into();
+            settings.tutor.args = vec!["--mcp".into()];
+            backend.save_settings(settings).await.unwrap();
+            connect_fixture(&backend, &target, cwd, local).await;
+            backend.agent_configuration().await.unwrap();
+            let conversation = backend.start_conversation(None, None).await.unwrap();
+            backend
+                .send_prompt(conversation.id.clone(), "Bonjour".into())
+                .await
+                .unwrap();
+            connect_fixture(&backend, &target, cwd, local).await;
+            backend
+                .send_prompt(conversation.id.clone(), "Encore".into())
+                .await
+                .unwrap();
+            backend
+                .send_prompt(conversation.id.clone(), "Merci".into())
+                .await
+                .unwrap();
+            let requests: Vec<Value> =
+                std::fs::read_to_string(directory.path().join("requests.jsonl"))
+                    .unwrap()
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+            let creations: Vec<_> = requests
+                .iter()
+                .filter(|r| r["method"] == "session/new")
+                .collect();
+            assert_eq!(creations.len(), 2);
+            assert!(creations[0].pointer("/params/_meta/tutorLocal").is_none());
+            assert_eq!(creations[0]["params"]["mcpServers"], json!([]));
+            let owner = creations[1].pointer("/params/_meta/tutorLocal/owner");
+            assert_eq!(owner.is_some(), local);
+            let refreshes: Vec<_> = requests
+                .iter()
+                .filter(|r| r["method"] == "session/load" || r["method"] == "_tutor/rebind")
+                .collect();
+            assert_eq!(
+                refreshes
+                    .iter()
+                    .map(|r| r["method"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                if local {
+                    vec!["_tutor/rebind", "session/load", "_tutor/rebind"]
+                } else {
+                    vec!["session/load"; 3]
+                }
+            );
+            for refresh in refreshes {
+                assert_eq!(refresh.pointer("/params/_meta/tutorLocal/owner"), owner);
+                assert_eq!(refresh["params"]["cwd"], cwd);
+                assert_eq!(
+                    refresh["params"]["sessionId"].as_str(),
+                    conversation.agent_session_id.as_deref()
+                );
+                assert_eq!(
+                    refresh["params"]["mcpServers"],
+                    creations[1]["params"]["mcpServers"]
+                );
+            }
+            let prompts: Vec<_> = requests
+                .iter()
+                .filter(|r| r["method"] == "session/prompt")
+                .collect();
+            assert_eq!(prompts.len(), 3);
+            assert!(prompts[0]["params"]["prompt"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Tu es le tuteur"));
+            let state = backend.snapshot().await;
+            let messages = state["conversations"][0]["messages"].as_array().unwrap();
+            assert_eq!(messages.len(), 6);
+            assert!(!messages
+                .iter()
+                .any(|m| m["text"].as_str().unwrap().contains("HISTORY REPLAY")));
+            backend.shutdown().await;
+        }
+    }
+}

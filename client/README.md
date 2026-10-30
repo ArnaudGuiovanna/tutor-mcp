@@ -8,18 +8,37 @@ exécuté nativement ou dans une distribution **WSL2** choisie explicitement.
 ## Agent Qwen local en développement
 
 Le composant `local-agent/` charge directement **Qwen3-4B-Instruct-2507
-Q4_K_M** et sert ACP sur son entrée/sortie standard. Ce premier incrément prend
-en charge la conversation texte, le streaming et l’arrêt. Les connexions MCP
-transmises par le client sont conservées comme configuration confidentielle,
-mais leurs outils ne sont pas encore exécutés. La reprise durable et les
-parcours pédagogiques restent à intégrer ; voir
+Q4_K_M** et sert ACP sur son entrée/sortie standard. Il prend en charge la
+conversation texte, le streaming, l’arrêt et la reprise depuis un journal local.
+Le catalogue sélectif et le transport HTTP MCP sont testés séparément ; les
+appels d’outils ne sont pas encore raccordés aux permissions et aux parcours
+pédagogiques. La connexion Tutor complète reste donc en développement ; voir
 [le backlog H00–H12](../docs/backlog-local-harness.yaml).
 
 Le moteur utilise le couple `llama-cpp-2`/`llama-cpp-sys-2` **0.1.146** épinglé
 par Goose. L’accès direct permet de compter le prompt avec le tokenizer du
 modèle et d’appliquer une grammaire GBNF lors du décodage. Les poids restent
 chargés entre les générations ; chaque génération dispose d’un nouveau KV
-cache limité à 4096 tokens. Une entrée trop longue est refusée sans troncature.
+cache limité à 4096 tokens. Le gestionnaire de contexte réserve par défaut
+768 tokens de sortie et 256 de marge, puis sélectionne des tours entiers avec
+le tokenizer exact. Une donnée indispensable trop longue entraîne un refus
+explicite ; elle n’est pas tronquée pour permettre une évaluation.
+
+Le client fournit un dossier privé `local-agent` dans les données du profil.
+Chaque session possède un journal SQLite lié au profil, au compte, à
+l’institution, au serveur et à l’empreinte du modèle. Les échanges originaux
+restent distincts des projections : `session/load` restitue l’historique
+conservé à l’interface, tandis que Qwen reçoit uniquement le contexte du travail
+en cours. Le renouvellement de connexion utilise `_tutor/rebind` pour une
+session déjà chargée, sans relecture de l’historique. Les jetons MCP restent
+dans la configuration en mémoire, hors du journal et des prompts.
+
+Pour un usage ACP direct, fournir `--data-dir CHEMIN_PRIVE_ABSOLU` et
+`_meta.tutorLocal.owner` avec les identifiants stables vérifiés
+`profileId`, `accountId`, `tenantId`, `serverId` lors de la création/reprise.
+Sans propriétaire, une session de configuration reste temporaire. Le journal
+n’est pas chiffré ; il utilise les protections du dossier applicatif. Les API
+de rétention refusent de supprimer une mutation dont le résultat reste inconnu.
 
 La compilation de cet agent séparé demande **Rust 1.95.0**, CMake ≥3.25,
 libclang et un compilateur C++. Le client de bureau conserve Rust 1.93.

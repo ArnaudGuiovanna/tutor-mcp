@@ -142,6 +142,28 @@ pub(crate) fn launch(cwd: &str) -> Result<LaunchSpec, String> {
     Configuration::read()?.launch(cwd)
 }
 
+/// The backend supplies its private profile directory. Neither the webview's
+/// serialized target nor the working directory selects journal storage.
+pub(crate) fn bind_data_directory(spec: &mut LaunchSpec, directory: &Path) -> Result<(), String> {
+    if !directory.is_absolute() || !directory.is_dir() {
+        return Err("Le stockage privé de l’agent local est indisponible.".into());
+    }
+    let data_directory = directory.join("local-agent");
+    let path = data_directory
+        .to_str()
+        .ok_or("Le chemin du stockage privé de l’agent local est invalide.")?;
+    validate_text(path, "Le stockage privé de l’agent local")?;
+    if spec
+        .args
+        .iter()
+        .any(|arg| arg == "--data-dir" || arg.starts_with("--data-dir="))
+    {
+        return Err("Le stockage privé de l’agent local est déjà configuré.".into());
+    }
+    spec.args.extend(["--data-dir".into(), path.into()]);
+    Ok(())
+}
+
 fn validate_text(value: &str, label: &str) -> Result<(), String> {
     if value.trim().is_empty() || value.len() > 32768 || value.chars().any(char::is_control) {
         return Err(format!(
@@ -383,6 +405,51 @@ mod tests {
         assert_eq!(spec.cwd.as_deref(), Some(fixture.root.path()));
         assert!(spec.env.is_empty());
         assert!(!fixture.root.path().join("injected").exists());
+    }
+
+    #[test]
+    fn journal_directory_comes_from_private_appdata_not_the_working_directory() {
+        let fixture = Fixture::new();
+        let work = tempfile::tempdir().unwrap();
+        let mut spec = fixture
+            .configuration()
+            .unwrap()
+            .launch(work.path().to_str().unwrap())
+            .unwrap();
+        let original = spec.args.clone();
+        bind_data_directory(&mut spec, fixture.root.path()).unwrap();
+        assert_eq!(&spec.args[..original.len()], original);
+        assert_eq!(
+            &spec.args[original.len()..],
+            [
+                "--data-dir",
+                fixture.root.path().join("local-agent").to_str().unwrap()
+            ]
+        );
+        assert_eq!(spec.cwd.as_deref(), Some(work.path()));
+        assert!(spec.env.is_empty());
+        assert!(bind_data_directory(&mut spec, work.path()).is_err());
+    }
+
+    #[test]
+    fn invalid_private_directory_does_not_modify_the_launch() {
+        let fixture = Fixture::new();
+        let mut spec = fixture
+            .configuration()
+            .unwrap()
+            .launch(fixture.root.path().to_str().unwrap())
+            .unwrap();
+        let original = spec.args.clone();
+        for directory in [
+            Path::new("relative"),
+            fixture.model.as_path(),
+            &fixture.root.path().join("absent"),
+        ] {
+            assert!(bind_data_directory(&mut spec, directory).is_err());
+            assert_eq!(spec.args, original);
+        }
+        spec.args.push("--data-dir=untrusted".into());
+        assert!(bind_data_directory(&mut spec, fixture.root.path()).is_err());
     }
 
     #[test]

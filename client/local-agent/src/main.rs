@@ -12,20 +12,35 @@ async fn main() {
         return;
     }
     if args == ["--help"] {
-        println!("tutor-local-agent --model ABSOLUTE_GGUF_PATH [--sha256 HEX] [--context 4096] [--max-output 768] [--gpu-layers 0] [--threads 6] [--batch 128]\nACP over stdin/stdout. CUDA or Vulkan features are required for GPU offload.");
+        println!("tutor-local-agent --model ABSOLUTE_GGUF_PATH [--sha256 HEX] [--data-dir ABSOLUTE_PRIVATE_DIRECTORY] [--context 4096] [--max-output 768] [--gpu-layers 0] [--threads 6] [--batch 128]\nACP over stdin/stdout. CUDA or Vulkan features are required for GPU offload.");
         return;
     }
-    let engine = match Config::parse(args).and_then(runtime::create) {
+    let config = match Config::parse(args) {
+        Ok(config) => config,
+        Err(code) => {
+            eprintln!("tutor-local-agent: {code}");
+            std::process::exit(2);
+        }
+    };
+    let options = acp::Options {
+        data_dir: config.data_dir.clone(),
+        model_sha256: config
+            .expected_sha256
+            .clone()
+            .unwrap_or_else(|| tutor_local_agent::config::MODEL_SHA256.into()),
+    };
+    let engine = match runtime::create(config) {
         Ok(engine) => Arc::new(Mutex::new(engine)),
         Err(code) => {
             eprintln!("tutor-local-agent: {code}");
             std::process::exit(2);
         }
     };
-    if acp::serve(
+    if acp::serve_with_options(
         tokio::io::BufReader::new(tokio::io::stdin()),
         tokio::io::stdout(),
         engine,
+        options,
     )
     .await
     .is_err()
