@@ -8,6 +8,7 @@ $repo = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 Push-Location $repo
 $oldFlags = $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS
 $oldCrt = $env:LLAMA_STATIC_CRT
+$oldCmakeRuntime = $env:CMAKE_MSVC_RUNTIME_LIBRARY
 try {
     $commit = (& git rev-parse HEAD).Trim()
     if ($LASTEXITCODE -ne 0 -or $commit -notmatch '^[0-9a-f]{40}$') { throw 'Cannot identify source commit.' }
@@ -27,6 +28,9 @@ try {
     # No installed VC++ Redistributable or GPU runtime is needed by this CPU EXE.
     # Use an explicit target so host proc-macros are not built with static CRT.
     $env:LLAMA_STATIC_CRT = '1'
+    # llama.cpp enables CMP0091: CMake's runtime property overrides the /MT
+    # flags emitted by cmake-rs unless this property is also set explicitly.
+    $env:CMAKE_MSVC_RUNTIME_LIBRARY = 'MultiThreaded'
     $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = '-C target-feature=+crt-static'
     # The offline notices metadata includes build/dev dependencies as well.
     & cargo +1.95.0 fetch --manifest-path client/local-agent/Cargo.toml --locked --target x86_64-pc-windows-msvc
@@ -73,5 +77,6 @@ try {
 } finally {
     $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = $oldFlags
     $env:LLAMA_STATIC_CRT = $oldCrt
+    $env:CMAKE_MSVC_RUNTIME_LIBRARY = $oldCmakeRuntime
     Pop-Location
 }
