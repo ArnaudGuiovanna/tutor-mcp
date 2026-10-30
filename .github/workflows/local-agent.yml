@@ -45,12 +45,14 @@ jobs:
           $ErrorActionPreference = 'Stop'
           # windows-2025 supplies CMake, LLVM and the Visual Studio C++ tools.
           # Verify the actual image rather than silently building without inference.
-          $cmake = (Get-Command cmake.exe -CommandType Application -ErrorAction Stop).Source
+          # Multiple CMake installations may be present on PATH. Select one
+          # executable rather than passing an array of paths to PowerShell '&'.
+          $cmake = (Get-Command cmake.exe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
           & $cmake --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "CMAKE=$cmake" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-          $clang = Get-Command clang.exe -CommandType Application -ErrorAction SilentlyContinue
+          $clang = Get-Command clang.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
           $candidates = @()
           if ($clang) { $candidates += Split-Path -Parent $clang.Source }
           $candidates += Join-Path $env:ProgramFiles 'LLVM/bin'
