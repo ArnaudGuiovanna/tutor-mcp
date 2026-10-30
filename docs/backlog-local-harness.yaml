@@ -1,0 +1,362 @@
+version: 1
+title: Harness local Tutor ACP — Qwen GGUF, découverte MCP et contexte borné
+authority: Backlog de référence pour toute l’implémentation H00–H12 convenue dans la conversation.
+status: IN_PROGRESS
+scope:
+  objective: Livrer et qualifier le harness local intégré au client ACP, jusqu’à la distribution Windows.
+  current_increment: Construire et vérifier le moteur GGUF natif et son protocole ACP ; les gates matériels restent ouverts.
+  preserve_full_goal: true
+  server_changes_allowed: false
+  exclusions: [LoRA, Needle, modification du serveur Tutor MCP]
+status_policy:
+  TODO: Travail restant à réaliser et à vérifier.
+  IN_PROGRESS: Travail engagé ; ne prouve ni implémentation complète ni validation matérielle.
+  DONE: Tous les critères satisfaits avec preuves liées au commit, au modèle et à l’environnement testés.
+  dependencies: Gates de validation ; préparation parallèle possible sans déclarer les prérequis satisfaits.
+  completion: Un premier incrément partiel ne termine pas l’objectif ; conserver tous les travaux et gates ouverts.
+  evidence: Distinguer observations, tests exécutés, cibles de recette et vérifications encore nécessaires.
+priority_policy:
+  P0: Indispensable au pilote fonctionnel.
+  P1: Indispensable à la distribution qualifiée ; ne constitue pas une exclusion du périmètre.
+
+target:
+  operating_system: Windows x64
+  cpu: Intel Core i7-9750H
+  ram_gib: 32
+  gpu: NVIDIA Quadro P2000
+  vram_gib: 4
+  integrated_gpu: Intel UHD Graphics 630
+  users: 1
+  model: Qwen3-4B-Instruct-2507
+  format: GGUF
+  quantization: Q4_K_M
+  model_sha256: 3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597
+  gguf_repository: unsloth/Qwen3-4B-Instruct-2507-GGUF
+  gguf_revision: a06e946bb6b655725eafa393f4a9745d460374c9
+  model_profile: client/local-agent/model-profile.json
+  windows_gpu_qualification: PENDING
+  deployment: NOT_PERFORMED
+
+invariants:
+  - Aucun changement du serveur MCP, de ses outils, de ses contrats ou de ses règles métier.
+  - Employer exactement Qwen3-4B-Instruct-2507 Q4_K_M ; un autre Qwen ne valide pas cette cible.
+  - Une instance des poids chargée et une génération active au maximum ; conversations inactives sur disque.
+  - Fenêtre initiale de 4096 tokens comprenant entrée, template, schémas, sortie et marge.
+  - Catalogue complet en RAM hors prompt ; découverte sélective et un schéma métier actif par défaut.
+  - Qwen propose ; le code déterministe valide, contrôle et exécute les opérations MCP.
+  - Le serveur reste autorité sur les droits, décisions pédagogiques, versions et progression.
+  - Séparer journal exact persistant et projection temporaire envoyée au modèle.
+  - Aucun résumé ne remplace une preuve, une réponse d’apprenant, une rubrique ou un reçu serveur.
+  - Isoler profils, comptes, institutions, serveurs, permissions, journaux, sessions et contextes actifs.
+  - Respecter autoriser, demander et refuser sur l’outil métier réel, même derrière call_tool.
+  - Identifiants et versions proviennent d’un état vérifié ; aucune identité fabriquée par le modèle.
+  - Préserver idempotence, ordre pédagogique, reprise après panne et état des mutations de résultat inconnu.
+  - Annuler localement ne signifie pas annuler une mutation déjà acceptée par le serveur.
+  - Préserver comptes, clés, historiques et fonctionnement des agents ACP existants.
+  - Aucun secret dans les prompts ; diagnostics sans réponses privées ni jetons de connexion.
+  - Toute réduction du contexte doit être traçable et conserver exactement les données indispensables.
+
+architecture:
+  process: Agent ACP Rust local livré avec l’application et chargé directement du GGUF.
+  external_inference_service_required: false
+  sequential_tasks: [choix_operation, preparation_activite, evaluation_proposee, explication_coaching]
+  reuse:
+    goose:
+      source: https://github.com/aaif-goose/goose/tree/main/crates/goose-local-inference
+      purpose: Évaluer chargement GGUF, cycle de vie, streaming et intégration ACP.
+      decision: Réutiliser directement le couple llama-cpp-2/llama-cpp-sys-2 épinglé par Goose derrière une interface Rust propre.
+      constraint: Ne pas importer les prompts de programmation ni l’exécution shell comme comportement Tutor.
+    mcp_scout:
+      source: https://github.com/mcp-scout/mcp-scout
+      purpose: Implémenter en Rust découverte lexicale et exposition des schémas à la demande.
+      local_operations: [search_tools, describe_tools, call_tool, list_servers]
+    exoharness:
+      source: https://github.com/jason571/Exoharness/blob/main/docs/CONTEXT_AND_TOKENS.md
+      purpose: Implémentation propre de la séparation journal exact et projection contextuelle.
+      constraint: Ne pas reprendre de code AGPL ; ne pas importer la plateforme PostgreSQL.
+  proposed_paths:
+    local_agent_crate: client/local-agent
+    local_agent_manifest: client/local-agent/Cargo.toml
+    local_agent_executable: tutor-local-agent
+    desktop_manifest: client/src-tauri/Cargo.toml
+    desktop_target: tutor-client
+    desktop_integration: client/src-tauri/src
+    journal_module_later: client/local-agent/src/journal.rs
+    journal_storage_later: SQLite par profil dans les données applicatives ; chemin final à définir en H04.
+    path_status: Agent et intégration native créés ; journal, orchestration et distribution restent à intégrer.
+  context_budget:
+    total_tokens: 4096
+    default_input_max_tokens: 3072
+    default_output_reserved_tokens: 768
+    safety_margin_tokens: 256
+    counter: Tokenizer réel du GGUF après application du template et ajout des schémas.
+    adjustment: Augmenter la réserve de sortie réduit le budget d’entrée à total constant.
+    overflow: Décomposer ou signaler la limite ; ne jamais tronquer silencieusement les preuves nécessaires.
+  journal:
+    source_of_truth: Entrées, arguments, résultats, références et transitions exacts.
+    projection: Vue bornée par tâche ; résultats volumineux référencés puis lus de manière ciblée.
+    provenance: Identifier origine utilisateur, MCP, état du parcours ou résumé secondaire de chaque élément.
+    retention: Définir rétention et effacement explicites sans supprimer les opérations à réconcilier.
+    workspace_constraint: Stockage distinct du fichier workspace actuel plafonné à 32 Mio.
+
+observed_h00_evidence:
+  desktop:
+    rust_version: '1.93'
+    source: client/src-tauri/Cargo.toml
+    verification: Lu dans le workspace lors de la création du backlog.
+  upstream_goose:
+    local_inference_version: 0.1.0-alpha.13
+    rust_version_required: '1.94.1'
+    llama_cpp_2_pin: '=0.1.146'
+    source: Manifestes et sources de goose-local-inference 0.1.0-alpha.13 téléchargés depuis crates.io.
+    public_api_gap: Le provider examiné n’expose pas publiquement le tokenizer exact et la grammaire nécessaires.
+    implementation: Accès direct au tokenizer et au sampler de grammaire dans client/local-agent/src/runtime.rs ; qualification en cours.
+  installed_toolchains:
+    versions: ['1.95.0', '1.98.1']
+    target: x86_64-unknown-linux-gnu
+    source: rustup toolchain list exécuté dans le workspace.
+    limitation: Ne prouve ni compilation Windows ni qualification CUDA/P2000.
+  cuda:
+    requirement: Chaîne CUDA 12.x compatible Pascal ; ne pas sélectionner une chaîne CUDA 13 uniquement.
+    source: Contrainte matérielle convenue pendant H00.
+    windows_compile: PENDING
+    p2000_inference: PENDING
+  acceptance_runs:
+    - scope: Linux CPU, test natif avec le GGUF épinglé, version debug
+      command: cargo +1.95.0 test --manifest-path client/local-agent/Cargo.toml --locked exact_qwen_text_grammar_budget_and_cancellation -- --ignored --nocapture
+      model_environment: TUTOR_LOCAL_MODEL_PATH
+      result: PASS après correction de la double acceptation des tokens par le sampler.
+      observations:
+        - Réponse française correcte et sortie JSON contrainte par GBNF.
+        - Dépassement de contexte refusé et demande annulée sans émission.
+        - Premier appel debug 141662 ms pour 8 tokens ; second appel 4020 ms pour 5 tokens.
+      limitations: Ce résultat ne qualifie ni la chaîne ACP complète, ni Windows, ni la P2000, ni le débit de production.
+    - scope: Linux CPU, binaire release, protocole ACP et GGUF épinglé
+      command: python3 -B client/scripts/qualify-local-agent.py --agent CHEMIN_AGENT --model CHEMIN_GGUF --output CHEMIN_RAPPORT --threads 2 --batch 32 --max-output 64 --timeout 180
+      result: PASS
+      binary_sha256: fc9c494cf66172c14258f9ea896f456e645a98d1237a94400ad3899ba6500dd2
+      observations:
+        - Initialisation, création de séance et deux réponses arithmétiques françaises correctes.
+        - Streaming puis annulation confirmée en 246.784 ms ; fermeture EOF sans arrêt forcé.
+        - Premier texte à froid 32592.337 ms ; deuxième appel 15531.136 ms avec 169 tokens en entrée.
+        - Test natif release séparé réussi pour grammaire, budget, annulation et compteur de chargement unique.
+        - Test ignoré du client Rust exécuté avec le vrai agent pour découverte, lancement, initialisation et fermeture ACP.
+      limitations: Ces observations sur VM CPU ne qualifient ni P2000, ni Windows, ni interface pédagogique complète ; outils et reprise durable sont encore absents.
+
+items:
+  - id: H00
+    title: Qualification technique et décision de réutilisation
+    priority: P0
+    status: IN_PROGRESS
+    depends_on: []
+    work:
+      - Épingler versions Goose/llama.cpp/llama-cpp-2, GGUF exact, origine et SHA-256.
+      - Décider des composants réutilisés et de la stratégie Rust/MSRV sans imposer une montée de version non évaluée.
+      - Qualifier compilation Windows/Pascal, tokenizer, template, annulation et décodage contraint réel.
+    acceptance:
+      - Le GGUF exact produit une réponse française et une sortie structurée sur la machine Windows/P2000 cible.
+      - Versions, pilote, options de compilation, empreinte, mémoire et latences sont consignés.
+      - Accès au comptage exact et à la grammaire démontré ; décision Goose ou contrôle llama-cpp-2 documentée.
+      - Toute vérification matérielle manquante reste explicitement ouverte ; aucun résultat Linux ne la remplace.
+
+  - id: H01
+    title: Agent ACP local
+    priority: P0
+    status: IN_PROGRESS
+    depends_on: [H00]
+    work:
+      - Créer tutor-local-agent dans client/local-agent et l’intégrer à la découverte et au lancement desktop.
+      - Implémenter les opérations ACP utilisées par Tutor, le streaming, les erreurs et le cycle de vie.
+    acceptance:
+      - Initialisation, création et reprise de session, streaming, annulation et erreurs passent par le client réel.
+      - Aucun processus orphelin après fermeture ; une génération interrompue reste identifiée comme telle.
+      - Les parcours Codex et Claude existants continuent de fonctionner.
+
+  - id: H02
+    title: Runtime GGUF
+    priority: P0
+    status: IN_PROGRESS
+    depends_on: [H00]
+    work:
+      - Encapsuler chargement, tokenisation, génération, annulation, placement CPU/GPU et libération derrière une interface Rust.
+      - Exposer les contrôles réels du moteur pour contexte et décodage contraint.
+    acceptance:
+      - Plusieurs tours réutilisent un seul chargement des poids et au plus une génération active.
+      - Le contexte est explicitement plafonné à 4096 tokens et mesuré avec le tokenizer exact.
+      - Une erreur mémoire entraîne un arrêt récupérable ou un repli CPU explicite.
+      - Le décodage contraint est testé dans le moteur ; une consigne de produire du JSON ne suffit pas.
+
+  - id: H03
+    title: Catalogue et découverte sélective
+    priority: P0
+    status: TODO
+    depends_on: [H01]
+    work:
+      - Conserver schémas complets, annotations et identités des outils dans un registre lié à la connexion et aux droits.
+      - Implémenter recherche lexicale, normalisation des accents, alias français et quatre opérations locales de découverte/appel.
+    acceptance:
+      - Aucun schéma métier complet dans le contexte initial ; trois candidats au maximum par recherche et un schéma actif par défaut.
+      - Sur au moins 60 formulations françaises annotées, l’outil attendu apparaît dans les trois premiers dans au moins 95 % des cas.
+      - Le catalogue est invalidé lors des changements de compte, institution, serveur ou droits et actualisé sur changement annoncé des outils.
+
+  - id: H04
+    title: Journal exact d’exécution
+    priority: P0
+    status: TODO
+    depends_on: [H01]
+    work:
+      - Créer SQLite par profil pour tours, opérations, arguments, résultats, références pédagogiques et états d’avancement.
+      - Définir stockage distinct du workspace, rétention, effacement et provenance des données.
+    acceptance:
+      - Après arrêt forcé, distinguer opérations terminées, en attente et de résultat inconnu.
+      - Projections et résumés ne modifient jamais les originaux ; profils et comptes restent isolés.
+      - Un échec d’écriture durable empêche toute nouvelle mutation.
+      - Rétention et effacement sont explicites ; diagnostics sans contenus privés et journal non limité par les 32 Mio du workspace.
+
+  - id: H05
+    title: Exécuteur déterministe
+    priority: P0
+    status: TODO
+    depends_on: [H03, H04]
+    work:
+      - Valider outil, schéma, arguments, permissions et préconditions avant appel.
+      - Gérer délais, erreurs, limites de boucle, clés d’idempotence et réconciliation des résultats inconnus.
+    acceptance:
+      - Aucun outil inconnu, interdit ou aux arguments invalides n’est exécuté ; identifiants et versions viennent de l’état vérifié.
+      - Les reprises conservent les mêmes arguments et la même clé selon la convention réelle de chaque outil.
+      - Les pannes avant et après réponse serveur ne provoquent aucune double mutation.
+      - Annuler localement ne déclare pas annulée une mutation acceptée ; les boucles et tentatives sont bornées.
+
+  - id: H06
+    title: Construction et réduction du contexte
+    priority: P0
+    status: TODO
+    depends_on: [H02, H04]
+    work:
+      - Construire une projection par tâche avec instructions, contrat actif, données indispensables et échanges récents.
+      - Référencer les gros résultats dans le journal, permettre leurs lectures ciblées et tracer chaque réduction.
+      - Adapter la voie locale de backend.rs pour éviter que pedagogical_prompt réinjecte à chaque tour ses instructions et huit messages déjà journalisés ; conserver la voie des agents externes.
+    acceptance:
+      - Chaque requête respecte le budget réel, template et schémas inclus ; texte et structuredContent équivalents ne sont pas doublés.
+      - Contraintes, rubriques et réponses nécessaires restent exactes et reliées à leur provenance.
+      - Cent tours incluant de gros résultats ne provoquent aucune croissance non bornée du contexte.
+      - Un dépassement incompressible entraîne décomposition ou limite explicite, jamais une évaluation sur preuves tronquées.
+
+  - id: H07
+    title: Parcours pédagogiques déterministes
+    priority: P0
+    status: TODO
+    depends_on: [H05, H06]
+    work:
+      - Modéliser formation active, séance, décision, préparation, affichage, réponse, évaluation, feedback et reprise.
+      - Exécuter les parcours connus par code, sans redécouverte systématique ni transfert d’autorité pédagogique au modèle.
+    acceptance:
+      - Pour un quiz, préparation réussie avant affichage, réponse exacte soumise avant évaluation et rubrique inchangée.
+      - Le feedback n’est enregistré comme livré qu’après livraison ; une flashcard reste une autoévaluation.
+      - Interruption et changement de formation ne rattachent jamais une réponse à une autre tentative.
+
+  - id: H08
+    title: Génération et coaching
+    priority: P0
+    status: TODO
+    depends_on: [H02, H06, H07]
+    work:
+      - Définir des tâches courtes pour préparer une activité, proposer une évaluation, expliquer, donner un indice et accompagner une difficulté.
+      - Cadrer sorties structurées et textes par le contrat pédagogique, les limites du modèle et la langue choisie.
+    acceptance:
+      - Les activités respectent le contrat serveur et le format UI sans révéler prématurément la correction.
+      - Une estimation n’est jamais présentée comme une maîtrise démontrée ; réponses dans la langue choisie.
+      - Une sortie invalide reçoit au plus une tentative de correction, puis une erreur explicite.
+
+  - id: H09
+    title: Intégration à l’expérience Tutor
+    priority: P1
+    status: TODO
+    depends_on: [H01, H05, H07]
+    work:
+      - Ajouter choix Qwen local, sélection du GGUF, chargement, arrêt, permissions et renouvellement de connexion Tutor.
+    acceptance:
+      - Le compte Tutor reste distinct du moteur local ; autoriser/demander/refuser s’applique à l’outil métier réel.
+      - Aucune clé ou jeton dans le prompt ; reprise, changement de compte et expiration ne rejouent pas une ancienne réponse.
+      - États accessibles en français et anglais, avec fonctionnement des agents existants préservé.
+
+  - id: H10
+    title: Qualification fonctionnelle et pédagogique
+    priority: P0
+    status: TODO
+    depends_on: [H03, H04, H05, H06, H07, H08]
+    work:
+      - Versionner un corpus de parcours réels, cas ambigus et erreurs ; séparer tests déterministes, tests Qwen et revue humaine.
+      - Définir la grille pédagogique avant les essais et conserver les résultats liés au GGUF épinglé.
+    acceptance:
+      - Au moins 100 scénarios exécutés trois fois avec le GGUF exact ; au moins 90 % de réussite complète des parcours pris en charge.
+      - Zéro violation dans la suite des permissions, identités, absence de doublons, ordre d’évaluation et conservation des preuves.
+      - Coaching évalué humainement avec la grille prédéfinie ; les métriques ne se limitent pas à la validité JSON.
+
+  - id: H11
+    title: Optimisation sur P2000
+    priority: P1
+    status: TODO
+    depends_on: [H02, H06, H10]
+    work:
+      - Mesurer puis régler couches GPU, batch, threads CPU, placement KV et sorties ; comparer au fonctionnement CPU.
+      - Vérifier les cibles de recette ci-dessous sans dégrader qualité ni invariants.
+    acceptance:
+      - Rapport sur la P2000 réelle avec mémoire, chargement froid, traitement du prompt, premier texte, débit et durée par parcours.
+      - Au moins une heure et 100 tours sans OOM, fuite progressive ni croissance mémoire continue.
+      - Toute optimisation conserve les résultats fonctionnels et pédagogiques exigés.
+      - Les cibles non atteintes sont déclarées ; aucune substitution de matériel ou modification silencieuse des seuils.
+
+  - id: H12
+    title: Distribution Windows
+    priority: P1
+    status: TODO
+    depends_on: [H09, H10, H11]
+    work:
+      - Intégrer agent et bibliothèques natives à l’installateur, verrouiller les dépendances et documenter le modèle compatible.
+    acceptance:
+      - Installation et génération sur Windows sans environnement de développement, y compris chemins avec espaces et accents.
+      - Mise à jour conservant comptes et historiques ; empreintes, notices et provenance des composants présentes.
+      - Rapport lié au commit exact, avec contrôle prouvant l’absence de changement serveur.
+      - Distinguer qualification locale, CI, publication et déploiement ; aucun succès externe déduit des seuls tests locaux.
+
+implementation_order:
+  - stage: 1
+    items: [H00, H01, H02]
+    deliverable: Écrire dans Tutor et recevoir une réponse du GGUF local.
+  - stage: 2
+    items: [H03, H04, H05, H06]
+    deliverable: Découvrir et exécuter un outil, journaliser exactement son résultat et construire un contexte borné.
+  - stage: 3
+    items: [H07, H08]
+    deliverable: Quiz complet avec fermeture et reprise de l’application.
+  - stage: 4
+    items: [H09, H10]
+    deliverable: Parcours utilisateurs intégrés et fiabilité mesurée.
+  - stage: 5
+    items: [H11, H12]
+    deliverable: Optimisation et qualification de l’application installée sur la machine cible.
+first_end_to_end_milestone:
+  steps: [ouvrir_seance, obtenir_activite, preparer_quiz, fermer_application, reprendre, soumettre_reponse, recevoir_feedback]
+  lifecycle: Un seul chargement par processus ; après fermeture, recharger les poids et reprendre depuis le journal.
+  completion_limit: Ce jalon démontre la première chaîne complète mais ne termine pas H00–H12.
+
+performance_targets:
+  status: PROPOSED_NOT_MEASURED
+  measurement_rule: Séparer temps locaux, attentes MCP et temps utilisateur ; baseline H00 puis qualification H11.
+  context_tokens_max: 4096
+  simultaneous_generations_max: 1
+  free_vram_target_mib: 512
+  vram_note: Marge indicative à ajuster explicitement selon l’usage de l’écran et les mesures.
+  median_generation_tokens_per_second_min: 8
+  warm_first_useful_text_p95_seconds_max: 15
+  first_text_input_tokens: 1000
+  cancellation_seconds_max: 2
+  cancellation_ui: Réaction immédiate de l’interface.
+  endurance_minutes_min: 60
+  endurance_turns_min: 100
+  measured_results: []
+later_optimizations:
+  condition: Après fiabilité et qualité pédagogique validées avec le contexte court.
+  candidates: [réutilisation du préfixe KV, quantification du KV, élargissement du contexte]
+  constraint: Aucune optimisation ultérieure ne remplace les critères du périmètre initial.

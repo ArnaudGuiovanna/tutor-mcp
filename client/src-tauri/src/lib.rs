@@ -8,6 +8,7 @@ pub mod discovery;
 pub mod identity;
 pub mod launch;
 pub mod learning_ui;
+pub mod local_agent;
 pub mod native_auth;
 pub mod permissions;
 pub mod profiles;

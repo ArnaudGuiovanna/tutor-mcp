@@ -1,0 +1,105 @@
+name: Local agent
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - staging
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: local-agent-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Local agent (Windows)
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+      PYTHONDONTWRITEBYTECODE: '1'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Rust for the standalone agent
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+
+      - name: Set up Python fixtures
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+
+      - name: Locate native build prerequisites from the Windows image
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # windows-2025 supplies CMake, LLVM and the Visual Studio C++ tools.
+          # Verify the actual image rather than silently building without inference.
+          $cmake = (Get-Command cmake.exe -CommandType Application -ErrorAction Stop).Source
+          & $cmake --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "CMAKE=$cmake" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          $clang = Get-Command clang.exe -CommandType Application -ErrorAction SilentlyContinue
+          $candidates = @()
+          if ($clang) { $candidates += Split-Path -Parent $clang.Source }
+          $candidates += Join-Path $env:ProgramFiles 'LLVM/bin'
+          $llvm = $candidates | Where-Object {
+            (Test-Path -LiteralPath (Join-Path $_ 'libclang.dll') -PathType Leaf) -and
+            (Test-Path -LiteralPath (Join-Path $_ 'clang.exe') -PathType Leaf)
+          } | Select-Object -First 1
+          if (-not $llvm) { throw 'The Windows image must provide LLVM with libclang.dll for bindgen.' }
+          & (Join-Path $llvm 'clang.exe') --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "LIBCLANG_PATH=$llvm" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $llvm | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not $vs) { throw 'Visual Studio x64 C++ build tools are required.' }
+          Write-Host "Visual Studio C++: $vs"
+
+      - name: Verify formatting, protocol fixtures and native CPU build/tests
+        shell: bash
+        run: bash scripts/verify-local-agent.sh
+
+      - name: Build and smoke-test the standalone CPU executable
+        shell: pwsh
+        run: |
+          cargo +1.95.0 build --manifest-path client/local-agent/Cargo.toml --locked --release --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $binary = 'client/local-agent/target/x86_64-pc-windows-msvc/release/tutor-local-agent.exe'
+          & $binary --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $binary --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          @{
+            sourceCommit = $env:GITHUB_SHA
+            target = 'x86_64-pc-windows-msvc'
+            backend = 'llama.cpp CPU'
+            sha256 = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+            realModelInference = 'not_tested'
+            p2000Qualification = 'not_tested'
+            installer = $false
+          } | ConvertTo-Json | Set-Content -LiteralPath "$env:RUNNER_TEMP/local-agent-build.json" -Encoding utf8
+
+      - name: Retain the executable and build receipt for this commit
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tutor-local-agent-windows-x64-${{ github.sha }}
+          path: |
+            client/local-agent/target/x86_64-pc-windows-msvc/release/tutor-local-agent.exe
+            ${{ runner.temp }}/local-agent-build.json
+          if-no-files-found: error
+          retention-days: 14

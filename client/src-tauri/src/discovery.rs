@@ -95,6 +95,9 @@ pub async fn discover_agents() -> Vec<AgentTarget> {
             targets[external_start + 1..].sort_by(|a, b| a.label.cmp(&b.label));
         }
     }
+    // Append without changing the order/defaults of existing Codex/Claude/WSL
+    // targets. The local entry explains configuration failures even if absent.
+    targets.push(crate::local_agent::discover());
     targets
 }
 
@@ -146,6 +149,12 @@ async fn discover_native() -> AgentTarget {
 /// A manually configured target can explicitly choose another versioned CLI.
 pub async fn launch_spec(target: &AgentTarget, cwd: &str) -> Result<LaunchSpec, String> {
     validate_text(cwd, "Le dossier de travail")?;
+    if target.id == crate::local_agent::TARGET_ID {
+        if target.environment != "native" {
+            return Err("L’agent Qwen local doit être lancé dans l’environnement natif.".into());
+        }
+        return crate::local_agent::launch(cwd);
+    }
     if target.id.starts_with("bundled:") {
         let id = target.id.clone();
         let cwd = cwd.to_string();
@@ -392,6 +401,11 @@ pub async fn command_spec(
         _ => return Err("Environnement d’agent inconnu.".into()),
     };
     let mut configured = target.clone();
+    if configured.id == crate::local_agent::TARGET_ID {
+        // A separate MCP command uses its own executable/arguments, never the
+        // local agent's model configuration or special launch route.
+        configured.id = "local-mcp-command".into();
+    }
     configured.adapter_path = Some(resolved);
     // Tutor is a separate local MCP process; an agent's optional CLI override
     // must neither be probed nor propagated into that command.
@@ -1165,6 +1179,69 @@ mod tests {
         )
         .await
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn local_qwen_mcp_commands_do_not_launch_the_model_or_receive_its_arguments() {
+        let root = tempfile::tempdir().unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let mut target = wsl_target();
+        target.id = crate::local_agent::TARGET_ID.into();
+        target.environment = "native".into();
+        // These descriptive fields must not affect a separately configured
+        // MCP process, nor require a local model to be installed to launch it.
+        target.adapter_path = Some("missing local agent".into());
+        target.codex_path = Some("invalid CLI must not be probed".into());
+        let arguments = vec!["--local".into(), "élève '日本語' $(not executed)".into()];
+        let spec = command_spec(
+            &target,
+            executable.to_str().unwrap(),
+            &arguments,
+            root.path().to_str().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(spec.program, executable.to_str().unwrap());
+        assert_eq!(spec.args, arguments);
+        assert!(spec.env.is_empty());
+        assert_eq!(spec.cwd.as_deref(), Some(root.path()));
+    }
+
+    #[tokio::test]
+    async fn local_qwen_does_not_accept_an_alternative_launch_environment() {
+        let root = tempfile::tempdir().unwrap();
+        let mut target = wsl_target();
+        target.id = crate::local_agent::TARGET_ID.into();
+        for environment in ["wsl", "remote-shell", ""] {
+            target.environment = environment.into();
+            let error = launch_spec(&target, root.path().to_str().unwrap())
+                .await
+                .unwrap_err();
+            assert!(error.contains("environnement natif"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_qwen_mcp_command_executes_literal_arguments_without_shell_interpretation() {
+        let root = tempfile::tempdir().unwrap();
+        let mut target = wsl_target();
+        target.id = crate::local_agent::TARGET_ID.into();
+        target.environment = "native".into();
+        let literal = "élève 日本語 $(touch injected); 'citation'";
+        let spec = command_spec(
+            &target,
+            "printf",
+            &["%s".into(), literal.into()],
+            root.path().to_str().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            run_probe(spec, Duration::from_secs(1)).await.unwrap(),
+            literal.as_bytes()
+        );
+        assert!(!root.path().join("injected").exists());
     }
 
     #[cfg(unix)]

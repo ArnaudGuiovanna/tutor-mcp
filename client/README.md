@@ -5,6 +5,73 @@ Le client est développé dans ce dossier du dépôt Tutor ; le serveur pédagog
 reste à la racine. La cible de référence est **Windows x64**. Un agent peut être
 exécuté nativement ou dans une distribution **WSL2** choisie explicitement.
 
+## Agent Qwen local en développement
+
+Le composant `local-agent/` charge directement **Qwen3-4B-Instruct-2507
+Q4_K_M** et sert ACP sur son entrée/sortie standard. Ce premier incrément prend
+en charge la conversation texte, le streaming et l’arrêt. Les connexions MCP
+transmises par le client sont conservées comme configuration confidentielle,
+mais leurs outils ne sont pas encore exécutés. La reprise durable et les
+parcours pédagogiques restent à intégrer ; voir
+[le backlog H00–H12](../docs/backlog-local-harness.yaml).
+
+Le moteur utilise le couple `llama-cpp-2`/`llama-cpp-sys-2` **0.1.146** épinglé
+par Goose. L’accès direct permet de compter le prompt avec le tokenizer du
+modèle et d’appliquer une grammaire GBNF lors du décodage. Les poids restent
+chargés entre les générations ; chaque génération dispose d’un nouveau KV
+cache limité à 4096 tokens. Une entrée trop longue est refusée sans troncature.
+
+La compilation de cet agent séparé demande **Rust 1.95.0**, CMake ≥3.25,
+libclang et un compilateur C++. Le client de bureau conserve Rust 1.93.
+
+```sh
+cargo +1.95.0 build --manifest-path client/local-agent/Cargo.toml --locked --release
+```
+
+Le fichier GGUF accepté par défaut est identifié dans
+[`model-profile.json`](local-agent/model-profile.json), avec sa révision et son
+SHA-256. Il n’est pas inclus dans le dépôt ni téléchargé automatiquement par
+l’application. Pour le récupérer explicitement avec la CLI Hugging Face :
+
+```sh
+hf download unsloth/Qwen3-4B-Instruct-2507-GGUF Qwen3-4B-Instruct-2507-Q4_K_M.gguf --revision a06e946bb6b655725eafa393f4a9745d460374c9 --local-dir CHEMIN_MODELES
+```
+
+Avant de démarrer Tutor, définir `TUTOR_LOCAL_AGENT_PATH` avec le chemin absolu
+du binaire natif et `TUTOR_LOCAL_MODEL_PATH` avec celui du GGUF. La cible
+**Qwen — local (expérimental)** apparaît dans les agents. Le mode initial est
+CPU ; `TUTOR_LOCAL_THREADS` (1–32) et `TUTOR_LOCAL_BATCH` (1–512) permettent de
+borner le travail. L’agent reçoit uniquement des arguments natifs, sans shell.
+
+Les options de compilation `--features cuda` ou `--features vulkan` ajoutent
+un backend GPU. `TUTOR_LOCAL_GPU_LAYERS` sélectionne ensuite 0–36 couches.
+La P2000 nécessite une chaîne CUDA compatible Pascal, par exemple CUDA 12.9,
+et une compilation ciblant `sm_61`. **Windows/P2000 n’est pas encore qualifié** ;
+le profil CPU et les tests de protocole ne démontrent pas cette compatibilité.
+
+Vérification sans téléchargement de modèle :
+
+```sh
+bash scripts/verify-local-agent.sh
+```
+
+Qualification explicite du modèle réel (les chemins doivent être absolus) :
+
+```sh
+python client/scripts/qualify-local-agent.py --agent CHEMIN_AGENT --model CHEMIN_GGUF --output CHEMIN_RAPPORT_JSON
+```
+
+Ce rapport sépare l’hôte réellement testé de la cible Windows/P2000. Le test
+natif `exact_qwen_text_grammar_budget_and_cancellation`, ignoré par défaut,
+vérifie aussi la grammaire avec `TUTOR_LOCAL_MODEL_PATH` :
+
+```sh
+cargo +1.95.0 test --manifest-path client/local-agent/Cargo.toml --locked --release exact_qwen_text_grammar_budget_and_cancellation -- --ignored --nocapture
+```
+
+Les contrôles GitHub construisent un exécutable CPU Windows et un reçu lié au
+commit. Cela ne constitue pas encore un installateur ni une qualification GPU.
+
 ## Parcours disponibles
 
 - Connexions séparées à Codex et à Tutor, avec état réel et erreurs explicites.
