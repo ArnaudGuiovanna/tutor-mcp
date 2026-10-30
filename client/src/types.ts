@@ -12,6 +12,14 @@ export interface AgentTarget {
   detail: string;
 }
 
+export interface LocalModelStatus {
+  phase: 'missing' | 'checking' | 'downloading' | 'importing' | 'ready' | 'error' | 'cancelled';
+  downloaded: number;
+  total: number;
+  error: string | null;
+  agentAvailable: boolean;
+}
+
 export interface Settings {
   reviewPlans?: Record<string, { enabled: boolean; format: 'quiz' | 'flashcard' }>;
   language?: 'fr' | 'en';

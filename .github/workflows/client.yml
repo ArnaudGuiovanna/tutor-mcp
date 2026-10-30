@@ -19,7 +19,7 @@ jobs:
   windows:
     name: Client (Windows)
     runs-on: windows-2025
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       CARGO_TERM_COLOR: always
       GOTOOLCHAIN: local
@@ -72,6 +72,16 @@ jobs:
         run: |
           python client/scripts/prepare-agents.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Install the pinned local inference toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal --component rust-docs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build and package the local CPU agent with its runtime
+        shell: pwsh
+        run: ./client/scripts/prepare-local-agent.ps1
 
       - name: Qualify both bundled agents through the production Rust launch
         shell: pwsh
@@ -147,6 +157,7 @@ jobs:
           if ($receipt.sourceCommit -ne $env:GITHUB_SHA) { throw 'The UI Automation report belongs to another commit.' }
           if (@($receipt.settingsTabs).Count -ne 4) { throw 'The UI Automation report is missing settings tabs.' }
           if ($receipt.networkRequestSent) { throw 'The offline UI qualification sent a network request.' }
+          if (-not $receipt.localAgentInstalled -or $receipt.localAgentSha256 -notmatch '^[0-9a-f]{64}$') { throw 'The installed local agent was not qualified.' }
           Write-Host "Verified UI Automation JSON for artifact upload: $report"
 
       - name: Retain Windows installer and qualification report
@@ -160,5 +171,7 @@ jobs:
             ${{ runner.temp }}/tutor-client-runtime.json
             ${{ runner.temp }}/tutor-client-wsl-runtime.json
             ${{ runner.temp }}/tutor-packaged-rust.json
+            client/bundled-local-agent/local-agent-build.json
+            client/bundled-local-agent/model-profile.json
           if-no-files-found: error
           retention-days: 14

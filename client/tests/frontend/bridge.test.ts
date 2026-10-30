@@ -8,6 +8,20 @@ import type { AgentTarget, Snapshot } from '../../src/types';
 afterEach(() => { clearMocks(); vi.unstubAllGlobals(); });
 
 describe('Le contrat IPC du bridge Tauri', () => {
+  it('prépare le modèle local par IPC sans chemin, URL ou commande fournis par la page', async () => {
+    vi.stubGlobal('isTauri', true);
+    const calls: [string, unknown][] = [];
+    const status = {phase:'missing', downloaded:0, total:2497281120, error:null, agentAvailable:true};
+    mockIPC((command, args) => { calls.push([command, args]); return status; });
+    expect(await bridge.localModelStatus()).toEqual(status);
+    expect(await bridge.downloadLocalModel()).toEqual(status);
+    expect(await bridge.importLocalModel()).toEqual(status);
+    expect(await bridge.cancelLocalModel()).toEqual(status);
+    expect(calls.map(([command]) => command)).toEqual([
+      'local_model_status', 'download_local_model', 'import_local_model', 'cancel_local_model',
+    ]);
+    for (const [, args] of calls) expect(args ?? {}).toEqual({});
+  });
   it('utilise les noms de commandes et les arguments camelCase du backend natif', async () => {
     vi.stubGlobal('isTauri', true);
     const calls: { command: string; args: unknown }[] = [];

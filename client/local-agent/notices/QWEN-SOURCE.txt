@@ -1,0 +1,17 @@
+Qwen3-4B-Instruct-2507
+
+Original model: Qwen/Qwen3-4B-Instruct-2507
+Original Apache-2.0 license, retained verbatim as QWEN-LICENSE.txt:
+https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507/raw/cdbee75f17c01a7cc42f958dc650907174af0554/LICENSE
+SHA-256: 832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e
+
+The application offers a separately downloaded GGUF quantization:
+Repository: unsloth/Qwen3-4B-Instruct-2507-GGUF
+Revision: a06e946bb6b655725eafa393f4a9745d460374c9
+File: Qwen3-4B-Instruct-2507-Q4_K_M.gguf
+SHA-256: 3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597
+Bytes: 2497281120
+
+Model weights are not contained in the Windows installer. Tutor verifies the
+pinned weights after download or import. The model-profile.json file records
+the inference profile; CPU and P2000 qualification remain separate concerns.

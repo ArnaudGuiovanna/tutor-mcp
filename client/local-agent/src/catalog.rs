@@ -484,6 +484,9 @@ fn tokens(text: &str) -> BTreeSet<String> {
             ) {
                 return None;
             }
+            // Keep action families aligned between natural French imperatives
+            // and retrieval aliases, without rewriting the exact tool identity.
+            let token = french_action(token);
             // Small plural normalization, shared by the index and query. This is
             // lexical matching, not a claim of general French language stemming.
             let token = if token.len() > 4 && token.ends_with('s') && !token.ends_with("ss") {
@@ -496,8 +499,53 @@ fn tokens(text: &str) -> BTreeSet<String> {
         .collect()
 }
 
+// Explicit action vocabulary avoids aggressively stemming unrelated nouns or
+// inventing a tool route. It applies equally to query and index tokens.
+fn french_action(token: &str) -> &str {
+    match token {
+        "ajoute" | "ajouter" | "ajout" => "ajouter",
+        "archive" | "archiver" | "archivage" => "archiver",
+        "reactive" | "reactiver" | "reactivation" | "desarchive" | "desarchiver" => "reactiver",
+        "restaure" | "restaurer" | "restauration" => "restaurer",
+        "supprime" | "supprimer" | "suppression" => "supprimer",
+        "efface" | "effacer" | "effacement" => "effacer",
+        "cherche" | "chercher" | "recherche" | "rechercher" => "chercher",
+        "retrouve" | "retrouver" => "retrouver",
+        "consulte" | "consulter" | "consultation" => "consulter",
+        "lis" | "lire" => "lire",
+        "relis" | "relire" => "relire",
+        "montre" | "montrer" => "montrer",
+        "affiche" | "afficher" | "affichage" => "afficher",
+        "cree" | "creer" | "creation" => "creer",
+        "propose" | "proposer" | "proposition" => "proposer",
+        "depose" | "deposer" | "depot" => "deposer",
+        "modifie" | "modifier" | "modification" => "modifier",
+        "applique" | "appliquer" | "application" => "appliquer",
+        "publie" | "publier" | "publication" => "publier",
+        "inscris" | "inscrire" | "inscription" => "inscrire",
+        "invite" | "inviter" | "invitation" => "inviter",
+        "autorise" | "autoriser" | "autorisation" => "autoriser",
+        "partage" | "partager" | "partageons" => "partager",
+        "soumet" | "soumets" | "soumettre" | "soumission" => "soumettre",
+        "enregistre" | "enregistrer" | "enregistrement" => "enregistrer",
+        "sauvegarde" | "sauvegarder" => "sauvegarder",
+        "prepare" | "preparer" | "preparation" => "preparer",
+        "annule" | "annuler" | "annulation" => "annuler",
+        "verifie" | "verifier" | "verification" => "verifier",
+        "valide" | "valider" | "validation" => "valider",
+        "termine" | "terminer" => "terminer",
+        "marque" | "marquer" => "marquer",
+        "selectionne" | "selectionner" | "selection" => "selectionner",
+        "change" | "changer" | "changement" => "changer",
+        "bascule" | "basculer" => "basculer",
+        "previsualise" | "previsualiser" | "previsualisation" => "previsualiser",
+        _ => token,
+    }
+}
+
 // These are retrieval aliases, not tool definitions or executable routes.
-// Names come from docs/mcp-tools.md; live tools/list remains authoritative.
+// Cover both the learning loop and unified training library exposed by Tutor.
+// The live tools/list remains authoritative; aliases never create an entry.
 fn french_aliases(name: &str) -> &'static str {
     match name {
         "start_learning_session" => "commencer demarrer ouvrir reprendre seance apprentissage",
@@ -509,7 +557,9 @@ fn french_aliases(name: &str) -> &'static str {
         "prepare_assessment_attempt" => {
             "preparer preparation evaluation quiz rubrique criteres tentative avant reponse"
         }
-        "submit_assessment_attempt" => "soumettre transmettre reponse rendu tentative evaluation",
+        "submit_assessment_attempt" => {
+            "soumettre transmettre enregistrer sauvegarder reponse finale definitive rendu tentative evaluation"
+        }
         "cancel_assessment_attempt" => "annuler abandonner tentative evaluation",
         "record_interaction" => {
             "enregistrer evaluation resultat observation reussite erreur progression interaction"
@@ -532,7 +582,7 @@ fn french_aliases(name: &str) -> &'static str {
             "verifier valider graphe prerequis cycles orphelins incoherences"
         }
         "archive_domain" => "archiver formation domaine programme",
-        "unarchive_domain" => "desarchiver restaurer formation domaine programme",
+        "unarchive_domain" => "desarchiver reactiver restaurer domaine progression activites",
         "delete_domain" => "supprimer effacer formation domaine programme",
         "set_domain_priority" => "prioriser priorite classement formation domaine programme",
         "mark_domain_high_stakes" => {
@@ -579,16 +629,80 @@ fn french_aliases(name: &str) -> &'static str {
         "record_session_close" => "terminer fermer cloturer seance recapitulatif bilan engagement",
         "list_implementation_intentions" => "lister engagements intentions plan si alors promesses",
         "update_implementation_intention" => {
-            "modifier resoudre engagement intention honoree manquee annulee"
+            "modifier resoudre marquer engagement intention pratique tenu accompli honoree manquee annulee"
         }
         "queue_webhook_message" => {
             "programmer envoyer message rappel discord notification encouragement"
         }
         "get_availability_model" => {
-            "consulter disponibilites horaires calendrier fuseau consentement accessibilite"
+            "consulter lire montrer disponibilites horaires calendrier creneau creneaux hebdomadaires fuseau consentement accessibilite notifications reglages"
         }
         "update_availability_model" => {
-            "modifier disponibilites horaires calendrier fuseau consentement accessibilite"
+            "modifier remplacer disponibilites horaires calendrier creneau creneaux hebdomadaires fuseau consentement accessibilite notifications reglages"
+        }
+        "list_training_library" => {
+            "chercher rechercher retrouver bibliotheque catalogue formation programme existant disponible sujet"
+        }
+        "get_training" => {
+            "ouvrir lire consulter programme formation progression personnelle revue decision modification proposee"
+        }
+        "get_conversation_context" => {
+            "lire consulter contexte conversation fil formation active selectionnee revision actuelle"
+        }
+        "select_conversation_training" => {
+            "selectionner choisir changer basculer conversation formation active selection version"
+        }
+        "get_training_policy" => {
+            "lire consulter politique institution apprentissage personnel autorise droit gerer"
+        }
+        "set_training_policy" => {
+            "modifier definir politique institution autoriser interdire apprentissage personnel proprietaire"
+        }
+        "get_training_groups" => {
+            "lire consulter groupes cohortes affectes formateur formation membres inscrits"
+        }
+        "find_training_members" => {
+            "chercher retrouver membres institution nom cle publique inviter formation commune"
+        }
+        "set_training_access" => {
+            "modifier acces audience formation commune inviter membre autoriser editeur droit editer publication libre"
+        }
+        "join_training" => "rejoindre inscrire inscription offre formation choisie invitation admission",
+        "preview_training_edit" => {
+            "previsualiser voir effet consequences pedagogiques edition modification programme revision simulation"
+        }
+        "propose_training_edit" => {
+            "proposer deposer enregistrer modification programme document complet editeur examen proposition"
+        }
+        "save_training_edit" => {
+            "sauvegarder appliquer enregistrer modification programme document complet edition revue revision"
+        }
+        "share_training" => {
+            "partager copier conception formation privee contribution commune institution audience"
+        }
+        "submit_training" => {
+            "soumettre envoyer brouillon formation revision proprietaire examen revue validation"
+        }
+        "decide_training" => {
+            "decider approuver approbation refuser demander corrections revue validation revision attente proprietaire motif decision"
+        }
+        "publish_training" => {
+            "publier publication programme formation relu revue audience public choisi"
+        }
+        "preview_training_lifecycle" => {
+            "previsualiser voir consequences effets cycle vie formation archivage restauration retrait suppression confirmation"
+        }
+        "archive_training" => {
+            "archiver formation revision versions inscrits confirmation"
+        }
+        "restore_training" => {
+            "restaurer formation archivee confirmation preuves versions inscrits"
+        }
+        "delete_training" => {
+            "supprimer formation personnelle brouillon inedit non publie confirmation"
+        }
+        "withdraw_training" => {
+            "retirer retrait formation commune publiee admissions inscrits version confirmation"
         }
         _ => "",
     }
@@ -762,6 +876,113 @@ mod tests {
         assert_eq!(
             tokens("activités notions réponses"),
             tokens("activité notion réponse")
+        );
+    }
+
+    #[test]
+    fn french_actions_match_imperatives_without_stemming_unrelated_words() {
+        assert_eq!(
+            tokens("cherche archive supprime soumets"),
+            tokens("chercher archiver suppression soumettre")
+        );
+        assert_eq!(
+            tokens("Prévisualise la modification"),
+            tokens("previsualisation modifier")
+        );
+        assert_eq!(
+            tokens("inscris réactive"),
+            tokens("inscription reactivation")
+        );
+        assert_eq!(
+            tokens("mer hiver dossier"),
+            BTreeSet::from(["mer".into(), "hiver".into(), "dossier".into()])
+        );
+        // Identifiers and arguments still require exact live tool identities.
+        let catalog = catalog(vec![tool("tutor", "delete_training")]);
+        assert_eq!(
+            catalog.search("Supprime le brouillon", 3).unwrap()[0].id,
+            "tutor/delete_training"
+        );
+        assert_eq!(
+            catalog.resolve(BINDING, "supprimer").err(),
+            Some(CatalogError::UnknownTool)
+        );
+        assert_eq!(
+            catalog.resolve(BINDING, "tutor/supprimer").err(),
+            Some(CatalogError::UnknownTool)
+        );
+        assert!(catalog
+            .search("retrouve la bibliothèque", 3)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn live_local_catalog_reaches_95_percent_on_the_unchanged_french_regression_corpus() {
+        // Fitted regression, not a held-out French language or model benchmark.
+        // Public synthetic queries and live metadata; never execute these tools.
+        let snapshot: Value =
+            serde_json::from_str(include_str!("../fixtures/catalog-local.json")).unwrap();
+        let corpus: Value =
+            serde_json::from_str(include_str!("../fixtures/discovery-fr.json")).unwrap();
+        assert_eq!(snapshot["server_id"], "tutor");
+        let entries: Vec<_> = snapshot["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| ToolEntry {
+                server_id: "tutor".into(),
+                name: tool["name"].as_str().unwrap().into(),
+                description: tool["description"].as_str().unwrap().into(),
+                input_schema: tool["inputSchema"].clone(),
+                annotations: tool["annotations"].clone(),
+            })
+            .collect();
+        assert_eq!(entries.len(), 68);
+        let catalog = catalog(entries);
+        let cases = corpus["queries"].as_array().unwrap();
+        assert_eq!(cases.len(), 80);
+        assert_eq!(corpus["query_count"], 80);
+        let mut expected_ids = BTreeSet::new();
+        let mut misses = Vec::new();
+        // Preserve all 62 baseline successes too; increasing the aggregate must
+        // not silently exchange an old success for a new one.
+        let baseline_misses = [
+            8, 9, 11, 28, 29, 31, 34, 38, 39, 50, 56, 62, 64, 75, 76, 77, 78, 79,
+        ];
+        for (index, case) in cases.iter().enumerate() {
+            let id = case["id"].as_str().unwrap();
+            assert_eq!(id, format!("fr-{:03}", index + 1));
+            let expected = case["expected_tool_id"].as_str().unwrap();
+            expected_ids.insert(expected);
+            catalog.resolve(BINDING, expected).unwrap();
+            for distractor in case["distractor_tool_ids"].as_array().unwrap() {
+                assert_ne!(distractor.as_str().unwrap(), expected);
+                catalog
+                    .resolve(BINDING, distractor.as_str().unwrap())
+                    .unwrap();
+            }
+            let results = catalog.search(case["query"].as_str().unwrap(), 3).unwrap();
+            assert!(results.len() <= 3);
+            if !results.iter().any(|tool| tool.id == expected) {
+                assert!(
+                    baseline_misses.contains(&(index + 1)),
+                    "new regression on {id}"
+                );
+                misses.push((
+                    id,
+                    expected,
+                    results
+                        .iter()
+                        .map(|tool| tool.id.clone())
+                        .collect::<Vec<_>>(),
+                ));
+            }
+        }
+        assert_eq!(expected_ids.len(), 68);
+        assert!(
+            (cases.len() - misses.len()) * 100 >= cases.len() * 95,
+            "top-three misses: {misses:?}"
         );
     }
 

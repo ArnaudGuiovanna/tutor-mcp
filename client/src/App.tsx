@@ -1,5 +1,5 @@
 import { t, useTranslation, setInterfaceLanguage } from './i18n';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { bridge } from './bridge';
 import type { ClientBridge } from './bridge';
@@ -281,6 +281,14 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   useEffect(()=>{setInterfaceLanguage(state.settings.language||'fr');},[state.settings.language]);
   useEffect(()=>{const media=window.matchMedia?.('(prefers-color-scheme: light)');const update=()=>{document.documentElement.dataset.theme=appearance.theme==='system'?(media?.matches?'light':'dark'):appearance.theme;document.documentElement.dataset.reduceMotion=String(appearance.reduceMotion);};update();media?.addEventListener?.('change',update);return()=>media?.removeEventListener?.('change',update);},[appearance.theme,appearance.reduceMotion]);
   function saved(next:Snapshot){if((next.profileEpoch||0)<(stateRef.current.profileEpoch||0)||(next.profile?.id&&stateRef.current.profile?.id&&next.profile.id!==stateRef.current.profile.id))return;stateRef.current=next;setState(next);setInterfaceLanguage(next.settings.language||'fr');}
+  const localModelReady = useCallback(async () => {
+    const bundled = await api.bundledAgents();
+    setTargets(previous => {
+      const refreshed = new Map(previous.map(target => [target.id, target]));
+      for (const target of bundled) refreshed.set(target.id, target);
+      return [...refreshed.values()];
+    });
+  }, [api]);
   function connections(section:'account'|'agents'|'institution',sectionBusy=locked){return <Connections key={`${state.profile?.id}:${section}`} section={section} settings={state.settings} targets={targets} connected={state.agentConnected} tutorStatus={state.tutorStatus} connection={connection} identity={state.identity} api={api} busy={sectionBusy}
     onIdentityAction={(label,action)=>perform(label,async()=>{await action();saved(await api.loadState());return true;}).then(result=>result===true)}
     onDiscover={()=>void perform('Recherche des installations…',async()=>setTargets(await api.discoverAgents()))}
@@ -318,7 +326,7 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
       {page === 'planning' && (state.tutorStatus.connected && !overview ? <div className="page-content"><p role="status">{t(overviewFailure ? 'Le planning est momentanément indisponible.' : 'Lecture du planning…')}</p>{overviewFailure && <button className="button secondary" disabled={locked} onClick={() => {setError(''); setOverviewAttempt(value => value + 1);}}>{t('Réessayer')}</button>}</div> : <ReviewPlanning key={planningScope} api={api} scope={planningScope} preferences={state.settings.reviewPlans || {}} connected={state.tutorStatus.connected} busy={locked || !!state.pendingMessage} refreshKey={libraryEpoch} onPreference={saveReviewPreference} onStart={startReview}/>)}
       {page === 'formations' && <TrainingWorkspace key={`${state.profile?.id}:${state.settings.tutor.url}:${overview?.identity?.tenantId}:${state.tutorStatus.connected}`} api={api} connected={state.tutorStatus.connected} epoch={libraryEpoch} initialId={trainingId} canCreate={overview?.identity?.roles?.includes('owner') === true} busy={locked} onLearn={learn} onDiscuss={discuss} onConnect={() => setPage('agents')} />}
       {page==='account'&&<div className="settings-content"><AccountMenu key={state.profile?.id} snapshot={state} overview={overview} busy={locked} api={api} onSelect={id=>void perform('Changement de compte…',async()=>applyProfile(await api.selectProfile(id)))} onCreate={label=>void perform('Création du compte…',async()=>{applyProfile(await api.createProfile(label));await api.createIdentity();saved(await api.loadState());setPage('account');})} onRename={label=>void perform('Enregistrement du nom…',async()=>saved(await api.renameProfile(label)))} onDelete={id=>void perform('Retrait du compte…',async()=>{applyProfile(await api.deleteProfile(id,id));setPage('account');})}/>{connections('account')}</div>}
-      {settingsPage&&<div className="settings-content"><SettingsWorkspace key={`${state.profile?.id}:${page}`} api={api} snapshot={state} overview={overview} busy={locked} initialTab={page==='settings'?'agents':page as 'agents'|'institution'|'members'|'ergonomics'} renderConnection={connections} onSaved={saved}/></div>}
+      {settingsPage&&<div className="settings-content"><SettingsWorkspace key={`${state.profile?.id}:${page}`} api={api} snapshot={state} overview={overview} busy={locked} initialTab={page==='settings'?'agents':page as 'agents'|'institution'|'members'|'ergonomics'} renderConnection={connections} onSaved={saved} onLocalModelReady={localModelReady}/></div>}
 
     </main>
   </div>;

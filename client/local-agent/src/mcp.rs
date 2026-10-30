@@ -579,14 +579,14 @@ impl SseDecoder {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
 
-    struct Reply {
+    pub(crate) struct Reply {
         status: u16,
         kind: &'static str,
         body: String,
@@ -594,7 +594,7 @@ mod tests {
         hold_open: bool,
     }
     impl Reply {
-        fn json(value: Value) -> Self {
+        pub(crate) fn json(value: Value) -> Self {
             Self {
                 status: 200,
                 kind: "application/json",
@@ -615,9 +615,9 @@ mod tests {
     }
 
     type Observed = Arc<Mutex<Vec<(Value, String)>>>;
-    struct Mock {
-        url: String,
-        observed: Observed,
+    pub(crate) struct Mock {
+        pub(crate) url: String,
+        pub(crate) observed: Observed,
         task: JoinHandle<()>,
     }
     impl Drop for Mock {
@@ -626,7 +626,7 @@ mod tests {
         }
     }
 
-    async fn mock(handler: impl Fn(&Value) -> Reply + Send + 'static) -> Mock {
+    pub(crate) async fn mock(handler: impl Fn(&Value) -> Reply + Send + 'static) -> Mock {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/mcp", listener.local_addr().unwrap());
         let observed: Observed = Arc::new(Mutex::new(Vec::new()));
@@ -697,7 +697,7 @@ mod tests {
         }
     }
 
-    fn initialization(request: &Value) -> Option<Reply> {
+    pub(crate) fn initialization(request: &Value) -> Option<Reply> {
         match request["method"].as_str().unwrap() {
             "initialize" => {
                 assert_eq!(request["params"]["protocolVersion"], PROTOCOL);

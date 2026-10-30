@@ -1,5 +1,7 @@
 # Stable source line endings for Windows builds and Linux WSL scripts.
 client/** text eol=lf
+# Retain the model author's exact original license bytes.
+client/local-agent/notices/QWEN-LICENSE.txt -text -whitespace
 client/src-tauri/icons/*.png -text
 client/src-tauri/icons/*.ico -text
 # Preserve the SDK's original legal text, including its original trailing space.

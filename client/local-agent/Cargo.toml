@@ -27,9 +27,16 @@ uuid = { version = "1", features = ["v4"] }
 
 rusqlite = { version = "=0.41.1", default-features = false, features = ["bundled"] }
 reqwest = { version = "=0.12.24", default-features = false, features = ["json", "rustls-tls"] }
+jsonschema = { version = "=0.60.2", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
 
 [profile.dev]
 debug = 0

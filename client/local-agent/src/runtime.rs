@@ -35,6 +35,9 @@ pub struct GenerationStats {
 }
 
 pub trait Engine: Send {
+    fn grammar_for(&self, _schema: &serde_json::Value) -> Result<String, String> {
+        Err("structured_output_unavailable".into())
+    }
     /// Must include the exact chat template and generation prefix. There is no
     /// approximate fallback; engines without a tokenizer cannot project context.
     fn count_input(
@@ -210,6 +213,18 @@ mod native {
     }
 
     impl Engine for LocalEngine {
+        fn grammar_for(&self, schema: &serde_json::Value) -> Result<String, String> {
+            let encoded = serde_json::to_string(schema).map_err(|_| "invalid_output_schema")?;
+            if encoded.len() > 64 * 1024 {
+                return Err("output_schema_too_large".into());
+            }
+            let grammar = llama_cpp_2::json_schema_to_grammar(&encoded)
+                .map_err(|_| "output_schema_unsupported")?;
+            if grammar.len() > 64 * 1024 {
+                return Err("output_grammar_too_large".into());
+            }
+            Ok(grammar)
+        }
         fn count_input(
             &mut self,
             messages: &[ChatMessage],

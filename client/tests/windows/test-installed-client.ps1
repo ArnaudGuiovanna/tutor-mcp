@@ -81,6 +81,24 @@ try {
     $agentVerifier = (Resolve-Path (Join-Path $PSScriptRoot '../../scripts/verify-packaged-agents.py')).Path
     & python $agentVerifier (Join-Path $installRoot 'agents')
     if ($LASTEXITCODE -ne 0) { throw 'La qualification des agents installés a échoué ; voir le détail ci-dessus.' }
+    $localRoot = Join-Path $installRoot 'local-agent'
+    $localBinary = Join-Path $localRoot 'tutor-local-agent.exe'
+    $localReceipt = Get-Content -LiteralPath (Join-Path $localRoot 'local-agent-build.json') -Raw | ConvertFrom-Json
+    if ($localReceipt.sourceCommit -ne $env:GITHUB_SHA -or $localReceipt.backend -ne 'llama.cpp CPU' -or -not $localReceipt.staticCrt) {
+        throw 'The installed local agent receipt does not match this CPU build.'
+    }
+    if ((Get-FileHash -LiteralPath $localBinary -Algorithm SHA256).Hash.ToLowerInvariant() -ne $localReceipt.sha256) {
+        throw 'The installed local agent hash differs from its build receipt.'
+    }
+    if ((Get-FileHash -LiteralPath (Join-Path $localRoot 'QWEN-LICENSE.txt') -Algorithm SHA256).Hash.ToLowerInvariant() -ne $localReceipt.modelLicenseSha256) {
+        throw 'The original Qwen model license was not packaged correctly.'
+    }
+    & python $noticeVerifier verify-tree (Join-Path $localRoot 'THIRD_PARTY_NOTICES')
+    if ($LASTEXITCODE -ne 0) { throw 'The installed local agent notices are incomplete.' }
+    & $localBinary --version
+    if ($LASTEXITCODE -ne 0) { throw 'The installed local agent cannot start.' }
+    & $localBinary --help
+    if ($LASTEXITCODE -ne 0) { throw 'The installed local agent CLI smoke failed.' }
 
     [void](New-Item -ItemType Directory -Path $appData)
     $ownsTestData = $true
@@ -141,6 +159,8 @@ try {
         framelessWindow = $true; customClose = $true
         persistenceAfterProcessRestart = $true; persistedValuesVerifiedInWorkspace = $true
         networkRequestSent = $false; testOwnedOfflineProfile = $true
+        localAgentInstalled = $true; localAgentSha256 = $localReceipt.sha256
+        localModelInference = 'not_tested'; p2000Qualification = 'not_tested'
         sendBeforeSetup = $true; narratorManualAudit = $false
         exercise = $exercise; reopened = $reopened
     } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $Report -Encoding UTF8

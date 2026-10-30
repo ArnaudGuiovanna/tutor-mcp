@@ -8,5 +8,6 @@ test-results/
 playwright-report/
 THIRD_PARTY_NOTICES/
 bundled-agents/
+bundled-local-agent/
 .agents-*/
 *.local

@@ -26,6 +26,13 @@ npm --prefix client run check
 npm --prefix client test
 npm --prefix client run build
 python3 -B -m unittest discover -s client/scripts -p test_collect_notices.py
+for client_verify_notice_input in client/scripts/collect-local-agent-notices.py client/scripts/test_collect_local_agent_notices.py; do
+    if [[ ! -f "$client_verify_notice_input" ]]; then
+        printf 'Required local-agent notice input is missing: %s\n' "$client_verify_notice_input" >&2
+        exit 1
+    fi
+done
+python3 -B -m unittest discover -s client/scripts -p test_collect_local_agent_notices.py
 python3 -B -m unittest discover -s client/scripts -p test_packaged_agents.py
 cargo fmt --manifest-path client/src-tauri/Cargo.toml --check
 cargo clippy --manifest-path client/src-tauri/Cargo.toml --locked --no-default-features --features qualification --all-targets -- -D warnings

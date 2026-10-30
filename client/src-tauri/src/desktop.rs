@@ -18,7 +18,52 @@ type AppBackend<'a> = State<'a, Arc<ClientProfiles>>;
 
 #[tauri::command]
 fn bundled_agents() -> Vec<crate::discovery::AgentTarget> {
-    crate::bundled::targets()
+    let mut targets = crate::bundled::targets();
+    targets.push(crate::local_agent::discover());
+    targets
+}
+
+type LocalModel<'a> = State<'a, Arc<crate::local_model::ModelManager>>;
+
+#[tauri::command]
+fn local_model_status(model: LocalModel<'_>) -> crate::local_model::ModelStatus {
+    model.status()
+}
+
+#[tauri::command]
+async fn download_local_model(
+    model: LocalModel<'_>,
+) -> Result<crate::local_model::ModelStatus, String> {
+    model.inner().start(None)
+}
+
+#[tauri::command]
+fn cancel_local_model(model: LocalModel<'_>) -> crate::local_model::ModelStatus {
+    model.cancel()
+}
+
+#[tauri::command]
+async fn import_local_model<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    model: LocalModel<'_>,
+) -> Result<crate::local_model::ModelStatus, String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("Modèle Qwen GGUF", &["gguf"])
+        .pick_file(move |file| {
+            let _ = sender.send(file);
+        });
+    let selection = receiver
+        .await
+        .map_err(|_| "La sélection du modèle a été interrompue.")?;
+    match selection {
+        Some(file) => model.inner().start(Some(
+            file.into_path()
+                .map_err(|_| "Choisissez un fichier local.")?,
+        )),
+        None => Ok(model.status()),
+    }
 }
 
 #[tauri::command]
@@ -398,6 +443,10 @@ async fn tutor_overview(backend: AppBackend<'_>) -> Result<Value, String> {
 fn command_handler<R: tauri::Runtime>(
 ) -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
+        local_model_status,
+        download_local_model,
+        import_local_model,
+        cancel_local_model,
         create_profile,
         select_profile,
         rename_profile,
@@ -448,6 +497,19 @@ pub fn run() {
         .setup(|app| {
             crate::bundled::configure(app.path().resource_dir()?.join("agents"));
             let directory = app.path().app_data_dir()?;
+            let model_directory = app.path().app_local_data_dir()?.join("models");
+            crate::local_agent::configure(
+                app.path().resource_dir()?.join("local-agent"),
+                model_directory.join("Qwen3-4B-Instruct-2507-Q4_K_M.gguf"),
+            );
+            let local_model = crate::local_model::ModelManager::new(
+                model_directory,
+                crate::local_agent::packaged_available(),
+            );
+            app.manage(local_model.clone());
+            tauri::async_runtime::spawn(async move {
+                local_model.check_existing();
+            });
             let handle = app.handle().clone();
             let backend = ClientProfiles::new(
                 &directory,
@@ -467,6 +529,8 @@ pub fn run() {
         .expect("Impossible de démarrer Tutor");
     app.run(|app, event| {
         if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+            app.state::<Arc<crate::local_model::ModelManager>>()
+                .cancel();
             let backend = app.state::<Arc<ClientProfiles>>().inner().clone();
             // The OS process is exiting: complete child cleanup before return.
             tauri::async_runtime::block_on(async { backend.current().await.shutdown().await });
@@ -486,6 +550,10 @@ mod tests {
         let backend = tauri::async_runtime::block_on(profiles.current());
         let app = tauri::test::mock_builder()
             .manage(profiles.clone())
+            .manage(crate::local_model::ModelManager::new(
+                directory.path().join("models"),
+                false,
+            ))
             .invoke_handler(command_handler())
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
             .unwrap();
@@ -510,6 +578,10 @@ mod tests {
             .unwrap()
         };
         let initial = call("load_state", json!({}));
+        let local = call("local_model_status", json!({}));
+        assert_eq!(local["phase"], "missing");
+        assert_eq!(local["agentAvailable"], false);
+        assert_eq!(call("cancel_local_model", json!({}))["phase"], "missing");
         assert_eq!(initial["agentConnected"], false);
         assert_eq!(initial["identity"]["exists"], false);
         let public = call("create_identity", json!({"nsec":null}));

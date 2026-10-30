@@ -4,7 +4,7 @@ authority: Backlog de référence pour toute l’implémentation H00–H12 conve
 status: IN_PROGRESS
 scope:
   objective: Livrer et qualifier le harness local intégré au client ACP, jusqu’à la distribution Windows.
-  current_increment: Intégrer journal durable, reprise ACP, projection bornée et premières briques de découverte/transport MCP ; exécuteur et gates matériels restent ouverts.
+  current_increment: Raccorder découverte sélective, lectures MCP HTTP/stdio, validation déterministe et permissions ACP ; qualifier le vrai modèle avant les écritures pédagogiques.
   preserve_full_goal: true
   server_changes_allowed: false
   exclusions: [LoRA, Needle, modification du serveur Tutor MCP]
@@ -35,6 +35,8 @@ target:
   gguf_revision: a06e946bb6b655725eafa393f4a9745d460374c9
   model_profile: client/local-agent/model-profile.json
   windows_gpu_qualification: PENDING
+  qualification_operator: L’utilisateur confirme pouvoir lancer le banc d’essai sur sa machine Windows/P2000.
+  qualification_delivery: Préparer un banc d’essai exécutable et un rapport exportable ; attendre ses mesures avant de qualifier le matériel.
   deployment: NOT_PERFORMED
 
 invariants:
@@ -83,7 +85,7 @@ architecture:
     desktop_integration: client/src-tauri/src
     journal_module: client/local-agent/src/journal.rs
     journal_storage: Données privées du profil/local-agent/empreinte_du_propriétaire/UUID_session.sqlite3.
-    path_status: Agent, journal et projection intégrés ; orchestration MCP, pédagogie et distribution restent à intégrer.
+    path_status: Agent, journal, projection et pilote MCP en lecture intégrés ; parcours pédagogiques avec écriture et distribution restent à intégrer.
   context_budget:
     total_tokens: 4096
     default_input_max_tokens: 3072
@@ -153,6 +155,8 @@ observed_increment_evidence:
     github_checks: Tous les contrôles requis ont réussi sur a2dbd6091506, dont Local agent (Windows) et Client (Windows).
     limitation: Binaire agent CPU construit ; ni P2000 ni distribution de cet agent dans l’installateur ne sont qualifiés.
   journal_and_context:
+    publication_commit: 6377e7a4a7fcd7a338387a80e805ae2290e0a59e
+    publication: staging et main ; contrôles GitHub requis réussis sur ce SHA, dont Local agent (Windows) et Client (Windows).
     environment: VM Linux CPU, Rust 1.95.0.
     automated_checks: 81 tests agent réussis sans puis avec inférence native, deux tests GGUF ignorés par défaut ; 18 tests du qualificateur et 140 tests du client réussis ; clippy et format vérifiés.
     evidence:
@@ -180,10 +184,87 @@ observed_increment_evidence:
         - Entrées mesurées de 219 puis 254 tokens ; sortie réservée de 32 tokens pour cet essai.
       limitation: Vérification ponctuelle de reprise, sans interface graphique, outils MCP ni qualification matérielle Windows/P2000.
   mcp_components:
+    local_verification: 129 tests agent réussis sans puis avec moteur natif ; deux tests GGUF ignorés par défaut. 36 tests Python et 141 tests client réussis ; format et clippy vérifiés.
     catalogue: Recherche lexicale française, trois résumés maximum, schéma exact sur demande et invalidation par liaison.
     http: Dix tests de transport HTTP réels sur loopback réussis ; handshake, JSON/SSE, pagination, notifications, annulation et absence de rejeu automatique.
+    stdio: Transport natif supervisé, limites de trames et pagination, annulation et arrêt du groupe de processus ; vérification Windows requise sur cet incrément.
     idempotency: Clé transmise dans params._meta.idempotency_key selon le contrat du serveur existant.
-    limitations: Transport et catalogue non encore raccordés à l’exécuteur ACP ; stdio et corpus français de 60 formulations restent à qualifier.
+    execution: Validation JSON Schema sans résolution réseau/fichier, identités issues de preuves vérifiées, autorisation ACP liée à l’appel métier, journal avant dispatch et aucun renvoi automatique.
+    limits: Huit générations maximum dont la réponse finale, deux outils MCP distincts, une correction de proposition et un schéma métier actif ; les transitions forcées sont exécutées sans génération.
+    protocol_evidence:
+      - Dix-sept tests ACP réussis, dont une chaîne HTTP avec autorisation/refus, refus de métadonnées incohérentes et injection du domaine vérifié.
+      - Dix-neuf tests de boucle du harness réussis avec moteur simulé ; lectures exactes ciblées, annulation, limites, mutation refusée, résultat inconnu, progression par phases, outils déjà utilisés exclus, arguments protégés et chemins de résultat contraints au décodage, couverture des sous-arbres et transition finale sans génération superflue.
+      - Aucun callback UI ne détient le verrou du journal ; les décisions internes ne deviennent pas des messages de conversation.
+    limitations: Pilote limité aux lectures dont le contrat a été examiné. Toutes les mutations sont bloquées ; réconciliation explicite, parcours pédagogiques, essai natif complet et qualification P2000 restent ouverts.
+  discovery_regression:
+    catalogue_tools: 68
+    queries: 80
+    corpus: client/local-agent/fixtures/discovery-fr.json
+    snapshot: client/local-agent/fixtures/catalog-local.json
+    snapshot_sha256: 45d5828d006fb9837caf4da2a1af0c11bf0fc2e45307fdfecd8459ba852480bf
+    corpus_sha256: a04289bef61e4b1b3d0d724137f07ac062beb5fab7cc9f2ea287fee120bd6cd5
+    baseline: 62/80 outils attendus dans les trois premiers résultats, dont 42 au premier rang.
+    after_tuning: 80/80 dans les trois premiers résultats, dont 71 au premier rang ; aucune requête supprimée ou réétiquetée.
+    method: Normalisation lexicale des verbes français et alias de recherche ; identités et schémas restent ceux du catalogue vivant.
+    limitation: Corpus utilisé pour régler la recherche, puis conservé comme régression. Ce score ne mesure pas la généralisation à de nouvelles demandes, le choix du modèle ni la réussite des parcours.
+  native_harness_attempts:
+    - scope: VM Linux CPU, GGUF épinglé, fixture HTTP de trois outils, deux threads et batch 32.
+      binary_sha256: 01ba7fe1aa3e8080279b0cfb27e8c9aa4681c55d6a2835b7e29ef49712c44545
+      result: FAIL
+      observation: Initialisation et découverte réussies, mais aucune demande d’autorisation ni aucun appel métier observé ; durée du prompt 518702 ms.
+      error_code: permission_not_observed
+      conclusion: Les tests déterministes ne suffisent pas à qualifier la sélection et l’exécution par le modèle réel. Diagnostic et correction nécessaires avant validation du pilote.
+      diagnostic: Une sonde native limitée à deux décisions reproduit deux recherches strictement identiques alors que le résultat est déjà fourni ; aucun appel métier.
+      correction: Grammaire et validation Rust liées à la phase courante ; recherche redondante interdite, contrat décrit avant appel, résultat consulté avant une nouvelle découverte. Test de régression ajouté ; essai natif complet à renouveler.
+    - scope: Même VM CPU et fixture, progression par phases, deux threads et batch 32.
+      binary_sha256: 5ddf10c6463459180b606d8378fd3701f0f0e749fbc1fe25d2a921a7b03900bf
+      result: FAIL
+      observation: Qwen décrit le bon outil, puis deux propositions d’appel sont refusées pour conflit avec un champ vérifié ; aucun appel métier. Durée du prompt 353286 ms.
+      error_code: tool_field_conflicts_with_verified_evidence
+      correction: Exclure les champs protégés de la grammaire des arguments du modèle ; conserver leur injection déterministe et la validation du schéma métier complet. Nouvel essai requis.
+    - scope: Même VM CPU et fixture, arguments protégés exclus du décodage, deux threads et batch 32.
+      binary_sha256: 37c9f8b81e62408b3d3467bdc4d2af4ce06410532850d9d9f007eff50d74fd3f
+      result: FAIL
+      observation: Un appel métier autorisé réussit ; deux lectures de chemins inexistants sont ensuite refusées. La réponse ne restitue pas le fait demandé ; durée du prompt 446730 ms.
+      error_code: answer_fact_mismatch
+      correction: Construire les chemins de lecture depuis le reçu exact, borner leur index et contraindre le décodage par référence ; exclure les chemins déjà consultés. Nouvel essai requis.
+    - scope: Même VM CPU et fixture, chemins de résultats contraints, deux threads et batch 32.
+      binary_sha256: dc429d3e48c59435e75eea78b531264d40c72923e9d885cfd51223ecd2b0ce70
+      result: FAIL
+      observation: Un appel autorisé et une lecture du résultat réussissent ; la réponse restitue l’heure correcte. Le journal révèle ensuite une redescription et une proposition d’appel identique bloquée par le code ; durée du prompt 558516 ms.
+      error_code: journal_contract_mismatch
+      correction: Exclure de la grammaire et de la validation les outils déjà appelés dans ce tour. Le pilote autorise au plus deux outils distincts. Conserver le critère de qualification sans le relâcher ; nouvel essai requis.
+    - scope: Même VM CPU et fixture, outils déjà utilisés exclus, deux threads et batch 32.
+      binary_sha256: 336e3318cebd9f96436329cd98d6c4c30e9115826dac926f4f490fad9c54eeb8
+      result: PASS
+      observation: Une permission, un appel métier, un reçu exact, quatre lectures explicites et une réponse reprenant le fait demandé ; contrôles du journal et fermeture propre réussis.
+      measurements: Huit générations, 7492 tokens d’entrée cumulés, 1256 tokens au maximum par projection, 207 tokens produits ; durée du prompt 828724 ms et premier texte à 799532 ms.
+      limitation: Première chaîne fonctionnelle sur fixture contrôlée ; latence CPU excessive, vrai Tutor et Windows/P2000 non qualifiés.
+      next_optimization: Exclure les sous-arbres déjà consultés ; lorsque seule la réponse finale reste autorisée, passer directement à sa génération. Mesurer à nouveau avec les mêmes paramètres.
+    - scope: Même VM CPU et fixture, couverture des lectures et transition finale déterministe, deux threads et batch 32.
+      binary_sha256: 0a48abf54fe4eac67ffc0d76de07f3e6f3cd386b90d1992799c7bef4090d3166
+      result: PASS
+      observation: Une permission, un appel métier, un reçu exact, trois lectures explicites et une réponse contenant le fait demandé ; contrôles du journal et fermeture propre réussis.
+      measurements: Six générations, 4791 tokens d’entrée cumulés, 961 tokens au maximum par projection, 210 tokens produits ; durée du prompt 572622 ms et premier texte à 536192 ms.
+      comparison: Sur ces deux essais ponctuels avec les mêmes paramètres, deux générations en moins et environ 31 % de durée totale de prompt en moins ; aucune mesure statistique de débit ni extrapolation à la P2000.
+      limitation: Latence encore élevée sur cette VM CPU. Qualification limitée à la fixture de trois outils ; vrai Tutor, parcours pédagogiques et Windows/P2000 encore à vérifier.
+  real_tutor_read:
+    result: PASS
+    scope: VM Linux CPU, GGUF épinglé, serveur Tutor inchangé sur stdio natif et profil temporaire neuf ; catalogue réel de 68 outils.
+    binary_sha256: 0a48abf54fe4eac67ffc0d76de07f3e6f3cd386b90d1992799c7bef4090d3166
+    server_binary_sha256: a9771bad09fa185560a62c1afe8fe7a23e5d03abdb05bc21046518022cc53b93
+    observation: Une autorisation et une lecture get_pending_alerts, aucune mutation ; résultat exact conservé, trois sélections incluses dans le contexte final et fermeture propre.
+    response: Réponse française indiquant correctement l’absence d’alertes et le besoin de configurer le domaine.
+    measurements: Sept générations, 6709 tokens d’entrée cumulés, 1181 tokens au maximum par projection, 212 tokens produits ; durée du prompt 746289 ms.
+    limitation: Un seul scénario de lecture sur un profil neuf ; ni parcours pédagogique complet, ni qualité générale, ni performance Windows/P2000 qualifiés.
+  windows_preview:
+    status: IN_PROGRESS
+    requested_by_user: Publier une préversion Windows pour qu’il puisse tester, puis poursuivre l’objectif complet.
+    desktop_version: 0.0.5
+    intended_tag: tutor-local-v0.1.0-alpha.1
+    scope: Installateur unique client et agent CPU, configuration graphique et téléchargement/importation vérifiés du GGUF depuis l’application ; aucun script ou variable requis.
+    model_distribution: GGUF de 2497281120 octets hors EXE NSIS ; téléchargement HTTPS à révision épinglée, contrôle de taille et SHA-256 avant activation, annulation et copie locale possibles.
+    limitations: Lectures MCP uniquement pour le harness ; accélération P2000, parcours pédagogiques et distribution finale restent ouverts.
 
 items:
   - id: H00
@@ -258,7 +339,7 @@ items:
   - id: H05
     title: Exécuteur déterministe
     priority: P0
-    status: TODO
+    status: IN_PROGRESS
     depends_on: [H03, H04]
     work:
       - Valider outil, schéma, arguments, permissions et préconditions avant appel.

@@ -275,6 +275,7 @@ pub struct Deleted {
 }
 
 pub struct Journal {
+    instance_id: uuid::Uuid,
     connection: Connection,
     recovered_unknown: usize,
     binding: Vec<u8>,
@@ -342,6 +343,7 @@ impl Journal {
         )?;
         tx.commit()?;
         Ok(Self {
+            instance_id: uuid::Uuid::new_v4(),
             connection,
             recovered_unknown,
             binding: owner,
@@ -350,6 +352,12 @@ impl Journal {
 
     pub fn recovered_unknown_count(&self) -> usize {
         self.recovered_unknown
+    }
+
+    /// An in-memory authority view belongs to this open journal instance.
+    /// Reopening requires reconstructing that view from retained evidence.
+    pub(crate) fn instance_id(&self) -> uuid::Uuid {
+        self.instance_id
     }
 
     pub fn append_turn(&mut self, id: &str, payload: &[u8]) -> Result<Turn> {
@@ -674,6 +682,13 @@ impl Journal {
 
     pub fn operation(&self, id: &str) -> Result<Option<Operation>> {
         read_operation(&self.connection, id)
+    }
+
+    pub fn has_unresolved_mutations(&self) -> Result<bool> {
+        self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operations WHERE mutating=1 AND state IN ('dispatched','unknown'))",
+            [], |row| row.get(0),
+        ).map_err(Into::into)
     }
 
     pub fn mark_dispatched(&mut self, id: &str) -> Result<DispatchPermit> {

@@ -5,12 +5,13 @@ import type { AgentConfiguration, AgentConfigOption, InstitutionMember, Institut
 import { errorMessage, record, statusLabel } from './model';
 import { t } from './i18n';
 import { Icon } from './icons';
+import { LocalModelSetup } from './LocalModelSetup';
 
 export type SettingsTab = 'agents' | 'institution' | 'members' | 'ergonomics';
 const tabs: [SettingsTab,string][] = [['agents','Connexion et outils'],['institution','Institution'],['members','Membres'],['ergonomics','Ergonomie']];
 export const defaultAppearance = {theme:'dark' as const,fontSize:20,lineHeight:1.65,reduceMotion:false};
 
-export function SettingsWorkspace({api,snapshot,overview,busy,initialTab='agents',renderConnection,onSaved}:{api:ClientBridge;snapshot:Snapshot;overview:TutorOverview|null;busy:boolean;initialTab?:SettingsTab;renderConnection:(section:'agents'|'institution',disabled:boolean)=>ReactNode;onSaved:(next:Snapshot)=>void}) {
+export function SettingsWorkspace({api,snapshot,overview,busy,initialTab='agents',renderConnection,onSaved,onLocalModelReady}:{api:ClientBridge;snapshot:Snapshot;overview:TutorOverview|null;busy:boolean;initialTab?:SettingsTab;renderConnection:(section:'agents'|'institution',disabled:boolean)=>ReactNode;onSaved:(next:Snapshot)=>void;onLocalModelReady?:()=>Promise<void>}) {
  const [tab,setTab]=useState<SettingsTab>(initialTab);const [working,setWorking]=useState(false);const [error,setError]=useState('');const [notice,setNotice]=useState('');
  const locked=busy||working;
  const [readingSize,setReadingSize]=useState(snapshot.settings.appearance?.fontSize||20);const sizeSaving=useRef<number | undefined>(undefined);
@@ -30,7 +31,7 @@ export function SettingsWorkspace({api,snapshot,overview,busy,initialTab='agents
     </ol>
     <div className={`connection-cards ${snapshot.tutorStatus.connected&&snapshot.agentConnected?'connections-ready':''}`}>
     <div id="tutor-connection" className="connection-step" tabIndex={-1}>{renderConnection('institution',locked)}</div>
-    <div id="agent-connection" className="connection-step" tabIndex={-1}>{renderConnection('agents',locked)}{snapshot.agentConnected&&<details className="settings-disclosure"><summary>{t('Modèle et rapidité')}</summary><AgentOptions api={api} snapshot={snapshot} busy={locked} onSaved={onSaved}/></details>}</div>
+    <div id="agent-connection" className="connection-step" tabIndex={-1}>{renderConnection('agents',locked)}<LocalModelSetup api={api} busy={locked} onReady={onLocalModelReady}/>{snapshot.agentConnected&&<details className="settings-disclosure"><summary>{t('Modèle et rapidité')}</summary><AgentOptions api={api} snapshot={snapshot} busy={locked} onSaved={onSaved}/></details>}</div>
     </div>
     <div id="tool-permissions" className="connection-step" tabIndex={-1}><McpPermissions api={api} settings={snapshot.settings} overview={overview} connected={snapshot.tutorStatus.connected} busy={locked} onSave={save}/></div>
    </div>}

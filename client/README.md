@@ -7,13 +7,54 @@ exécuté nativement ou dans une distribution **WSL2** choisie explicitement.
 
 ## Agent Qwen local en développement
 
+La préversion Windows CPU regroupe **Tutor 0.0.5 et l’agent local dans un seul
+installateur**. Dans **Paramètres → Connexion et outils**, installer le modèle
+Qwen avec le bouton de téléchargement, ou sélectionner le GGUF déjà disponible
+sur l’ordinateur. L’application conserve le modèle dans son dossier de données
+et vérifie sa taille et son SHA-256 avant activation. Il n’y a aucun script ni
+variable d’environnement à configurer pour ce parcours.
+
+Le modèle pèse 2,5 Go : il est téléchargé depuis une révision Hugging Face
+épinglée, car un fichier GitHub Release doit rester inférieur à 2 Gio. Une
+connexion Internet est donc nécessaire pour cette installation initiale, sauf
+si le GGUF exact est déjà disponible. L’inférence est ensuite locale ; la
+connexion au serveur Tutor garde son fonctionnement habituel. Le serveur MCP
+n’est pas embarqué ni modifié. La préversion permet de tester la conversation,
+la reprise et les lectures MCP ; elle n’active pas encore l’accélération P2000.
+La latence CPU reste à mesurer sur la machine cible ; les essais Linux de cette
+étape prennent plusieurs minutes pour une lecture d’outil.
+
 Le composant `local-agent/` charge directement **Qwen3-4B-Instruct-2507
 Q4_K_M** et sert ACP sur son entrée/sortie standard. Il prend en charge la
 conversation texte, le streaming, l’arrêt et la reprise depuis un journal local.
-Le catalogue sélectif et le transport HTTP MCP sont testés séparément ; les
-appels d’outils ne sont pas encore raccordés aux permissions et aux parcours
-pédagogiques. La connexion Tutor complète reste donc en développement ; voir
+Un premier harness raccorde les lectures MCP prises en charge aux permissions
+ACP, via HTTP ou un processus natif sur entrée/sortie standard. Toutes les
+mutations restent refusées dans ce pilote : préparation, soumission et
+évaluation pédagogiques doivent encore être intégrées. Le tuteur complet reste
+donc en développement ; voir
 [le backlog H00–H12](../docs/backlog-local-harness.yaml).
+
+Le catalogue reste en mémoire hors du prompt. La recherche retourne au plus
+trois résumés ; Qwen demande ensuite un seul schéma complet. Le code valide
+l’identité de l’outil, ses arguments et les données vérifiées avant de demander
+l’autorisation sur l’outil métier réel. Un tour comporte au plus huit appels
+au modèle, deux appels MCP sur des outils distincts et une correction de
+proposition. Les résultats exacts restent dans le journal ; le modèle en lit
+des parties par pointeur JSON.
+Une référence seule ne constitue pas une donnée consultée.
+Les chemins proposés proviennent du résultat réel, avec un index borné à 32
+chemins et trois niveaux. Les omissions sont signalées ; aucun champ inventé
+ni sous-arbre déjà couvert n’est accepté par le décodeur ou par Rust. Un index
+incomplet ne permet jamais de conclure que des données non vues ont été lues.
+Quand seule la réponse finale reste possible, le code y passe directement,
+sans génération intermédiaire pour annoncer cette transition.
+La grammaire dépend de l’étape courante : une recherche déjà réussie conduit
+au choix du contrat, puis à l’appel et à la lecture du résultat. Rust vérifie
+aussi cette progression ; le modèle ne peut pas répéter une recherche ou une
+description déjà terminée pour prolonger la boucle.
+La grammaire des arguments expose uniquement les champs modifiables par le
+modèle. Les identifiants, versions et preuves sont fournis par le code ; le
+schéma métier complet reste conservé et vérifié après cette injection.
 
 Le moteur utilise le couple `llama-cpp-2`/`llama-cpp-sys-2` **0.1.146** épinglé
 par Goose. L’accès direct permet de compter le prompt avec le tokenizer du
@@ -33,12 +74,23 @@ en cours. Le renouvellement de connexion utilise `_tutor/rebind` pour une
 session déjà chargée, sans relecture de l’historique. Les jetons MCP restent
 dans la configuration en mémoire, hors du journal et des prompts.
 
+Pour l’agent local, le client transmet le message de l’apprenant sans lui
+préfixer l’historique déjà journalisé. Il fournit séparément le contexte de
+formation obtenu du serveur dans `_meta.tutorLocal.task` : `conversationId`,
+`language`, `trainingContext`. Le harness vérifie sa correspondance avec la
+conversation de la connexion MCP ; le modèle ne choisit pas ces identifiants.
+Les agents externes conservent leur construction de prompt habituelle.
+
 Pour un usage ACP direct, fournir `--data-dir CHEMIN_PRIVE_ABSOLU` et
 `_meta.tutorLocal.owner` avec les identifiants stables vérifiés
 `profileId`, `accountId`, `tenantId`, `serverId` lors de la création/reprise.
 Sans propriétaire, une session de configuration reste temporaire. Le journal
 n’est pas chiffré ; il utilise les protections du dossier applicatif. Les API
 de rétention refusent de supprimer une mutation dont le résultat reste inconnu.
+Le pilote MCP nécessite une session durable et exactement un serveur nommé
+`tutor`. Les lectures passent par une liste de contrats examinés ; une
+annotation `readOnlyHint` ne suffit pas à autoriser un outil. Un échec de
+transport n’entraîne aucun nouvel envoi automatique.
 
 La compilation de cet agent séparé demande **Rust 1.95.0**, CMake ≥3.25,
 libclang et un compilateur C++. Le client de bureau conserve Rust 1.93.
@@ -79,6 +131,18 @@ Qualification explicite du modèle réel (les chemins doivent être absolus) :
 ```sh
 python client/scripts/qualify-local-agent.py --agent CHEMIN_AGENT --model CHEMIN_GGUF --output CHEMIN_RAPPORT_JSON
 ```
+
+Essai distinct de la chaîne Qwen → harness → permission ACP → lecture MCP :
+
+```sh
+python client/scripts/qualify-local-harness.py --agent CHEMIN_AGENT --model CHEMIN_GGUF --output CHEMIN_RAPPORT_HARNESS_JSON --timeout 1800
+```
+
+Cet essai utilise un serveur HTTP local de test avec trois outils. Il vérifie
+dans le journal la sélection du contrat, l’appel autorisé, la lecture ciblée
+du résultat et son inclusion dans le contexte de réponse. Il exige aussi une
+réponse contenant le fait retourné par le serveur. Il ne qualifie pas les
+parcours du vrai Tutor, le catalogue complet ni la qualité pédagogique.
 
 Ce rapport sépare l’hôte réellement testé de la cible Windows/P2000. Le test
 natif `exact_qwen_text_grammar_budget_and_cancellation`, ignoré par défaut,
@@ -193,11 +257,16 @@ Pour reconstruire les ressources depuis le dépôt :
 
 ```powershell
 python client/scripts/prepare-agents.py
+rustup toolchain install 1.95.0 --profile minimal --component rust-docs
+./client/scripts/prepare-local-agent.ps1
 ```
 
 Le script utilise les archives npm verrouillées et le ZIP officiel Node vérifié
 par SHA256. Les ressources générées sont ignorées par Git. Le workflow teste
-les deux agents installés sans Node externe dans PATH.
+les deux agents installés sans Node externe dans PATH. Le second script construit
+l’agent Qwen CPU avec son runtime C++ lié statiquement, vérifie son lancement et
+collecte ses notices. Il requiert les outils Visual Studio C++, CMake et LLVM
+sur la machine de compilation. L’utilisateur de l’installateur n’en a pas besoin.
 
 Pour WSL2, installer l’adaptateur **dans la distribution Linux concernée**, puis
 relancer la détection. Le lancement conserve le même utilisateur Linux, retrouve

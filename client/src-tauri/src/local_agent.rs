@@ -1,12 +1,12 @@
 // Copyright (c) 2026 Arnaud Guiovanna
 // SPDX-License-Identifier: MIT
 
-//! H01 desktop integration for the separately built `tutor-local-agent`.
+//! Trusted launch configuration for the packaged `tutor-local-agent`.
 //!
 //! Configuration belongs to the desktop process, never the webview target:
 //! - TUTOR_LOCAL_AGENT_PATH: absolute native executable (or the exact sidecar
 //!   name beside the running app when unset; no PATH/development-tree search).
-//! - TUTOR_LOCAL_MODEL_PATH: absolute GGUF file; no automatic download.
+//! - TUTOR_LOCAL_MODEL_PATH: optional developer override of the managed GGUF.
 //! - TUTOR_LOCAL_GPU_LAYERS: 0..=36, default 0 until P2000 calibration.
 //! - TUTOR_LOCAL_THREADS: 1..=32, default available CPUs capped at 6.
 //! - TUTOR_LOCAL_BATCH: 1..=512, default 128.
@@ -14,11 +14,77 @@
 //! Context/output remain fixed at 4096/768 for the initial hardware profile.
 //! File signatures only detect obvious misconfiguration. Model identity, GGUF
 //! compatibility and ACP capabilities are established by the native agent/ACP
-//! handshake; the agent must report empty authMethods. Installer and settings UI are
-//! separate work; locating a sidecar does not imply it is currently packaged.
+//! handshake; the agent must report empty authMethods. The desktop supplies the
+//! installed resource root and managed model path, never a webview-supplied target.
 
 use crate::{discovery::AgentTarget, launch::LaunchSpec};
-use std::{ffi::OsString, fs::File, io::Read, path::Path};
+use sha2::{Digest, Sha256};
+use std::{
+    ffi::OsString,
+    fs::File,
+    io::Read,
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
+
+struct InstalledPaths {
+    root: PathBuf,
+    model: PathBuf,
+}
+static INSTALLED: OnceLock<InstalledPaths> = OnceLock::new();
+
+pub fn configure(root: PathBuf, model: PathBuf) {
+    let _ = INSTALLED.set(InstalledPaths { root, model });
+}
+
+pub fn packaged_available() -> bool {
+    INSTALLED
+        .get()
+        .is_some_and(|paths| verified_executable(&paths.root).is_ok())
+}
+
+fn verified_executable(root: &Path) -> Result<PathBuf, String> {
+    let path = root.join(EXECUTABLE);
+    checked_file(
+        path.clone().into_os_string(),
+        "L’agent local installé",
+        true,
+    )?;
+    let receipt = root.join("local-agent-build.json");
+    let mut bytes = Vec::new();
+    File::open(&receipt)
+        .map_err(|_| "Réinstallez Tutor : reçu de l’agent local absent.")?
+        .take(65537)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Le reçu de l’agent local est illisible.")?;
+    if bytes.len() > 65536 {
+        return Err("Le reçu de l’agent local est invalide.".into());
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|_| "Le reçu de l’agent local est invalide.")?;
+    if value["backend"] != "llama.cpp CPU"
+        || value["target"] != "x86_64-pc-windows-msvc"
+        || value["staticCrt"] != true
+    {
+        return Err("Le profil de l’agent local installé est incompatible.".into());
+    }
+    let mut file = File::open(&path).map_err(|_| "L’agent local installé est illisible.")?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0; 65536];
+    loop {
+        let size = file
+            .read(&mut buffer)
+            .map_err(|_| "L’agent local installé est illisible.")?;
+        if size == 0 {
+            break;
+        }
+        digest.update(&buffer[..size]);
+    }
+    if value["sha256"].as_str() != Some(format!("{:x}", digest.finalize()).as_str()) {
+        return Err("Réinstallez Tutor : l’agent local ne correspond pas à son reçu.".into());
+    }
+    Ok(path)
+}
 
 pub(crate) const TARGET_ID: &str = "local:qwen";
 const EXECUTABLE: &str = if cfg!(windows) {
@@ -37,8 +103,31 @@ struct Configuration {
 
 impl Configuration {
     fn read() -> Result<Self, String> {
+        let installed = INSTALLED.get();
+        let packaged = if std::env::var_os("TUTOR_LOCAL_AGENT_PATH").is_none() {
+            installed
+                .map(|paths| verified_executable(&paths.root))
+                .transpose()?
+        } else {
+            None
+        };
+        if std::env::var_os("TUTOR_LOCAL_MODEL_PATH").is_none()
+            && installed.is_some_and(|paths| !paths.model.is_file())
+        {
+            return Err("Installez le modèle Qwen dans Paramètres → Connexion et outils.".into());
+        }
         Self::from_environment(
-            |name| std::env::var_os(name),
+            |name| {
+                std::env::var_os(name).or_else(|| match name {
+                    "TUTOR_LOCAL_AGENT_PATH" => {
+                        packaged.as_ref().map(|path| path.clone().into_os_string())
+                    }
+                    "TUTOR_LOCAL_MODEL_PATH" => {
+                        installed.map(|paths| paths.model.clone().into_os_string())
+                    }
+                    _ => None,
+                })
+            },
             std::env::current_exe().ok().as_deref(),
             std::thread::available_parallelism().map_or(1, usize::from),
         )
@@ -129,7 +218,7 @@ fn target_from(configuration: Result<Configuration, String>) -> AgentTarget {
         Ok(configuration) => {
             target.adapter_path = Some(configuration.executable);
             target.available = true;
-            target.detail = "Agent local de développement : conversation texte. Les outils Tutor et la reprise persistante restent en cours d’intégration. Le modèle sera vérifié au premier message.".into();
+            target.detail = "Agent local expérimental : conversation, reprise et lectures Tutor. La préparation et l’évaluation des activités restent à intégrer. Le modèle sera vérifié au premier message.".into();
         }
         Err(error) => target.detail = error,
     }
@@ -374,6 +463,29 @@ mod tests {
                 12,
             )
         }
+    }
+
+    #[test]
+    fn installed_agent_must_match_the_cpu_build_receipt() {
+        let fixture = Fixture::new();
+        let receipt_path = fixture.root.path().join("local-agent-build.json");
+        assert!(verified_executable(fixture.root.path()).is_err());
+        let mut receipt = serde_json::json!({
+            "backend": "llama.cpp CPU", "target": "x86_64-pc-windows-msvc", "staticCrt": true,
+            "sha256": format!("{:x}", Sha256::digest(std::fs::read(&fixture.executable).unwrap()))
+        });
+        std::fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        assert_eq!(
+            verified_executable(fixture.root.path()).unwrap(),
+            fixture.executable
+        );
+        receipt["backend"] = serde_json::json!("CUDA");
+        std::fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        assert!(verified_executable(fixture.root.path()).is_err());
+        receipt["backend"] = serde_json::json!("llama.cpp CPU");
+        receipt["sha256"] = serde_json::json!("0".repeat(64));
+        std::fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        assert!(verified_executable(fixture.root.path()).is_err());
     }
 
     #[test]
