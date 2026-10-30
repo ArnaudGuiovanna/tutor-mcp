@@ -30,6 +30,10 @@ SECRET = "PRIVATE_FIXTURE_DATA_NEVER_REPORT"
 # journal columns consumed by the inspector. No native library is imported.
 FIXTURE = r'''
 import hashlib, json, pathlib, sqlite3, sys, time, urllib.request, uuid
+# ACP is UTF-8 even when Windows starts Python with a legacy console codec.
+# Keep the real protocol reader strict; the scripted peer owns its wire codec.
+sys.stdin.reconfigure(encoding="utf-8")
+sys.stdout.reconfigure(encoding="utf-8", newline="\n")
 mode, model = sys.argv[1:3]
 data = pathlib.Path(sys.argv[sys.argv.index("--data-dir") + 1])
 secret = "PRIVATE_FIXTURE_DATA_NEVER_REPORT"
@@ -281,6 +285,12 @@ class HarnessQualificationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["metrics"]["journal"]["exact_result_receipts"], 0)
         self.assertEqual(report["metrics"]["journal"]["explicit_result_reads"], 0)
         self.assertFalse(report["metrics"]["prompt"]["grounded_numeric_fact"])
+
+    async def test_peer_keeps_utf8_acp_under_a_legacy_windows_stdio_codec(self):
+        with mock.patch.dict(os.environ, {"PYTHONIOENCODING": "cp1252", "PYTHONUTF8": "0"}):
+            report = await self.qualify()
+        self.assertTrue(report["protocol_passed"], report)
+        self.assertTrue(report["metrics"]["journal"]["final_context_contains_selected_fact"])
 
     async def test_failed_prompt_without_permission_retains_only_safe_diagnostics(self):
         for mode in ("no-permission", "partial-no-permission"):

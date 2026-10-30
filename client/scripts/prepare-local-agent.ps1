@@ -28,6 +28,9 @@ try {
     # Use an explicit target so host proc-macros are not built with static CRT.
     $env:LLAMA_STATIC_CRT = '1'
     $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS = '-C target-feature=+crt-static'
+    # The offline notices metadata includes build/dev dependencies as well.
+    & cargo +1.95.0 fetch --manifest-path client/local-agent/Cargo.toml --locked --target x86_64-pc-windows-msvc
+    if ($LASTEXITCODE -ne 0) { throw 'Local agent dependency download failed.' }
     & cargo +1.95.0 build --manifest-path client/local-agent/Cargo.toml --locked --release --target x86_64-pc-windows-msvc
     if ($LASTEXITCODE -ne 0) { throw 'Native local agent build failed.' }
     $binary = Join-Path $repo 'client/local-agent/target/x86_64-pc-windows-msvc/release/tutor-local-agent.exe'

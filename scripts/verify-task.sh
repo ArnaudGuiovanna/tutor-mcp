@@ -22,7 +22,7 @@ python3 -m unittest discover -s scripts -p 'test_finish_task.py'
 python3 -m unittest discover -s scripts -p 'test_evaluate_learning_policies.py'
 python3 -m unittest discover -s scripts -p 'test_third_party_notices.py'
 python3 -m unittest discover -s scripts -p 'test_installers.py'
-task_local_agent_changes=$(git diff --cached --name-only -- client/local-agent/ client/scripts/qualify-local-agent.py client/scripts/test_qualify_local_agent.py .github/workflows/local-agent.yml scripts/verify-local-agent.sh scripts/verify-task.sh .github/required-checks.json)
+task_local_agent_changes=$(git diff --cached --name-only -- client/local-agent/ client/scripts/qualify-local-agent.py client/scripts/test_qualify_local_agent.py client/scripts/qualify-local-harness.py client/scripts/test_qualify_local_harness.py .github/workflows/local-agent.yml scripts/verify-local-agent.sh scripts/verify-task.sh .github/required-checks.json)
 if [[ -n "$task_local_agent_changes" ]]; then
     bash scripts/verify-local-agent.sh
 fi
