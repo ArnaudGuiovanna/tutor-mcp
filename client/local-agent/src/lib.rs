@@ -15,4 +15,5 @@ pub mod journal;
 pub mod mcp;
 pub mod mcp_client;
 pub mod mcp_stdio;
+pub mod pedagogical;
 pub mod session_store;

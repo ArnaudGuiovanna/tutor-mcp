@@ -196,6 +196,14 @@ observed_increment_evidence:
       - Dix-neuf tests de boucle du harness réussis avec moteur simulé ; lectures exactes ciblées, annulation, limites, mutation refusée, résultat inconnu, progression par phases, outils déjà utilisés exclus, arguments protégés et chemins de résultat contraints au décodage, couverture des sous-arbres et transition finale sans génération superflue.
       - Aucun callback UI ne détient le verrou du journal ; les décisions internes ne deviennent pas des messages de conversation.
     limitations: Pilote limité aux lectures dont le contrat a été examiné. Toutes les mutations sont bloquées ; réconciliation explicite, parcours pédagogiques, essai natif complet et qualification P2000 restent ouverts.
+  executor_and_workflow_foundation:
+    local_verification: 177 tests agent réussis sans puis avec moteur natif compilé ; deux essais GGUF ignorés uniquement dans la configuration native. 37 tests Python, format et clippy réussis ; revue ciblée et scénarios de panne après envoi vérifiés.
+    contract_retention: Avant préparation, reçu immuable du schéma validé, des arguments canoniques, de l’effet, de la convention de clé et du tour source ; vérification renouvelée avant dispatch. Les anciennes opérations sans contrat conservé ne sont pas complétées depuis une nouvelle proposition.
+    turn_authority: Autorité limitée à un tour ouvert, délivrée une seule fois pour son ancre. Le permis et l’appel préparé conservent un guard révocable ; révocation et admission au dispatch sont ordonnées sous un verrou bref, libéré avant toute attente réseau.
+    stop: Révocation mémoire avant écriture durable ; nettoyage limité à la préparation appartenant exactement au parcours. Fin de tour, abandon du parcours ou échec de persistance ne permettent pas de recréer un guard. Dispatched, Unknown et Completed ne deviennent jamais Rejected lors de cet arrêt.
+    pedagogical_scope: Machine non raccordée au dispatcher, de contexte vérifié à décision, avec issues terminales REST et CLOSE_SESSION sans inventer une décision ni déclencher une évaluation.
+    evidence: Catalogue réel capturé et reçus synthétiques conformes aux handlers ; tests de liens, versions, propriétaires, reprise refusée, stockage défaillant et révocation après admission avec issue inconnue.
+    limitations: Aucun nouveau parcours pédagogique activé. Préparation du quiz, soumission, évaluation, ACK de feedback, reprise multi-tour et réconciliation explicite restent à implémenter ; les mutations MCP du pilote restent bloquées.
   discovery_regression:
     catalogue_tools: 68
     queries: 80
@@ -258,13 +266,20 @@ observed_increment_evidence:
     measurements: Sept générations, 6709 tokens d’entrée cumulés, 1181 tokens au maximum par projection, 212 tokens produits ; durée du prompt 746289 ms.
     limitation: Un seul scénario de lecture sur un profil neuf ; ni parcours pédagogique complet, ni qualité générale, ni performance Windows/P2000 qualifiés.
   windows_preview:
-    status: IN_PROGRESS
+    status: PUBLISHED
     requested_by_user: Publier une préversion Windows pour qu’il puisse tester, puis poursuivre l’objectif complet.
     desktop_version: 0.0.5
-    intended_tag: tutor-local-v0.1.0-alpha.1
+    tag: tutor-local-v0.1.0-alpha.1
+    source_commit: 52d91e12d7d56352af18076b56e87e013af6af40
+    release_url: https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/tutor-local-v0.1.0-alpha.1
+    windows_ci: https://github.com/ArnaudGuiovanna/tutor-mcp/actions/runs/41147515290
+    installer_bytes: 344219076
+    installer_sha256: c6e39f6a93e8513ea8e1b17e7f1c29b4676692c817848ee5c56e0dd822d15832
+    validation: Tous les contrôles requis du commit ont réussi ; installateur construit, installé et application ouverte sur Windows. Binaire CPU embarqué identifié par SHA-256, dépendances limitées aux DLL système et notices vérifiées.
+    publication: Commit publié sur staging et main ; préversion publiée sans remplacer la dernière version stable v0.7.3.
     scope: Installateur unique client et agent CPU, configuration graphique et téléchargement/importation vérifiés du GGUF depuis l’application ; aucun script ou variable requis.
     model_distribution: GGUF de 2497281120 octets hors EXE NSIS ; téléchargement HTTPS à révision épinglée, contrôle de taille et SHA-256 avant activation, annulation et copie locale possibles.
-    limitations: Lectures MCP uniquement pour le harness ; accélération P2000, parcours pédagogiques et distribution finale restent ouverts.
+    limitations: Lectures MCP uniquement pour le harness ; aucune génération avec le GGUF réel encore qualifiée sur Windows. Accélération P2000, parcours pédagogiques et distribution finale restent ouverts.
 
 items:
   - id: H00
@@ -368,7 +383,7 @@ items:
   - id: H07
     title: Parcours pédagogiques déterministes
     priority: P0
-    status: TODO
+    status: IN_PROGRESS
     depends_on: [H05, H06]
     work:
       - Modéliser formation active, séance, décision, préparation, affichage, réponse, évaluation, feedback et reprise.

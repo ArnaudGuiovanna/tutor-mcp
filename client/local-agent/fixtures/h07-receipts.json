@@ -1,0 +1,327 @@
+{
+  "fixture_kind": "synthetic_server_contract_receipts_not_live_capture",
+  "source_files": [
+    "tools/tools.go:jsonResult",
+    "models/training.go:ConversationContext",
+    "tools/training.go:registerTrainingTools",
+    "tools/curriculum.go:registerGetCurriculumSnapshot",
+    "models/curriculum.go:CurriculumSnapshot",
+    "tools/session.go:registerStartLearningSession",
+    "models/session.go:LearningSession",
+    "tools/activity.go:registerGetNextActivity",
+    "tools/pedagogical_decision.go:freezePedagogicalDecision",
+    "engine/orchestrator.go:composeEscapeActivity",
+    "engine/orchestrator.go:OrchestrateWithPhase",
+    "tools/activity.go:buildPedagogicalContract",
+    "models/domain.go:PedagogicalContract"
+  ],
+  "payloads": {
+    "get_conversation_context": {
+      "conversation_id": "d5caf369-afbd-4499-a257-05dbc5209081",
+      "training_id": "personal:h07-fixture",
+      "domain_id": "domain_h07",
+      "revision": "revision-opaque-a",
+      "selection_version": 4,
+      "name": "Formation synthétique H07"
+    },
+    "get_curriculum_snapshot": {
+      "snapshot": {
+        "domain_id": "domain_h07",
+        "version": 7,
+        "parent_version": 6,
+        "graph": {
+          "concepts": [
+            "Variables"
+          ],
+          "prerequisites": {}
+        },
+        "concepts": [
+          {
+            "id": "concept_immutable_1",
+            "key": "Variables",
+            "label": "Variables et affectation",
+            "description": "Lire une affectation simple.",
+            "level": "foundation",
+            "outcomes": [
+              {
+                "id": "outcome_value",
+                "statement": "Déterminer une valeur après affectation.",
+                "observable": "Valeur choisie et justification."
+              }
+            ],
+            "criteria": [
+              {
+                "id": "criterion_value",
+                "description": "Valeur conforme aux affectations."
+              }
+            ],
+            "status": "active"
+          }
+        ],
+        "operation": {
+          "type": "update_metadata",
+          "rationale": "Fixture de contrat."
+        },
+        "provenance": {
+          "source_type": "host_proposal",
+          "source_ref": "synthetic-fixture",
+          "author": "fixture",
+          "rationale": "Données synthétiques."
+        },
+        "review": {
+          "status": "unreviewed"
+        },
+        "created_by": "fixture",
+        "created_at": "2026-10-30T09:00:00Z"
+      }
+    },
+    "start_learning_session": {
+      "session_id": "session_h07",
+      "session": {
+        "id": "session_h07",
+        "learner_id": "learner_synthetic",
+        "domain_id": "domain_h07",
+        "status": "open",
+        "started_at": "2026-10-30T09:00:00Z",
+        "last_active_at": "2026-10-30T09:00:00Z"
+      }
+    },
+    "get_next_activity": {
+      "needs_domain_setup": false,
+      "session_id": "session_h07",
+      "domain_id": "domain_h07",
+      "domain_name": "Formation synthétique H07",
+      "intent": "auto",
+      "intent_status": "auto",
+      "activity": {
+        "type": "DIAGNOSTIC_ASSESSMENT",
+        "concept": "Variables",
+        "difficulty_target": 0.5,
+        "format": "short_constructed_response",
+        "estimated_minutes": 3,
+        "rationale": "Fixture de contrat.",
+        "prompt_for_llm": "Établir la valeur après affectation."
+      },
+      "pedagogical_contract": {
+        "learning_event_protocol": "response-feedback-v1",
+        "decision_id": "decision_h07",
+        "policy_version": "2026-10-parameters-v6",
+        "bkt_update_mode": "observation_only",
+        "curriculum_version": 7,
+        "competency": {
+          "id": "concept_immutable_1",
+          "key": "Variables",
+          "label": "Variables et affectation",
+          "description": "Lire une affectation simple.",
+          "level": "foundation",
+          "outcomes": [
+            {
+              "id": "outcome_value",
+              "statement": "Déterminer une valeur après affectation.",
+              "observable": "Valeur choisie et justification."
+            }
+          ],
+          "criteria": [
+            {
+              "id": "criterion_value",
+              "description": "Valeur conforme aux affectations."
+            }
+          ],
+          "status": "active"
+        },
+        "intent": "measure_prior_knowledge_without_instruction",
+        "target_concept": "Variables",
+        "recommended_activity_type": "DIAGNOSTIC_ASSESSMENT",
+        "constraints": {
+          "must_collect": [
+            "learner_answer",
+            "rubric_score",
+            "cold_response_before_feedback",
+            "reasoning_trace"
+          ],
+          "avoid": [
+            "introducing_new_prerequisite",
+            "long_explanation_first",
+            "marking_mastery_without_evidence",
+            "teaching_before_response",
+            "hints_before_response",
+            "worked_example_before_response"
+          ]
+        },
+        "allowed_variants": [
+          "short_constructed_response",
+          "cold_application",
+          "misconception_probe"
+        ],
+        "llm_discretion": {
+          "can_change_format": true,
+          "can_request_clarification": true,
+          "can_propose_negotiation": true,
+          "cannot_mark_mastery_without_evidence": true
+        },
+        "learner_explanation": "Diagnostic synthétique.",
+        "audit_rationale": "Fixture de contrat.",
+        "llm_instruction": "Préparer avant de présenter."
+      },
+      "decision_id": "decision_h07",
+      "audit_rationale": "Fixture de contrat.",
+      "llm_instruction": "Préparer avant de présenter.",
+      "learner_explanation": "Diagnostic synthétique."
+    }
+  },
+  "terminal_envelopes": {
+    "REST": {
+      "isError": false,
+      "content": [
+        {
+          "type": "text",
+          "text": "{\"needs_domain_setup\":false,\"session_id\":\"session_h07\",\"domain_id\":\"domain_h07\",\"domain_name\":\"Formation synthétique H07\",\"intent\":\"auto\",\"intent_status\":\"auto\",\"activity\":{\"type\":\"REST\",\"concept\":\"\",\"difficulty_target\":0,\"format\":\"\",\"estimated_minutes\":0,\"rationale\":\"pipeline_exhausted: NoFringe persists after retry\",\"prompt_for_llm\":\"No eligible activity remains after retry. Ask the learner what they want to work on next.\"},\"session_concepts_done\":0,\"metacognitive_mirror\":null,\"tutor_mode\":\"normal\",\"active_misconceptions\":[],\"known_misconception_types\":[],\"motivation_brief\":{\"kind\":\"\",\"instruction\":\"\"},\"mastery_evidence\":{},\"mastery_uncertainty\":{},\"transfer_profile\":{},\"goal_relevance_status\":{\"status\":\"valid\",\"message\":\"Goal-aware routing has a complete relevance vector for the current graph.\"},\"pedagogical_contract\":{\"learning_event_protocol\":\"response-feedback-v1\",\"bkt_update_mode\":\"observation_only\",\"intent\":\"continue_learning\",\"recommended_activity_type\":\"REST\",\"constraints\":{\"must_collect\":[\"learner_answer\",\"rubric_score\"],\"avoid\":[\"introducing_new_prerequisite\",\"long_explanation_first\",\"marking_mastery_without_evidence\"]},\"allowed_variants\":[\"socratic_prompt\",\"worked_example_completion\",\"micro_practice\"],\"llm_discretion\":{\"can_change_format\":true,\"can_request_clarification\":true,\"can_propose_negotiation\":true,\"cannot_mark_mastery_without_evidence\":true},\"learner_explanation\":\"We will consolidate this concept before moving to the next step.\",\"audit_rationale\":\"pipeline_exhausted: NoFringe persists after retry\",\"llm_instruction\":\"No eligible activity remains after retry. Ask the learner what they want to work on next.\"},\"decision_id\":\"\",\"audit_rationale\":\"pipeline_exhausted: NoFringe persists after retry\",\"llm_instruction\":\"No eligible activity remains after retry. Ask the learner what they want to work on next.\",\"learner_explanation\":\"We will consolidate this concept before moving to the next step.\"}"
+        }
+      ],
+      "structuredContent": {
+        "needs_domain_setup": false,
+        "session_id": "session_h07",
+        "domain_id": "domain_h07",
+        "domain_name": "Formation synthétique H07",
+        "intent": "auto",
+        "intent_status": "auto",
+        "activity": {
+          "type": "REST",
+          "concept": "",
+          "difficulty_target": 0,
+          "format": "",
+          "estimated_minutes": 0,
+          "rationale": "pipeline_exhausted: NoFringe persists after retry",
+          "prompt_for_llm": "No eligible activity remains after retry. Ask the learner what they want to work on next."
+        },
+        "session_concepts_done": 0,
+        "metacognitive_mirror": null,
+        "tutor_mode": "normal",
+        "active_misconceptions": [],
+        "known_misconception_types": [],
+        "motivation_brief": {
+          "kind": "",
+          "instruction": ""
+        },
+        "mastery_evidence": {},
+        "mastery_uncertainty": {},
+        "transfer_profile": {},
+        "goal_relevance_status": {
+          "status": "valid",
+          "message": "Goal-aware routing has a complete relevance vector for the current graph."
+        },
+        "pedagogical_contract": {
+          "learning_event_protocol": "response-feedback-v1",
+          "bkt_update_mode": "observation_only",
+          "intent": "continue_learning",
+          "recommended_activity_type": "REST",
+          "constraints": {
+            "must_collect": [
+              "learner_answer",
+              "rubric_score"
+            ],
+            "avoid": [
+              "introducing_new_prerequisite",
+              "long_explanation_first",
+              "marking_mastery_without_evidence"
+            ]
+          },
+          "allowed_variants": [
+            "socratic_prompt",
+            "worked_example_completion",
+            "micro_practice"
+          ],
+          "llm_discretion": {
+            "can_change_format": true,
+            "can_request_clarification": true,
+            "can_propose_negotiation": true,
+            "cannot_mark_mastery_without_evidence": true
+          },
+          "learner_explanation": "We will consolidate this concept before moving to the next step.",
+          "audit_rationale": "pipeline_exhausted: NoFringe persists after retry",
+          "llm_instruction": "No eligible activity remains after retry. Ask the learner what they want to work on next."
+        },
+        "decision_id": "",
+        "audit_rationale": "pipeline_exhausted: NoFringe persists after retry",
+        "llm_instruction": "No eligible activity remains after retry. Ask the learner what they want to work on next.",
+        "learner_explanation": "We will consolidate this concept before moving to the next step."
+      }
+    },
+    "CLOSE_SESSION": {
+      "isError": false,
+      "content": [
+        {
+          "type": "text",
+          "text": "{\"needs_domain_setup\":false,\"session_id\":\"session_h07\",\"domain_id\":\"domain_h07\",\"domain_name\":\"Formation synthétique H07\",\"intent\":\"auto\",\"intent_status\":\"auto\",\"activity\":{\"type\":\"CLOSE_SESSION\",\"concept\":\"\",\"difficulty_target\":0,\"format\":\"session_overload\",\"estimated_minutes\":0,\"rationale\":\"session >= 45 min (OVERLOAD)\",\"prompt_for_llm\":\"Session terminee. Emets le recap_brief et appelle record_session_close.\"},\"session_concepts_done\":0,\"metacognitive_mirror\":null,\"tutor_mode\":\"normal\",\"active_misconceptions\":[],\"known_misconception_types\":[],\"motivation_brief\":{\"kind\":\"\",\"instruction\":\"\"},\"mastery_evidence\":{},\"mastery_uncertainty\":{},\"transfer_profile\":{},\"goal_relevance_status\":{\"status\":\"valid\",\"message\":\"Goal-aware routing has a complete relevance vector for the current graph.\"},\"pedagogical_contract\":{\"learning_event_protocol\":\"response-feedback-v1\",\"bkt_update_mode\":\"observation_only\",\"intent\":\"close_overloaded_session\",\"recommended_activity_type\":\"CLOSE_SESSION\",\"constraints\":{\"must_collect\":[\"learner_answer\",\"rubric_score\"],\"avoid\":[\"introducing_new_prerequisite\",\"long_explanation_first\",\"marking_mastery_without_evidence\"]},\"allowed_variants\":[\"recap_brief\",\"next_session_intention\"],\"llm_discretion\":{\"can_change_format\":false,\"can_request_clarification\":true,\"can_propose_negotiation\":false,\"cannot_mark_mastery_without_evidence\":true},\"learner_explanation\":\"We will close this session with a short recap and a clear next step.\",\"audit_rationale\":\"session >= 45 min (OVERLOAD)\",\"llm_instruction\":\"Session terminee. Emets le recap_brief et appelle record_session_close.\"},\"decision_id\":\"\",\"audit_rationale\":\"session >= 45 min (OVERLOAD)\",\"llm_instruction\":\"Session terminee. Emets le recap_brief et appelle record_session_close.\",\"learner_explanation\":\"We will close this session with a short recap and a clear next step.\"}"
+        }
+      ],
+      "structuredContent": {
+        "needs_domain_setup": false,
+        "session_id": "session_h07",
+        "domain_id": "domain_h07",
+        "domain_name": "Formation synthétique H07",
+        "intent": "auto",
+        "intent_status": "auto",
+        "activity": {
+          "type": "CLOSE_SESSION",
+          "concept": "",
+          "difficulty_target": 0,
+          "format": "session_overload",
+          "estimated_minutes": 0,
+          "rationale": "session >= 45 min (OVERLOAD)",
+          "prompt_for_llm": "Session terminee. Emets le recap_brief et appelle record_session_close."
+        },
+        "session_concepts_done": 0,
+        "metacognitive_mirror": null,
+        "tutor_mode": "normal",
+        "active_misconceptions": [],
+        "known_misconception_types": [],
+        "motivation_brief": {
+          "kind": "",
+          "instruction": ""
+        },
+        "mastery_evidence": {},
+        "mastery_uncertainty": {},
+        "transfer_profile": {},
+        "goal_relevance_status": {
+          "status": "valid",
+          "message": "Goal-aware routing has a complete relevance vector for the current graph."
+        },
+        "pedagogical_contract": {
+          "learning_event_protocol": "response-feedback-v1",
+          "bkt_update_mode": "observation_only",
+          "intent": "close_overloaded_session",
+          "recommended_activity_type": "CLOSE_SESSION",
+          "constraints": {
+            "must_collect": [
+              "learner_answer",
+              "rubric_score"
+            ],
+            "avoid": [
+              "introducing_new_prerequisite",
+              "long_explanation_first",
+              "marking_mastery_without_evidence"
+            ]
+          },
+          "allowed_variants": [
+            "recap_brief",
+            "next_session_intention"
+          ],
+          "llm_discretion": {
+            "can_change_format": false,
+            "can_request_clarification": true,
+            "can_propose_negotiation": false,
+            "cannot_mark_mastery_without_evidence": true
+          },
+          "learner_explanation": "We will close this session with a short recap and a clear next step.",
+          "audit_rationale": "session >= 45 min (OVERLOAD)",
+          "llm_instruction": "Session terminee. Emets le recap_brief et appelle record_session_close."
+        },
+        "decision_id": "",
+        "audit_rationale": "session >= 45 min (OVERLOAD)",
+        "llm_instruction": "Session terminee. Emets le recap_brief et appelle record_session_close.",
+        "learner_explanation": "We will close this session with a short recap and a clear next step."
+      }
+    }
+  }
+}

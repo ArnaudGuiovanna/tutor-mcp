@@ -319,6 +319,11 @@ impl ValidatedCall {
     pub fn arguments(&self) -> &Value {
         &self.args
     }
+    /// Exact schema used for validation, retained only as private journal
+    /// evidence. This shared reference cannot change the validated call.
+    pub(crate) fn input_schema(&self) -> &Value {
+        &self.schema
+    }
     pub fn idempotency_key(&self) -> Option<&str> {
         self.key.as_deref()
     }
