@@ -1429,7 +1429,10 @@ mod tests {
         }
 
         async fn read(&mut self) -> Value {
-            let frame = timeout(Duration::from_secs(3), read_frame(&mut self.output))
+            // This is a deadlock watchdog, not an inference latency assertion.
+            // Parallel journal tests can spend several seconds flushing receipts
+            // on Windows runners before the next protocol frame is available.
+            let frame = timeout(Duration::from_secs(15), read_frame(&mut self.output))
                 .await
                 .expect("server response timed out")
                 .unwrap()
