@@ -285,6 +285,9 @@ impl Backend {
                 // A manual target label is not an executable identity. Consent
                 // must be granted again after replacing its program/adapter.
                 settings.permission_policy = None;
+                // Model IDs, reasoning levels and speed modes belong to the
+                // previous agent and cannot be carried over to its replacement.
+                settings.agent = Default::default();
             }
             reconnect_tutor = serde_json::to_value((
                 &previous.target_id,
@@ -475,15 +478,61 @@ impl Backend {
         if existing.is_none() {
             let response=rpc.request("session/new",json!({"cwd":cwd,"mcpServers":[],"_meta":{"disableBuiltInTools":true,"claudeCode":{"options":{"allowDangerouslySkipPermissions":false,"tools":[]}}}})).await?;
             let session = session_id(&response)?;
+            let settings = self.session_agent_settings(&response).await?;
             let response = apply_agent_settings(&rpc, &session, response, &settings).await?;
             if let Some(agent) = self.agent.lock().await.as_mut() {
                 agent.configuration_session = Some(session);
                 agent.configuration = response;
             }
         }
+        let settings = self.settings().await.agent;
         let guard = self.agent.lock().await;
         let agent = guard.as_ref().ok_or("Reconnectez l’agent.")?;
         Ok(configuration_view(true, &agent.configuration, &settings))
+    }
+
+    async fn session_agent_settings(
+        &self,
+        response: &Value,
+    ) -> Result<crate::workspace::AgentSettings, String> {
+        let local = self
+            .agent
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|agent| agent.target.id == crate::local_agent::TARGET_ID);
+        let mut store = self.store.lock().await;
+        let saved = store.data.settings.agent.clone();
+        if !local || store.data.settings.target_id != crate::local_agent::TARGET_ID {
+            return Ok(saved);
+        }
+        let model = config_option(response, "model");
+        let values = model.as_ref().map(config_values).unwrap_or_default();
+        // Alpha.1 saved the previous provider's preferences under local:qwen.
+        // Recover only after the local agent advertises its sole fixed model
+        // and no reasoning/speed choices. Never choose a provider model or
+        // infer a fallback when the advertised contract has changed.
+        let fixed_local_model = values.len() == 1
+            && model
+                .as_ref()
+                .and_then(|option| option["currentValue"].as_str())
+                == values.first().map(String::as_str)
+            && config_option(response, "thought_level").is_none()
+            && fast_option(response).is_none();
+        let incompatible = (!saved.model.is_empty() && !values.contains(&saved.model))
+            || !saved.reasoning_effort.is_empty()
+            || saved.speed != "balanced";
+        if !fixed_local_model || !incompatible {
+            return Ok(saved);
+        }
+        let restored = crate::workspace::AgentSettings::default();
+        store.transaction(|data| {
+            data.settings.agent = restored.clone();
+            Ok(())
+        })?;
+        drop(store);
+        self.state_changed().await;
+        Ok(restored)
     }
     pub async fn set_agent_configuration(
         &self,
@@ -540,7 +589,7 @@ impl Backend {
         session: &str,
         response: Value,
     ) -> Result<(), String> {
-        let settings = self.settings().await.agent;
+        let settings = self.session_agent_settings(&response).await?;
         let response = apply_agent_settings(rpc, session, response, &settings).await?;
         if let Some(agent) = self.agent.lock().await.as_mut() {
             agent.configuration_session = Some(session.into());

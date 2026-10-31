@@ -240,6 +240,183 @@ async fn agent_options_and_language_survive_sessions_and_reject_unknown_choices(
 }
 
 #[tokio::test]
+async fn agent_preferences_reset_on_target_change_but_survive_other_settings_changes() {
+    for replace_manual_program in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let (backend, _) = connected(directory.path()).await;
+        let wanted = crate::workspace::AgentSettings {
+            model: "fixture-fast".into(),
+            reasoning_effort: "high".into(),
+            speed: "deep".into(),
+        };
+        backend
+            .set_agent_configuration(wanted.clone())
+            .await
+            .unwrap();
+        let mut settings = backend.settings().await;
+        settings.language = "en".into();
+        backend.save_settings(settings).await.unwrap();
+        assert_eq!(backend.settings().await.agent.model, wanted.model);
+        assert_eq!(backend.settings().await.agent.reasoning_effort, "high");
+        assert_eq!(backend.settings().await.agent.speed, "deep");
+
+        let mut changed = backend.settings().await;
+        if replace_manual_program {
+            changed.manual_target.as_mut().unwrap().adapter_path = Some("replacement.cjs".into());
+        } else {
+            changed.target_id = crate::local_agent::TARGET_ID.into();
+            changed.manual_target = None;
+        }
+        let snapshot = backend.save_settings(changed).await.unwrap();
+        assert_eq!(
+            snapshot["settings"]["agent"],
+            json!({"model":"","reasoningEffort":"","speed":"balanced"})
+        );
+        let saved = WorkspaceStore::load(directory.path()).unwrap();
+        assert!(saved.data.settings.agent.model.is_empty());
+        assert!(saved.data.settings.agent.reasoning_effort.is_empty());
+        assert_eq!(saved.data.settings.agent.speed, "balanced");
+        assert_eq!(saved.data.settings.language, "en");
+        backend.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn legacy_local_preferences_recover_before_configuration_or_conversation_and_persist() {
+    let profile: Value =
+        serde_json::from_str(include_str!("../../local-agent/model-profile.json")).unwrap();
+    let local_model = profile["id"].as_str().unwrap();
+    for configuration_first in [true, false] {
+        for (model, effort, speed) in [
+            ("previous-provider-model", "high", "deep"),
+            (local_model, "", "fast"),
+            (local_model, "high", "balanced"),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            std::fs::write(directory.path().join("fixture-local-model"), b"fixture").unwrap();
+            let (old, _) = connected(directory.path()).await;
+            old.store
+                .lock()
+                .await
+                .transaction(|data| {
+                    // Reproduce the persisted alpha.1 state, before any new save_settings call.
+                    data.settings.target_id = crate::local_agent::TARGET_ID.into();
+                    data.settings.manual_target = None;
+                    data.settings.agent = crate::workspace::AgentSettings {
+                        model: model.into(),
+                        reasoning_effort: effort.into(),
+                        speed: speed.into(),
+                    };
+                    Ok(())
+                })
+                .unwrap();
+            old.shutdown().await;
+            drop(old);
+
+            let backend = Backend::new(directory.path(), Arc::new(|_, _| {})).unwrap();
+            backend
+                .connect_agent(
+                    fixture_target(),
+                    directory.path().to_string_lossy().into_owned(),
+                )
+                .await
+                .unwrap();
+            // Exercise production session/configuration routing with a protocol-only
+            // subprocess. This does not claim GGUF or native inference qualification.
+            backend.agent.lock().await.as_mut().unwrap().target.id =
+                crate::local_agent::TARGET_ID.into();
+            backend.tutor_overview().await.unwrap();
+            if configuration_first {
+                let options = backend.agent_configuration().await.unwrap();
+                assert_eq!(options["configOptions"][0]["currentValue"], local_model);
+                assert_eq!(options["supported"]["model"], true);
+                assert_eq!(options["supported"]["reasoningEffort"], false);
+            }
+            let conversation = backend.start_conversation(None, None).await.unwrap();
+            backend
+                .send_prompt(conversation.id, "Bonjour".into())
+                .await
+                .unwrap();
+            assert_eq!(
+                backend.snapshot().await["conversations"][0]["messages"][1]["text"],
+                "Bonjour, élève."
+            );
+            let options = backend.agent_configuration().await.unwrap();
+            assert_eq!(
+                options["current"],
+                json!({"model":"","reasoningEffort":"","speed":"balanced"})
+            );
+            let saved = WorkspaceStore::load(directory.path()).unwrap();
+            assert!(saved.data.settings.agent.model.is_empty());
+            assert!(saved.data.settings.agent.reasoning_effort.is_empty());
+            assert_eq!(saved.data.settings.agent.speed, "balanced");
+            assert_eq!(saved.data.conversations.len(), 1);
+
+            // A new explicit invalid selection still fails; recovery is not an
+            // exemption from validating the user's requested configuration.
+            assert!(backend
+                .set_agent_configuration(crate::workspace::AgentSettings {
+                    model: "invented".into(),
+                    ..Default::default()
+                })
+                .await
+                .is_err());
+            assert!(backend.settings().await.agent.model.is_empty());
+            backend.shutdown().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn local_preference_recovery_preserves_valid_choices_and_does_not_change_external_agents() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("fixture-local-model"), b"fixture").unwrap();
+    let (backend, _) = connected(directory.path()).await;
+    backend
+        .store
+        .lock()
+        .await
+        .transaction(|data| {
+            data.settings.target_id = crate::local_agent::TARGET_ID.into();
+            data.settings.agent.model = "previous-provider-model".into();
+            Ok(())
+        })
+        .unwrap();
+    // A sole advertised model is not enough to authorize migration: the
+    // connected target must actually be the bundled local agent.
+    assert!(backend.agent_configuration().await.is_err());
+    assert_eq!(
+        backend.settings().await.agent.model,
+        "previous-provider-model"
+    );
+    backend.agent.lock().await.as_mut().unwrap().target.id = crate::local_agent::TARGET_ID.into();
+    let profile: Value =
+        serde_json::from_str(include_str!("../../local-agent/model-profile.json")).unwrap();
+    let model = profile["id"].as_str().unwrap();
+    backend
+        .store
+        .lock()
+        .await
+        .transaction(|data| {
+            data.settings.agent.model = model.into();
+            Ok(())
+        })
+        .unwrap();
+    let view = backend.agent_configuration().await.unwrap();
+    assert_eq!(view["current"]["model"], model);
+    assert_eq!(
+        WorkspaceStore::load(directory.path())
+            .unwrap()
+            .data
+            .settings
+            .agent
+            .model,
+        model
+    );
+    backend.shutdown().await;
+}
+
+#[tokio::test]
 async fn full_client_flow_persists_last_chunk_and_resumes_without_replay() {
     let directory = tempfile::tempdir().unwrap();
     let (backend, _events) = connected(directory.path()).await;

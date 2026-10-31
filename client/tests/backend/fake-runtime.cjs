@@ -14,11 +14,15 @@ let sessions = fs.existsSync(sessionFile) ? JSON.parse(fs.readFileSync(sessionFi
 let waiting;
 let typedFailures = false;
 const configs = {};
-const configOptions = (id) => configs[id] ||= sessions[id]?.fixtureConfig || [
+const fixedLocalModel = fs.existsSync(path.join(process.cwd(), 'fixture-local-model'));
+const localModel = fixedLocalModel ? require('../../local-agent/model-profile.json').id : null;
+const configOptions = (id) => configs[id] ||= sessions[id]?.fixtureConfig || (fixedLocalModel ? [
+  {id:'model',category:'model',name:'Model',type:'select',currentValue:localModel,options:[{value:localModel,name:'Qwen local'}]},
+] : [
   {id:'model',category:'model',name:'Model',type:'select',currentValue:'fixture-standard',options:[{value:'fixture-standard',name:'Standard'},{value:'fixture-fast',name:'Fast'}]},
   {id:'effort',category:'thought_level',name:'Reasoning',type:'select',currentValue:'medium',options:[{value:'low',name:'Low'},{value:'medium',name:'Medium'},{value:'high',name:'High'}]},
   {id:'fast-mode',category:'model_config',name:'Fast mode',type:'select',currentValue:'off',options:[{value:'off',name:'Off'},{value:'on',name:'On'}]},
-];
+]);
 const send = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
 const result = (request, value) => send({jsonrpc:'2.0', id:request.id, result:value});
 const chunk = (sessionId, text) => send({jsonrpc:'2.0',method:'session/update',params:{sessionId,update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text}}}});
@@ -35,18 +39,18 @@ readline.createInterface({input:process.stdin}).on('line', (line) => {
   } else if (request.method === 'tools/list') {
     result(request,{tools:[{name:'get_next_activity',description:'Fixture next activity',inputSchema:{type:'object'}}]});
   } else if (request.method === 'tools/call') {
-    const value = params.name === 'get_learner_context' ? {learner:{id:'learner-1'},domains:[{domain_id:'domain-1',name:'Astronomie',concept_count:1}]} : {items:[]};
+    const value = params.name === 'get_learner_context' ? {learner_id:'learner-1',learner:{id:'learner-1'},domains:[{domain_id:'domain-1',name:'Astronomie',concept_count:1}]} : {items:[]};
     result(request,{content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value});
   } else if (request.method === 'session/new') {
     const sessionId = `session-${Object.keys(sessions).length + 1}`;
     sessions[sessionId] = params;
     fs.writeFileSync(sessionFile, JSON.stringify(sessions));
     result(request,{sessionId,configOptions:configOptions(sessionId)});
-  } else if (request.method === 'session/load') {
+  } else if (request.method === 'session/load' || (fixedLocalModel && request.method === '_tutor/rebind')) {
     if (!sessions[params.sessionId]) return send({jsonrpc:'2.0',id:request.id,error:{code:-32602,message:'Unknown session'}});
     sessions[params.sessionId] = {...sessions[params.sessionId],...params};
     fs.writeFileSync(sessionFile, JSON.stringify(sessions));
-    chunk(params.sessionId,'ANCIEN TEXTE À NE PAS RÉAJOUTER');
+    if (request.method === 'session/load') chunk(params.sessionId,'ANCIEN TEXTE À NE PAS RÉAJOUTER');
     result(request,{configOptions:configOptions(params.sessionId)});
   } else if (request.method === 'session/set_config_option') {
     const options=configOptions(params.sessionId);
