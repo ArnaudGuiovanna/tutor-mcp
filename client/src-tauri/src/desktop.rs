@@ -500,7 +500,7 @@ pub fn run() {
             let model_directory = app.path().app_local_data_dir()?.join("models");
             crate::local_agent::configure(
                 app.path().resource_dir()?.join("local-agent"),
-                model_directory.join("Qwen3-4B-Instruct-2507-Q4_K_M.gguf"),
+                model_directory.join(crate::local_model::MODEL_FILENAME),
             );
             let local_model = crate::local_model::ModelManager::new(
                 model_directory,

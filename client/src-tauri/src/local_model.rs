@@ -21,10 +21,10 @@ use std::{
 };
 use tokio::sync::Notify;
 
-pub const MODEL_FILENAME: &str = "Qwen3-4B-Instruct-2507-Q4_K_M.gguf";
-pub const MODEL_URL: &str = "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/a06e946bb6b655725eafa393f4a9745d460374c9/Qwen3-4B-Instruct-2507-Q4_K_M.gguf";
-pub const MODEL_BYTES: u64 = 2_497_281_120;
-pub const MODEL_SHA256: &str = "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597";
+pub const MODEL_FILENAME: &str = "Qwen3-1.7B-Q4_K_M.gguf";
+pub const MODEL_URL: &str = "https://huggingface.co/unsloth/Qwen3-1.7B-GGUF/resolve/d7f544eead698dbd1f15126ef60b45a1e1933222/Qwen3-1.7B-Q4_K_M.gguf";
+pub const MODEL_BYTES: u64 = 1_107_409_472;
+pub const MODEL_SHA256: &str = "b139949c5bd74937ad8ed8c8cf3d9ffb1e99c866c823204dc42c0d91fa181897";
 const BUFFER_BYTES: usize = 256 * 1024;
 const NETWORK_IDLE: Duration = Duration::from_secs(60);
 const SIZE_ERROR: &str = "La taille du modèle ne correspond pas au profil attendu.";

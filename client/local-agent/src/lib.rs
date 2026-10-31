@@ -9,6 +9,7 @@ pub mod call_validation;
 pub mod catalog;
 pub mod context;
 pub mod executor;
+pub mod fast_harness;
 pub mod harness;
 pub mod host_context;
 pub mod journal;

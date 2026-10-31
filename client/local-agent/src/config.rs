@@ -3,8 +3,8 @@
 
 use std::path::PathBuf;
 
-pub const MODEL_ID: &str = "qwen3-4b-instruct-2507-q4_k_m";
-pub const MODEL_SHA256: &str = "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597";
+pub const MODEL_ID: &str = "qwen3-1.7b-q4_k_m";
+pub const MODEL_SHA256: &str = "b139949c5bd74937ad8ed8c8cf3d9ffb1e99c866c823204dc42c0d91fa181897";
 pub const CONTEXT_LIMIT: u32 = 4096;
 pub const TOKEN_MARGIN: u32 = 256;
 
@@ -25,8 +25,8 @@ impl Config {
         let mut config = Self {
             model: PathBuf::new(),
             expected_sha256: Some(MODEL_SHA256.into()),
-            context: CONTEXT_LIMIT,
-            max_output: 768,
+            context: 2048,
+            max_output: 192,
             gpu_layers: 0,
             threads: 6,
             batch: 128,
@@ -102,7 +102,7 @@ mod tests {
         let args = ["--model".into(), model.display().to_string()];
         let config = Config::parse(args.clone()).unwrap();
         assert_eq!(config.model, model);
-        assert_eq!(config.context, 4096);
+        assert_eq!(config.context, 2048);
         assert_eq!(config.gpu_layers, 0);
         for suffix in [
             ["--context", "32000"],

@@ -16,10 +16,10 @@ export function client(initial = initialState()) {
   let agentListener: (event: JsonRecord) => void = () => {};
   let stateListener: (snapshot: Snapshot) => void = () => {};
   const api: ClientBridge = {
-    localModelStatus: vi.fn(async (): Promise<LocalModelStatus> => ({phase:'missing', downloaded:0, total:2497281120, error:null, agentAvailable:true})),
-    downloadLocalModel: vi.fn(async (): Promise<LocalModelStatus> => ({phase:'downloading', downloaded:0, total:2497281120, error:null, agentAvailable:true})),
-    importLocalModel: vi.fn(async (): Promise<LocalModelStatus> => ({phase:'importing', downloaded:0, total:2497281120, error:null, agentAvailable:true})),
-    cancelLocalModel: vi.fn(async (): Promise<LocalModelStatus> => ({phase:'cancelled', downloaded:0, total:2497281120, error:null, agentAvailable:true})),
+    localModelStatus: vi.fn(async (): Promise<LocalModelStatus> => ({phase:'missing', downloaded:0, total:1107409472, error:null, agentAvailable:true})),
+    downloadLocalModel: vi.fn(async (): Promise<LocalModelStatus> => ({phase:'downloading', downloaded:0, total:1107409472, error:null, agentAvailable:true})),
+    importLocalModel: vi.fn(async (): Promise<LocalModelStatus> => ({phase:'importing', downloaded:0, total:1107409472, error:null, agentAvailable:true})),
+    cancelLocalModel: vi.fn(async (): Promise<LocalModelStatus> => ({phase:'cancelled', downloaded:0, total:1107409472, error:null, agentAvailable:true})),
     deleteProfile: vi.fn(async () => structuredClone(state)),
     institutionAction: vi.fn(async (action) => action === 'list_members' ? {items:[],next_after:''} : {institution:{id:'tenant-1',name:'Institution de test'},membership:{id:'member-1',roles:['learner'],status:'active'},capabilities:{manage_members:false,transfer_ownership:false,request_erasure:true,last_owner:false},personal_learning:true,erasure_requests:[]}),
     listMcpTools: vi.fn(async () => ({tools:[]})),

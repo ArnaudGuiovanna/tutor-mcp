@@ -342,11 +342,17 @@ fn render(
         optional: Vec<&'a Evidence>,
         active_tool: Option<&'a ActiveTool>,
     }
+    let has_records =
+        !task.required.is_empty() || !optional.is_empty() || task.active_tool.is_some();
     let mut messages = vec![ChatMessage {
         role: "system".into(),
-        content: format!("{}\n{}", task.instructions, PROVENANCE_RULE),
+        content: if has_records {
+            format!("{}\n{}", task.instructions, PROVENANCE_RULE)
+        } else {
+            task.instructions.into()
+        },
     }];
-    if !task.required.is_empty() || !optional.is_empty() || task.active_tool.is_some() {
+    if has_records {
         messages.push(ChatMessage {
             role: "user".into(),
             content: bounded_json(&Data {
@@ -425,6 +431,22 @@ mod tests {
             optional: &[],
             active_tool: None,
         }
+    }
+
+    #[test]
+    fn conversation_omits_record_instructions_until_evidence_is_projected() {
+        let plain = task(&[], &[]);
+        let messages = render(&plain, &[], &[]).unwrap();
+        assert_eq!(messages[0].content, plain.instructions);
+        let evidence = [Evidence {
+            id: "receipt".into(),
+            origin: Origin::TutorServer,
+            payload: json!({"value": 2}),
+        }];
+        let with_record = task(&evidence, &[]);
+        let messages = render(&with_record, &[], &[]).unwrap();
+        assert!(messages[0].content.contains(PROVENANCE_RULE));
+        assert!(messages[1].content.contains("receipt"));
     }
 
     #[test]

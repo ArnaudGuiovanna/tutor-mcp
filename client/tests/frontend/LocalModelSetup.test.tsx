@@ -7,7 +7,7 @@ import { setInterfaceLanguage } from '../../src/i18n';
 import type { AgentTarget, LocalModelStatus } from '../../src/types';
 import { client, initialState, target } from './clientFixture';
 
-const missing: LocalModelStatus = {phase:'missing', downloaded:0, total:2497281120, error:null, agentAvailable:true};
+const missing: LocalModelStatus = {phase:'missing', downloaded:0, total:1107409472, error:null, agentAvailable:true};
 const ready: LocalModelStatus = {...missing, phase:'ready', downloaded:missing.total};
 const localTarget: AgentTarget = {id:'local:qwen', label:'Qwen — local (expérimental)', environment:'native', available:true, detail:'Modèle local vérifié'};
 
@@ -42,7 +42,7 @@ describe('Préparation du modèle local', () => {
     const {api} = client();
     const onReady = vi.fn(async () => {});
     vi.mocked(api.localModelStatus).mockResolvedValueOnce(missing)
-      .mockResolvedValueOnce({...missing, phase:'downloading', downloaded:1_000_000_000})
+      .mockResolvedValueOnce({...missing, phase:'downloading', downloaded:100_000_000})
       .mockResolvedValueOnce({...ready, phase:'checking'}).mockResolvedValue(ready);
     render(<LocalModelSetup api={api} busy={false} onReady={onReady}/>);
     await flush();
@@ -50,8 +50,8 @@ describe('Préparation du modèle local', () => {
     await flush();
     expect(api.downloadLocalModel).toHaveBeenCalledTimes(1);
     await tick();
-    expect(screen.getByRole('progressbar').getAttribute('value')).toBe('1000000000');
-    expect(screen.getByText('1 Go sur 2,5 Go')).toBeTruthy();
+    expect(screen.getByRole('progressbar').getAttribute('value')).toBe('100000000');
+    expect(screen.getByText('0,1 Go sur 1,11 Go')).toBeTruthy();
     await tick();
     expect(screen.getByText('Vérification du modèle…')).toBeTruthy();
     expect(screen.getByRole('progressbar').hasAttribute('value')).toBe(false);

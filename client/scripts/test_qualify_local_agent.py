@@ -77,7 +77,7 @@ for line in sys.stdin:
         assert params["mcpServers"] == []
         assert pathlib.Path(params["cwd"]).is_dir()
         response(identifier, {"sessionId":session,"configOptions":[{
-            "id":"model","currentValue":"qwen3-4b-instruct-2507-q4_k_m"}]})
+            "id":"model","currentValue":"qwen3-1.7b-q4_k_m"}]})
     elif method == "session/prompt":
         text = params["prompt"][0]["text"]
         assert params["sessionId"] == session
@@ -301,7 +301,7 @@ class QualificationTests(unittest.IsolatedAsyncioTestCase):
     def test_native_command_keeps_unicode_paths_separate_and_bounds_defaults(self):
         argv = runner.command(self.options, "a" * 64)
         self.assertEqual(argv, [str(self.options.agent), "--model", str(self.model),
-                               "--context", "4096", "--max-output", "128", "--gpu-layers", "0",
+                               "--context", "2048", "--max-output", "128", "--gpu-layers", "0",
                                "--threads", "2", "--batch", "32", "--sha256", "a" * 64])
         self.assertNotIn("-c", argv)
         for key, bad in (("max_output", 769), ("gpu_layers", 37), ("batch", 513),

@@ -11,7 +11,7 @@ describe('Le contrat IPC du bridge Tauri', () => {
   it('prépare le modèle local par IPC sans chemin, URL ou commande fournis par la page', async () => {
     vi.stubGlobal('isTauri', true);
     const calls: [string, unknown][] = [];
-    const status = {phase:'missing', downloaded:0, total:2497281120, error:null, agentAvailable:true};
+    const status = {phase:'missing', downloaded:0, total:1107409472, error:null, agentAvailable:true};
     mockIPC((command, args) => { calls.push([command, args]); return status; });
     expect(await bridge.localModelStatus()).toEqual(status);
     expect(await bridge.downloadLocalModel()).toEqual(status);

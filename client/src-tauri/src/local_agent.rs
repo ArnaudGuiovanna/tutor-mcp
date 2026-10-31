@@ -11,7 +11,7 @@
 //! - TUTOR_LOCAL_THREADS: 1..=32, default available CPUs capped at 6.
 //! - TUTOR_LOCAL_BATCH: 1..=512, default 128.
 //!
-//! Context/output remain fixed at 4096/768 for the initial hardware profile.
+//! Context/output remain fixed at 2048/192 for the initial hardware profile.
 //! File signatures only detect obvious misconfiguration. Model identity, GGUF
 //! compatibility and ACP capabilities are established by the native agent/ACP
 //! handshake; the agent must report empty authMethods. The desktop supplies the
@@ -180,9 +180,9 @@ impl Configuration {
                 "--model".into(),
                 self.model,
                 "--context".into(),
-                "4096".into(),
+                "2048".into(),
                 "--max-output".into(),
-                "768".into(),
+                "192".into(),
                 "--gpu-layers".into(),
                 self.gpu_layers.to_string(),
                 "--threads".into(),
@@ -503,9 +503,9 @@ mod tests {
                 "--model",
                 fixture.model.to_str().unwrap(),
                 "--context",
-                "4096",
+                "2048",
                 "--max-output",
-                "768",
+                "192",
                 "--gpu-layers",
                 "0",
                 "--threads",

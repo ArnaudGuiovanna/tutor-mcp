@@ -141,7 +141,8 @@ export function LocalModelSetup({ api, busy, onReady }: LocalModelSetupProps) {
   return <section className="settings-section" aria-labelledby={heading}>
     <h2 id={heading}>{t('Qwen local (expérimental)')}</h2>
     <p>{t('Préparez le modèle une fois pour converser avec Qwen sur cet appareil.')}</p>
-    <p><strong>Qwen3-4B-Instruct-2507 · Q4_K_M</strong> · {t('environ 2,5 Go')}</p>
+    <p><strong>Qwen3-1.7B · Q4_K_M</strong> · {t('environ 1,1 Go')}</p>
+    <p>{t('Pour consulter vos données, envoyez /alertes ou /contexte dans la conversation. Les autres messages servent à discuter avec le modèle.')}</p>
     <p>{t('Le téléchargement utilise Hugging Face. Vous pouvez aussi choisir le GGUF exact déjà présent sur votre ordinateur : Tutor en conserve une copie vérifiée.')}</p>
     <p>{t('Le réseau sert au téléchargement du modèle. Les réponses sont ensuite calculées sur cet appareil ; le serveur Tutor peut être distant.')}</p>
     <p className="subtle-note">{t('Version CPU expérimentale : conversation et lecture des données Tutor uniquement. Les activités et évaluations ne sont pas encore disponibles. Les réponses peuvent être lentes ; la Quadro P2000 n’est pas encore qualifiée.')}</p>

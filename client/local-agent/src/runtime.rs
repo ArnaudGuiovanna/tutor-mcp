@@ -192,12 +192,10 @@ mod native {
                 .collect();
             if model.meta_val_str("general.architecture").as_deref() != Ok("qwen3")
                 || !normalized.contains("qwen3")
-                || !normalized.contains("4b")
-                || !normalized.contains("instruct")
-                || !normalized.contains("2507")
+                || !normalized.contains("17b")
                 || model.meta_val_str("general.file_type").as_deref() != Ok("15")
-                || model.n_layer() != 36
-                || model.n_embd() != 2560
+                || model.n_layer() != 28
+                || model.n_embd() != 2048
                 || model.n_head_kv() != 8
                 || model.n_ctx_train() < self.config.context
             {
@@ -315,7 +313,14 @@ mod native {
                         .map_err(|_| "invalid_grammar")?,
                 );
             }
-            samplers.push(LlamaSampler::greedy());
+            // Qwen3's non-thinking profile. A fixed seed makes qualification
+            // reproducible; this never decides permissions or tool arguments.
+            samplers.extend([
+                LlamaSampler::temp(0.7),
+                LlamaSampler::top_k(20),
+                LlamaSampler::top_p(0.8, 1),
+                LlamaSampler::dist(42),
+            ]);
             let mut sampler = LlamaSampler::chain_simple(samplers);
             let mut decoder = encoding_rs::UTF_8.new_decoder();
             for index in 0..request.max_output_tokens {
@@ -487,7 +492,7 @@ mod native {
         }
 
         /// This is deliberately ignored by ordinary CI: a trait double does
-        /// not qualify a model. Run with the pinned 2.5 GB GGUF explicitly.
+        /// not qualify a model. Run with the pinned 1.1 GB GGUF explicitly.
         #[test]
         #[ignore = "requires TUTOR_LOCAL_MODEL_PATH pointing to the pinned Qwen GGUF"]
         fn exact_qwen_text_grammar_budget_and_cancellation() {

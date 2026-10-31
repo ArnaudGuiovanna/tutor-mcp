@@ -1725,7 +1725,7 @@ impl Backend {
                 agent.target.id.clone(),
                 agent.cwd.clone(),
                 agent.capabilities.clone(),
-                digest(&json!([agent.target, agent.cwd])),
+                agent_runtime_binding(&agent.target, &agent.cwd),
             )
         };
         let (existing, intent) = {
@@ -1885,7 +1885,7 @@ impl Backend {
                     .get("loadSession")
                     .and_then(Value::as_bool)
                     == Some(true),
-                digest(&json!([agent.target, agent.cwd])),
+                agent_runtime_binding(&agent.target, &agent.cwd),
                 agent.target.id.clone(),
             )
         };
@@ -2656,6 +2656,16 @@ fn session_id(value: &Value) -> Result<String, String> {
         .ok_or("L’agent n’a pas retourné d’identifiant de séance.".into())
 }
 
+fn agent_runtime_binding(target: &AgentTarget, cwd: &str) -> String {
+    if target.id == crate::local_agent::TARGET_ID {
+        // Model upgrades open a new native journal. Do not attempt to resume a
+        // journal pinned to other weights; preserve the desktop's exact history.
+        digest(&json!([target, cwd, crate::local_model::MODEL_SHA256]))
+    } else {
+        digest(&json!([target, cwd]))
+    }
+}
+
 fn digest(value: &Value) -> String {
     format!(
         "{:x}",
@@ -3267,6 +3277,26 @@ mod tests;
 #[cfg(test)]
 mod local_journal_tests {
     use super::*;
+
+    #[test]
+    fn model_upgrade_changes_only_the_local_runtime_binding() {
+        let mut target = crate::local_agent::discover();
+        let old = digest(&json!([target, "/workspace"]));
+        assert_ne!(agent_runtime_binding(&target, "/workspace"), old);
+        assert_eq!(
+            agent_runtime_binding(&target, "/workspace"),
+            digest(&json!([
+                target,
+                "/workspace",
+                crate::local_model::MODEL_SHA256
+            ]))
+        );
+        target.id = "external:fixture".into();
+        assert_eq!(
+            agent_runtime_binding(&target, "/workspace"),
+            digest(&json!([target, "/workspace"]))
+        );
+    }
 
     #[test]
     fn local_prompt_keeps_exact_raw_text_and_verified_metadata_while_external_prompt_is_unchanged()

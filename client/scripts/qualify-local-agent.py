@@ -40,7 +40,7 @@ import tempfile
 import time
 
 
-MODEL_ID = "qwen3-4b-instruct-2507-q4_k_m"
+MODEL_ID = "qwen3-1.7b-q4_k_m"
 PINNED_MODEL_PROFILE = Path(__file__).resolve().parents[1] / "local-agent/model-profile.json"
 ARITHMETIC = "Calcule 17 + 25. Réponds uniquement par le nombre, sans explication."
 LONG_PROMPT = (
@@ -178,7 +178,7 @@ def inspect_artifacts(options, deadline, protocol_only):
 
 
 def command(options, model_sha256=None):
-    argv = [str(options.agent), "--model", str(options.model), "--context", "4096",
+    argv = [str(options.agent), "--model", str(options.model), "--context", "2048",
             "--max-output", str(options.max_output), "--gpu-layers", str(options.gpu_layers),
             "--threads", str(options.threads), "--batch", str(options.batch)]
     if model_sha256 is not None:
@@ -259,7 +259,7 @@ def generation_metadata(result, max_output):
     if not all(type(value) is int for value in values):
         return None
     inputs, outputs, elapsed = values
-    if not (0 < inputs <= 4096 - max_output - 256
+    if not (0 < inputs <= 2048 - max_output - 256
             and 0 < outputs <= max_output and 0 <= elapsed <= 3_600_000):
         return None
     return {"input_tokens": inputs, "output_tokens": outputs, "elapsed_ms": elapsed}
@@ -393,7 +393,7 @@ def new_report(options, protocol_only):
         "host": {"scope": "execution_host_only", "system": platform.system(),
                  "machine": platform.machine(), "python": platform.python_version(),
                  "requested_compute": "cpu" if options.gpu_layers == 0 else "gpu_offload"},
-        "configuration": {"context": 4096, "max_output": options.max_output,
+        "configuration": {"context": 2048, "max_output": options.max_output,
                           "gpu_layers": options.gpu_layers, "threads": options.threads,
                           "batch": options.batch, "timeout_seconds": options.timeout,
                           "cancel_timeout_seconds": options.cancel_timeout},

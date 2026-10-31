@@ -1,14 +1,14 @@
 {
-  "id": "qwen3-4b-instruct-2507-q4_k_m",
-  "model": "Qwen/Qwen3-4B-Instruct-2507",
-  "gguf_repository": "unsloth/Qwen3-4B-Instruct-2507-GGUF",
-  "gguf_revision": "a06e946bb6b655725eafa393f4a9745d460374c9",
-  "gguf_filename": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
-  "gguf_sha256": "3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597",
-  "gguf_bytes": 2497281120,
+  "id": "qwen3-1.7b-q4_k_m",
+  "model": "Qwen/Qwen3-1.7B",
+  "gguf_repository": "unsloth/Qwen3-1.7B-GGUF",
+  "gguf_revision": "d7f544eead698dbd1f15126ef60b45a1e1933222",
+  "gguf_filename": "Qwen3-1.7B-Q4_K_M.gguf",
+  "gguf_sha256": "b139949c5bd74937ad8ed8c8cf3d9ffb1e99c866c823204dc42c0d91fa181897",
+  "gguf_bytes": 1107409472,
   "license": "Apache-2.0",
-  "context_tokens": 4096,
-  "max_output_tokens": 768,
+  "context_tokens": 2048,
+  "max_output_tokens": 192,
   "token_margin": 256,
   "kv_type": "f16",
   "flash_attention": false,
@@ -16,5 +16,13 @@
   "llama_cpp_sys_2": "0.1.146",
   "upstream_reference": "goose-local-inference 0.1.0-alpha.13",
   "p2000_qualification": "pending",
-  "windows_qualification": "pending"
+  "windows_qualification": "pending",
+  "thinking": false,
+  "sampling": {
+    "temperature": 0.7,
+    "top_k": 20,
+    "top_p": 0.8,
+    "min_p": 0,
+    "seed": 42
+  }
 }

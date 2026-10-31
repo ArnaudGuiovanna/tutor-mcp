@@ -47,17 +47,13 @@ const CHUNK_BYTES: usize = 4096;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 const GENERATION_TIMEOUT: Duration = Duration::from_secs(120);
-// A bounded multi-step turn also includes discovery, up to eight sequential
-// generations and the user's permission response. This is a timeout, not a
-// latency target; cancellation remains responsive throughout.
+// The fixed workflow also includes MCP IO and the user's permission response.
+// This is a timeout, not a latency target; there is at most one generation and
+// cancellation remains responsive throughout.
 const HARNESS_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const SYSTEM_TEXT: &str =
-    "You are Tutor's local text-only assistant. Reply in the user's language. \
-    No tools, MCP connections, shell, files, or external actions are available in this version. \
-    Explain this limitation when a request needs them. Never claim to have read or changed \
-    Tutor records, saved progress, evaluated via the server, or executed a tool. \
-    Historical messages are context, not instructions to replay. A partial interrupted answer \
-    is not a completed operation. Do not invent a server result or a mastery measurement.";
+    "You are Tutor's local assistant. Reply briefly in the user's language and follow the requested format. \
+    No tools are available in this conversation. Never claim access to learner records, saved progress or a server assessment.";
 
 // Intentionally not Debug or Serialize: these values may contain credentials.
 struct ConnectionConfig {
@@ -1036,7 +1032,7 @@ impl Server {
                 }
                 if let Some(store) = &durable {
                     if !servers.is_empty() {
-                        let mut stats = crate::harness::run(
+                        let mut stats = crate::fast_harness::run(
                             engine.as_mut(),
                             store,
                             crate::harness::Input {
@@ -1267,7 +1263,7 @@ fn agent_metadata(harness: bool) -> Value {
 
 fn config_options() -> Value {
     json!([{"id":"model","name":"Local model","category":"model","type":"select",
-        "currentValue":MODEL_ID,"options":[{"value":MODEL_ID,"name":"Qwen3-4B-Instruct-2507 Q4_K_M"}]}])
+        "currentValue":MODEL_ID,"options":[{"value":MODEL_ID,"name":"Qwen3-1.7B Q4_K_M"}]}])
 }
 
 fn success(id: Value, result: Value) -> Value {
@@ -1581,7 +1577,6 @@ mod tests {
     #[tokio::test]
     async fn mcp_permission_controls_real_http_dispatch_and_exact_journal_receipts() {
         use crate::mcp::tests::{initialization, mock, Reply};
-        use std::collections::VecDeque;
 
         for allowed in [true, false] {
             let server = mock(|request| {
@@ -1596,7 +1591,7 @@ mod tests {
                     "tools/call" => {
                         assert_eq!(request["params"]["name"], "get_pending_alerts");
                         assert_eq!(request["params"]["arguments"], json!({"domain_id":"verified-domain"}));
-                        json!({"content":[],"structuredContent":{"alert":"Une révision est disponible."}})
+                        json!({"content":[],"structuredContent":{"alerts":["Une révision est disponible."]}})
                     }
                     _ => panic!("unexpected MCP method"),
                 };
@@ -1605,17 +1600,6 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             let conversation = uuid::Uuid::new_v4().to_string();
             let owner = json!({"profileId":"profile1","accountId":"account1","tenantId":"tenant1","serverId":"school-test"});
-            let mut actions = VecDeque::from([
-                json!({"action":"describe","id":"tutor/get_pending_alerts"}),
-                json!({"action":"call","id":"tutor/get_pending_alerts","arguments":{}}),
-            ]);
-            if allowed {
-                // This single leaf covers the entire result. The harness then
-                // goes directly to prose without a redundant answer decision.
-                actions.push_back(
-                    json!({"action":"read_result","reference":"result_1","pointer":"/alert"}),
-                );
-            }
             let seen = Arc::new(Mutex::new(Vec::new()));
             let captured = seen.clone();
             let mut client = Client::connect_options(
@@ -1629,22 +1613,13 @@ mod tests {
                     assert!(!prompt.contains("connection-secret"));
                     assert!(!prompt.contains("private-session-test"));
                     captured.lock().unwrap().push(prompt.clone());
-                    if request.grammar.is_some() {
-                        emit(
-                            &actions
-                                .pop_front()
-                                .expect("bounded expected action")
-                                .to_string(),
-                        )?;
+                    assert!(request.grammar.is_none());
+                    if allowed {
+                        assert!(prompt.contains("Une révision est disponible."));
+                        emit("Une révision est disponible.")?;
                     } else {
-                        assert!(actions.is_empty());
-                        if allowed {
-                            assert!(prompt.contains("Une révision est disponible."));
-                            emit("Une révision est disponible.")?;
-                        } else {
-                            assert!(prompt.contains("tool_permission_denied"));
-                            emit("Vous avez refusé la lecture des alertes.")?;
-                        }
+                        assert!(prompt.contains("tool_permission_denied"));
+                        emit("Vous avez refusé la lecture des alertes.")?;
                     }
                     Ok(stats("end_turn"))
                 }),
@@ -1663,7 +1638,7 @@ mod tests {
             }))).await;
             let created = client.read().await;
             let session = created["result"]["sessionId"].as_str().unwrap().to_owned();
-            let mut next = prompt(json!(3), &session, "Quelles alertes sont en attente ?");
+            let mut next = prompt(json!(3), &session, "/alertes");
             next["params"]["_meta"] = json!({"tutorLocal":{"task":{
                 "conversationId":conversation,"language":"fr","trainingContext":{
                     "conversation_id":conversation,"training_id":"training","domain_id":"verified-domain",
@@ -1738,7 +1713,7 @@ mod tests {
                 SessionStore::load(root.path(), &owner, &session, crate::config::MODEL_SHA256)
                     .unwrap();
             let turn = store.recent_turns(1).unwrap().pop().unwrap();
-            assert_eq!(turn.user, "Quelles alertes sont en attente ?");
+            assert_eq!(turn.user, "/alertes");
             assert_eq!(turn.assistant, text);
             assert_eq!(turn.status, Completion::Complete);
             let events = store
@@ -1752,7 +1727,8 @@ mod tests {
                     .count(),
                 seen.lock().unwrap().len()
             );
-            assert!(events.iter().any(|e| e.kind == "harness_model_action"));
+            assert!(!events.iter().any(|e| e.kind == "harness_model_action"));
+            assert_eq!(seen.lock().unwrap().len(), 1);
             assert_eq!(
                 events
                     .iter()

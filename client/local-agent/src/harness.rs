@@ -55,6 +55,7 @@ pub struct Input<'a> {
     pub conversation_id: Option<Uuid>,
 }
 
+/// Legacy discovery harness, retained for experiments; ACP uses fast_harness.
 /// Owns one fresh connection for this turn. All ordinary error and cancellation
 /// paths close it; transport Drop remains the backstop for worker unwinding.
 pub fn run(
@@ -79,7 +80,197 @@ pub fn run(
     }
 }
 
-// An internal seam for deterministic offline tests; production uses Client.
+/// Fixed CPU workflow. No model action can reach the executor through this path.
+pub(crate) fn run_fixed(
+    engine: &mut dyn Engine,
+    store: &Arc<Mutex<SessionStore>>,
+    input: Input<'_>,
+    cancel: &AtomicBool,
+    handle: &Handle,
+    ui: &mut dyn Ui,
+) -> Result<GenerationStats, String> {
+    validate_input(store, &input)?;
+    check_cancel(cancel)?;
+    let mut client = handle
+        .block_on(Client::connect(&input.servers[0], input.cwd, cancel))
+        .map_err(|_| "harness_mcp_connection_failed".to_owned())?;
+    let outcome = fixed_connected(engine, store, &input, cancel, handle, ui, &mut client);
+    let closed = handle.block_on(client.close());
+    match (outcome, closed) {
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(_)) => Err("harness_mcp_close_failed".into()),
+        (Ok(stats), Ok(())) => Ok(stats),
+    }
+}
+
+fn fixed_connected<C: Connection>(
+    engine: &mut dyn Engine,
+    store: &Arc<Mutex<SessionStore>>,
+    input: &Input<'_>,
+    cancel: &AtomicBool,
+    handle: &Handle,
+    ui: &mut dyn Ui,
+    client: &mut C,
+) -> Result<GenerationStats, String> {
+    use crate::fast_harness::{route, Route};
+    validate_input(store, input)?;
+    let selected = route(input.user);
+    if !matches!(selected, Route::Alerts | Route::Context) {
+        return Err("harness_route_invalid".into());
+    }
+    let mut state = initial_state(store, input)?;
+    event(
+        store,
+        input.turn_id,
+        "harness_fixed_route",
+        json!({"route":if selected == Route::Alerts {"alerts"} else {"context"}}),
+    )?;
+    state.refresh(client, handle, cancel)?;
+    let turn = TurnContext {
+        store,
+        input,
+        cancel,
+        handle,
+    };
+    let tools: &[&str] = if selected == Route::Context {
+        &["get_pending_alerts", "get_learner_context"]
+    } else {
+        &["get_pending_alerts"]
+    };
+    'workflow: for name in tools {
+        check_cancel(cancel)?;
+        if client.changed() {
+            state.refresh(client, handle, cancel)?;
+        }
+        let id = format!("tutor/{name}");
+        for action in [
+            Action::Describe { id: id.clone() },
+            Action::Call {
+                id,
+                arguments: json!({}),
+            },
+        ] {
+            match step(action, &mut state, &turn, ui, client)? {
+                Step::Continue => (),
+                Step::Correction(code) | Step::Stop(code) => {
+                    state.feedback(store, input.turn_id, &code)?;
+                    break 'workflow;
+                }
+            }
+        }
+        let receipt = state.receipts.last().ok_or("harness_result_unavailable")?;
+        let envelope: Value = serde_json::from_slice(
+            &lock(store)?
+                .journal()
+                .resolve_content(&receipt.reference)
+                .map_err(|_| "harness_result_unavailable")?,
+        )
+        .map_err(|_| "harness_result_invalid")?;
+        let payload =
+            call_validation::result_payload(&envelope).map_err(|_| "harness_result_invalid")?;
+        if *name == "get_pending_alerts" && !payload.get("alerts").is_some_and(Value::is_array) {
+            state.feedback(store, input.turn_id, "result_payload_unavailable")?;
+            break;
+        }
+        let alias = receipt.alias.clone();
+        let pointers: Vec<&str> = if *name == "get_pending_alerts" {
+            ["/alerts", "/has_critical", "/needs_domain_setup"]
+                .into_iter()
+                .filter(|p| payload.pointer(p).is_some())
+                .collect()
+        } else {
+            vec![""]
+        };
+        for pointer in pointers {
+            // Never put an unbounded tool response into the model context.
+            // Refuse the selection whole, rather than silently dropping alerts.
+            if serde_json::to_vec(payload.pointer(pointer).ok_or("harness_result_invalid")?)
+                .map_or(true, |v| v.len() > 4096)
+            {
+                state.feedback(store, input.turn_id, "result_selection_too_large")?;
+                break 'workflow;
+            }
+            match step(
+                Action::ReadResult {
+                    reference: alias.clone(),
+                    pointer: pointer.into(),
+                },
+                &mut state,
+                &turn,
+                ui,
+                client,
+            )? {
+                Step::Continue => (),
+                Step::Correction(code) | Step::Stop(code) => {
+                    state.feedback(store, input.turn_id, &code)?;
+                    break 'workflow;
+                }
+            }
+        }
+        if *name == "get_pending_alerts"
+            && selected == Route::Context
+            && (payload["has_critical"] != false || payload["needs_domain_setup"] != false)
+        {
+            state.feedback(store, input.turn_id, "context_read_blocked_by_alerts")?;
+            break;
+        }
+    }
+    // Audit references remain exact, but routing receipts and lists of available
+    // pointers do not help write the answer. Project only the selected values.
+    // The full operation/selection linkage stays in the journal.
+    let required: Vec<Evidence> = state
+        .feedback
+        .iter()
+        .cloned()
+        .chain(state.reads.iter().map(|read| Evidence {
+            id: read.id.clone(),
+            origin: read.origin,
+            payload: json!({"field":read.payload["pointer"],"value":read.payload["value"]}),
+        }))
+        .collect();
+    let instructions = if input.language == Some("en") {
+        "In a few lines, report only the supplied Tutor facts in English. Copy alert messages and numbers exactly. Mention errors or missing data. Do not add activities, explanations or assessments."
+    } else {
+        "En quelques lignes, rapporte uniquement les faits Tutor fournis en français. Recopie les messages d'alerte et les nombres exactement. Signale les erreurs ou les données absentes. N'ajoute ni activité, ni explication, ni évaluation."
+    };
+    generate_text(
+        engine,
+        store,
+        input,
+        cancel,
+        ui,
+        &TaskContext {
+            instructions,
+            current_user: input.user,
+            required: &required,
+            optional: &[],
+            history: &[],
+            active_tool: None,
+        },
+    )
+}
+
+pub(crate) fn generate_text(
+    engine: &mut dyn Engine,
+    store: &Arc<Mutex<SessionStore>>,
+    input: &Input<'_>,
+    cancel: &AtomicBool,
+    ui: &mut dyn Ui,
+    task: &TaskContext<'_>,
+) -> Result<GenerationStats, String> {
+    check_cancel(cancel)?;
+    let request = project(engine, store, input.turn_id, cancel, task, None)?;
+    let mut bytes = 0usize;
+    engine.generate(request, cancel, &mut |text| {
+        check_cancel(cancel)?;
+        bytes = bytes
+            .checked_add(text.len())
+            .filter(|&n| n <= MAX_TEXT_BYTES)
+            .ok_or("harness_output_limit")?;
+        ui.text(text)
+    })
+}
+
 trait Connection: Transport {
     fn list(&mut self, handle: &Handle, cancel: &AtomicBool) -> Result<Vec<ToolEntry>, String>;
     fn changed(&mut self) -> bool;
@@ -105,7 +296,10 @@ fn check_cancel(cancel: &AtomicBool) -> Result<(), String> {
         Ok(())
     }
 }
-fn validate_input(store: &Arc<Mutex<SessionStore>>, input: &Input<'_>) -> Result<(), String> {
+pub(crate) fn validate_input(
+    store: &Arc<Mutex<SessionStore>>,
+    input: &Input<'_>,
+) -> Result<(), String> {
     if input.servers.len() != 1
         || input.servers[0].get("name").and_then(Value::as_str) != Some("tutor")
         || input.user.trim().is_empty()
@@ -617,6 +811,11 @@ fn run_connected<C: Connection>(
     client: &mut C,
 ) -> Result<GenerationStats, String> {
     validate_input(store, input)?;
+    let mut state = initial_state(store, input)?;
+    run_discovery_connected(engine, store, input, cancel, handle, ui, client, &mut state)
+}
+
+fn initial_state(store: &Arc<Mutex<SessionStore>>, input: &Input<'_>) -> Result<State, String> {
     let binding = Uuid::new_v4().to_string();
     let fields = {
         let store = lock(store)?;
@@ -632,7 +831,7 @@ fn run_connected<C: Connection>(
         }
         fields
     };
-    let mut state = State {
+    Ok(State {
         catalog: ToolCatalog::new(binding.clone()).map_err(|_| "harness_binding_invalid")?,
         binding,
         fields,
@@ -649,7 +848,20 @@ fn run_connected<C: Connection>(
         corrections: 0,
         discovery_retry_used: false,
         servers_listed: false,
-    };
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_discovery_connected<C: Connection>(
+    engine: &mut dyn Engine,
+    store: &Arc<Mutex<SessionStore>>,
+    input: &Input<'_>,
+    cancel: &AtomicBool,
+    handle: &Handle,
+    ui: &mut dyn Ui,
+    client: &mut C,
+    state: &mut State,
+) -> Result<GenerationStats, String> {
     check_cancel(cancel)?;
     state.refresh(client, handle, cancel)?;
     state.search(store, input.turn_id, prefix(input.user.trim(), 1024))?;
@@ -751,7 +963,7 @@ fn run_connected<C: Connection>(
             break;
         }
         let result = match action {
-            Ok(action) => step(action, &mut state, &turn, ui, client)?,
+            Ok(action) => step(action, state, &turn, ui, client)?,
             Err(code) => Step::Correction(code.to_owned()),
         };
         match result {
@@ -1369,6 +1581,176 @@ mod tests {
     const CALL: &str = r#"{"action":"call","id":"tutor/get_pending_alerts","arguments":{}}"#;
     const READ: &str = r#"{"action":"read_result","reference":"result_1","pointer":"/alerts"}"#;
     const ANSWER: &str = r#"{"action":"answer"}"#;
+
+    #[test]
+    fn small_model_chat_bypasses_unreachable_mcp_and_uses_one_generation() {
+        let f = Fixture::for_user("Bonjour, réponds en une phrase.");
+        let cancel = AtomicBool::new(false);
+        let mut model = Model::new(&["Bonjour !"]);
+        let mut ui = UserInterface::new(&f, &cancel);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        crate::fast_harness::run(
+            &mut model,
+            &f.store,
+            f.input(),
+            &cancel,
+            rt.handle(),
+            &mut ui,
+        )
+        .unwrap();
+        assert_eq!(ui.text, "Bonjour !");
+        assert!(ui.approvals.is_empty());
+        assert_eq!(model.requests.len(), 1);
+        assert!(model.requests[0].grammar.is_none());
+        assert!(f.records("harness_model_action").is_empty());
+        assert!(f.records("harness_search").is_empty());
+        assert_eq!(f.records("context_projection").len(), 1);
+    }
+
+    #[test]
+    fn fixed_alerts_keep_permissions_and_exact_reads_without_model_decisions() {
+        for allow in [true, false] {
+            let f = Fixture::for_user("/alertes");
+            let cancel = AtomicBool::new(false);
+            let mut model = Model::new(&["Résumé."]);
+            let mut ui = UserInterface::new(&f, &cancel);
+            if !allow {
+                ui.response = json!({"outcome":{"outcome":"cancelled"}});
+            }
+            let mut port = Port::new();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            fixed_connected(
+                &mut model,
+                &f.store,
+                &f.input(),
+                &cancel,
+                rt.handle(),
+                &mut ui,
+                &mut port,
+            )
+            .unwrap();
+            assert_eq!(port.calls.len(), usize::from(allow));
+            assert_eq!(ui.approvals.len(), 1);
+            assert_eq!(model.requests.len(), 1);
+            assert!(model.requests[0].grammar.is_none());
+            assert!(f.records("harness_model_action").is_empty());
+            assert!(f.records("harness_search").is_empty());
+            let prompt = serde_json::to_string(&model.requests[0].messages).unwrap();
+            assert!(!prompt.contains("SCHEMA_ONLY_ENUM_MARKER"));
+            assert!(!prompt.contains("VALUE_NEVER_PROJECT"));
+            assert_eq!(prompt.contains("Réponse exacte 日本語"), allow);
+            assert_eq!(
+                f.records("harness_result_selection").len(),
+                usize::from(allow)
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_context_checks_alerts_before_context_and_stops_on_unknown_or_critical_state() {
+        for (critical, needs_setup, expected_calls) in [
+            (json!(false), json!(false), 2),
+            (json!(true), json!(false), 1),
+            (json!(false), json!(true), 1),
+            (Value::Null, json!(false), 1),
+        ] {
+            let f = Fixture::for_user("/contexte");
+            let cancel = AtomicBool::new(false);
+            let mut model = Model::new(&["Résumé."]);
+            let mut ui = UserInterface::new(&f, &cancel);
+            let mut port = Port::new();
+            port.result = Ok(
+                json!({"structuredContent":{"alerts":[],"has_critical":critical,"needs_domain_setup":needs_setup}}),
+            );
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            fixed_connected(
+                &mut model,
+                &f.store,
+                &f.input(),
+                &cancel,
+                rt.handle(),
+                &mut ui,
+                &mut port,
+            )
+            .unwrap();
+            assert_eq!(port.calls.len(), expected_calls);
+            assert_eq!(port.calls[0], ("get_pending_alerts".into(), json!({})));
+            if expected_calls == 2 {
+                assert_eq!(port.calls[1], ("get_learner_context".into(), json!({})));
+            }
+            assert_eq!(model.requests.len(), 1);
+        }
+    }
+
+    #[test]
+    fn fixed_route_cancelled_approval_never_dispatches_or_generates() {
+        let f = Fixture::for_user("/alertes");
+        let cancel = AtomicBool::new(false);
+        let mut model = Model::new(&[]);
+        let mut ui = UserInterface::new(&f, &cancel);
+        ui.cancel_on_approval = true;
+        let mut port = Port::new();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert!(fixed_connected(
+            &mut model,
+            &f.store,
+            &f.input(),
+            &cancel,
+            rt.handle(),
+            &mut ui,
+            &mut port
+        )
+        .is_err());
+        assert!(port.calls.is_empty());
+        assert!(model.requests.is_empty());
+    }
+
+    #[test]
+    fn fixed_route_never_treats_absent_or_oversized_alerts_as_an_empty_list() {
+        for payload in [
+            json!({"has_critical":false,"needs_domain_setup":false}),
+            json!({"alerts":["x".repeat(4097)],"has_critical":false,"needs_domain_setup":false}),
+        ] {
+            let f = Fixture::for_user("/contexte");
+            let cancel = AtomicBool::new(false);
+            let mut model = Model::new(&["Données indisponibles."]);
+            let mut ui = UserInterface::new(&f, &cancel);
+            let mut port = Port::new();
+            port.result = Ok(json!({"structuredContent":payload}));
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            fixed_connected(
+                &mut model,
+                &f.store,
+                &f.input(),
+                &cancel,
+                rt.handle(),
+                &mut ui,
+                &mut port,
+            )
+            .unwrap();
+            assert_eq!(port.calls.len(), 1);
+            assert!(f.records("harness_result_selection").is_empty());
+            assert_eq!(f.records("harness_action_status").len(), 1);
+            assert!(!serde_json::to_string(&model.requests[0].messages)
+                .unwrap()
+                .contains("\"alerts\":[]"));
+        }
+    }
 
     #[test]
     fn action_contract_and_parser_reject_ambiguous_or_unbounded_actions() {

@@ -1,7 +1,7 @@
 {
   "name": "@tutor-mcp/client",
   "private": true,
-  "version": "0.0.6",
+  "version": "0.0.7",
   "description": "Client pédagogique Tutor pour Windows, avec Codex et Claude via ACP",
   "license": "MIT",
   "type": "module",

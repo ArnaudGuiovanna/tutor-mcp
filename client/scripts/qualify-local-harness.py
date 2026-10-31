@@ -14,8 +14,10 @@ a loopback-only controlled HTTP MCP fixture: get_pending_alerts plus two real
 catalogue distractors. This is deliberately NOT the full 68-tool discovery test.
 Only the expected, read-only business call with exact host-bound arguments can
 be approved. No real Tutor server is contacted. After process shutdown, the
-SQLite journal must prove discovery, describe, one call, an explicit read_result
-and inclusion of that exact selection in the final model context. The final
+SQLite journal must prove the fixed /alertes route, the validated contract,
+one call, deterministic exact read_result selections, no model tool decisions and
+one final generation containing those selections. Legacy discovery journals
+are accepted only from protocol fixtures, never for live qualification. The final
 answer must contain the fixture's numerical fact; an unread reference cannot
 pass. The synthetic alert's unpredictable marker exists only in its MCP result.
 
@@ -67,7 +69,7 @@ TOOL_ID = "tutor/" + TOOL
 DISTRACTORS = ("get_availability_model", "get_goal_relevance")
 DOMAIN = "qualification-domain"
 ARGUMENTS = {"domain_id": DOMAIN}
-PROMPT = "Quelles sont mes alertes en attente ? Indique le message et l’heure de la révision."
+PROMPT = "/alertes"
 FACT = re.compile(r"(?<!\d)17\s*(?:h(?:eures?)?|:)\s*42(?!\d)", re.IGNORECASE)
 MAX_HTTP_HEADER = 16 * 1024
 MAX_HTTP_BODY = 128 * 1024
@@ -482,7 +484,7 @@ def journal_diagnostics(data_dir, session_id):
 
 
 def inspect_journal(data_dir, session_id, call_id, fixture, answer, result, options, allowed,
-                    model_sha256, deadline):
+                    model_sha256, deadline, fixed_required=False):
     """Read only AFTER child reaping (the native journal holds an exclusive lock)."""
     paths = list(data_dir.glob("*/*.sqlite3"))
     require(len(paths) == 1, "durable_journal_missing_or_multiple")
@@ -517,9 +519,17 @@ def inspect_journal(data_dir, session_id, call_id, fixture, answer, result, opti
         require("".join(e[3]["text"] for e in by_kind("assistant_chunk")) == answer,
                 "journal_answer_mismatch")
         searches = by_kind("harness_search")
-        require(searches and all(isinstance(e[3].get("tools"), list) and len(e[3]["tools"]) <= 3
+        routes = by_kind("harness_fixed_route")
+        fixed = bool(routes)
+        require(not fixed_required or fixed, "journal_fixed_route_missing")
+        if fixed:
+            require(len(routes) == 1 and routes[0][3] == {"route": "alerts"}
+                    and not searches and not by_kind("harness_model_action"),
+                    "journal_fixed_route_invalid")
+        else:
+            require(searches and all(isinstance(e[3].get("tools"), list) and len(e[3]["tools"]) <= 3
                                 for e in searches), "journal_discovery_missing")
-        require(any(t.get("id") == TOOL_ID for e in searches for t in e[3]["tools"]),
+            require(any(t.get("id") == TOOL_ID for e in searches for t in e[3]["tools"]),
                 "journal_expected_tool_not_discovered")
         contracts = by_kind("harness_selected_contract")
         require(len(contracts) == 1 and contracts[0][3].get("id") == TOOL_ID
@@ -536,7 +546,10 @@ def inspect_journal(data_dir, session_id, call_id, fixture, answer, result, opti
             actions.append((e[0], action))
         descriptions = [(seq, a) for seq, a in actions if a["action"] == "describe"]
         calls = [(seq, a) for seq, a in actions if a["action"] == "call"]
-        require(1 <= len(actions) <= 7 and len(descriptions) == len(calls) == 1
+        if fixed:
+            require(routes[0][0] < contracts[0][0], "journal_action_sequence_mismatch")
+        else:
+            require(1 <= len(actions) <= 7 and len(descriptions) == len(calls) == 1
                 and descriptions[0][1].get("id") == calls[0][1].get("id") == TOOL_ID
                 and searches[0][0] < descriptions[0][0] < contracts[0][0] < calls[0][0],
                 "journal_action_sequence_mismatch")
@@ -558,16 +571,19 @@ def inspect_journal(data_dir, session_id, call_id, fixture, answer, result, opti
         if allowed:
             require(len(receipts) == 1 and receipts[0][0] == call_id
                     and decode_json(receipts[0][1]) == fixture.result, "journal_receipt_mismatch")
-            require(reads and selections, "journal_explicit_read_missing")
+            require(selections and (fixed or reads), "journal_explicit_read_missing")
             grounded = []
             for e in selections:
                 selection = e[3]
                 require(selection.get("operation_id") == call_id and selection.get("reference") == "result_1",
                         "journal_selection_reference_mismatch")
                 pointer = selection.get("pointer")
+                ordered = (pointer in ("/alerts", "/has_critical", "/needs_domain_setup")
+                           and contracts[0][0] < e[0]) if fixed else any(
+                               calls[0][0] < seq < e[0] and a.get("reference") == "result_1"
+                               and a.get("pointer") == pointer for seq, a in reads)
                 require(selection.get("value") == json_pointer(fixture.result["structuredContent"], pointer)
-                        and any(calls[0][0] < seq < e[0] and a.get("reference") == "result_1"
-                                and a.get("pointer") == pointer for seq, a in reads),
+                        and ordered,
                         "journal_selection_mismatch")
                 encoded = json.dumps(selection["value"], ensure_ascii=False)
                 if FACT.search(encoded) and fixture.marker in encoded:
@@ -582,7 +598,7 @@ def inspect_journal(data_dir, session_id, call_id, fixture, answer, result, opti
         for e in projections:
             audit = e[3]
             require(type(audit.get("input_tokens")) is int
-                    and 0 < audit["input_tokens"] <= 4096 - options.max_output - 256
+                    and 0 < audit["input_tokens"] <= 2048 - options.max_output - 256
                     and type(audit.get("output_reserved")) is int
                     and audit["output_reserved"] == options.max_output, "journal_context_budget_exceeded")
         if allowed:
@@ -596,7 +612,8 @@ def inspect_journal(data_dir, session_id, call_id, fixture, answer, result, opti
                 and 0 <= stats["elapsedMs"] <= 3_600_000, "generation_metadata_invalid")
         metrics = {"event_count": len(events), "model_decisions": len(actions),
                    "model_invocations": len(projections), "discovery_count": len(searches),
-                   "described_tools": len(contracts), "explicit_result_reads": len(reads),
+                   "workflow": "fixed" if fixed else "discovery_fixture",
+                   "described_tools": len(contracts), "explicit_result_reads": len(selections),
                    "operation_count": len(operations), "exact_result_receipts": len(receipts),
                    "max_input_tokens": max(e[3]["input_tokens"] for e in projections),
                    "input_tokens_sum": stats["inputTokens"], "output_tokens_sum": stats["outputTokens"],
@@ -760,7 +777,8 @@ async def _qualify(options, protocol_command=None, allowed=True):
                 answer, call_id, result, _ = completed
                 metrics, identity = inspect_journal(data_dir, session_id, call_id, fixture, answer,
                                                     result, options, allowed,
-                                                    report["artifacts"]["model"]["sha256"], deadline)
+                                                    report["artifacts"]["model"]["sha256"], deadline,
+                                                    fixed_required=not protocol_only)
                 report["metrics"]["journal"] = metrics
                 report["artifacts"]["journal"] = identity
                 report["validations"]["journal"] = "passed"

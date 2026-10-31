@@ -12,7 +12,7 @@ async fn main() {
         return;
     }
     if args == ["--help"] {
-        println!("tutor-local-agent --model ABSOLUTE_GGUF_PATH [--sha256 HEX] [--data-dir ABSOLUTE_PRIVATE_DIRECTORY] [--context 4096] [--max-output 768] [--gpu-layers 0] [--threads 6] [--batch 128]\nACP over stdin/stdout. CUDA or Vulkan features are required for GPU offload.");
+        println!("tutor-local-agent --model ABSOLUTE_GGUF_PATH [--sha256 HEX] [--data-dir ABSOLUTE_PRIVATE_DIRECTORY] [--context 2048] [--max-output 192] [--gpu-layers 0] [--threads 6] [--batch 128]\nACP over stdin/stdout. CUDA or Vulkan features are required for GPU offload.");
         return;
     }
     let config = match Config::parse(args) {

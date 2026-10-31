@@ -35,6 +35,7 @@ import hashlib, json, pathlib, sqlite3, sys, time, urllib.request, uuid
 sys.stdin.reconfigure(encoding="utf-8")
 sys.stdout.reconfigure(encoding="utf-8", newline="\n")
 mode, model = sys.argv[1:3]
+fixed = mode.startswith("fixed")
 data = pathlib.Path(sys.argv[sys.argv.index("--data-dir") + 1])
 secret = "PRIVATE_FIXTURE_DATA_NEVER_REPORT"
 session, turn, operation = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
@@ -68,6 +69,7 @@ def project(kept=()):
     event("context_projection", {"input_tokens":100,"output_reserved":256,
                                  "kept_ids":list(kept),"omitted":[]})
 def action(payload):
+    if fixed: return
     project()
     event("harness_model_action", {"raw":encode(payload).decode(),"complete":True,"rejected_chunk_bytes":0})
 def mcp(method, params, identifier=1):
@@ -110,7 +112,8 @@ def finish(allowed):
         if mode != "unread-reference":
             action({"action":"read_result","reference":"result_1","pointer":"/alerts/0/message"})
             selected = event("harness_result_selection", {"reference":"result_1","operation_id":operation,
-                             "pointer":"/alerts/0/message","value":result["structuredContent"]["alerts"][0]["message"]})
+                             "pointer":"/alerts" if fixed else "/alerts/0/message",
+                             "value":result["structuredContent"]["alerts"] if fixed else result["structuredContent"]["alerts"][0]["message"]})
         action({"action":"answer"})
         project([selected] if selected and mode != "omitted-selection" else [])
         answer = result["structuredContent"]["alerts"][0]["message"] + " " + secret
@@ -157,7 +160,7 @@ for line in sys.stdin:
         url = params["mcpServers"][0]["url"]
         assert url.startswith("http://127.0.0.1:")
         reply(request["id"], {"sessionId":session,"configOptions":[{"id":"model",
-              "currentValue":"qwen3-4b-instruct-2507-q4_k_m"}]})
+              "currentValue":"qwen3-1.7b-q4_k_m"}]})
     elif method == "session/prompt":
         pending = request["id"]
         if mode in ("cancel", "ignore-cancel"): continue
@@ -171,7 +174,12 @@ for line in sys.stdin:
         tools = mcp("tools/list", {}, 2)["tools"]
         assert len(tools) == 3
         contract = next(t for t in tools if t["name"] == tool)
-        event("harness_search", {"query":prompt,"tools":[{"id":"tutor/"+t["name"],"name":t["name"]} for t in tools]})
+        if fixed:
+            event("harness_fixed_route", {"route":"alerts"})
+            if mode == "fixed-model-action":
+                event("harness_model_action", {"raw":encode({"action":"answer"}).decode(),"complete":True,"rejected_chunk_bytes":0})
+        else:
+            event("harness_search", {"query":prompt,"tools":[{"id":"tutor/"+t["name"],"name":t["name"]} for t in tools]})
         if mode in ("no-permission", "partial-no-permission", "partial-crash", "partial-timeout", "diagnostic-flood"):
             if mode == "no-permission":
                 action({"action":"answer","private":secret})
@@ -285,6 +293,21 @@ class HarnessQualificationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["metrics"]["journal"]["exact_result_receipts"], 0)
         self.assertEqual(report["metrics"]["journal"]["explicit_result_reads"], 0)
         self.assertFalse(report["metrics"]["prompt"]["grounded_numeric_fact"])
+
+    async def test_fixed_route_has_one_generation_and_no_model_tool_decisions(self):
+        report = await self.qualify(mode="fixed")
+        self.assertTrue(report["protocol_passed"], report)
+        journal = report["metrics"]["journal"]
+        self.assertEqual(journal["workflow"], "fixed")
+        self.assertEqual(journal["model_decisions"], 0)
+        self.assertEqual(journal["discovery_count"], 0)
+        self.assertEqual(journal["model_invocations"], 1)
+        self.assertEqual(journal["exact_result_receipts"], 1)
+
+    async def test_fixed_route_rejects_hidden_model_tool_decisions(self):
+        report = await self.qualify(mode="fixed-model-action")
+        self.assertFalse(report["protocol_passed"])
+        self.assertIn("journal_fixed_route_invalid", report["errors"])
 
     async def test_peer_keeps_utf8_acp_under_a_legacy_windows_stdio_codec(self):
         with mock.patch.dict(os.environ, {"PYTHONIOENCODING": "cp1252", "PYTHONUTF8": "0"}):
