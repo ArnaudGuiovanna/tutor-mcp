@@ -1,11 +1,14 @@
 // Interface copy only. User messages, names, curriculum and assessment evidence
 // retain their original language and are never translated by this catalogue.
 export const english: Record<string, string> = {
+  'Je prépare la réponse…': 'I’m preparing the response…',
+  '{seconds} s écoulées': '{seconds} s elapsed',
+
   'Choisissez Qwen local, Codex ou Claude.': 'Choose local Qwen, Codex or Claude.',
   'Modèle sur cet ordinateur, sans compte fournisseur IA.': 'Model on this computer, with no AI provider account required.',
   'Qwen local (expérimental)': 'Local Qwen (experimental)',
   'Préparez le modèle une fois pour converser avec Qwen sur cet appareil.': 'Set up the model once to chat with Qwen on this device.',
-  'Pour consulter vos données, envoyez /alertes ou /contexte dans la conversation. Les autres messages servent à discuter avec le modèle.': 'To read your data, send /alerts or /context in the conversation. Other messages are for chatting with the model.',
+  'Demandez « montre mon profil » ou « affiche ma formation ». Les commandes /alertes et /contexte restent disponibles.': 'Ask “show my profile” or “show my current training”. The /alerts and /context commands remain available.',
   'environ 1,1 Go': 'about 1.1 GB',
   'Le téléchargement utilise Hugging Face. Vous pouvez aussi choisir le GGUF exact déjà présent sur votre ordinateur : Tutor en conserve une copie vérifiée.': 'The download uses Hugging Face. You can also choose the exact GGUF already on your computer: Tutor keeps a verified copy.',
   'Le réseau sert au téléchargement du modèle. Les réponses sont ensuite calculées sur cet appareil ; le serveur Tutor peut être distant.': 'The model download uses the network. Responses are then generated on this device; the Tutor server may be remote.',

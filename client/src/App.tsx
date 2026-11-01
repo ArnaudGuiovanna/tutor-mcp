@@ -318,9 +318,8 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
       {busy && <div className="notice" role="status"><span className="spinner" />{busy}</div>}
       {state.pendingMessage && !pending && <section className="outbox" aria-label={t("Message à envoyer")}><div><strong>{t("À envoyer")}</strong><p>{visibleStudyText(state.pendingMessage.text)}</p></div><div className="button-row"><button className="button secondary" disabled={locked} onClick={() => void perform('Retrait du message…', async () => { if (!structuredOutbox) setDraft(visibleStudyText(state.pendingMessage!.text)); setState(await api.queuePrompt(null)); setPage('conversation'); })}>{structuredOutbox ? t("Retirer") : t("Modifier")}</button><button className="button primary" disabled={locked} onClick={() => { if (!state.tutorStatus.connected) setPage('agents'); else if (!state.agentConnected) setPage('agents'); else void dispatch(state.pendingMessage!.text, state.conversations.find(item => item.id === state.pendingMessage!.conversationId), true); }}>{state.tutorStatus.connected && state.agentConnected ? t("Envoyer le message conservé") : t("Terminer la connexion")}</button></div></section>}
       {page === 'conversation' && <section className="conversation-panel" aria-label={t("Conversation avec votre tuteur")}>
-        <ConversationMessages key={`${state.profile?.id}:${conversation?.id}`} conversation={conversation} streamText={stream} streaming={!!pending} disabled={locked || !!state.pendingMessage} pendingText={state.pendingMessage?.conversationId === conversation?.id ? state.pendingMessage?.text : undefined} openLink={api.openExternalLink} onRespond={respondToActivity} onContinue={continueActivity} onSuggestion={value => { setDraft(value); document.getElementById('prompt')?.focus(); }} />
+        <ConversationMessages key={`${state.profile?.id}:${conversation?.id}`} conversation={conversation} streamText={stream} streaming={!!pending} activity={(pending||preparing) ? <TutorActivity tools={tools} streaming={!!stream} permission={!!permissions.length} preparing={preparing} providerStatus={providerStatus}/> : undefined} disabled={locked || !!state.pendingMessage} pendingText={state.pendingMessage?.conversationId === conversation?.id ? state.pendingMessage?.text : undefined} openLink={api.openExternalLink} onRespond={respondToActivity} onContinue={continueActivity} onSuggestion={value => { setDraft(value); document.getElementById('prompt')?.focus(); }} />
         {permissions.map((permission,index) => <PermissionCard key={JSON.stringify(permission.id)} permission={permission} disabled={permissionBusy || index > 0} onAnswer={optionId => void (async () => { setPermissionBusy(true); try { await api.answerPermission(permission.id,optionId); setPermissions(previous => previous.filter(item => JSON.stringify(item.id) !== JSON.stringify(permission.id))); } catch (reason) { setError(errorMessage(reason)); } finally { setPermissionBusy(false); } })()} />)}
-        {(pending||preparing)&&<TutorActivity tools={tools} streaming={!!stream} permission={!!permissions.length} preparing={preparing} providerStatus={providerStatus}/>}
         <StudyComposer draft={draft} onChange={setDraft} disabled={!!pending || !!state.pendingMessage} canSend={!locked && !!draft.trim() && !state.pendingMessage} pending={!!pending} onSend={sendDraft} onCancel={() => void api.cancelPrompt(pending!).catch(reason => setError(errorMessage(reason)))} />
       </section>}
       {page === 'planning' && (state.tutorStatus.connected && !overview ? <div className="page-content"><p role="status">{t(overviewFailure ? 'Le planning est momentanément indisponible.' : 'Lecture du planning…')}</p>{overviewFailure && <button className="button secondary" disabled={locked} onClick={() => {setError(''); setOverviewAttempt(value => value + 1);}}>{t('Réessayer')}</button>}</div> : <ReviewPlanning key={planningScope} api={api} scope={planningScope} preferences={state.settings.reviewPlans || {}} connected={state.tutorStatus.connected} busy={locked || !!state.pendingMessage} refreshKey={libraryEpoch} onPreference={saveReviewPreference} onStart={startReview}/>)}
@@ -334,8 +333,8 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
 
 function Notice({ children,kind,onDismiss }: { children: ReactNode;kind:'error'|'info';onDismiss:()=>void }) { return <div className={`notice ${kind}`} role={kind === 'error' ? 'alert' : 'status'}><div>{children}</div><button className="icon-button" aria-label={t("Fermer le message")} onClick={onDismiss}><Icon name="close" size={16} /></button></div>; }
 
-function ConversationMessages({ conversation,streamText,streaming,disabled,pendingText,openLink,onRespond,onContinue,onSuggestion }: {
-  conversation?: Conversation;streamText:string;streaming:boolean;disabled:boolean;pendingText?:string;openLink:ClientBridge['openExternalLink'];
+function ConversationMessages({ conversation,streamText,streaming,activity,disabled,pendingText,openLink,onRespond,onContinue,onSuggestion }: {
+  conversation?: Conversation;streamText:string;streaming:boolean;activity?:ReactNode;disabled:boolean;pendingText?:string;openLink:ClientBridge['openExternalLink'];
   onRespond:(activity:LearningActivity,response:LearningResponse)=>Promise<boolean>;onContinue:(activity:LearningActivity)=>void;onSuggestion:(value:string)=>void;
 }) {
   const end = useRef<HTMLDivElement>(null); const nearEnd = useRef(true); const [unread,setUnread] = useState(false);
@@ -360,7 +359,7 @@ function ConversationMessages({ conversation,streamText,streaming,disabled,pendi
       if (card) {card.scrollIntoView?.({block:'start'}); return;}
     }
     end.current?.scrollIntoView?.({block:'nearest'});
-  },[conversation?.id,messages.length,streamText,streaming,lastActivity?.messageId]);
+  },[conversation?.id,messages.length,streamText,streaming,!!activity,lastActivity?.messageId]);
   function assistantContent(value: string, complete: boolean, messageId?: string, context?: ConversationContext) {
     return parseLearningContent(value, {complete}).map((segment, index) => {
       if (segment.type === 'text') return <MessageBody key={index} text={segment.text} openLink={openLink}/>;
@@ -388,6 +387,7 @@ function ConversationMessages({ conversation,streamText,streaming,disabled,pendi
       return <article className={`message ${message.role}`} key={message.id}>{changed && <p className="training-turn">{context.name}</p>}<p className="message-label">{message.role === 'user' ? t("Vous") : message.role === 'assistant' ? t("Tutor") : t("Information")}</p><div className="message-text">{message.role === 'assistant' ? assistantContent(visible, message.status === 'complete', message.id, context) : <MessageBody text={visibleStudyText(visible)} openLink={openLink}/>}{message.status === 'streaming' && <span className="streaming-cursor" aria-hidden="true" />}</div>{message.status === 'interrupted' && <p className="message-interrupted">{t("Réponse interrompue — les éléments affichés peuvent être incomplets.")}</p>}{message.status === 'error' && <p className="message-interrupted">{t("La réponse n’a pas été confirmée comme terminée.")}</p>}</article>;
     })}
     {!!streamText && messages.at(-1)?.role !== 'assistant' && <article className="message assistant"><p className="message-label">{t("Tutor")}</p><div className="message-text">{assistantContent(streamText, false)}</div></article>}
+    {activity && <div className="conversation-activity">{activity}</div>}
     {unread && <button className="button secondary jump-to-latest" onClick={() => { nearEnd.current = true; setUnread(false); end.current?.scrollIntoView?.({block:'nearest'}); }}>{t("Aller aux derniers messages")}</button>}
     <div ref={end} />
   </div>;
@@ -398,11 +398,13 @@ function PermissionCard({ permission,disabled,onAnswer }: { permission:Permissio
 }
 
 export function TutorActivity({tools,streaming,permission,preparing,providerStatus=''}:{tools:ToolActivity[];streaming:boolean;permission:boolean;preparing:string;providerStatus?:string}){
+ const [elapsed,setElapsed]=useState(0);
+ useEffect(()=>{const started=Date.now();const timer=window.setInterval(()=>setElapsed(Math.floor((Date.now()-started)/1000)),1000);return()=>window.clearInterval(timer);},[]);
  const finished=tools.filter(tool=>['completed','failed','cancelled'].includes(tool.status)).length;const active=[...tools].reverse().find(tool=>!['completed','failed','cancelled'].includes(tool.status));const latest=tools.at(-1);const name=(active?.title||'').toLowerCase();
- let message=preparing||t('Je prépare la prochaine étape…');
+ let message=preparing||t('Je prépare la réponse…');
  if(permission)message=t('Votre autorisation est attendue.');
  else if(providerStatus)message=providerStatus;
  else if(active){message=/next_activity|assessment|curriculum/.test(name)?t('Je prépare la prochaine activité…'):/progress|interaction|mastery|learner_context/.test(name)?t('Je consulte votre progression…'):/training|domain|formation|library/.test(name)?t('Je retrouve votre formation…'):t('Je consulte le serveur Tutor…');}
  else if(streaming)message=t('Je rédige la réponse…');else if(latest?.status==='failed')message=t('Un outil a rencontré une erreur. Le tuteur examine le résultat…');
- return <div className="tutor-activity" role="status" aria-live="polite" aria-atomic="true"><span className={`activity-mark ${permission?'waiting':''}`} aria-hidden="true"><i/><i/><i/></span><div><p key={message} className="activity-text">{message}</p>{finished>0&&<small>{t('{count} appel(s) terminé(s)',{count:finished})}</small>}</div></div>;
+ return <div className="tutor-activity" role="status" aria-live="polite" aria-atomic="true"><span className={`activity-mark ${permission?'waiting':''}`} aria-hidden="true"></span><div><p key={message} className="activity-text">{message}</p><small className="activity-elapsed" aria-hidden="true">{t('{seconds} s écoulées',{seconds:elapsed})}</small>{finished>0&&<small>{t('{count} appel(s) terminé(s)',{count:finished})}</small>}</div></div>;
 }

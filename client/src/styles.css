@@ -146,13 +146,12 @@ code,.mono { font-family:var(--mono); font-size:.88em; font-variant-ligatures:no
 .tutor-activity { display:flex; align-items:center; gap:10px; flex:none; padding:8px 0; width:calc(100% - 2 * var(--page-gutter)); max-width:var(--content-width); margin:0 auto; color:var(--fg-2); }
 .tutor-activity p { font-size:13px; margin:0; color:var(--fg-2); }
 .tutor-activity small { display:block; font-family:var(--mono); font-size:11px; color:var(--fg-2); overflow-wrap:anywhere; max-width:80ch; margin-top:2px; }
-.activity-mark { display:flex; align-items:center; gap:3px; width:24px; height:24px; flex:none; }
-.activity-mark i { width:4px; height:4px; border-radius:50%; background:var(--blue-hi); animation:breathe 1.4s ease-in-out infinite; }
-.activity-mark i:nth-child(2) { animation-delay:160ms; }
-.activity-mark i:nth-child(3) { animation-delay:320ms; }
-.activity-mark.waiting i { animation:none; background:var(--review); }
+.conversation-activity { max-width:var(--content-width); margin:0 auto 24px; }
+.conversation-activity .tutor-activity { width:100%; padding:14px 18px; margin:0; background:var(--surface); border:1px solid var(--line); border-radius:var(--r-md); }
+.activity-mark { width:22px; height:22px; flex:none; border:3px solid var(--line-strong); border-top-color:var(--blue-hi); border-radius:50%; animation:spin 900ms linear infinite; }
+.activity-mark.waiting { animation:none; border-color:var(--review); }
+.activity-elapsed { font-variant-numeric:tabular-nums; }
 .activity-text { animation:arrive 180ms var(--ease); }
-@keyframes breathe { 0%,80%,100% { opacity:.35; transform:scale(.8); } 40% { opacity:1; transform:scale(1); } }
 @keyframes arrive { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
 
 /* Cartes, avis, boutons */

@@ -115,7 +115,7 @@ fn fixed_connected<C: Connection>(
     use crate::fast_harness::{route, Route};
     validate_input(store, input)?;
     let selected = route(input.user);
-    if !matches!(selected, Route::Alerts | Route::Context) {
+    if !matches!(selected, Route::Alerts | Route::Context | Route::Profile) {
         return Err("harness_route_invalid".into());
     }
     let mut state = initial_state(store, input)?;
@@ -123,7 +123,7 @@ fn fixed_connected<C: Connection>(
         store,
         input.turn_id,
         "harness_fixed_route",
-        json!({"route":if selected == Route::Alerts {"alerts"} else {"context"}}),
+        json!({"route":match selected { Route::Alerts => "alerts", Route::Profile => "profile", _ => "context" }}),
     )?;
     state.refresh(client, handle, cancel)?;
     let turn = TurnContext {
@@ -132,7 +132,11 @@ fn fixed_connected<C: Connection>(
         cancel,
         handle,
     };
-    let tools: &[&str] = if selected == Route::Context {
+    let tools: &[&str] = if selected == Route::Profile {
+        // Reading the explicitly requested profile does not start a learning
+        // activity. It remains possible when no domain has been configured.
+        &["get_learner_context"]
+    } else if selected == Route::Context {
         &["get_pending_alerts", "get_learner_context"]
     } else {
         &["get_pending_alerts"]
@@ -178,6 +182,20 @@ fn fixed_connected<C: Connection>(
                 .into_iter()
                 .filter(|p| payload.pointer(p).is_some())
                 .collect()
+        } else if selected == Route::Profile {
+            if !payload.get("profile").is_some_and(Value::is_object)
+                || payload.get("objective").is_some_and(|v| !v.is_string())
+                || ["device", "language", "affect_baseline"]
+                    .iter()
+                    .any(|name| payload["profile"].get(name).is_some_and(|v| !v.is_string()))
+            {
+                state.feedback(store, input.turn_id, "result_payload_unavailable")?;
+                break;
+            }
+            ["/profile", "/objective"]
+                .into_iter()
+                .filter(|p| payload.pointer(p).is_some())
+                .collect()
         } else {
             vec![""]
         };
@@ -215,6 +233,16 @@ fn fixed_connected<C: Connection>(
             break;
         }
     }
+    if selected == Route::Profile {
+        let training = verified_training(store, input)?;
+        let text = crate::fast_harness::profile_text(
+            &state.reads,
+            state.feedback.as_ref(),
+            training.as_ref(),
+            input.language,
+        );
+        return crate::fast_harness::direct_text(ui, cancel, &text);
+    }
     // Audit references remain exact, but routing receipts and lists of available
     // pointers do not help write the answer. Project only the selected values.
     // The full operation/selection linkage stays in the journal.
@@ -250,6 +278,49 @@ fn fixed_connected<C: Connection>(
     )
 }
 
+/// A compact projection of the current desktop-confirmed training. The source
+/// must belong to this turn and conversation, just like executor argument proof.
+/// Only its name reaches the model; identifiers, versions and other fields stay
+/// in the journal and host-owned tool parameters.
+pub(crate) fn verified_training(
+    store: &Arc<Mutex<SessionStore>>,
+    input: &Input<'_>,
+) -> Result<Option<Evidence>, String> {
+    let Some(reference) = input.host_context else {
+        return Ok(None);
+    };
+    let conversation = input
+        .conversation_id
+        .ok_or("harness_host_context_invalid")?;
+    let host: crate::host_context::HostContext = {
+        let store = lock(store)?;
+        let mut fields = VerifiedFields::new(Uuid::new_v4().to_string(), store.journal())
+            .map_err(|_| "harness_binding_invalid")?;
+        fields
+            .bind_host_context(store.journal(), reference, input.turn_id, conversation)
+            .map_err(|_| "harness_host_context_invalid")?;
+        serde_json::from_slice(
+            &store
+                .journal()
+                .resolve_content(reference)
+                .map_err(|_| "harness_host_context_invalid")?,
+        )
+        .map_err(|_| "harness_host_context_invalid")?
+    };
+    let payload = json!({"active_training": if host.training_context["training_id"] == "" {
+        Value::Null
+    } else { json!({"name":host.training_context["name"]}) }});
+    let mut evidence = event(
+        store,
+        input.turn_id,
+        "host_context_selection",
+        json!({"source":reference.id(),"value":payload}),
+    )?;
+    evidence.origin = Origin::TutorServer;
+    evidence.payload = payload;
+    Ok(Some(evidence))
+}
+
 pub(crate) fn generate_text(
     engine: &mut dyn Engine,
     store: &Arc<Mutex<SessionStore>>,
@@ -259,7 +330,7 @@ pub(crate) fn generate_text(
     task: &TaskContext<'_>,
 ) -> Result<GenerationStats, String> {
     check_cancel(cancel)?;
-    let request = project(engine, store, input.turn_id, cancel, task, None)?;
+    let request = project(engine, store, input.turn_id, cancel, task, None, Some(2))?;
     let mut bytes = 0usize;
     engine.generate(request, cancel, &mut |text| {
         check_cancel(cancel)?;
@@ -912,6 +983,7 @@ fn run_discovery_connected<C: Connection>(
                 active_tool: state.active.as_ref(),
             },
             Some(grammar),
+            None,
         )?;
         let mut raw = String::new();
         let mut rejected_chunk_bytes = 0usize;
@@ -998,6 +1070,7 @@ fn run_discovery_connected<C: Connection>(
             active_tool: None,
         },
         None,
+        None,
     )?;
     let mut bytes = 0usize;
     let stats = engine
@@ -1041,12 +1114,15 @@ fn project(
     cancel: &AtomicBool,
     task: &TaskContext<'_>,
     grammar: Option<String>,
+    recent_turns: Option<usize>,
 ) -> Result<GenerationRequest, String> {
     let mut budget = engine.context_budget();
     budget.output = budget.output.min(768);
-    let projection = context::project(task, budget, |messages| {
-        engine.count_input(messages, cancel)
-    })
+    let count = |messages: &[crate::runtime::ChatMessage]| engine.count_input(messages, cancel);
+    let projection = match recent_turns {
+        Some(window) => context::project_recent(task, budget, window, count),
+        None => context::project(task, budget, count),
+    }
     .map_err(|error| match error {
         context::ContextError::RequiredEvidenceDoesNotFit => "context_budget_exceeded".to_owned(),
         _ => error.to_string(),
@@ -1608,6 +1684,174 @@ mod tests {
         assert!(f.records("harness_model_action").is_empty());
         assert!(f.records("harness_search").is_empty());
         assert_eq!(f.records("context_projection").len(), 1);
+    }
+
+    fn host_training(f: &Fixture, selected: bool) -> (ContentRef, Uuid) {
+        let conversation = Uuid::new_v4();
+        let evidence = event(&f.store, &f.turn, "verified_host_context", json!({
+            "conversationId":conversation.to_string(),"language":"fr",
+            "trainingContext":{"conversation_id":conversation.to_string(),
+                "training_id":if selected {"verified-training"} else {""},
+                "domain_id":if selected {"verified-domain"} else {""},
+                "revision":"7","selection_version":2,"name":if selected {"Jardinage durable"} else {""},
+                "private_unselected":"HOST_PRIVATE_NEVER_PROJECT"}
+        })).unwrap();
+        let reference = lock(&f.store)
+            .unwrap()
+            .journal()
+            .content_ref(crate::journal::ContentKind::Event, &evidence.id)
+            .unwrap();
+        (reference, conversation)
+    }
+
+    #[test]
+    fn chat_receives_current_verified_training_without_private_host_fields() {
+        let f = Fixture::for_user("Comment commencer ?");
+        let (reference, conversation) = host_training(&f, true);
+        let mut input = f.input();
+        input.host_context = Some(&reference);
+        input.conversation_id = Some(conversation);
+        let cancel = AtomicBool::new(false);
+        let mut model = Model::new(&["Parlons du sol."]);
+        let mut ui = UserInterface::new(&f, &cancel);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        crate::fast_harness::run(&mut model, &f.store, input, &cancel, rt.handle(), &mut ui)
+            .unwrap();
+        let prompt = serde_json::to_string(&model.requests[0].messages).unwrap();
+        assert!(prompt.contains("Jardinage durable"));
+        assert!(!prompt.contains("HOST_PRIVATE_NEVER_PROJECT"));
+        assert!(!prompt.contains("verified-domain"));
+        assert!(ui.approvals.is_empty());
+        assert_eq!(f.records("host_context_selection").len(), 1);
+    }
+
+    #[test]
+    fn active_training_is_exact_and_does_not_load_the_model_or_guess_missing_state() {
+        for selected in [true, false] {
+            let f = Fixture::for_user("Quelle est ma formation ?");
+            let (reference, conversation) = host_training(&f, selected);
+            let cancel = AtomicBool::new(false);
+            let mut input = f.input();
+            input.host_context = Some(&reference);
+            input.conversation_id = Some(conversation);
+            let mut model = Model::new(&[]);
+            let mut ui = UserInterface::new(&f, &cancel);
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let stats = crate::fast_harness::run(
+                &mut model,
+                &f.store,
+                input,
+                &cancel,
+                rt.handle(),
+                &mut ui,
+            )
+            .unwrap();
+            assert_eq!(stats.input_tokens, 0);
+            assert_eq!(model.counts, 0);
+            assert!(model.requests.is_empty());
+            assert_eq!(ui.text.contains("Jardinage durable"), selected);
+            assert_eq!(ui.text.contains("Aucune formation"), !selected);
+            assert!(ui.approvals.is_empty());
+            // A record from this conversation still cannot be reused under a
+            // different scope or turn; no model fallback may reinterpret it.
+            let mut wrong = f.input();
+            wrong.host_context = Some(&reference);
+            wrong.conversation_id = Some(Uuid::new_v4());
+            assert!(verified_training(&f.store, &wrong).is_err());
+            wrong.conversation_id = Some(conversation);
+            wrong.turn_id = "another-turn";
+            assert!(verified_training(&f.store, &wrong).is_err());
+        }
+    }
+
+    #[test]
+    fn natural_profile_request_reads_only_the_authorized_profile_without_generation() {
+        for allow in [true, false] {
+            let f = Fixture::for_user("Recherche mon profil ou ma formation");
+            let cancel = AtomicBool::new(false);
+            let mut model = Model::new(&[]);
+            let mut ui = UserInterface::new(&f, &cancel);
+            if !allow {
+                ui.response = json!({"outcome":{"outcome":"cancelled"}});
+            }
+            let mut port = Port::new();
+            port.result = Ok(json!({"structuredContent":{
+                "profile":{"language":"fr","device":"laptop"},"objective":"Cultiver un potager",
+                "needs_domain_setup":true,"irrelevant_private": "UNSELECTED_SECRET".repeat(1000)
+            }}));
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            fixed_connected(
+                &mut model,
+                &f.store,
+                &f.input(),
+                &cancel,
+                rt.handle(),
+                &mut ui,
+                &mut port,
+            )
+            .unwrap();
+            assert_eq!(ui.approvals.len(), 1);
+            assert_eq!(port.calls.len(), usize::from(allow));
+            if allow {
+                assert_eq!(port.calls[0], ("get_learner_context".into(), json!({})));
+            }
+            assert_eq!(ui.text.contains("Cultiver un potager"), allow);
+            assert_eq!(
+                ui.text.contains("autorisation n’a pas été accordée"),
+                !allow
+            );
+            assert!(!ui.text.contains("UNSELECTED_SECRET"));
+            assert_eq!(
+                f.records("harness_result_selection").len(),
+                2 * usize::from(allow)
+            );
+            assert!(f.records("harness_model_action").is_empty());
+            assert_eq!(model.counts, 0);
+            assert!(model.requests.is_empty());
+        }
+    }
+
+    #[test]
+    fn malformed_profile_never_becomes_an_empty_or_invented_profile() {
+        for payload in [
+            json!({}),
+            json!({"profile":[]}),
+            json!({"profile":{"language":false}}),
+            json!({"profile":{},"objective":"x".repeat(4097)}),
+        ] {
+            let f = Fixture::for_user("donne moi mon profil");
+            let cancel = AtomicBool::new(false);
+            let mut model = Model::new(&[]);
+            let mut ui = UserInterface::new(&f, &cancel);
+            let mut port = Port::new();
+            port.result = Ok(json!({"structuredContent":payload}));
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            fixed_connected(
+                &mut model,
+                &f.store,
+                &f.input(),
+                &cancel,
+                rt.handle(),
+                &mut ui,
+                &mut port,
+            )
+            .unwrap();
+            assert!(ui.text.contains("n’a pas pu fournir un profil vérifié"));
+            assert!(!ui.text.contains("Aucun objectif"));
+            assert!(model.requests.is_empty());
+        }
     }
 
     #[test]

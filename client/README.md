@@ -7,7 +7,7 @@ exécuté nativement ou dans une distribution **WSL2** choisie explicitement.
 
 ## Agent Qwen local en développement
 
-La préversion Windows CPU regroupe **Tutor 0.0.7 et l’agent local dans un seul
+La préversion Windows CPU regroupe **Tutor 0.0.8 et l’agent local dans un seul
 installateur**. Dans **Paramètres → Connexion et outils**, installer le modèle
 Qwen avec le bouton de téléchargement, ou sélectionner le GGUF déjà disponible
 sur l’ordinateur. L’application conserve le modèle dans son dossier de données
@@ -19,7 +19,7 @@ Hugging Face épinglée. Une connexion Internet est nécessaire pour cette
 installation initiale, sauf si le GGUF exact est déjà disponible. L’inférence
 est ensuite locale ; la connexion au serveur Tutor garde son fonctionnement
 habituel. Le serveur MCP n’est pas embarqué ni modifié. La préversion permet
-de tester la conversation, la reprise et deux lectures MCP ; elle n’active
+de tester la conversation, la reprise et les lectures MCP prises en charge ; elle n’active
 pas encore l’accélération P2000. Les mesures Linux et leurs limites sont
 publiées dans [le bilan de cette préversion](docs/local-cpu-preview.md).
 Elles ne prédisent pas la latence sur la machine Windows cible.
@@ -32,21 +32,33 @@ préparation, soumission et évaluation pédagogiques doivent encore être inté
 Le tuteur complet reste donc en développement ; voir
 [le backlog H00–H12](../docs/backlog-local-harness.yaml).
 
-Un message ordinaire déclenche une seule génération, sans connexion MCP dans
-l’agent natif ; le client de bureau conserve sa synchronisation du contexte
-pédagogique. Les commandes entières `/alertes` et `/contexte` activent des
-parcours déterministes. La première lit les alertes ; la seconde ne consulte
-ensuite le contexte de l’élève que si les indicateurs `has_critical` et
-`needs_domain_setup` sont présents et valent tous deux `false`. `/aide` affiche
-les commandes sans charger le modèle. Les demandes libres restent de la
-conversation : elles ne déclenchent pas une découverte autonome des outils.
+La conversation libre utilise une seule génération. Le modèle reçoit le nom de
+la formation active confirmé par le client et au plus les deux derniers tours ;
+le journal reste complet et toutes les omissions de contexte sont enregistrées.
+Le rôle est celui d’un coach d’apprentissage, pour tous les sujets.
 
-Rust choisit les outils et les arguments, vérifie leurs contrats, injecte les
-identités prouvées par l’hôte et demande les permissions ACP sur les opérations
-réelles. Le catalogue, les schémas et les décisions de routage restent hors du
-prompt. Le journal conserve les résultats complets ; seules les valeurs exactes
-sélectionnées par le code sont données au modèle pour une unique génération
-finale. Une sélection indispensable dépassant le budget est refusée entière.
+Les demandes entières « donne-moi mon profil » et « recherche mon profil ou ma
+formation » (ou `/profil`) déclenchent une lecture autorisée de
+`get_learner_context`. Rust affiche l’objectif, les préférences retournées et
+la formation active confirmée, sans génération ni supposition du modèle. Cette
+lecture reste possible sans domaine configuré. « Affiche ma formation » (ou
+`/formation`) affiche directement la formation de la conversation, synchronisée
+par le client. Une formation absente ou non vérifiée est indiquée explicitement.
+
+`/alertes` et `/contexte` conservent leur parcours : alertes d’abord, puis contexte
+seulement si `has_critical` et `needs_domain_setup` valent tous deux `false`.
+Ces deux commandes utilisent une génération finale. `/aide`, « Que peux-tu faire ? »
+et les salutations simples reçoivent une réponse déterministe, sans charger le
+modèle. Les autres formulations restent de la conversation ; la reconnaissance
+de demandes reste un ensemble de règles explicites, pas une découverte autonome
+de tous les outils.
+
+Rust choisit les outils, valide leurs contrats, injecte les identités vérifiées
+et conserve les permissions ACP. Le catalogue et les schémas restent hors du
+prompt. Les reçus complets restent dans le journal. Une donnée indispensable
+qui ne tient pas dans le budget est refusée entière. Dans l’interface, un
+indicateur et le temps écoulé apparaissent dès l’attente, avant le premier token ;
+le compteur reste visible lorsque les animations sont désactivées.
 L’ancien harness de découverte reste disponible dans la bibliothèque pour les
 expérimentations ; il n’est plus utilisé par le parcours ACP livré.
 

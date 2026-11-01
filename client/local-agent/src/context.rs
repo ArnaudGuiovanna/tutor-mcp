@@ -177,8 +177,22 @@ impl std::error::Error for ContextError {}
 pub fn project(
     task: &TaskContext<'_>,
     budget: Budget,
+    count: impl FnMut(&[ChatMessage]) -> Result<usize, String>,
+) -> Result<Projection, ContextError> {
+    project_recent(task, budget, MAX_HISTORY_CANDIDATES, count)
+}
+
+/// Keep a small working dialogue on CPU while still auditing every omitted
+/// turn. This does not truncate required evidence or change the durable journal.
+pub fn project_recent(
+    task: &TaskContext<'_>,
+    budget: Budget,
+    recent_turns: usize,
     mut count: impl FnMut(&[ChatMessage]) -> Result<usize, String>,
 ) -> Result<Projection, ContextError> {
+    if recent_turns > MAX_HISTORY_CANDIDATES {
+        return Err(ContextError::InvalidBudget);
+    }
     let input_limit = budget.input_limit()?;
     validate(task)?;
     let mut selected_history = Vec::new();
@@ -219,7 +233,7 @@ pub fn project(
     }
     for index in (0..task.history.len()).rev() {
         let id = &task.history[index].id;
-        if task.history.len() - index > MAX_HISTORY_CANDIDATES {
+        if task.history.len() - index > recent_turns {
             omit(&mut omitted, id, OmissionReason::OutsideRecentWindow);
             continue;
         }
@@ -511,6 +525,38 @@ mod tests {
             );
         }
         assert_eq!(history.len(), 100);
+    }
+
+    #[test]
+    fn short_working_dialogue_preserves_required_facts_and_accounts_for_old_turns() {
+        let history: Vec<_> = (0..10)
+            .map(|i| HistoricalTurn {
+                id: format!("turn-{i}"),
+                user: format!("question {i}"),
+                assistant: format!("answer {i}"),
+                status: TurnStatus::Complete,
+            })
+            .collect();
+        let evidence = [Evidence {
+            id: "current-training".into(),
+            origin: Origin::TutorServer,
+            payload: json!({"name":"Jardinage durable"}),
+        }];
+        let input = task(&evidence, &history);
+        let projection = project_recent(&input, Budget::default(), 2, counter).unwrap();
+        assert_eq!(
+            projection.kept_ids,
+            ["current-training", "turn-8", "turn-9"]
+        );
+        assert_eq!(projection.omitted.len(), 8);
+        assert!(projection
+            .omitted
+            .iter()
+            .all(|item| item.reason == OmissionReason::OutsideRecentWindow));
+        let rendered = serde_json::to_string(&projection.messages).unwrap();
+        assert!(rendered.contains("Jardinage durable"));
+        assert!(!rendered.contains("question 7"));
+        assert_eq!(history.len(), 10);
     }
 
     #[test]

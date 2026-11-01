@@ -79,6 +79,10 @@ describe('Apprendre depuis la conversation', () => {
     const fixture=client(initialState(true));let finish!:(value:{stopReason:string})=>void;
     vi.mocked(fixture.api.sendPrompt).mockImplementation(()=>new Promise(resolve=>{finish=resolve;}));await ready(fixture.api);
     await userEvent.type(screen.getByLabelText('Votre message au tuteur'),'Bonjour');await userEvent.click(screen.getByRole('button',{name:'Envoyer'}));await waitFor(()=>expect(fixture.api.sendPrompt).toHaveBeenCalled());
+    const waiting = screen.getByText('Je prépare la réponse…').closest('[role="status"]');
+    expect(waiting).toBeTruthy();
+    expect(screen.getByRole('log').contains(waiting)).toBe(true);
+    expect(screen.getByText('0 s écoulées')).toBeTruthy();
     act(()=>fixture.emit({method:'session/update',params:{sessionId:'agent-1',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'Une explication progressive.'}}}}));
     expect(await screen.findByText('Une explication progressive.')).toBeTruthy();
     act(()=>fixture.emit({id:7,method:'session/request_permission',params:{sessionId:'agent-1',toolCall:{title:'Enregistrer une observation'},options:[{optionId:'reject',name:'Refuser',kind:'reject_once'}]}}));
@@ -86,6 +90,7 @@ describe('Apprendre depuis la conversation', () => {
     await userEvent.click(screen.getByRole('button',{name:'Interrompre'}));expect(fixture.api.cancelPrompt).toHaveBeenCalledWith('conversation-1');
     await act(async()=>finish({stopReason:'cancelled'}));
     expect(await screen.findByText(/Réponse interrompue. Vos échanges/)).toBeTruthy();
+    expect(screen.queryByText(/s écoulées/)).toBeNull();
   });
 
   it('signale une nouvelle tentative du fournisseur puis reprend l’activité sans interrompre la réponse', async () => {
