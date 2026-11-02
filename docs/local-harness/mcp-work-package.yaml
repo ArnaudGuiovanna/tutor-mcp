@@ -6,10 +6,10 @@ parent_plan: docs/plan-local-harness.yaml
 owner: mcp_capabilities
 lots: [LH-02, LH-04, LH-08]
 baseline_commit: e8185e5ebedddedd691bfd6adf4798e99ac9eb90
-scope: Plan client Rust/ACP ; premier raccordement de connexion résidente dans resident-integration.yaml. Catalogue résident, capacités et qualification complète restent à réaliser.
+scope: Plan client Rust/ACP ; raccordement de connexion dans resident-integration.yaml et cache stdio optionnel dans catalog-integration.yaml. Capacités métier et qualification complète restent à réaliser.
 server_changes_allowed: false
 
-observations_scope: Constats historiques au baseline_commit ; voir resident-integration.yaml pour l'incrément de connexion suivant.
+observations_scope: Constats historiques au baseline_commit ; voir resident-integration.yaml et catalog-integration.yaml pour les incréments suivants.
 observations:
   - source: client/local-agent/src/harness.rs:59
     fact: ACP utilise fast_harness ; run_fixed ouvre et ferme un Client par tour, initial_state crée un binding aléatoire et un catalogue neuf.

@@ -11,7 +11,7 @@ use crate::{
     context::{self, ActiveTool, Evidence, HistoricalTurn, Origin, TaskContext},
     executor::{self, Preparation},
     journal::ContentRef,
-    mcp_client::{Client, McpObservation, Transport},
+    mcp_client::{CatalogObservation, Client, McpObservation, Transport},
     mcp_session::{Lease, Manager, ReleasePolicy, Scope},
     runtime::{Engine, GenerationRequest, GenerationStats},
     session_store::SessionStore,
@@ -58,6 +58,8 @@ pub struct McpConnectionObservation {
     pub connection_reused: bool,
     pub retained: bool,
     pub catalog_reused: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<CatalogObservation>,
     pub restart_required: bool,
     pub prior_cleanup: Vec<McpObservation>,
 }
@@ -69,6 +71,7 @@ impl Default for McpConnectionObservation {
             connection_reused: false,
             retained: false,
             catalog_reused: false,
+            catalog: None,
             restart_required: false,
             prior_cleanup: Vec::new(),
         }
@@ -186,8 +189,8 @@ fn run_workflow(
                 return Err(error);
             }
         };
-        // The existing state machine fetches a fresh catalog for EVERY lease.
-        // Approval, changed-after-approval and dispatch stay in its executor.
+        // The lease selects a fresh or eligible exact schema snapshot.
+        // Approval, post-approval freshness and dispatch remain in the executor.
         let outcome = if fixed {
             fixed_connected(engine, store, &input, cancel, handle, ui, &mut lease)
         } else {
@@ -201,6 +204,8 @@ fn run_workflow(
         let released = handle.block_on(lease.release(policy, cancel));
         connection.connection_reused = released.connection_reused;
         connection.retained = released.retained;
+        connection.catalog_reused = released.catalog.cache_hits > 0;
+        connection.catalog = Some(released.catalog);
         connection.restart_required = released
             .error
             .is_some_and(|error| error.requires_agent_restart());
@@ -645,6 +650,7 @@ pub(crate) fn generate_text(
 trait Connection: Transport {
     fn list(&mut self, handle: &Handle, cancel: &AtomicBool) -> Result<Vec<ToolEntry>, String>;
     fn changed(&mut self) -> bool;
+    fn after_approval(&mut self) {}
 }
 impl Connection for Client {
     fn list(&mut self, handle: &Handle, cancel: &AtomicBool) -> Result<Vec<ToolEntry>, String> {
@@ -658,6 +664,10 @@ impl Connection for Client {
 }
 
 impl Connection for Lease {
+    fn after_approval(&mut self) {
+        self.require_catalog_refresh_after_approval();
+    }
+
     fn list(&mut self, handle: &Handle, cancel: &AtomicBool) -> Result<Vec<ToolEntry>, String> {
         handle
             .block_on(self.list_tools(cancel))
@@ -1610,16 +1620,21 @@ fn call<C: Connection>(
             .map_err(|_| "harness_permission_unavailable")?;
         // Do not even refresh the catalog once host approval was cancelled.
         check_cancel(cancel)?;
-        if client.changed() {
-            state.refresh(client, handle, cancel)?;
-        }
-        // Only approved calls enter in_progress. Executor remains the authority.
         let allowed = response.pointer("/outcome/outcome").and_then(Value::as_str)
             == Some("selected")
             && response
                 .pointer("/outcome/optionId")
                 .and_then(Value::as_str)
                 == Some("allow");
+        if allowed {
+            // A transport without idle notifications needs a wire refresh at
+            // this boundary; an observable stdio lease keeps its TTL checks.
+            client.after_approval();
+        }
+        if client.changed() {
+            state.refresh(client, handle, cancel)?;
+        }
+        // Only approved calls enter in_progress. Executor remains the authority.
         if allowed {
             update(ui, &call_id, &name, "in_progress", false)?;
             state.calls += 1;
@@ -2081,6 +2096,75 @@ mod tests {
             },
         ]);
         assert_eq!(pages.catalog_pages, Some(5));
+    }
+
+    #[test]
+    fn resident_http_catalog_refreshes_after_approval_and_rejects_changed_schema() {
+        use crate::mcp::tests::{initialization, mock, Reply};
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let changed = Arc::new(AtomicBool::new(false));
+        let server_changed = changed.clone();
+        let server = runtime.block_on(mock(move |request| {
+            initialization(request).unwrap_or_else(|| {
+                assert_eq!(request["method"], "tools/list");
+                let schema = if server_changed.load(Ordering::Acquire) {
+                    json!({"type":"object","properties":{"flavor":{"type":"string"}},
+                        "required":["flavor"],"additionalProperties":false})
+                } else {
+                    json!({"type":"object","properties":{},"additionalProperties":false})
+                };
+                Reply::json(json!({"jsonrpc":"2.0","id":request["id"],"result":{
+                    "tools":[{"name":"get_learner_context","inputSchema":schema}]}}))
+            })
+        }));
+        let mut fixture = Fixture::for_user("donne moi mon profil");
+        let scope = resident_scope(&mut fixture, &server.url, Uuid::new_v4());
+        let manager = Manager::new_with_catalog_policy(
+            runtime.handle().clone(),
+            crate::mcp_session::CatalogPolicy::reviewed_stdio(std::time::Duration::from_secs(30))
+                .unwrap(),
+        );
+        let cancel = AtomicBool::new(false);
+        let mut model = Model::new(&[]);
+        let mut ui = UserInterface::new(&fixture, &cancel);
+        ui.invalidate = Some(changed);
+        crate::fast_harness::run_with_connection(
+            &mut model,
+            &fixture.store,
+            fixture.input(),
+            &cancel,
+            runtime.handle(),
+            &mut ui,
+            Some(ResidentMcp {
+                manager: &manager,
+                scope: &scope,
+            }),
+        )
+        .unwrap();
+        assert_eq!(ui.approvals.len(), 1);
+        assert_eq!(method_count(&server, "tools/list"), 2);
+        assert_eq!(method_count(&server, "tools/call"), 0);
+        assert!(model.requests.is_empty());
+        let store = fixture.store.lock().unwrap();
+        let operations = store
+            .journal()
+            .operation_ids(crate::journal::OperationState::Rejected, "", 10)
+            .unwrap();
+        assert_eq!(operations.len(), 1);
+        drop(store);
+        assert_eq!(ui.connections.len(), 1);
+        let catalog = ui.connections[0].catalog.as_ref().unwrap();
+        assert_eq!(catalog.cache_hits, 0);
+        assert_eq!(catalog.cache_misses, 2);
+        assert_eq!(
+            catalog.last_miss_reason,
+            Some(crate::mcp_client::CatalogMissReason::PermissionBoundary)
+        );
+        runtime.block_on(manager.shutdown());
     }
 
     #[test]

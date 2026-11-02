@@ -17,7 +17,8 @@ export PYTHONDONTWRITEBYTECODE=1
 for local_verify_required in "$local_verify_manifest" client/local-agent/Cargo.lock \
     client/scripts/qualify-local-agent.py client/scripts/test_qualify_local_agent.py \
     client/scripts/qualify-local-harness.py client/scripts/test_qualify_local_harness.py \
-    client/scripts/qualify-local-resident.py client/scripts/test_qualify_local_resident.py; do
+    client/scripts/qualify-local-resident.py client/scripts/test_qualify_local_resident.py \
+    client/scripts/qualify-local-catalog.py client/scripts/test_qualify_local_catalog.py; do
     if [[ ! -f "$local_verify_required" ]]; then
         printf 'Required local-agent verification input is missing: %s\n' "$local_verify_required" >&2
         exit 1

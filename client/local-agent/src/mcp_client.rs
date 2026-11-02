@@ -22,6 +22,57 @@ enum Inner {
     Stdio(mcp_stdio::StdioClient),
 }
 
+/// Non-consuming transport facts. No authorization, payload or configuration.
+/// notification_revision changes ONLY on real tools/list_changed messages;
+/// post_call_revision changes on the conservative tools/call boundary.
+#[derive(Clone, Copy)]
+pub(crate) struct CatalogState {
+    pub notification_revision: u64,
+    pub post_call_revision: u64,
+    pub ready: bool,
+    pub notifications_supported: bool,
+    pub idle_notifications_observable: bool,
+}
+
+/// Exportable cache metadata only; never contains schemas, tools or scope IDs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogMissReason {
+    Disabled,
+    Cold,
+    ScopeChanged,
+    Expired,
+    RealNotification,
+    UnreviewedCall,
+    ToolError,
+    UnusableTransport,
+    IdleNotificationsUnobservable,
+    CapabilityMissing,
+    PermissionBoundary,
+    FetchChanged,
+    FetchFailure,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogObservation {
+    pub schema_version: u32,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub last_miss_reason: Option<CatalogMissReason>,
+}
+
+impl Default for CatalogObservation {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            cache_hits: 0,
+            cache_misses: 0,
+            last_miss_reason: None,
+        }
+    }
+}
+
 /// Schema 1, aggregate monotonic elapsed times in milliseconds. No payloads,
 /// names, credentials, paths, URLs or private identifiers are retained here.
 ///
@@ -270,6 +321,13 @@ impl Client {
         match &mut self.inner {
             Inner::Http(client) => client.take_tools_changed(),
             Inner::Stdio(client) => client.take_tools_changed(),
+        }
+    }
+
+    pub(crate) fn catalog_state(&self) -> CatalogState {
+        match &self.inner {
+            Inner::Http(client) => client.catalog_state(),
+            Inner::Stdio(client) => client.catalog_state(),
         }
     }
 

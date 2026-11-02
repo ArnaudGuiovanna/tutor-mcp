@@ -158,8 +158,10 @@ pub struct McpClient {
     next_id: u64,
     ready: bool,
     supports_tools: bool,
+    supports_list_changed: bool,
     tools_changed: bool,
     catalog_revision: u64,
+    post_call_revision: u64,
 }
 
 impl McpClient {
@@ -179,8 +181,10 @@ impl McpClient {
             next_id: 1,
             ready: true,
             supports_tools: false,
+            supports_list_changed: false,
             tools_changed: true,
             catalog_revision: 0,
+            post_call_revision: 0,
         };
         let initialized = client.request("initialize", json!({"protocolVersion":PROTOCOL,
             "capabilities":{},"clientInfo":{"name":"tutor-local-agent","version":env!("CARGO_PKG_VERSION")}}), cancel).await?;
@@ -194,6 +198,10 @@ impl McpClient {
         client.supports_tools = initialized
             .pointer("/capabilities/tools")
             .is_some_and(Value::is_object);
+        client.supports_list_changed = initialized
+            .pointer("/capabilities/tools/listChanged")
+            .and_then(Value::as_bool)
+            == Some(true);
         client.ready = false;
         let body =
             encode(&json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}))?;
@@ -211,6 +219,16 @@ impl McpClient {
     /// conservatively invalidate the catalog because visibility can change.
     pub fn take_tools_changed(&mut self) -> bool {
         std::mem::take(&mut self.tools_changed)
+    }
+
+    pub(crate) fn catalog_state(&self) -> crate::mcp_client::CatalogState {
+        crate::mcp_client::CatalogState {
+            notification_revision: self.catalog_revision,
+            post_call_revision: self.post_call_revision,
+            ready: self.ready && self.supports_tools,
+            notifications_supported: self.supports_list_changed,
+            idle_notifications_observable: false, // no idle GET/SSE in this transport
+        }
     }
 
     /// Close locally without replay, HTTP DELETE, or any remote mutation.
@@ -324,6 +342,11 @@ impl McpClient {
             params["_meta"] = json!({"idempotency_key":key});
         }
         self.tools_changed = true;
+        let Some(next) = self.post_call_revision.checked_add(1) else {
+            self.ready = false;
+            return Err(McpError::Protocol);
+        };
+        self.post_call_revision = next;
         let result = self.request("tools/call", params, cancel).await?;
         if !result.get("content").is_some_and(Value::is_array)
             || result.get("isError").is_some_and(|v| !v.is_boolean())
@@ -469,7 +492,11 @@ impl McpClient {
             }
             if method.as_str() == Some("notifications/tools/list_changed") {
                 self.tools_changed = true;
-                self.catalog_revision = self.catalog_revision.wrapping_add(1);
+                let Some(next) = self.catalog_revision.checked_add(1) else {
+                    self.ready = false;
+                    return Err(McpError::Protocol);
+                };
+                self.catalog_revision = next;
             }
             return Ok(None);
         }

@@ -20,6 +20,7 @@ pub struct Config {
     pub data_dir: Option<PathBuf>,
     pub prefix_cache: bool,
     pub reuse_mcp: bool,
+    pub catalog_cache: bool,
 }
 
 impl Config {
@@ -35,6 +36,7 @@ impl Config {
             data_dir: None,
             prefix_cache: false,
             reuse_mcp: false,
+            catalog_cache: false,
         };
         let mut args = args.into_iter();
         let mut seen = std::collections::BTreeSet::new();
@@ -48,6 +50,7 @@ impl Config {
                 "--data-dir" => config.data_dir = Some(value.into()),
                 "--prefix-cache" => config.prefix_cache = parse_switch(&value)?,
                 "--reuse-mcp" => config.reuse_mcp = parse_switch(&value)?,
+                "--catalog-cache" => config.catalog_cache = parse_switch(&value)?,
                 "--sha256" => config.expected_sha256 = Some(value.to_ascii_lowercase()),
                 "--context" => config.context = value.parse().map_err(|_| "invalid_context")?,
                 "--max-output" => {
@@ -66,6 +69,9 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        if self.catalog_cache && !self.reuse_mcp {
+            return Err("catalog_cache_requires_mcp_reuse".into());
+        }
         if !self.model.is_absolute() || !self.model.is_file() {
             return Err("model_file_unavailable".into());
         }
@@ -118,15 +124,26 @@ mod tests {
         assert_eq!(config.model, model);
         assert_eq!(config.context, 2048);
         assert_eq!(config.gpu_layers, 0);
-        assert!(!config.prefix_cache && !config.reuse_mcp);
+        assert!(!config.prefix_cache && !config.reuse_mcp && !config.catalog_cache);
         let enabled = Config::parse(args.clone().into_iter().chain([
             "--prefix-cache".into(),
             "on".into(),
             "--reuse-mcp".into(),
             "on".into(),
+            "--catalog-cache".into(),
+            "on".into(),
         ]))
         .unwrap();
-        assert!(enabled.prefix_cache && enabled.reuse_mcp);
+        assert!(enabled.prefix_cache && enabled.reuse_mcp && enabled.catalog_cache);
+        assert_eq!(
+            Config::parse(
+                args.clone()
+                    .into_iter()
+                    .chain(["--catalog-cache".into(), "on".into()])
+            )
+            .unwrap_err(),
+            "catalog_cache_requires_mcp_reuse"
+        );
         assert!(Config::parse(
             args.clone()
                 .into_iter()

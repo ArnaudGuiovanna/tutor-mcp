@@ -52,7 +52,7 @@ mcp:
   interruption: Future abandonnée sans résultat → compteur Interrupted ; aucune annulation distante ni reprise automatique n'en est déduite.
   drain: take_observation et begin_turn_observation drainent les mesures sans fermer ni rejouer le transport ; récolter avant de détruire le Client.
   unavailable: initializeTotalMs et catalogPages restent null ; le wrapper ne peut pas les isoler. closeTotalMs couvre seulement close explicite, pas les nettoyages internes ou Drop.
-  lifecycle: La référence native-observation-baseline.json reconstruisait connexion et catalogue par parcours ; LH-02 permet désormais la résidence de connexion, avec catalogue encore rafraîchi à chaque lease.
+  lifecycle: La référence native-observation-baseline.json reconstruisait connexion et catalogue par parcours ; LH-02 permet désormais leur résidence optionnelle. Le contrat catalog-integration.yaml distingue les hits stdio des lectures réseau et du repli HTTP.
 
 worker:
   field: workerElapsedMs

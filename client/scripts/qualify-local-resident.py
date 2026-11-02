@@ -108,15 +108,25 @@ def checked_runtime(value, probe):
         'phases': {'modelOpenMs', 'modelHashMs', 'backendSetupMs', 'modelLoadMs', 'modelValidationMs', 'templateMs', 'tokenizationMs', 'contextAllocationMs', 'batchAllocationMs', 'prefillMs', 'samplerSetupMs', 'samplingMs', 'decodeMs', 'tokenConversionMs', 'emitMs', 'bridgeWaitMs', 'cacheMaintenanceMs'},
         'counts': {'countInputCalls', 'countedInputTokens', 'generationCalls', 'templateCalls', 'tokenizationCalls', 'inputTokens', 'reusedTokens', 'evaluatedInputTokens', 'outputTokens', 'modelLoadAttempts', 'modelLoadCount', 'contextAllocationAttempts', 'contextAllocations', 'failedOperations', 'cancelledOperations'},
         'mcp': {'schemaVersion', 'connectTotalMs', 'initializeTotalMs', 'catalogTotalMs', 'catalogPages', 'toolsCallTotalMs', 'closeTotalMs', 'catalogAttempts', 'catalogTransportSuccesses', 'catalogTransportFailures', 'catalogInterrupted', 'callAttempts', 'callTransportSuccesses', 'callTransportFailures', 'callInterrupted', 'toolResultErrors', 'closeAttempts', 'closeTransportSuccesses', 'closeTransportFailures', 'closeInterrupted'},
-        'mcpConnection': {'schemaVersion', 'connectionReused', 'retained', 'catalogReused', 'restartRequired', 'priorCleanup'},
+        'mcpConnection': {'schemaVersion', 'connectionReused', 'retained', 'catalogReused', 'catalog', 'restartRequired', 'priorCleanup'},
+        'catalog': {'schemaVersion', 'cacheHits', 'cacheMisses', 'lastMissReason'},
     }
     def section(item, kind):
         if item is None:
             return
         probe.require(type(item) is dict and set(item) <= sections[kind], 'observation_fields_changed')
+        if kind == 'catalog':
+            probe.require(set(item) == sections[kind] and type(item['schemaVersion']) is int and item['schemaVersion'] == 1, 'catalog_observation_version_changed')
+            probe.require(all(type(item[key]) is int and 0 <= item[key] < 2**64 for key in ('cacheHits', 'cacheMisses')), 'invalid_catalog_counter')
+            reasons = {'disabled', 'cold', 'scope_changed', 'expired', 'real_notification', 'unreviewed_call', 'tool_error', 'unusable_transport', 'idle_notifications_unobservable', 'capability_missing', 'permission_boundary', 'fetch_changed', 'fetch_failure'}
+            reason = item['lastMissReason']
+            probe.require(reason is None or (type(reason) is str and reason in reasons), 'invalid_catalog_miss_reason')
+            return
         for key, child in item.items():
             if key in ('operations', 'phases', 'counts'):
                 section(child, key)
+            elif key == 'catalog':
+                section(child, 'catalog')
             elif key == 'priorCleanup':
                 probe.require(type(child) is list and len(child) <= 32, 'invalid_cleanup_observation')
                 for cleanup in child:
@@ -270,7 +280,7 @@ class Acp:
     async def prompt(self, session, training, text, label, allow, timeout, sink, session_label):
         self.identifier += 1
         deadline = min(self.deadline, time.monotonic() + timeout)
-        row = {'case': label, 'sessionLabel': session_label, 'prompt': text, 'permissionAllowed': allow, 'permissions': 0, 'firstTextMs': None, 'outcome': 'running', 'checks': [], 'environmentBefore': environment()}
+        row = {'case': label, 'sessionLabel': session_label, 'prompt': text, 'permissionAllowed': allow, 'permissions': 0, 'permissionOperationIds': [], 'permissionRpcIds': [], 'toolUpdates': [], 'observedDispatchesBeforePermission': [], 'firstTextMs': None, 'outcome': 'running', 'checks': [], 'environmentBefore': environment()}
         sink.append(row)  # Preserve partial evidence on interruption/errors too.
         before = audit_counts(self.audit, self.probe)
         started, chunks, tool_statuses = time.monotonic(), [], []
@@ -283,6 +293,13 @@ class Acp:
                     params = value.get('params', {})
                     raw = params.get('toolCall', {}).get('rawInput', {})
                     self.probe.require(params.get('sessionId') == session and raw.get('server') == 'tutor' and raw.get('tool') == 'get_learner_context' and raw.get('arguments') == expected_profile_arguments(training), 'permission_not_expected_read')
+                    operation_id = params.get('toolCall', {}).get('toolCallId')
+                    self.probe.require(type(operation_id) is str and 0 < len(operation_id) <= 128 and not any(ord(char) < 32 for char in operation_id) and value.get('id') == 'permission:' + operation_id, 'permission_operation_id_mismatch')
+                    dispatched = audit_delta(before, audit_counts(self.audit, self.probe)).get('profile_dispatch', 0)
+                    row['observedDispatchesBeforePermission'].append(dispatched)
+                    self.probe.require(dispatched == 0, 'profile_dispatched_before_permission')
+                    row['permissionOperationIds'].append(operation_id)
+                    row['permissionRpcIds'].append(value['id'])
                     row['permissions'] += 1
                     self.probe.require(row['permissions'] == 1, 'multiple_permissions')
                     choice = next((x for x in params.get('options', []) if x.get('kind') == ('allow_once' if allow else 'reject_once')), None)
@@ -303,6 +320,9 @@ class Acp:
                         self.probe.require(sum(len(p.encode()) for p in chunks) <= self.probe.MAX_TEXT, 'answer_budget_exceeded')
                     else:
                         self.probe.require(update.get('sessionUpdate') in ('tool_call', 'tool_call_update') and update.get('title') == 'get_learner_context', 'unexpected_update')
+                        operation_id = update.get('toolCallId')
+                        self.probe.require(type(operation_id) is str and 0 < len(operation_id) <= 128, 'tool_update_operation_id_missing')
+                        row['toolUpdates'].append({'operationId': operation_id, 'status': update.get('status')})
                         tool_statuses.append(update.get('status'))
                 else:
                     self.probe.require(method is None and type(value.get('id')) is int and value['id'] == self.identifier, 'unexpected_agent_message')

@@ -1,0 +1,888 @@
+{
+  "schemaVersion": 1,
+  "status": "checks_failed_or_incomplete",
+  "scope": "Development paired native ACP and unchanged disposable Tutor; catalog cache only, no LLM inference.",
+  "windowsP2000Qualified": false,
+  "pedagogyQualified": false,
+  "usefulResponseMeasured": false,
+  "heldOutCorpusUsed": false,
+  "startedAt": "2026-11-02T15:34:15.337732+00:00",
+  "variants": [
+    {
+      "variant": "catalogOff",
+      "requested": {
+        "catalogCache": false,
+        "prefixCache": false,
+        "reuseMcp": true
+      },
+      "cases": [
+        {
+          "case": "cold_profile",
+          "sessionLabel": "A",
+          "prompt": "donne moi mon profil",
+          "permissionAllowed": true,
+          "permissions": 0,
+          "permissionOperationIds": [],
+          "permissionRpcIds": [],
+          "toolUpdates": [],
+          "observedDispatchesBeforePermission": [],
+          "firstTextMs": null,
+          "outcome": "rpc_error",
+          "checks": [
+            {
+              "name": "completed_end_turn",
+              "passed": false
+            },
+            {
+              "name": "one_actual_permission",
+              "passed": false
+            },
+            {
+              "name": "synthetic_objective_marker_or_nonempty_denial",
+              "passed": false
+            },
+            {
+              "name": "dispatch_matches_permission",
+              "passed": false
+            },
+            {
+              "name": "no_unexpected_tool_dispatch",
+              "passed": true
+            },
+            {
+              "name": "connection_reuse_matches_case",
+              "passed": true
+            },
+            {
+              "name": "catalog_reuse_matches_case",
+              "passed": true
+            },
+            {
+              "name": "catalog_counters_match_case",
+              "passed": true
+            },
+            {
+              "name": "miss_reads_real_catalog",
+              "passed": false
+            },
+            {
+              "name": "initialize_only_on_connection_change",
+              "passed": true
+            },
+            {
+              "name": "no_model_or_token_work",
+              "passed": false
+            },
+            {
+              "name": "no_observed_model_phases_or_calls",
+              "passed": true
+            },
+            {
+              "name": "matched_permission_and_update_ids",
+              "passed": false
+            },
+            {
+              "name": "no_observed_dispatch_before_permission",
+              "passed": false
+            },
+            {
+              "name": "no_model_context_projection",
+              "passed": true
+            },
+            {
+              "name": "connection_retained_without_restart",
+              "passed": false
+            }
+          ],
+          "environmentBefore": {
+            "platform": "linux",
+            "logicalCpus": 4,
+            "loadavg": [
+              1.7822265625,
+              1.58349609375,
+              1.08837890625
+            ],
+            "cgroupCpu": {
+              "usage_usec": 51151898156,
+              "user_usec": 46235503821,
+              "system_usec": 4916394334,
+              "nr_throttled": 0,
+              "throttled_usec": 0
+            },
+            "cgroupCpuMax": "max 100000"
+          },
+          "rpcErrorCode": -32007,
+          "observation": {
+            "componentScope": "native_agent",
+            "inference": {
+              "counts": {
+                "cancelledOperations": 0,
+                "contextAllocationAttempts": 0,
+                "contextAllocations": 0,
+                "countInputCalls": 0,
+                "countedInputTokens": 0,
+                "evaluatedInputTokens": 0,
+                "failedOperations": 0,
+                "generationCalls": 0,
+                "inputTokens": 0,
+                "modelLoadAttempts": 0,
+                "modelLoadCount": 0,
+                "outputTokens": 0,
+                "reusedTokens": 0,
+                "templateCalls": 0,
+                "tokenizationCalls": 0
+              },
+              "cpuTimeMs": null,
+              "elapsedMs": 30974.92913,
+              "firstEmissionMs": null,
+              "firstTokenMs": null,
+              "firstUsefulResponseMs": null,
+              "gpuSynchronizedMs": null,
+              "lastOutcome": null,
+              "operations": {
+                "countInputMs": null,
+                "generationMs": null
+              },
+              "phases": {
+                "backendSetupMs": null,
+                "batchAllocationMs": null,
+                "bridgeWaitMs": null,
+                "cacheMaintenanceMs": null,
+                "contextAllocationMs": null,
+                "decodeMs": null,
+                "emitMs": null,
+                "modelHashMs": null,
+                "modelLoadMs": null,
+                "modelOpenMs": null,
+                "modelValidationMs": null,
+                "prefillMs": null,
+                "samplerSetupMs": null,
+                "samplingMs": null,
+                "templateMs": null,
+                "tokenConversionMs": null,
+                "tokenizationMs": null
+              },
+              "schemaVersion": 1,
+              "timingKind": "host_wall_clock"
+            },
+            "mcp": {
+              "callAttempts": 0,
+              "callInterrupted": 0,
+              "callTransportFailures": 0,
+              "callTransportSuccesses": 0,
+              "catalogAttempts": 1,
+              "catalogInterrupted": 0,
+              "catalogPages": null,
+              "catalogTotalMs": 30006.659556,
+              "catalogTransportFailures": 1,
+              "catalogTransportSuccesses": 0,
+              "closeAttempts": 1,
+              "closeInterrupted": 0,
+              "closeTotalMs": 0.014394,
+              "closeTransportFailures": 0,
+              "closeTransportSuccesses": 1,
+              "connectTotalMs": 958.229997,
+              "initializeTotalMs": null,
+              "schemaVersion": 1,
+              "toolResultErrors": 0,
+              "toolsCallTotalMs": null
+            },
+            "mcpConnection": {
+              "catalog": {
+                "cacheHits": 0,
+                "cacheMisses": 1,
+                "lastMissReason": "fetch_failure",
+                "schemaVersion": 1
+              },
+              "catalogReused": false,
+              "connectionReused": false,
+              "priorCleanup": [],
+              "restartRequired": false,
+              "retained": false,
+              "schemaVersion": 1
+            },
+            "schemaVersion": 1,
+            "workerElapsedMs": 30975.364568
+          },
+          "totalMs": 30977.774147002492,
+          "answerSynthetic": "",
+          "toolStatuses": [],
+          "wireObservedDelta": {
+            "initialize_request": 1,
+            "initialize_success": 1,
+            "relay_start": 1
+          },
+          "environmentAfter": {
+            "platform": "linux",
+            "logicalCpus": 4,
+            "loadavg": [
+              1.54248046875,
+              1.55615234375,
+              1.0947265625
+            ],
+            "cgroupCpu": {
+              "usage_usec": 51160198494,
+              "user_usec": 46242427948,
+              "system_usec": 4917770545,
+              "nr_throttled": 0,
+              "throttled_usec": 0
+            },
+            "cgroupCpuMax": "max 100000"
+          }
+        }
+      ],
+      "checks": [
+        {
+          "name": "agent_gracefully_reaped",
+          "passed": true
+        },
+        {
+          "name": "expected_wire_initializations",
+          "passed": false
+        },
+        {
+          "name": "expected_wrapper_fetches_and_wire_pages",
+          "passed": false
+        },
+        {
+          "name": "four_authorized_reads_only",
+          "passed": false
+        },
+        {
+          "name": "no_relay_protocol_error",
+          "passed": true
+        }
+      ],
+      "errors": [
+        "catalog_prompt_incomplete"
+      ],
+      "shutdown": {
+        "graceful_eof": true,
+        "forced": false,
+        "reaped": true,
+        "exit_code": 0
+      },
+      "journal": {
+        "checks": [
+          {
+            "name": "one_journal_per_session",
+            "passed": true
+          },
+          {
+            "name": "A_all_accepted_turns_durable",
+            "passed": false
+          },
+          {
+            "name": "A_exact_users_and_answers",
+            "passed": true
+          },
+          {
+            "name": "A_one_complete_commit_each",
+            "passed": false
+          },
+          {
+            "name": "A_exact_conversation_binding",
+            "passed": true
+          },
+          {
+            "name": "A_no_model_projection",
+            "passed": true
+          },
+          {
+            "name": "A_dispatch_and_denial_receipts",
+            "passed": false
+          },
+          {
+            "name": "A_no_mutation_unknown_or_other_tool",
+            "passed": true
+          },
+          {
+            "name": "A_exact_verified_arguments",
+            "passed": true
+          },
+          {
+            "name": "A_one_operation_linked_to_each_actual_turn",
+            "passed": false
+          },
+          {
+            "name": "A_permission_ids_match_executed_operations",
+            "passed": false
+          },
+          {
+            "name": "A_dispatch_or_denial_transitions_exact",
+            "passed": false
+          },
+          {
+            "name": "A_actual_result_facts_match_or_denial_has_no_result",
+            "passed": false
+          }
+        ],
+        "sessions": {
+          "A": {
+            "storedTurns": 1,
+            "completedReadOperations": 0,
+            "rejectedOperations": 0,
+            "events": 5
+          }
+        }
+      },
+      "wireObservedTotals": {
+        "relay_start": 1,
+        "initialize_request": 1,
+        "initialize_success": 1
+      }
+    },
+    {
+      "variant": "catalogOn",
+      "requested": {
+        "catalogCache": true,
+        "prefixCache": false,
+        "reuseMcp": true
+      },
+      "cases": [
+        {
+          "case": "cold_profile",
+          "sessionLabel": "A",
+          "prompt": "donne moi mon profil",
+          "permissionAllowed": true,
+          "permissions": 0,
+          "permissionOperationIds": [],
+          "permissionRpcIds": [],
+          "toolUpdates": [],
+          "observedDispatchesBeforePermission": [],
+          "firstTextMs": null,
+          "outcome": "rpc_error",
+          "checks": [
+            {
+              "name": "completed_end_turn",
+              "passed": false
+            },
+            {
+              "name": "one_actual_permission",
+              "passed": false
+            },
+            {
+              "name": "synthetic_objective_marker_or_nonempty_denial",
+              "passed": false
+            },
+            {
+              "name": "dispatch_matches_permission",
+              "passed": false
+            },
+            {
+              "name": "no_unexpected_tool_dispatch",
+              "passed": true
+            },
+            {
+              "name": "connection_reuse_matches_case",
+              "passed": true
+            },
+            {
+              "name": "catalog_reuse_matches_case",
+              "passed": true
+            },
+            {
+              "name": "catalog_counters_match_case",
+              "passed": true
+            },
+            {
+              "name": "miss_reads_real_catalog",
+              "passed": false
+            },
+            {
+              "name": "initialize_only_on_connection_change",
+              "passed": true
+            },
+            {
+              "name": "no_model_or_token_work",
+              "passed": false
+            },
+            {
+              "name": "no_observed_model_phases_or_calls",
+              "passed": true
+            },
+            {
+              "name": "matched_permission_and_update_ids",
+              "passed": false
+            },
+            {
+              "name": "no_observed_dispatch_before_permission",
+              "passed": false
+            },
+            {
+              "name": "no_model_context_projection",
+              "passed": true
+            },
+            {
+              "name": "connection_retained_without_restart",
+              "passed": false
+            }
+          ],
+          "environmentBefore": {
+            "platform": "linux",
+            "logicalCpus": 4,
+            "loadavg": [
+              1.54248046875,
+              1.55615234375,
+              1.0947265625
+            ],
+            "cgroupCpu": {
+              "usage_usec": 51160280113,
+              "user_usec": 46242483672,
+              "system_usec": 4917796440,
+              "nr_throttled": 0,
+              "throttled_usec": 0
+            },
+            "cgroupCpuMax": "max 100000"
+          },
+          "rpcErrorCode": -32007,
+          "observation": {
+            "componentScope": "native_agent",
+            "inference": {
+              "counts": {
+                "cancelledOperations": 0,
+                "contextAllocationAttempts": 0,
+                "contextAllocations": 0,
+                "countInputCalls": 0,
+                "countedInputTokens": 0,
+                "evaluatedInputTokens": 0,
+                "failedOperations": 0,
+                "generationCalls": 0,
+                "inputTokens": 0,
+                "modelLoadAttempts": 0,
+                "modelLoadCount": 0,
+                "outputTokens": 0,
+                "reusedTokens": 0,
+                "templateCalls": 0,
+                "tokenizationCalls": 0
+              },
+              "cpuTimeMs": null,
+              "elapsedMs": 30889.9179,
+              "firstEmissionMs": null,
+              "firstTokenMs": null,
+              "firstUsefulResponseMs": null,
+              "gpuSynchronizedMs": null,
+              "lastOutcome": null,
+              "operations": {
+                "countInputMs": null,
+                "generationMs": null
+              },
+              "phases": {
+                "backendSetupMs": null,
+                "batchAllocationMs": null,
+                "bridgeWaitMs": null,
+                "cacheMaintenanceMs": null,
+                "contextAllocationMs": null,
+                "decodeMs": null,
+                "emitMs": null,
+                "modelHashMs": null,
+                "modelLoadMs": null,
+                "modelOpenMs": null,
+                "modelValidationMs": null,
+                "prefillMs": null,
+                "samplerSetupMs": null,
+                "samplingMs": null,
+                "templateMs": null,
+                "tokenConversionMs": null,
+                "tokenizationMs": null
+              },
+              "schemaVersion": 1,
+              "timingKind": "host_wall_clock"
+            },
+            "mcp": {
+              "callAttempts": 0,
+              "callInterrupted": 0,
+              "callTransportFailures": 0,
+              "callTransportSuccesses": 0,
+              "catalogAttempts": 1,
+              "catalogInterrupted": 0,
+              "catalogPages": null,
+              "catalogTotalMs": 30005.604572,
+              "catalogTransportFailures": 1,
+              "catalogTransportSuccesses": 0,
+              "closeAttempts": 1,
+              "closeInterrupted": 0,
+              "closeTotalMs": 0.00219,
+              "closeTransportFailures": 0,
+              "closeTransportSuccesses": 1,
+              "connectTotalMs": 880.82723,
+              "initializeTotalMs": null,
+              "schemaVersion": 1,
+              "toolResultErrors": 0,
+              "toolsCallTotalMs": null
+            },
+            "mcpConnection": {
+              "catalog": {
+                "cacheHits": 0,
+                "cacheMisses": 1,
+                "lastMissReason": "fetch_failure",
+                "schemaVersion": 1
+              },
+              "catalogReused": false,
+              "connectionReused": false,
+              "priorCleanup": [],
+              "restartRequired": false,
+              "retained": false,
+              "schemaVersion": 1
+            },
+            "schemaVersion": 1,
+            "workerElapsedMs": 30890.534852
+          },
+          "totalMs": 30893.361834983807,
+          "answerSynthetic": "",
+          "toolStatuses": [],
+          "wireObservedDelta": {
+            "initialize_request": 1,
+            "initialize_success": 1,
+            "relay_start": 1
+          },
+          "environmentAfter": {
+            "platform": "linux",
+            "logicalCpus": 4,
+            "loadavg": [
+              1.2373046875,
+              1.48486328125,
+              1.0849609375
+            ],
+            "cgroupCpu": {
+              "usage_usec": 51168761183,
+              "user_usec": 46249504536,
+              "system_usec": 4919256647,
+              "nr_throttled": 0,
+              "throttled_usec": 0
+            },
+            "cgroupCpuMax": "max 100000"
+          }
+        }
+      ],
+      "checks": [
+        {
+          "name": "agent_gracefully_reaped",
+          "passed": true
+        },
+        {
+          "name": "expected_wire_initializations",
+          "passed": false
+        },
+        {
+          "name": "expected_wrapper_fetches_and_wire_pages",
+          "passed": false
+        },
+        {
+          "name": "four_authorized_reads_only",
+          "passed": false
+        },
+        {
+          "name": "no_relay_protocol_error",
+          "passed": true
+        }
+      ],
+      "errors": [
+        "catalog_prompt_incomplete"
+      ],
+      "shutdown": {
+        "graceful_eof": true,
+        "forced": false,
+        "reaped": true,
+        "exit_code": 0
+      },
+      "journal": {
+        "checks": [
+          {
+            "name": "one_journal_per_session",
+            "passed": true
+          },
+          {
+            "name": "A_all_accepted_turns_durable",
+            "passed": false
+          },
+          {
+            "name": "A_exact_users_and_answers",
+            "passed": true
+          },
+          {
+            "name": "A_one_complete_commit_each",
+            "passed": false
+          },
+          {
+            "name": "A_exact_conversation_binding",
+            "passed": true
+          },
+          {
+            "name": "A_no_model_projection",
+            "passed": true
+          },
+          {
+            "name": "A_dispatch_and_denial_receipts",
+            "passed": false
+          },
+          {
+            "name": "A_no_mutation_unknown_or_other_tool",
+            "passed": true
+          },
+          {
+            "name": "A_exact_verified_arguments",
+            "passed": true
+          },
+          {
+            "name": "A_one_operation_linked_to_each_actual_turn",
+            "passed": false
+          },
+          {
+            "name": "A_permission_ids_match_executed_operations",
+            "passed": false
+          },
+          {
+            "name": "A_dispatch_or_denial_transitions_exact",
+            "passed": false
+          },
+          {
+            "name": "A_actual_result_facts_match_or_denial_has_no_result",
+            "passed": false
+          }
+        ],
+        "sessions": {
+          "A": {
+            "storedTurns": 1,
+            "completedReadOperations": 0,
+            "rejectedOperations": 0,
+            "events": 5
+          }
+        }
+      },
+      "wireObservedTotals": {
+        "relay_start": 1,
+        "initialize_request": 1,
+        "initialize_success": 1
+      }
+    }
+  ],
+  "checks": [
+    {
+      "name": "artifacts_unchanged",
+      "passed": true
+    },
+    {
+      "name": "sources_unchanged",
+      "passed": true
+    },
+    {
+      "name": "two_complete_variants",
+      "passed": false
+    }
+  ],
+  "errors": [],
+  "configuration": {
+    "variantOrder": [
+      "catalogOff",
+      "catalogOn"
+    ],
+    "catalogTtlSeconds": 30,
+    "prefixCache": false,
+    "reuseMcp": true,
+    "context": 2048,
+    "maxOutput": 96,
+    "gpuLayers": 0,
+    "threads": 4,
+    "batch": 128,
+    "timeoutSeconds": 300,
+    "turnTimeoutSeconds": 60
+  },
+  "limits": [
+    "Two development variants, one pass each; no p95 or population speed claim.",
+    "Transparent Python stdio relay adds startup/forwarding cost.",
+    "Synthetic host Owner and HostContext are not institution authentication.",
+    "First text only; no UI or usefulness measurement.",
+    "No native model generation or P2000/Windows/coaching qualification.",
+    "The answer oracle checks only a synthetic objective marker and nonempty refusal, not every rendered fact.",
+    "Permissions are automatic controlled fixture responses, not measured human approval."
+  ],
+  "artifactsBefore": {
+    "agent": {
+      "sha256": "c090d2cc5830ba6c086222146f4a349935d277011934fabcd80894c0ff0d7ee6",
+      "bytes": 18347592
+    },
+    "server": {
+      "sha256": "9c36faebdb89f7a28fa057cb391f52f2a928d3d3f8d14751c4f7d8914410da63",
+      "bytes": 52117333
+    },
+    "model": {
+      "sha256": "b139949c5bd74937ad8ed8c8cf3d9ffb1e99c866c823204dc42c0d91fa181897",
+      "bytes": 1107409472
+    }
+  },
+  "sourceFiles": {
+    "client/scripts/qualify-local-catalog.py": {
+      "sha256": "d9f106b36db837131792bf2b4070c59329f6ff44a2bb955bd6ea1d34c6a8440e",
+      "bytes": 25925
+    },
+    "client/scripts/qualify-local-resident.py": {
+      "sha256": "7ea98b057dcc1ca57ed3bae0bb75b6a148b63641c8094af9e0cb95119d6589f6",
+      "bytes": 50116
+    },
+    "client/scripts/qualify-local-context.py": {
+      "sha256": "fcf38ca3d422e5f5807a1c8287c10f39ffdae3373f9541124577f0f33025db15",
+      "bytes": 9332
+    },
+    "client/scripts/qualify-local-agent.py": {
+      "sha256": "846ca98153127d6576ea5b3770fb919d346c8366355f041245cd2c6c6a801da1",
+      "bytes": 27126
+    },
+    "client/local-agent/Cargo.toml": {
+      "sha256": "079ad94fd212cf464ec09301b1db63b2bbceda992647a3dce92fbe1a621716fd",
+      "bytes": 1605
+    },
+    "client/local-agent/Cargo.lock": {
+      "sha256": "1ea6d39ec20f915ff10c4ef777fe9fd4f08e7646d603d6e8826fb0ba244f798c",
+      "bytes": 56288
+    },
+    "client/local-agent/model-profile.json": {
+      "sha256": "9f02c9b26b2f9e7ac54e1a333886bcf55c7ab4df60689c1fdc7c5a577fb1dc36",
+      "bytes": 813
+    },
+    "client/local-agent/src/main.rs": {
+      "sha256": "16bf2bfbb5a3a04b45c8414c72aa7aa6c33a658ba12edf4875339d6bd7984381",
+      "bytes": 1855
+    },
+    "client/local-agent/src/lib.rs": {
+      "sha256": "590a7fa666b76db1bc2b32e79964ba65cbaea940a52176372d300ebe7d350e92",
+      "bytes": 387
+    },
+    "client/local-agent/src/config.rs": {
+      "sha256": "b79bc274a1181e3ab3b5d55b3808d523cc6e84df46c38a5d2ae003ac989782ac",
+      "bytes": 5901
+    },
+    "client/local-agent/src/acp.rs": {
+      "sha256": "c0cd8ee196f9c96c21485fc8362f1705569134212a0c044af8a854dc495fb897",
+      "bytes": 124642
+    },
+    "client/local-agent/src/runtime.rs": {
+      "sha256": "fd071e710b2bf871d3e36888450c0098250edae9cf0034b67220c2588dfc320f",
+      "bytes": 100711
+    },
+    "client/local-agent/src/harness.rs": {
+      "sha256": "36bcc83ad122d7ccbf727f617d1ce09e2f7fd27abe34afa5e2949515878768d6",
+      "bytes": 135553
+    },
+    "client/local-agent/src/fast_harness.rs": {
+      "sha256": "b7e1e0475dc3a9f6c4ada4dd909ca4acb52ab140434614b6139efd02f48365e3",
+      "bytes": 14825
+    },
+    "client/local-agent/src/mcp_session.rs": {
+      "sha256": "29279acfbb5f4d488eef9ff703141226a8b328755527f751940dab6098e5c593",
+      "bytes": 116335
+    },
+    "client/local-agent/src/mcp_client.rs": {
+      "sha256": "3edc1477780e047a71afc9b973fd1d59b6569356b488ffb62f52fcde13624ed7",
+      "bytes": 24263
+    },
+    "client/local-agent/src/mcp.rs": {
+      "sha256": "67f0768fa6eb3135f41b06ddffbbb0e4bdbff3f619e937d61dd98d656ad3cd52",
+      "bytes": 42356
+    },
+    "client/local-agent/src/mcp_stdio.rs": {
+      "sha256": "566dad6f8efb8a8820aa41f75657e72ed3f2434e43115551816950f8107310c9",
+      "bytes": 54269
+    },
+    "client/local-agent/src/session_store.rs": {
+      "sha256": "ca74bc6dc9e5046f6b44dea7bffa1e39939405a89d1767923e385b34cd95aa72",
+      "bytes": 25220
+    },
+    "client/local-agent/src/host_context.rs": {
+      "sha256": "62b19a71fb8a07a61e36fb9347bd6481ee6156ff2019875e3fec43e50fe65baa",
+      "bytes": 5885
+    },
+    "client/local-agent/src/context.rs": {
+      "sha256": "4fbb5a657a216ee3659ba7e406c87ab93e3d55fee81be5de7d216b222eb23955",
+      "bytes": 34894
+    },
+    "client/local-agent/src/executor.rs": {
+      "sha256": "37428a1e6725d727192d134d19e9e037c5cec1614bf1cccfacef55c38a9e0f3f",
+      "bytes": 69639
+    },
+    "client/local-agent/src/call_validation.rs": {
+      "sha256": "1714d9cae303a5d983e87a0605b29a618d4d068a970036defc3d57345b5dab3d",
+      "bytes": 30071
+    },
+    "client/local-agent/src/journal.rs": {
+      "sha256": "d228ef4d815cfbbacb2b2a051f440cd17db7e3412f0a04813801763c2522cf6d",
+      "bytes": 86723
+    }
+  },
+  "fixtureShutdowns": [
+    {
+      "graceful_eof": true,
+      "forced": false,
+      "reaped": true,
+      "exit_code": 0
+    },
+    {
+      "graceful_eof": true,
+      "forced": false,
+      "reaped": true,
+      "exit_code": 0
+    }
+  ],
+  "fixture": {
+    "syntheticObjective": "Jardin catalogue 309cc0982c",
+    "trainingNamesSynthetic": [
+      "Catalogue A 309cc0982c",
+      "Catalogue B 309cc0982c"
+    ],
+    "pairedDatabaseCopiedAfterSeedShutdown": true
+  },
+  "artifactsAfter": {
+    "agent": {
+      "sha256": "c090d2cc5830ba6c086222146f4a349935d277011934fabcd80894c0ff0d7ee6",
+      "bytes": 18347592
+    },
+    "server": {
+      "sha256": "9c36faebdb89f7a28fa057cb391f52f2a928d3d3f8d14751c4f7d8914410da63",
+      "bytes": 52117333
+    },
+    "model": {
+      "sha256": "b139949c5bd74937ad8ed8c8cf3d9ffb1e99c866c823204dc42c0d91fa181897",
+      "bytes": 1107409472
+    }
+  },
+  "checksSummary": {
+    "observed": 71,
+    "passed": 32,
+    "failed": 39
+  },
+  "missingCases": [
+    {
+      "variant": "catalogOff",
+      "case": "warm_profile"
+    },
+    {
+      "variant": "catalogOff",
+      "case": "denied_profile"
+    },
+    {
+      "variant": "catalogOff",
+      "case": "configuration_change"
+    },
+    {
+      "variant": "catalogOff",
+      "case": "new_conversation"
+    },
+    {
+      "variant": "catalogOn",
+      "case": "warm_profile"
+    },
+    {
+      "variant": "catalogOn",
+      "case": "denied_profile"
+    },
+    {
+      "variant": "catalogOn",
+      "case": "configuration_change"
+    },
+    {
+      "variant": "catalogOn",
+      "case": "new_conversation"
+    }
+  ],
+  "completedAt": "2026-11-02T15:35:30.152215+00:00"
+}

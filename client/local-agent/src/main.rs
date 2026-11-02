@@ -12,7 +12,7 @@ async fn main() {
         return;
     }
     if args == ["--help"] {
-        println!("tutor-local-agent --model ABSOLUTE_GGUF_PATH [--sha256 HEX] [--data-dir ABSOLUTE_PRIVATE_DIRECTORY] [--context 2048] [--max-output 192] [--gpu-layers 0] [--threads 6] [--batch 128] [--prefix-cache off|on] [--reuse-mcp off|on]\nACP over stdin/stdout. CUDA or Vulkan features are required for GPU offload.");
+        println!("tutor-local-agent --model ABSOLUTE_GGUF_PATH [--sha256 HEX] [--data-dir ABSOLUTE_PRIVATE_DIRECTORY] [--context 2048] [--max-output 192] [--gpu-layers 0] [--threads 6] [--batch 128] [--prefix-cache off|on] [--reuse-mcp off|on] [--catalog-cache off|on]\nACP over stdin/stdout. CUDA or Vulkan features are required for GPU offload.");
         return;
     }
     let config = match Config::parse(args) {
@@ -30,6 +30,7 @@ async fn main() {
             .unwrap_or_else(|| tutor_local_agent::config::MODEL_SHA256.into()),
         prefix_cache: config.prefix_cache,
         reuse_mcp: config.reuse_mcp,
+        catalog_cache: config.catalog_cache,
     };
     let engine = match runtime::create(config) {
         Ok(engine) => Arc::new(Mutex::new(engine)),

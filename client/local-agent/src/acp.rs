@@ -29,6 +29,7 @@ pub struct Options {
     pub model_sha256: String,
     pub prefix_cache: bool,
     pub reuse_mcp: bool,
+    pub catalog_cache: bool,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -37,6 +38,7 @@ impl Default for Options {
             model_sha256: crate::config::MODEL_SHA256.into(),
             prefix_cache: false,
             reuse_mcp: false,
+            catalog_cache: false,
         }
     }
 }
@@ -471,6 +473,9 @@ where
     R: AsyncBufRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    if options.catalog_cache && !options.reuse_mcp {
+        anyhow::bail!("catalog_cache_requires_mcp_reuse");
+    }
     let cancel = Arc::new(AtomicBool::new(false));
     let _cancel_on_exit = CancelOnDrop(cancel.clone());
     let closed = Arc::new(AtomicBool::new(false));
@@ -500,9 +505,22 @@ where
         }
     }));
     let mut server = Server {
-        mcp: options
-            .reuse_mcp
-            .then(|| crate::mcp_session::Manager::new(tokio::runtime::Handle::current())),
+        mcp: if options.reuse_mcp {
+            let manager = if options.catalog_cache {
+                let policy =
+                    crate::mcp_session::CatalogPolicy::reviewed_stdio(Duration::from_secs(30))
+                        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                crate::mcp_session::Manager::new_with_catalog_policy(
+                    tokio::runtime::Handle::current(),
+                    policy,
+                )
+            } else {
+                crate::mcp_session::Manager::new(tokio::runtime::Handle::current())
+            };
+            Some(manager)
+        } else {
+            None
+        },
         cache_connection: uuid::Uuid::new_v4(),
         options,
         ..Server::default()

@@ -31,8 +31,8 @@ mcp:
   reuse: HTTP ou enfant stdio réutilisés seulement dans le scope admissible ; rebind strictement identique sans changement d'époque.
   invalidation: Configuration différente ou rechargement révoquent l'époque ; nouvelle acquisition attend la fin du nettoyage local, au plus trois secondes, avec annulation.
   no_replay: Cette attente concerne la réservation locale avant tout envoi. Aucun connect ou tools/call déjà envoyé n'est rejoué.
-  health: Connexion existante ne signifie pas pair vivant ; un tools/list frais au début de chaque lease détecte EOF/échec et interdit le dispatch sur catalogue périmé.
-  catalog: Toujours relu à chaque lease ; catalogReused=false. Le critère de catalogue résident de LH-02 reste ouvert.
+  health: Connexion existante ne signifie pas pair vivant ; sans cache de catalogue, tools/list reste relu au début de chaque lease. Le cache stdio exige en plus transport sain et notifications observables.
+  catalog: Relu à chaque lease par défaut ; l'incrément optionnel suivant est décrit dans catalog-integration.yaml. Les rapports résidents historiques ci-dessous n'activaient pas ce cache.
   authority: Schéma vivant, paramètres prouvés, permission métier réelle et changed() après approbation restent vérifiés par l'exécuteur existant.
   cleanup: EOF appelle shutdown ; une issue de nettoyage non prouvée conserve une quarantaine et demande un redémarrage de l'agent. Aucun nouveau Manager n'efface cette incertitude.
   metadata: result._meta.tutor.runtime.mcpConnection, également disponible sous error.data._meta.tutor.runtime sur les erreurs observées.

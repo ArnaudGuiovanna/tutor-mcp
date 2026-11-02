@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Arnaud Guiovanna
 // SPDX-License-Identifier: MIT
 
-//! LH-02 candidate: one connection slot, exclusive leases, no catalog cache.
+//! Resident connection and catalog snapshots behind opt-in policies.
 //!
 //! HOST-ONLY: Scope is built after the ACP Owner and HostContext are verified.
 //! This module cannot turn model text into authority, grant permissions, issue
@@ -9,9 +9,10 @@
 //!
 //! Wiring contract for the parent:
 //! - One Manager for the agent lifetime, not one Manager per turn.
-//! - Refresh tools/list at the start of EVERY lease, as the harness already
-//!   does. Idle EOF/readiness is not exposed by the current transports. A cache
-//!   hit here means an existing Client was handed out, NOT that it was probed.
+//! - FreshEachLease preserves the shipped behavior. ReviewedStdio can reuse
+//!   only an exact scoped/generation/TTL snapshot with observable notifications.
+//!   Every call still requires the existing executor and ACP permission; a
+//!   catalog hit is never an authorization grant. HTTP always fetches on list.
 //! - invalidate synchronously on host authority/config changes; it advances the
 //!   epoch before returning and schedules idle cleanup without awaiting IO.
 //!   shutdown is asynchronous and must precede manager replacement.
@@ -22,7 +23,7 @@
 //! - Keep a runtime alive for cleanup. Drop is the existing transport backstop,
 //!   not proof that an OS process tree finished. No raw Client/Deref is exposed.
 //!
-//! Deliberately incomplete: resident catalogs, TTL/eviction, idle health events,
+//! Deliberately incomplete: HTTP idle events/cache, idle eviction,
 //! and typed lower-level connect/cleanup outcomes remain follow-up work. In
 //! particular, cancelled/dropped stdio connect can hide a cleanup failure. Its
 //! slot is quarantined, never silently reopened. This is not LH-02 completion.
@@ -33,7 +34,10 @@
 use crate::{
     catalog::ToolEntry,
     mcp,
-    mcp_client::{Client, Error as ClientError, McpObservation, Transport},
+    mcp_client::{
+        CatalogMissReason, CatalogObservation, Client, Error as ClientError, McpObservation,
+        Transport,
+    },
     mcp_stdio,
     session_store::Owner,
 };
@@ -55,6 +59,36 @@ use uuid::Uuid;
 enum Kind {
     Http,
     Stdio,
+}
+
+/// Cache reuse is opt-in. FreshEachLease preserves the shipped behavior.
+#[derive(Clone, Copy)]
+pub(crate) struct CatalogPolicy {
+    ttl: Option<Duration>,
+}
+
+impl CatalogPolicy {
+    pub(crate) fn fresh_each_lease() -> Self {
+        Self { ttl: None }
+    }
+
+    pub(crate) fn reviewed_stdio(ttl: Duration) -> Result<Self, Error> {
+        if ttl.is_zero() || ttl > Duration::from_secs(30) {
+            return Err(Error::InvalidCatalogPolicy);
+        }
+        Ok(Self { ttl: Some(ttl) })
+    }
+}
+
+// This is a private exact schema snapshot, not an authority/approval receipt.
+// No Debug/Serialize and no model projection. TTL starts BEFORE page 1 fetch.
+struct CatalogSnapshot {
+    scope: Scope,
+    generation: u64,
+    notification_revision: u64,
+    post_call_revision: u64,
+    fetched_at: Instant,
+    entries: Vec<ToolEntry>,
 }
 
 /// Opaque host-issued scope. No Debug, Serialize, Deserialize or hash accessor.
@@ -151,6 +185,7 @@ fn config_fingerprint(config: &Value, cwd: &Path) -> Result<[u8; 32], Error> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Error {
     InvalidScope,
+    InvalidCatalogPolicy,
     ConfigMismatch,
     Busy,
     Closed,
@@ -167,6 +202,7 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::InvalidScope => "mcp_scope_invalid",
+            Self::InvalidCatalogPolicy => "mcp_catalog_policy_invalid",
             Self::ConfigMismatch => "mcp_scope_configuration_changed",
             Self::Busy => "mcp_slot_not_quiescent",
             Self::Closed => "mcp_manager_shut_down",
@@ -212,6 +248,7 @@ pub(crate) struct ReleaseReport {
     pub connection_reused: bool,
     pub retained: bool,
     pub error: Option<Error>,
+    pub catalog: CatalogObservation,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -231,6 +268,7 @@ pub(crate) struct Retirement {
 struct Idle {
     scope: Scope,
     client: Client,
+    catalog: Option<CatalogSnapshot>,
 }
 
 enum Slot {
@@ -254,6 +292,7 @@ struct Shared {
     state: Mutex<State>,
     changed: Notify,
     runtime: Handle,
+    catalog_policy: CatalogPolicy,
 }
 
 impl Shared {
@@ -307,6 +346,10 @@ pub(crate) struct Manager {
 
 impl Manager {
     pub(crate) fn new(runtime: Handle) -> Self {
+        Self::new_with_catalog_policy(runtime, CatalogPolicy::fresh_each_lease())
+    }
+
+    pub(crate) fn new_with_catalog_policy(runtime: Handle, catalog_policy: CatalogPolicy) -> Self {
         Self {
             shared: Arc::new(Shared {
                 state: Mutex::new(State {
@@ -318,6 +361,7 @@ impl Manager {
                 }),
                 changed: Notify::new(),
                 runtime,
+                catalog_policy,
             }),
         }
     }
@@ -436,11 +480,15 @@ impl Manager {
             connection_reused: false,
             preceding: Vec::new(),
             connecting_started: None,
+            catalog: None,
+            catalog_invalidated: None,
+            catalog_observation: CatalogObservation::default(),
         };
         if let Some(idle) = idle {
             let same_scope = idle.scope == *scope;
             lease.client = Some(idle.client);
             if same_scope {
+                lease.catalog = idle.catalog;
                 lease.connection_reused = true;
                 return Ok(lease);
             }
@@ -630,6 +678,9 @@ impl Manager {
             connection_reused: false,
             preceding: Vec::new(),
             connecting_started: None,
+            catalog: None,
+            catalog_invalidated: None,
+            catalog_observation: CatalogObservation::default(),
         }))
     }
 
@@ -674,6 +725,9 @@ pub(crate) struct Lease {
     connection_reused: bool,
     preceding: Vec<McpObservation>,
     connecting_started: Option<Instant>,
+    catalog: Option<CatalogSnapshot>,
+    catalog_invalidated: Option<CatalogMissReason>,
+    catalog_observation: CatalogObservation,
 }
 
 impl Lease {
@@ -698,10 +752,125 @@ impl Lease {
         allowed
     }
 
+    fn invalidate_catalog(&mut self, reason: CatalogMissReason) {
+        self.catalog = None;
+        self.catalog_invalidated = Some(reason);
+        self.catalog_observation.last_miss_reason = Some(reason);
+    }
+
+    // Policy-independent stamp check. Even fallback transports can reject
+    // an observed notification or an expired approval-time snapshot.
+    fn snapshot_reason(&self) -> Option<CatalogMissReason> {
+        let ttl = self.shared.catalog_policy.ttl?;
+        if !self.is_current() {
+            return Some(CatalogMissReason::UnusableTransport);
+        }
+        let state = self.client.as_ref().expect("owned client").catalog_state();
+        if !state.ready {
+            return Some(CatalogMissReason::UnusableTransport);
+        }
+        if let Some(reason) = self.catalog_invalidated {
+            return Some(reason);
+        }
+        let Some(snapshot) = &self.catalog else {
+            return Some(CatalogMissReason::Cold);
+        };
+        if snapshot.scope != self.scope || snapshot.generation != self.epoch {
+            return Some(CatalogMissReason::ScopeChanged);
+        }
+        if state.notification_revision != snapshot.notification_revision {
+            return Some(CatalogMissReason::RealNotification);
+        }
+        if state.post_call_revision != snapshot.post_call_revision {
+            return Some(CatalogMissReason::UnreviewedCall);
+        }
+        if snapshot.fetched_at.elapsed() >= ttl {
+            return Some(CatalogMissReason::Expired);
+        }
+        None
+    }
+
+    fn cache_miss(&self) -> Option<CatalogMissReason> {
+        if self.shared.catalog_policy.ttl.is_none() {
+            return Some(CatalogMissReason::Disabled);
+        }
+        let state = self.client.as_ref().expect("owned client").catalog_state();
+        if !state.ready {
+            return Some(CatalogMissReason::UnusableTransport);
+        }
+        if let Some(reason) = self.catalog_invalidated {
+            return Some(reason);
+        }
+        if !state.idle_notifications_observable {
+            return Some(CatalogMissReason::IdleNotificationsUnobservable);
+        }
+        if !state.notifications_supported {
+            return Some(CatalogMissReason::CapabilityMissing);
+        }
+        self.snapshot_reason()
+    }
+
+    pub(crate) fn require_catalog_refresh(&mut self) {
+        self.invalidate_catalog(CatalogMissReason::PermissionBoundary);
+    }
+
+    /// Must be called by the Connection adapter AFTER a matched allow response,
+    /// BEFORE changed()/refresh and executor dispatch. A cached HTTP/fallback
+    /// snapshot younger than TTL is still insufficient at this boundary.
+    /// Observable stdio keeps its normal notification/TTL checks instead.
+    pub(crate) fn require_catalog_refresh_after_approval(&mut self) -> bool {
+        if self.shared.catalog_policy.ttl.is_none() {
+            return false;
+        }
+        let state = self.client.as_ref().expect("owned client").catalog_state();
+        let required = !state.idle_notifications_observable || !state.notifications_supported;
+        if required {
+            self.require_catalog_refresh();
+        }
+        required
+    }
+
+    /// Metadata only; this does not drain/invalidate the actual snapshot.
+    /// Root should normally use ReleaseReport.catalog after release instead.
+    pub(crate) fn take_catalog_observation(&mut self) -> CatalogObservation {
+        std::mem::take(&mut self.catalog_observation)
+    }
+
     pub(crate) async fn list_tools(
         &mut self,
         cancel: &AtomicBool,
     ) -> Result<Vec<ToolEntry>, ClientError> {
+        if !self.is_current() || cancel.load(Ordering::Acquire) {
+            self.healthy = false;
+            return Err(ClientError::Catalog);
+        }
+        let mut reason = if self.shared.catalog_policy.ttl.is_none() {
+            Some(CatalogMissReason::Disabled)
+        } else {
+            self.cache_miss()
+        };
+        if reason.is_none() {
+            let entries = self
+                .catalog
+                .as_ref()
+                .expect("validated catalog")
+                .entries
+                .clone();
+            // Recheck after the clone: a stdio notification may have arrived
+            // concurrently. Never return a hit using the now-obsolete stamp.
+            reason = self.cache_miss();
+            if reason.is_none() && !cancel.load(Ordering::Acquire) {
+                self.catalog_observation.cache_hits =
+                    self.catalog_observation.cache_hits.saturating_add(1);
+                return Ok(entries);
+            }
+        }
+        let reason = reason.unwrap_or(CatalogMissReason::UnusableTransport);
+        self.catalog_observation.cache_misses =
+            self.catalog_observation.cache_misses.saturating_add(1);
+        self.invalidate_catalog(reason); // no stale fallback after error/drop
+        let before = self.client.as_ref().expect("owned client").catalog_state();
+        let fetched_at = Instant::now();
         if !self.before_io(cancel) {
             return Err(ClientError::Catalog);
         }
@@ -714,7 +883,49 @@ impl Lease {
         self.healthy = result.is_ok()
             && !cancel.load(Ordering::Acquire)
             && self.shared.current(self.ticket, self.epoch);
-        result
+        let entries = match result {
+            Ok(entries) if self.healthy => entries,
+            Ok(_) => {
+                self.invalidate_catalog(CatalogMissReason::FetchChanged);
+                return Err(ClientError::Catalog);
+            }
+            Err(error) => {
+                let after = self.client.as_ref().expect("owned client").catalog_state();
+                let reason = if before.notification_revision != after.notification_revision {
+                    CatalogMissReason::FetchChanged
+                } else {
+                    CatalogMissReason::FetchFailure
+                };
+                self.invalidate_catalog(reason);
+                return Err(error);
+            }
+        };
+        let after = self.client.as_ref().expect("owned client").catalog_state();
+        if !after.ready
+            || before.notification_revision != after.notification_revision
+            || before.post_call_revision != after.post_call_revision
+        {
+            self.invalidate_catalog(CatalogMissReason::FetchChanged);
+            self.healthy = false;
+            return Err(ClientError::Catalog);
+        }
+        if let Some(ttl) = self.shared.catalog_policy.ttl {
+            if fetched_at.elapsed() >= ttl {
+                self.invalidate_catalog(CatalogMissReason::Expired);
+                self.healthy = false;
+                return Err(ClientError::Catalog);
+            }
+            self.catalog = Some(CatalogSnapshot {
+                scope: self.scope.clone(),
+                generation: self.epoch,
+                notification_revision: after.notification_revision,
+                post_call_revision: after.post_call_revision,
+                fetched_at,
+                entries: entries.clone(),
+            });
+        }
+        self.catalog_invalidated = None;
+        Ok(entries)
     }
 
     pub(crate) fn take_tools_changed(&mut self) -> bool {
@@ -722,10 +933,17 @@ impl Lease {
             self.healthy = false;
             return true;
         }
-        self.client
-            .as_mut()
-            .expect("owned client")
-            .take_tools_changed()
+        if self.shared.catalog_policy.ttl.is_some() {
+            // Sticky until a successful wire refresh; never consume a real
+            // notification by merely asking this question.
+            return self.snapshot_reason().is_some();
+        }
+        self.catalog_invalidated.is_some()
+            || self
+                .client
+                .as_mut()
+                .expect("owned client")
+                .take_tools_changed()
     }
 
     pub(crate) async fn release(
@@ -757,6 +975,7 @@ impl Lease {
                         state.slot = Slot::Idle(Box::new(Idle {
                             scope: self.scope.clone(),
                             client: self.client.take().expect("owned client"),
+                            catalog: self.catalog.take(),
                         }));
                         true
                     }
@@ -771,6 +990,7 @@ impl Lease {
                     connection_reused: self.connection_reused,
                     retained: true,
                     error: None,
+                    catalog: self.take_catalog_observation(),
                 };
             }
         }
@@ -791,6 +1011,7 @@ impl Lease {
             } else {
                 finished.err()
             },
+            catalog: self.take_catalog_observation(),
         }
     }
 }
@@ -807,6 +1028,17 @@ impl Transport for Lease {
         key: Option<&str>,
         cancel: &AtomicBool,
     ) -> Result<Value, ClientError> {
+        // Final local freshness check before transport IO. The executor still
+        // validates the exact prepared schema and actual ACP approval first.
+        if self.shared.catalog_policy.ttl.is_some() && self.snapshot_reason().is_some() {
+            let reason = self
+                .snapshot_reason()
+                .unwrap_or(CatalogMissReason::FetchChanged);
+            self.invalidate_catalog(reason);
+            self.healthy = false;
+            return Err(ClientError::Call); // never auto-refresh/replay a call
+        }
+        let before = self.client.as_ref().expect("owned client").catalog_state();
         if !self.before_io(cancel) {
             return Err(ClientError::Call);
         }
@@ -819,11 +1051,94 @@ impl Transport for Lease {
         self.healthy = result.is_ok()
             && !cancel.load(Ordering::Acquire)
             && self.shared.current(self.ticket, self.epoch);
+        // Disabled preserves the existing result/dirty-marker path without
+        // cloning or classifying private tool payloads for an inactive cache.
+        if self.shared.catalog_policy.ttl.is_none() {
+            return result;
+        }
+        let after = self.client.as_ref().expect("owned client").catalog_state();
+        if self.healthy {
+            let valid_read = result
+                .as_ref()
+                .is_ok_and(|envelope| reviewed_catalog_read(name, envelope));
+            let ttl = self.shared.catalog_policy.ttl;
+            let can_acknowledge = ttl.is_some()
+                && after.idle_notifications_observable
+                && after.notifications_supported
+                && after.ready
+                && valid_read;
+            if can_acknowledge {
+                if let Some(snapshot) = &mut self.catalog {
+                    if snapshot.scope == self.scope
+                        && snapshot.generation == self.epoch
+                        && snapshot.notification_revision == before.notification_revision
+                        && before.notification_revision == after.notification_revision
+                        && snapshot.post_call_revision == before.post_call_revision
+                        && before.post_call_revision.checked_add(1)
+                            == Some(after.post_call_revision)
+                        && snapshot.fetched_at.elapsed() < ttl.expect("checked TTL")
+                    {
+                        // Acknowledge only THIS reviewed read's conservative
+                        // counter. The lower tools_changed flag stays intact.
+                        snapshot.post_call_revision = after.post_call_revision;
+                    }
+                }
+            } else if result
+                .as_ref()
+                .is_ok_and(|value| value.get("isError").and_then(Value::as_bool) == Some(true))
+            {
+                self.invalidate_catalog(CatalogMissReason::ToolError);
+            } else {
+                self.invalidate_catalog(CatalogMissReason::UnreviewedCall);
+            }
+        } else {
+            self.invalidate_catalog(CatalogMissReason::UnusableTransport);
+        }
         // Keep a completed envelope intact even if cancellation/revocation
         // arrives just after it. Its transport may be retired; the executor
         // still needs the exact reply to journal success/error/uncertainty.
         // isError:true is transport Ok, never a business success proof.
         result
+    }
+}
+
+// These exact handlers were reviewed in tools/context.go, alerts.go, olm.go
+// and their DB/engine callees. This ONLY controls schema-cache retention; it
+// never marks an operation read-only for authorization, grants consent or
+// interprets a model-proposed tool. All other names invalidate conservatively.
+fn reviewed_catalog_read(name: &str, envelope: &Value) -> bool {
+    if !matches!(
+        name,
+        "get_learner_context" | "get_pending_alerts" | "get_olm_snapshot"
+    ) {
+        return false;
+    }
+    let Ok(payload) = crate::call_validation::result_payload(envelope) else {
+        return false;
+    };
+    if payload.get("error").is_some() {
+        return false;
+    }
+    match name {
+        "get_learner_context" => {
+            payload.get("profile").is_some_and(Value::is_object)
+                && payload.get("domains").is_some_and(Value::is_array)
+                && payload
+                    .get("needs_domain_setup")
+                    .is_some_and(Value::is_boolean)
+        }
+        "get_pending_alerts" => {
+            payload.get("alerts").is_some_and(Value::is_array)
+                && payload.get("has_critical").is_some_and(Value::is_boolean)
+                && payload
+                    .get("needs_domain_setup")
+                    .is_some_and(Value::is_boolean)
+        }
+        "get_olm_snapshot" => {
+            payload.get("domain_id").is_some_and(Value::is_string)
+                || payload.get("domains").is_some_and(Value::is_array)
+        }
+        _ => false,
     }
 }
 
@@ -1467,6 +1782,14 @@ fn send(text: &str) { let mut out=io::stdout().lock(); writeln!(out,"{text}").un
 }
 fn main() {
     let pid=std::process::id(); record(&format!("spawn {pid}"));
+    let mode=std::env::var("FIXTURE_MODE").unwrap();
+    let changed=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if let Ok(trigger)=std::env::var("FIXTURE_NOTIFY_TRIGGER") {
+        let changed=changed.clone();
+        std::thread::spawn(move || { while !std::path::Path::new(&trigger).exists() { std::thread::sleep(Duration::from_millis(2)); }
+            changed.store(true,std::sync::atomic::Ordering::Release);
+            send(r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#); record("notified"); });
+    }
     if let Ok(previous)=std::env::var("FIXTURE_PREVIOUS_PID") { record(&format!("previous_stopped {}", stopped(previous.parse().unwrap()))); }
     for line in io::stdin().lock().lines() {
         let line=line.unwrap();
@@ -1475,12 +1798,31 @@ fn main() {
         let id:u64=line[start..].trim_start().chars().take_while(|c|c.is_ascii_digit()).collect::<String>().parse().unwrap();
         if line.contains("\"method\":\"initialize\"") {
             record("initialize");
-            if std::env::var("FIXTURE_MODE").as_deref()==Ok("hang_init") { loop { std::thread::sleep(Duration::from_secs(60)); } }
-            send(&format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"protocolVersion":"2025-06-18","capabilities":{{"tools":{{}}}}}}}}"#)); continue;
+            if mode=="hang_init" { loop { std::thread::sleep(Duration::from_secs(60)); } }
+            let caps=if mode.starts_with("catalog_") && mode!="catalog_no_cap" { r#"{"listChanged":true}"# } else { "{}" };
+            send(&format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"protocolVersion":"2025-06-18","capabilities":{{"tools":{caps}}}}}}}"#)); continue;
         }
-        if line.contains("\"method\":\"tools/list\"") { record("list"); send(&format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"tools":[]}}}}"#)); continue; }
+        if line.contains("\"method\":\"tools/list\"") {
+            record("list");
+            if mode.starts_with("catalog_") {
+                let page=if line.contains("\"cursor\"") {
+                    if mode=="catalog_notify_fetch" { send(r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#); }
+                    r#"{"tools":[{"name":"get_pending_alerts","inputSchema":{"type":"object","properties":{}}},{"name":"opaque_unreviewed","inputSchema":{"type":"object","properties":{}},"annotations":{"readOnlyHint":true}}]}"#.to_owned()
+                } else {
+                    let kind=if changed.load(std::sync::atomic::Ordering::Acquire) { "integer" } else { "string" };
+                    format!(r#"{{"tools":[{{"name":"get_learner_context","inputSchema":{{"type":"object","properties":{{"flavor":{{"type":"{kind}"}}}}}}}}],"nextCursor":"p2"}}"#)
+                };
+                send(&format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{page}}}"#));
+            } else { send(&format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"tools":[]}}}}"#)); }
+            continue;
+        }
         if line.contains("\"name\":\"hang\"") { record("hang_call"); loop { std::thread::sleep(Duration::from_secs(60)); } }
-        record("call"); send(&format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"content":[],"structuredContent":{{"pid":{pid}}}}}}}"#));
+        record("call");
+        let error=mode=="catalog_tool_error";
+        let payload=if line.contains("\"name\":\"get_learner_context\"") { r#"{"profile":{},"domains":[],"needs_domain_setup":false,"objective":"fixture"}"#.to_owned() }
+            else if line.contains("\"name\":\"get_pending_alerts\"") { r#"{"alerts":[],"has_critical":false,"needs_domain_setup":false}"#.to_owned() }
+            else { format!(r#"{{"pid":{pid}}}"#) };
+        send(&format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"content":[],"isError":{error},"structuredContent":{payload}}}}}"#));
         if line.contains("\"name\":\"exit\"") { return; }
     }
 }
@@ -1830,5 +2172,623 @@ fn main() {
         assert_eq!(report.status, RetirementStatus::Quarantined);
         assert!(report.error.unwrap().requires_agent_restart());
         assert_eq!(spawn_count(&log), 1);
+    }
+
+    fn catalog_policy() -> CatalogPolicy {
+        CatalogPolicy::reviewed_stdio(Duration::from_secs(30)).unwrap()
+    }
+
+    fn catalog_scope(directory: &Path, config: &Value, conversation: Uuid) -> Scope {
+        Scope::from_host(&owner(), "catalog-acp", conversation, config, directory).unwrap()
+    }
+
+    #[test]
+    fn catalog_policy_ttl_is_bounded_and_registry_reads_are_not_whitelisted() {
+        assert!(CatalogPolicy::reviewed_stdio(Duration::ZERO).is_err());
+        assert!(CatalogPolicy::reviewed_stdio(Duration::from_secs(31)).is_err());
+        assert!(CatalogPolicy::reviewed_stdio(Duration::from_secs(30)).is_ok());
+        let payload = json!({"content":[],"structuredContent":{"profile":{},"domains":[],"needs_domain_setup":false}});
+        assert!(reviewed_catalog_read("get_learner_context", &payload));
+        for name in [
+            "list_training_library",
+            "get_training",
+            "get_conversation_context",
+            "opaque_unreviewed",
+        ] {
+            assert!(!reviewed_catalog_read(name, &payload));
+        }
+        assert!(!reviewed_catalog_read(
+            "get_learner_context",
+            &json!({"content":[],"isError":true,"structuredContent":{}})
+        ));
+    }
+
+    #[tokio::test]
+    async fn catalog_stdio_hit_acknowledges_only_reviewed_post_call_not_real_notification() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = directory.path().join("catalog.log");
+        let conversation = Uuid::new_v4();
+        let config = stdio_config(&log, conversation, "catalog_normal");
+        let scope = catalog_scope(directory.path(), &config, conversation);
+        let manager = Manager::new_with_catalog_policy(Handle::current(), catalog_policy());
+        let cancel = AtomicBool::new(false);
+        let mut lease = manager
+            .acquire(&scope, &config, directory.path(), &cancel)
+            .await
+            .unwrap();
+        let entries = lease.list_tools(&cancel).await.unwrap();
+        assert_eq!(entries.len(), 3);
+        let before = lease.client.as_ref().unwrap().catalog_state();
+        lease
+            .call_tool("get_learner_context", json!({}), None, &cancel)
+            .await
+            .unwrap();
+        let after = lease.client.as_ref().unwrap().catalog_state();
+        assert_eq!(before.notification_revision, after.notification_revision);
+        assert_eq!(before.post_call_revision + 1, after.post_call_revision);
+        assert!(lease.client.as_mut().unwrap().take_tools_changed()); // global marker preserved
+        assert!(!lease.take_tools_changed()); // reviewed local acknowledgment only
+        let first = lease.release(ReleasePolicy::RetainIfHealthy, &cancel).await;
+        assert_eq!(first.catalog.cache_misses, 1);
+        let mut lease = manager
+            .acquire(&scope, &config, directory.path(), &cancel)
+            .await
+            .unwrap();
+        assert_eq!(lease.list_tools(&cancel).await.unwrap().len(), 3);
+        let second = lease.release(ReleasePolicy::RetainIfHealthy, &cancel).await;
+        assert_eq!(second.catalog.cache_hits, 1);
+        assert_eq!(second.catalog.cache_misses, 0);
+        assert_eq!(second.observations[0].catalog_attempts, 0);
+        assert_eq!(second.observations[0].catalog_total_ms, None);
+        assert_eq!(
+            events(&log)
+                .lines()
+                .filter(|line| *line == "initialize")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events(&log).lines().filter(|line| *line == "list").count(),
+            2
+        ); // one 2-page snapshot
+        assert_eq!(
+            events(&log).lines().filter(|line| *line == "call").count(),
+            1
+        );
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn catalog_http_unobservable_idle_events_keep_wire_refresh_each_lease() {
+        let directory = tempfile::tempdir().unwrap();
+        let server = http().await;
+        let conversation = Uuid::new_v4();
+        let config = config(&server.url, conversation);
+        let scope = catalog_scope(directory.path(), &config, conversation);
+        let manager = Manager::new_with_catalog_policy(Handle::current(), catalog_policy());
+        let cancel = AtomicBool::new(false);
+        for _ in 0..2 {
+            let mut lease = manager
+                .acquire(&scope, &config, directory.path(), &cancel)
+                .await
+                .unwrap();
+            lease.list_tools(&cancel).await.unwrap();
+            let report = lease.release(ReleasePolicy::RetainIfHealthy, &cancel).await;
+            assert_eq!(report.catalog.cache_hits, 0);
+            assert_eq!(
+                report.catalog.last_miss_reason,
+                Some(CatalogMissReason::IdleNotificationsUnobservable)
+            );
+        }
+        assert_eq!(count(&server, "initialize"), 1);
+        assert_eq!(count(&server, "tools/list"), 2);
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn catalog_unreviewed_or_error_result_never_uses_annotation_as_authority() {
+        for mode in ["catalog_normal", "catalog_tool_error"] {
+            let directory = tempfile::tempdir().unwrap();
+            let log = directory.path().join("catalog.log");
+            let conversation = Uuid::new_v4();
+            let config = stdio_config(&log, conversation, mode);
+            let scope = catalog_scope(directory.path(), &config, conversation);
+            let manager = Manager::new_with_catalog_policy(Handle::current(), catalog_policy());
+            let cancel = AtomicBool::new(false);
+            let mut lease = manager
+                .acquire(&scope, &config, directory.path(), &cancel)
+                .await
+                .unwrap();
+            let entries = lease.list_tools(&cancel).await.unwrap();
+            let (name, reason) = if mode == "catalog_normal" {
+                assert_eq!(
+                    entries
+                        .iter()
+                        .find(|tool| tool.name == "opaque_unreviewed")
+                        .unwrap()
+                        .annotations["readOnlyHint"],
+                    true
+                );
+                ("opaque_unreviewed", CatalogMissReason::UnreviewedCall)
+            } else {
+                ("get_learner_context", CatalogMissReason::ToolError)
+            };
+            let envelope = lease
+                .call_tool(name, json!({}), None, &cancel)
+                .await
+                .unwrap();
+            assert_eq!(envelope["isError"], mode == "catalog_tool_error");
+            assert!(lease.take_tools_changed());
+            assert!(lease.take_tools_changed()); // sticky, polling never acknowledges
+            lease.list_tools(&cancel).await.unwrap();
+            let report = lease.release(ReleasePolicy::Close, &cancel).await;
+            assert_eq!(report.catalog.cache_misses, 2);
+            assert_eq!(report.catalog.last_miss_reason, Some(reason));
+            assert_eq!(report.observations[0].call_transport_successes, 1);
+            assert_eq!(
+                report.observations[0].tool_result_errors,
+                if mode == "catalog_tool_error" { 1 } else { 0 }
+            );
+            assert_eq!(
+                events(&log).lines().filter(|line| *line == "call").count(),
+                1
+            );
+            manager.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_expiry_and_explicit_permission_boundary_require_fresh_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = directory.path().join("catalog.log");
+        let conversation = Uuid::new_v4();
+        let config = stdio_config(&log, conversation, "catalog_normal");
+        let scope = catalog_scope(directory.path(), &config, conversation);
+        let manager = Manager::new_with_catalog_policy(Handle::current(), catalog_policy());
+        let cancel = AtomicBool::new(false);
+        let mut lease = manager
+            .acquire(&scope, &config, directory.path(), &cancel)
+            .await
+            .unwrap();
+        lease.list_tools(&cancel).await.unwrap();
+        // Deterministic elapsed-age injection, not a latency benchmark.
+        lease.catalog.as_mut().unwrap().fetched_at = Instant::now() - Duration::from_secs(31);
+        assert!(lease.take_tools_changed());
+        lease.list_tools(&cancel).await.unwrap();
+        assert_eq!(
+            lease.catalog_observation.last_miss_reason,
+            Some(CatalogMissReason::Expired)
+        );
+        lease.require_catalog_refresh();
+        assert!(lease.take_tools_changed());
+        lease.list_tools(&cancel).await.unwrap();
+        assert_eq!(
+            lease.catalog_observation.last_miss_reason,
+            Some(CatalogMissReason::PermissionBoundary)
+        );
+        let report = lease.release(ReleasePolicy::Close, &cancel).await;
+        assert_eq!(report.catalog.cache_hits, 0);
+        assert_eq!(report.catalog.cache_misses, 3);
+        assert_eq!(
+            events(&log).lines().filter(|line| *line == "list").count(),
+            6
+        );
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn catalog_notification_during_pagination_rejects_every_partial_page() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = directory.path().join("catalog.log");
+        let conversation = Uuid::new_v4();
+        let config = stdio_config(&log, conversation, "catalog_notify_fetch");
+        let scope = catalog_scope(directory.path(), &config, conversation);
+        let manager = Manager::new_with_catalog_policy(Handle::current(), catalog_policy());
+        let cancel = AtomicBool::new(false);
+        let mut lease = manager
+            .acquire(&scope, &config, directory.path(), &cancel)
+            .await
+            .unwrap();
+        assert_eq!(
+            lease.list_tools(&cancel).await.err(),
+            Some(ClientError::Catalog)
+        );
+        assert!(lease.catalog.is_none());
+        let report = lease.release(ReleasePolicy::RetainIfHealthy, &cancel).await;
+        assert!(!report.retained);
+        assert_eq!(report.catalog.cache_hits, 0);
+        assert_eq!(
+            report.catalog.last_miss_reason,
+            Some(CatalogMissReason::FetchChanged)
+        );
+        assert_eq!(
+            events(&log).lines().filter(|line| *line == "list").count(),
+            2
+        );
+        assert_eq!(
+            events(&log).lines().filter(|line| *line == "call").count(),
+            0
+        );
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn catalog_changed_type_while_approval_pending_rejects_old_prepared_call() {
+        use crate::{
+            call_validation::{self, VerifiedFields},
+            catalog::ToolCatalog,
+            executor::{self, Preparation},
+            session_store::SessionStore,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let log = directory.path().join("catalog.log");
+        let trigger = directory.path().join("notify.trigger");
+        let conversation = Uuid::new_v4();
+        let mut config = stdio_config(&log, conversation, "catalog_idle_notify");
+        config["env"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name":"FIXTURE_NOTIFY_TRIGGER","value":trigger}));
+        let scope = catalog_scope(directory.path(), &config, conversation);
+        let manager = Manager::new_with_catalog_policy(Handle::current(), catalog_policy());
+        let cancel = AtomicBool::new(false);
+        let mut lease = manager
+            .acquire(&scope, &config, directory.path(), &cancel)
+            .await
+            .unwrap();
+        let mut catalog = ToolCatalog::new("catalog-epoch".into()).unwrap();
+        catalog
+            .replace_server_tools(
+                "catalog-epoch",
+                "tutor",
+                lease.list_tools(&cancel).await.unwrap(),
+            )
+            .unwrap();
+        let mut store = SessionStore::create(directory.path(), &owner(), &"a".repeat(64)).unwrap();
+        let turn = store.begin_turn("Read my own fixture profile").unwrap();
+        let fields = VerifiedFields::new("catalog-epoch".into(), store.journal()).unwrap();
+        let call = call_validation::validate_call(
+            &catalog,
+            "catalog-epoch",
+            "tutor/get_learner_context",
+            &json!({}),
+            &fields,
+            Uuid::new_v4(),
+        )
+        .unwrap();
+        let operation = call.operation_id().to_owned();
+        let Preparation::Ready(prepared) =
+            executor::prepare(store.journal_mut(), &turn, call, None).unwrap()
+        else {
+            panic!("fresh call expected");
+        };
+        // Approval is pending at the host. Server changes a type and emits a
+        // real idle notification; the old allow response cannot authorize it.
+        std::fs::write(&trigger, b"notify").unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !lease.take_tools_changed() {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(lease.take_tools_changed());
+        catalog
+            .replace_server_tools(
+                "catalog-epoch",
+                "tutor",
+                lease.list_tools(&cancel).await.unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            catalog
+                .resolve("catalog-epoch", "tutor/get_learner_context")
+                .unwrap()
+                .input_schema["properties"]["flavor"]["type"],
+            "integer"
+        );
+        let approval = json!({"outcome":{"outcome":"selected","optionId":"allow"}});
+        assert_eq!(
+            prepared
+                .execute(
+                    store.journal_mut(),
+                    &catalog,
+                    "catalog-epoch",
+                    &approval,
+                    &mut lease,
+                    &cancel
+                )
+                .await
+                .err(),
+            Some(executor::Error::Stale)
+        );
+        assert_eq!(
+            store
+                .journal()
+                .operation(&operation)
+                .unwrap()
+                .unwrap()
+                .state,
+            crate::journal::OperationState::Rejected
+        );
+        assert_eq!(
+            events(&log).lines().filter(|line| *line == "call").count(),
+            0
+        );
+        let report = lease.release(ReleasePolicy::Close, &cancel).await;
+        assert_eq!(
+            report.catalog.last_miss_reason,
+            Some(CatalogMissReason::RealNotification)
+        );
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn catalog_scope_and_generation_changes_cannot_keep_previous_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = directory.path().join("catalog.log");
+        let conversation = Uuid::new_v4();
+        let config = stdio_config(&log, conversation, "catalog_normal");
+        let scope = catalog_scope(directory.path(), &config, conversation);
+        let manager = Manager::new_with_catalog_policy(Handle::current(), catalog_policy());
+        let cancel = AtomicBool::new(false);
+        let mut lease = manager
+            .acquire(&scope, &config, directory.path(), &cancel)
+            .await
+            .unwrap();
+        lease.list_tools(&cancel).await.unwrap();
+        lease.release(ReleasePolicy::RetainIfHealthy, &cancel).await;
+        manager.invalidate();
+        manager
+            .wait_ready(&cancel, Duration::from_secs(3))
+            .await
+            .unwrap();
+        let mut lease = manager
+            .acquire(&scope, &config, directory.path(), &cancel)
+            .await
+            .unwrap();
+        lease.list_tools(&cancel).await.unwrap();
+        assert_eq!(lease.catalog_observation.cache_hits, 0);
+        lease.release(ReleasePolicy::RetainIfHealthy, &cancel).await;
+        let mut another = owner();
+        another.account_id.push_str("-other");
+        let changed = Scope::from_host(
+            &another,
+            "catalog-acp",
+            conversation,
+            &config,
+            directory.path(),
+        )
+        .unwrap();
+        let mut lease = manager
+            .acquire(&changed, &config, directory.path(), &cancel)
+            .await
+            .unwrap();
+        lease.list_tools(&cancel).await.unwrap();
+        assert_eq!(lease.catalog_observation.cache_hits, 0);
+        assert_eq!(spawn_count(&log), 3);
+        assert_eq!(
+            events(&log).lines().filter(|line| *line == "list").count(),
+            6
+        );
+        let report = lease.release(ReleasePolicy::Close, &cancel).await;
+        let exported = serde_json::to_string(&report.catalog).unwrap();
+        assert!(!exported.contains("fixture-private"));
+        assert!(!exported.contains("inputSchema"));
+        assert!(!exported.contains("catalog-acp"));
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn catalog_after_approval_refreshes_http_and_unobservable_stdio_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let server = http().await;
+        let conversation = Uuid::new_v4();
+        let config = config(&server.url, conversation);
+        let scope = catalog_scope(directory.path(), &config, conversation);
+        let manager = Manager::new_with_catalog_policy(Handle::current(), catalog_policy());
+        let cancel = AtomicBool::new(false);
+        let mut lease = manager
+            .acquire(&scope, &config, directory.path(), &cancel)
+            .await
+            .unwrap();
+        lease.list_tools(&cancel).await.unwrap();
+        assert!(!lease.take_tools_changed()); // young HTTP stamp alone misses idle events
+        assert!(lease.require_catalog_refresh_after_approval());
+        assert!(lease.take_tools_changed());
+        lease.list_tools(&cancel).await.unwrap();
+        assert_eq!(count(&server, "tools/list"), 2);
+        let report = lease.release(ReleasePolicy::Close, &cancel).await;
+        assert_eq!(report.catalog.cache_hits, 0);
+        assert_eq!(report.catalog.cache_misses, 2);
+        manager.shutdown().await;
+
+        for mode in ["catalog_normal", "catalog_no_cap"] {
+            let directory = tempfile::tempdir().unwrap();
+            let log = directory.path().join("approval.log");
+            let conversation = Uuid::new_v4();
+            let config = stdio_config(&log, conversation, mode);
+            let scope = catalog_scope(directory.path(), &config, conversation);
+            let manager = Manager::new_with_catalog_policy(Handle::current(), catalog_policy());
+            let mut lease = manager
+                .acquire(&scope, &config, directory.path(), &cancel)
+                .await
+                .unwrap();
+            lease.list_tools(&cancel).await.unwrap();
+            let needs_wire_refresh = mode == "catalog_no_cap";
+            assert_eq!(
+                lease.require_catalog_refresh_after_approval(),
+                needs_wire_refresh
+            );
+            assert_eq!(lease.take_tools_changed(), needs_wire_refresh);
+            lease.list_tools(&cancel).await.unwrap();
+            let report = lease.release(ReleasePolicy::Close, &cancel).await;
+            assert_eq!(
+                report.catalog.cache_hits,
+                if needs_wire_refresh { 0 } else { 1 }
+            );
+            assert_eq!(
+                events(&log)
+                    .lines()
+                    .filter(|event| *event == "list")
+                    .count(),
+                if needs_wire_refresh { 4 } else { 2 }
+            );
+            manager.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_disabled_keeps_existing_approval_and_result_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let server = http().await;
+        let conversation = Uuid::new_v4();
+        let config = config(&server.url, conversation);
+        let scope = catalog_scope(directory.path(), &config, conversation);
+        let manager = Manager::new(Handle::current());
+        let cancel = AtomicBool::new(false);
+        let mut lease = manager
+            .acquire(&scope, &config, directory.path(), &cancel)
+            .await
+            .unwrap();
+        lease.list_tools(&cancel).await.unwrap();
+        assert!(!lease.require_catalog_refresh_after_approval());
+        assert!(!lease.take_tools_changed());
+        let reply = lease
+            .call_tool("get_learner_context", json!({}), None, &cancel)
+            .await
+            .unwrap();
+        assert!(reply.is_object());
+        assert!(lease.take_tools_changed()); // original conservative post-call marker
+        assert!(lease.catalog.is_none());
+        assert!(lease.catalog_invalidated.is_none());
+        assert_eq!(count(&server, "tools/list"), 1);
+        assert_eq!(count(&server, "tools/call"), 1);
+        let report = lease.release(ReleasePolicy::Close, &cancel).await;
+        assert_eq!(report.catalog.cache_hits, 0);
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "Requires an explicitly selected local Tutor binary; disposable profile only, no model"]
+    async fn catalog_actual_tutor_development_probe() {
+        use crate::{
+            call_validation::{self, VerifiedFields},
+            catalog::ToolCatalog,
+            executor::{self, Preparation},
+            journal::OperationState,
+            session_store::SessionStore,
+        };
+        let server = std::path::PathBuf::from(
+            std::env::var_os("TUTOR_CATALOG_PROBE_SERVER").expect("explicit local Tutor binary"),
+        );
+        assert!(server.is_absolute() && server.is_file());
+        let output = std::path::PathBuf::from(
+            std::env::var_os("TUTOR_CATALOG_PROBE_OUTPUT").expect("new report path"),
+        );
+        assert!(output.is_absolute() && !output.exists());
+        let directory = tempfile::tempdir().unwrap();
+        let conversation = Uuid::new_v4();
+        let config = json!({"name":"tutor", "command":server,
+            "args":["--local","--data-dir",directory.path().join("disposable-server")],
+            "env":[{"name":"TUTOR_CONVERSATION_ID","value":conversation.to_string()}]});
+        let scope = catalog_scope(directory.path(), &config, conversation);
+        let manager = Manager::new_with_catalog_policy(Handle::current(), catalog_policy());
+        let cancel = AtomicBool::new(false);
+        let mut store =
+            SessionStore::create(&directory.path().join("journal"), &owner(), &"b".repeat(64))
+                .unwrap();
+        store.bind_conversation(conversation).unwrap();
+        let mut observations = Vec::new();
+        let mut same_entries: Option<Vec<ToolEntry>> = None;
+        let mut checks = Vec::new();
+        for index in 0..2 {
+            let turn = store
+                .begin_turn("Development probe: consult the disposable local profile")
+                .unwrap();
+            let started = Instant::now();
+            let mut lease = manager
+                .acquire(&scope, &config, directory.path(), &cancel)
+                .await
+                .unwrap();
+            let connected_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let transport_state = lease.client.as_ref().unwrap().catalog_state();
+            let list_started = Instant::now();
+            let entries = lease.list_tools(&cancel).await.unwrap();
+            let list_ms = list_started.elapsed().as_secs_f64() * 1000.0;
+            checks.push(json!({"name":"real_server_declares_list_changed", "passed":transport_state.notifications_supported}));
+            checks.push(json!({"name":"stdio_idle_reader_observable", "passed":transport_state.idle_notifications_observable}));
+            checks.push(json!({"name":"nonempty_actual_catalog", "passed":!entries.is_empty()}));
+            let same = same_entries.as_ref().is_none_or(|prior| *prior == entries);
+            checks.push(json!({"name":"exact_same_catalog_entries", "passed":same}));
+            same_entries = Some(entries.clone());
+            let binding = "real-catalog-development-epoch";
+            let mut catalog = ToolCatalog::new(binding.into()).unwrap();
+            catalog
+                .replace_server_tools(binding, "tutor", entries.clone())
+                .unwrap();
+            let fields = VerifiedFields::new(binding.into(), store.journal()).unwrap();
+            let call = call_validation::validate_call(
+                &catalog,
+                binding,
+                "tutor/get_learner_context",
+                &json!({}),
+                &fields,
+                Uuid::new_v4(),
+            )
+            .unwrap();
+            let operation = call.operation_id().to_owned();
+            let Preparation::Ready(prepared) =
+                executor::prepare(store.journal_mut(), &turn, call, None).unwrap()
+            else {
+                panic!("new operation required");
+            };
+            // Controlled approval fixture, not an assertion about the ACP/UI.
+            let approval = json!({"outcome":{"outcome":"selected","optionId":"allow"}});
+            let forced = lease.require_catalog_refresh_after_approval();
+            if lease.take_tools_changed() {
+                catalog
+                    .replace_server_tools(
+                        binding,
+                        "tutor",
+                        lease.list_tools(&cancel).await.unwrap(),
+                    )
+                    .unwrap();
+            }
+            let executed = prepared
+                .execute(
+                    store.journal_mut(),
+                    &catalog,
+                    binding,
+                    &approval,
+                    &mut lease,
+                    &cancel,
+                )
+                .await
+                .unwrap();
+            let payload = call_validation::result_payload(&executed.result).unwrap();
+            checks.push(json!({"name":"actual_profile_payload", "passed":payload.get("profile").is_some_and(Value::is_object) && payload.get("domains").is_some_and(Value::is_array) && payload.get("needs_domain_setup").is_some_and(Value::is_boolean)}));
+            checks.push(json!({"name":"durable_completed_operation", "passed":store.journal().operation(&operation).unwrap().unwrap().state==OperationState::Completed}));
+            store
+                .finish_turn(&turn, crate::session_store::Completion::Complete)
+                .unwrap();
+            let released = lease.release(ReleasePolicy::RetainIfHealthy, &cancel).await;
+            checks.push(json!({"name":"expected_catalog_reuse", "passed":if index==0 { released.catalog.cache_misses==1 && released.catalog.cache_hits==0 } else { released.catalog.cache_hits==1 && released.catalog.cache_misses==0 }}));
+            checks.push(json!({"name":"expected_connection_reuse", "passed":released.connection_reused==(index==1) && released.retained}));
+            observations.push(json!({"index":index,"toolsCount":entries.len(),"connectOrLeaseMs":connected_ms,"listOrCacheMs":list_ms,"afterApprovalForcedRefresh":forced,"catalog":released.catalog,"mcp":released.observations,"restartRequired":released.error.is_some_and(|e|e.requires_agent_restart())}));
+        }
+        let shutdown = manager.shutdown().await;
+        checks.push(json!({"name":"shutdown_quiescent", "passed":shutdown.status==RetirementStatus::Quiescent && shutdown.error.is_none()}));
+        let passed = checks.iter().all(|check| check["passed"] == true);
+        let report = json!({"schemaVersion":1,"scope":"Development: resident manager and real executor with unchanged local Tutor on disposable data. No ACP/UI/model/Windows/P2000 qualification.","status":if passed {"checks_passed"}else{"checks_failed"},"llmInvoked":false,"windowsP2000Qualified":false,"pedagogyQualified":false,"usefulResponseMeasured":false,"cacheTtlSeconds":30,"observations":observations,"checks":checks,"limits":["Only two sequential profile consultations; descriptive timings, no p95 or end-user latency.","Approval is a controlled fixture; no actual ACP host or UI.","Observed declared listChanged and cache reuse, not an induced real server list-change event.","Disposable local identity; no institution/account authentication qualification."]});
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(output)
+            .unwrap();
+        file.write_all(serde_json::to_string_pretty(&report).unwrap().as_bytes())
+            .unwrap();
+        assert!(passed, "see new development report for failed checks");
     }
 }

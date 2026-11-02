@@ -190,11 +190,28 @@ class CheckerTests(NoProcesses):
         value['mcpConnection']['privateHeader'] = 'must-not-be-exported'
         with self.assertRaises(probe.QualificationError):
             resident.checked_runtime(value, probe)
+
         value = runtime_metadata()
         value['inference']['phases']['prefillMs'] = float('nan')
         with self.assertRaises(probe.QualificationError):
             resident.checked_runtime(value, probe)
 
+    def test_catalog_extension_preserves_unknown_io_phases(self):
+        value = runtime_metadata()
+        value['mcpConnection']['catalog'] = {'schemaVersion': 1, 'cacheHits': 1, 'cacheMisses': 0, 'lastMissReason': None}
+        accepted = resident.checked_runtime(copy.deepcopy(value), probe)
+        self.assertEqual(accepted, value)
+        self.assertIsNone(accepted['mcp']['catalogPages'])
+        self.assertIsNone(accepted['mcp']['initializeTotalMs'])
+
+    def test_catalog_extension_rejects_private_fields_and_invalid_counters(self):
+        catalog = {'schemaVersion': 1, 'cacheHits': 1, 'cacheMisses': 0, 'lastMissReason': 'cold'}
+        for changes in ({'cacheHits': True}, {'cacheMisses': 0.0}, {'cacheHits': -1}, {'cacheHits': 2**64}, {'schemaVersion': True}, {'lastMissReason': 'private fixture data'}, {'privateSchema': 'must-not-export'}):
+            with self.subTest(changes=changes):
+                value = runtime_metadata()
+                value['mcpConnection']['catalog'] = {**catalog, **changes}
+                with self.assertRaises(probe.QualificationError):
+                    resident.checked_runtime(value, probe)
 
 class AcpTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -262,12 +279,27 @@ class AcpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(acp.process.stdin.written), 1)  # Prompt only, no permission response.
 
     def permission_frame(self, arguments):
-        return {'jsonrpc': '2.0', 'id': 'permission:profile', 'method': 'session/request_permission', 'params': {'sessionId': 'session-A', 'toolCall': {'rawInput': {'server': 'tutor', 'tool': 'get_learner_context', 'arguments': arguments}}, 'options': [{'kind': 'allow_once', 'optionId': 'allow'}, {'kind': 'reject_once', 'optionId': 'deny'}]}}
+        return {'jsonrpc': '2.0', 'id': 'permission:fixture-profile', 'method': 'session/request_permission', 'params': {'sessionId': 'session-A', 'toolCall': {'toolCallId': 'fixture-profile', 'rawInput': {'server': 'tutor', 'tool': 'get_learner_context', 'arguments': arguments}}, 'options': [{'kind': 'allow_once', 'optionId': 'allow'}, {'kind': 'reject_once', 'optionId': 'deny'}]}}
 
     async def profile_permission(self, training, arguments, allowed=True):
         acp = self.acp([self.permission_frame(arguments), answer_frame()])
         row = await acp.prompt('session-A', training, resident.PROFILE_PROMPT, 'offline_profile', allowed, 5, [], 'A')
         return row, acp.process.stdin.written
+
+    async def test_permission_id_must_match_the_actual_operation(self):
+        frame = self.permission_frame({})
+        frame['id'] = 'permission:other-operation'
+        acp = self.acp([frame])
+        result = await acp.prompt('session-A', {'conversation_id': 'fixture'}, resident.PROFILE_PROMPT, 'bad_operation', True, 5, [], 'A')
+        self.assertEqual(result['error'], 'permission_operation_id_mismatch')
+        self.assertEqual(len(acp.process.stdin.written), 1)
+
+    async def test_observed_dispatch_before_permission_is_rejected(self):
+        acp = self.acp([self.permission_frame({})])
+        with patch.object(resident, 'audit_counts', side_effect=[Counter(), Counter({'profile_dispatch': 1}), Counter({'profile_dispatch': 1})]):
+            result = await acp.prompt('session-A', {'conversation_id': 'fixture'}, resident.PROFILE_PROMPT, 'early_dispatch', True, 5, [], 'A')
+        self.assertEqual(result['error'], 'profile_dispatched_before_permission')
+        self.assertEqual(len(acp.process.stdin.written), 1)
 
     async def test_permission_correct_host_domain_is_accepted(self):
         row, written = await self.profile_permission({'conversation_id': 'fixture', 'domain_id': 'domain-verified'}, {'domain_id': 'domain-verified'})

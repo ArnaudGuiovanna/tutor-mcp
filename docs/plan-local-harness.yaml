@@ -43,7 +43,10 @@ implementation_checkpoint:
   resident_contract: docs/local-harness/resident-integration.yaml
   resident_source: Worker/contexte résidents, cache confirmé après journal, connexion MCP réutilisable, projection de preuves à alias stables et liaison durable à la conversation intégrés derrière options explicites.
   resident_checks: 228 tests sans inférence et 237 tests avec moteur natif réussis ; trois essais GGUF ignorés par cette suite, Clippy strict réussi.
-  next: Vérifier le banc apparié sur vrai Tutor/GGUF, puis terminer la fraîcheur du catalogue, l'état pédagogique et les capacités ; aucun gain produit présumé.
+  catalog_contract: docs/local-harness/catalog-integration.yaml
+  catalog_source: Cache exact stdio optionnel, TTL maximal de 30 secondes, notifications réelles séparées du marqueur après appel et fraîcheur recontrôlée après approbation ; HTTP reste conservateur.
+  catalog_checks: 239 tests sans moteur et 248 tests natifs réussis ; respectivement un et quatre essais explicites ignorés. Banc ACP sur vrai Tutor avec et sans cache, 227 contrôles réussis, aucun calcul modèle.
+  next: Intégrer l'état pédagogique, les capacités et le routage sémantique puis qualifier sur Windows/P2000 ; les bancs techniques ne prouvent pas la compréhension générale.
 
 invariants:
   - Le serveur reste autorité sur les droits, formations, versions, décisions et progression.
@@ -182,7 +185,7 @@ items:
       - Révoquer les anciens bindings sur changement de compte, serveur, conversation ou autorisation ; actualiser le catalogue vivant.
       - Un échec de transport n'entraîne aucun rejeu automatique d'une opération envoyée ; les mutations inconnues restent identifiées.
       - Annulation, rebind, EOF et fermeture du client libèrent transports et processus ; permissions toujours vérifiées sur l'outil métier réel.
-    checkpoint: Connexion HTTP/stdio réutilisable, lease exclusive et nettoyage contrôlé raccordés ; catalogue encore relu à chaque lease, donc critère de catalogue résident non satisfait.
+    checkpoint: Connexion HTTP/stdio résidente et cache stdio optionnel raccordés ; deux lectures de catalogue évitées sur le banc ACP apparié de dix demandes. HTTP sans événements au repos, éviction, campagne de fautes complète et qualification cible restent ouverts ; voir catalog-integration.yaml.
 
   - id: LH-03
     title: État pédagogique persistant et projection bornée

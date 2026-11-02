@@ -185,6 +185,7 @@ struct State {
     pending: AtomicU64,
     tools_changed: AtomicBool,
     revision: AtomicU64,
+    post_call_revision: AtomicU64,
 }
 impl State {
     fn shutdown(&self) {
@@ -224,6 +225,7 @@ pub struct StdioClient {
     next_id: u64,
     ready: bool,
     supports_tools: bool,
+    supports_list_changed: bool,
 }
 impl Drop for StdioClient {
     fn drop(&mut self) {
@@ -276,6 +278,7 @@ impl StdioClient {
             pending: AtomicU64::new(0),
             tools_changed: AtomicBool::new(true),
             revision: AtomicU64::new(0),
+            post_call_revision: AtomicU64::new(0),
         });
         let (tx, responses) = mpsc::channel(2);
         let reader_state = state.clone();
@@ -313,7 +316,16 @@ impl StdioClient {
                         break;
                     }
                     if method.as_str() == Some("notifications/tools/list_changed") {
-                        reader_state.revision.fetch_add(1, Ordering::AcqRel);
+                        if reader_state
+                            .revision
+                            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                                value.checked_add(1)
+                            })
+                            .is_err()
+                        {
+                            let _ = tx.send(Err(StdioError::Protocol)).await;
+                            break;
+                        }
                         reader_state.tools_changed.store(true, Ordering::Release);
                     }
                     continue;
@@ -384,6 +396,7 @@ impl StdioClient {
             next_id: 1,
             ready: true,
             supports_tools: false,
+            supports_list_changed: false,
         };
         let result = client.initialize(cancel).await;
         if let Err(error) = result {
@@ -410,6 +423,10 @@ impl StdioClient {
         self.supports_tools = result
             .pointer("/capabilities/tools")
             .is_some_and(Value::is_object);
+        self.supports_list_changed = result
+            .pointer("/capabilities/tools/listChanged")
+            .and_then(Value::as_bool)
+            == Some(true);
         let body =
             encode(&json!({"jsonrpc":"2.0","method":"notifications/initialized","params":{}}))?;
         self.ready = false;
@@ -432,6 +449,16 @@ impl StdioClient {
     }
     pub fn take_tools_changed(&self) -> bool {
         self.state.tools_changed.swap(false, Ordering::AcqRel)
+    }
+
+    pub(crate) fn catalog_state(&self) -> crate::mcp_client::CatalogState {
+        crate::mcp_client::CatalogState {
+            notification_revision: self.state.revision.load(Ordering::Acquire),
+            post_call_revision: self.state.post_call_revision.load(Ordering::Acquire),
+            ready: self.ready && self.supports_tools && !self.state.closing.load(Ordering::Acquire),
+            notifications_supported: self.supports_list_changed,
+            idle_notifications_observable: true,
+        }
     }
 
     pub async fn close(&mut self) -> Result<(), StdioError> {
@@ -551,6 +578,18 @@ impl StdioClient {
             params["_meta"] = json!({"idempotency_key":key});
         }
         self.state.tools_changed.store(true, Ordering::Release);
+        if self
+            .state
+            .post_call_revision
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                value.checked_add(1)
+            })
+            .is_err()
+        {
+            self.ready = false;
+            self.state.shutdown();
+            return Err(StdioError::Protocol);
+        }
         let result = self.request("tools/call", params, cancel).await?;
         if !result.get("content").is_some_and(Value::is_array)
             || result.get("isError").is_some_and(|v| !v.is_boolean())
