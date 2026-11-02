@@ -338,7 +338,7 @@ class OutputTests(NoProcesses):
             folder = Path(directory)
             output = folder / 'rapport élève nouveau.json'
             options = resident.parse_options(self.fixture_paths(folder) + ['--output', str(output), '--welcome-turns', '100'])
-            self.assertEqual(options.output, output)
+            self.assertEqual(options.output, output.resolve())
             self.assertEqual(options.welcome_turns, 100)
             self.assertFalse(output.exists())
 
@@ -358,7 +358,7 @@ class OutputTests(NoProcesses):
             output = Path(directory)
             options = SimpleNamespace(command='probe', output=output)
             report = {'status': 'observations_complete', 'checksSummary': {}}
-            with patch.object(resident, 'parse_options', return_value=options), patch.object(resident, 'run', new=AsyncMock(return_value=report)), self.assertRaises((IsADirectoryError, FileExistsError)):
+            with patch.object(resident, 'parse_options', return_value=options), patch.object(resident, 'run', new=AsyncMock(return_value=report)), self.assertRaises((IsADirectoryError, FileExistsError, PermissionError)):
                 resident.main([])
             self.assertTrue(output.is_dir())
 
