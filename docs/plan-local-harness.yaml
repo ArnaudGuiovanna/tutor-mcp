@@ -1,0 +1,314 @@
+version: 1
+title: Tutor ACP local — plan de réalisation, fluidité et compréhension des intentions
+requested_at: '2026-11-02'
+baseline_commit: e8185e5ebedddedd691bfd6adf4798e99ac9eb90
+authority: Plan de référence pour les nouveaux travaux du harness, après acceptation de la recommandation du 1 novembre 2026.
+historical_backlog: docs/backlog-local-harness.yaml
+status: PLANNED
+planning_delivery: REVIEWED ; quatre lots remis et intégrés, dépendances et contrats recoupés par l'agent principal.
+implementation_status: NOT_STARTED
+status_meaning: Les lots ci-dessous décrivent des travaux à réaliser ; leur présence ne prouve ni leur implémentation ni leur qualification.
+
+objective:
+  product: Un tuteur local qui comprend les demandes dans la conversation pédagogique, utilise les capacités Tutor appropriées et répond dans un délai acceptable.
+  implementation: Agent ACP Rust, GGUF chargé localement, journal exact, état pédagogique compact, contexte d'inférence réutilisable, connexion MCP persistante et exécuteur déterministe.
+  target: Windows x64, Intel Core i7-9750H, 32 Gio RAM, Quadro P2000 4 Gio, un utilisateur.
+  exclusions: [modification du serveur MCP, LoRA, Needle]
+  model_selection: Comparer des configurations complètes ; aucun nouveau modèle n'est adopté sur la seule base de ses benchmarks publiés.
+  completion: Tous les critères fonctionnels, pédagogiques, de latence et de distribution sont vérifiés sur le commit et le matériel cibles ; une CI verte ou un lot initial ne suffit pas.
+  qualification_operator: L'utilisateur a confirmé pouvoir exécuter le futur banc sur son PC Windows/P2000 ; demander ce lancement seulement lorsque le paquet et son rapport exportable sont prêts.
+
+current_state:
+  desktop_version: 0.0.8
+  release: https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/tutor-local-v0.1.0-alpha.4
+  runtime_model: Qwen3-1.7B Q4_K_M
+  model_profile: client/local-agent/model-profile.json
+  model_sha256: b139949c5bd74937ad8ed8c8cf3d9ffb1e99c866c823204dc42c0d91fa181897
+  inference: CPU ; poids résidents, nouveau contexte KV à chaque génération.
+  context: 2048 tokens, 192 réservés en sortie, 256 de marge, deux tours récents et nom de formation confirmé.
+  tools: Quelques demandes entières sélectionnent des lectures fixes ; les autres passent en conversation sans MCP dans l'agent natif.
+  connection: Connexion et catalogue MCP reconstruits puis fermés à chaque parcours fixe.
+  retained_foundations: [journal SQLite, provenance, validation de schéma, permissions ACP, garde de tour, reçus et idempotence]
+  qualification: Windows installateur/UI qualifiés ; inférence P2000, compréhension générale et pédagogie complète non qualifiées.
+  measurements: docs/local-harness/research-baseline.json
+
+invariants:
+  - Le serveur reste autorité sur les droits, formations, versions, décisions et progression.
+  - Le modèle propose une intention ou une explication ; Rust décide de l'admission, construit les paramètres prouvés et exécute les outils.
+  - Aucun appel déclenché par la seule proximité vectorielle ; aucun score déclaré par le LLM ne confère une autorisation.
+  - Les identifiants proviennent de l'identité vérifiée, du contexte actuel ou d'un résultat serveur journalisé ; jamais d'une invention du modèle.
+  - Une instance de poids et une génération active ; contexte, listes et caches isolés par propriétaire, serveur, conversation et modèle.
+  - Une annulation ne signifie pas qu'une mutation distante a été annulée ; un résultat inconnu reste à réconcilier sans rejeu automatique.
+  - Le journal conserve les entrées, preuves et reçus exacts ; une projection ou un résumé ne les remplace pas.
+  - Aucun secret ni réponse privée dans les diagnostics exportés ; les textes des cas d'essai proviennent de fixtures ou d'un export explicitement choisi.
+  - Tout budget compte tokenizer, template, capacités, données et sortie ; une preuve requise n'est jamais tronquée silencieusement.
+  - Une phrase non reconnue n'autorise pas une affirmation comme « aucun accès au profil » sans preuve de cette indisponibilité.
+  - Les agents ACP existants, données utilisateur et politiques d'autorisation continuent de fonctionner.
+
+architecture:
+  fast_path: Message et état vérifié → candidats sémantiques et classificateur calibré → capacité admise → MCP → rendu structuré sourcé.
+  llm_path: Message, état utile et quelques capacités → décision bornée ou réponse pédagogique ; lectures exécutées par Rust ; synthèse supplémentaire seulement si nécessaire.
+  uncertainty: Rejet du classificateur, référence non résolue ou demande composée → analyse LLM bornée ou clarification ciblée ; pas de choix forcé.
+  capabilities: Registre métier local associé aux outils vivants ; catalogue et schémas complets hors contexte ; descriptions courtes seulement pour les candidats.
+  dialogue_state: Formation, objectif, activité, question attendue, dernière liste, difficulté et informations manquantes, avec provenance et version.
+  context_manager: État obligatoire + historique récent sélectionné + preuves retrouvées ; budget exact 2048 puis 4096 si les mesures le justifient.
+  resident_runtime: Worker d'inférence propriétaire du backend, du modèle et des états de contexte ; préfixes stables avant données variables.
+  resident_mcp: Connexion et catalogue liés à l'identité et à la conversation ; invalidation sur rebind, droits, configuration ou annonce de changement.
+  system_prompt: Rôle de tuteur généraliste, usage des capacités et distinction données confirmées/inconnues ; consignes stables, adaptées au modèle, sans catalogue exhaustif ni raisonnement long imposé.
+  optional_encoder: Petit encodeur multilingue CPU local, par exemple via fastembed-rs ; un classificateur entraîné et calibré sur les intentions Tutor est à comparer à la décision LLM bornée.
+
+shared_contracts:
+  status: PROPOSED ; noms définitifs à stabiliser dans LH-00, avant les modifications concurrentes des modules centraux.
+  owner_binding:
+    responsibility: Identité locale et distante vérifiée, origine serveur, conversation et génération de liaison.
+    source: Réutiliser les bindings et preuves de host_context/call_validation ; ne pas créer une deuxième identité indépendante.
+    cache_rule: Un changement d'autorité invalide connexion, propositions en attente, sélections et caches concernés ; un renouvellement de transport n'autorise aucun rejeu.
+  dialogue_snapshot:
+    responsibility: État du tour courant, version de sélection, dernier exercice et dernière liste, chaque fait lié à une référence de journal et à son origine.
+    owner: context_routing
+    unavailable: Distinguer absent, inconnu, périmé, refusé et erreur ; aucun de ces états n'est une chaîne vide supposée confirmée.
+  capability_proposal:
+    responsibility: Intention, références utilisateur et paramètres non autoritaires proposés par routeur ou modèle.
+    owner: context_routing
+    admission: Le registre Rust résout les références, contrôle schéma et préconditions puis fournit un plan ; une proposition n'est pas un permis.
+  admitted_execution:
+    responsibility: Opérations métier typées, preuves de paramètres, politique d'autorisation et garde de tour déjà fournis par l'exécuteur.
+    owner: mcp_capabilities
+    result: Reçus immuables puis sélection exacte des faits nécessaires ; erreur ou issue inconnue ne deviennent pas une réponse de succès.
+  inference_request:
+    responsibility: Messages projetés, budget exact, profil modèle, clé de contexte admissible, mode de sortie et annulation.
+    owner: runtime_cache
+    compatibility: Les clés de cache ne sont jamais construites à partir d'un texte utilisateur ; l'adaptateur ACP fournit le binding vérifié.
+  turn_observation:
+    responsibility: Horodatages monotones et durées de phases, tokens comptés/réutilisés/produits, backend et effet utilisateur observable.
+    owner: qualification
+    privacy: Aucun texte de prompt, réponse privée, clé, jeton ou argument métier sensible dans les mesures techniques exportées par défaut.
+    compatibility: Champs ACP historiques conservés ; extensions optionnelles et versionnées ; les essais déclarent les métriques manquantes plutôt que de les inventer.
+
+parallel_work_rules:
+  - Chaque implémentation commence par les contrats partagés correspondant à son incrément ; la liste paths décrit la surface prévue et n'autorise pas deux agents à éditer le même fichier simultanément.
+  - Un agent propriétaire par fichier central ; le principal attribue les adaptations acp.rs/harness.rs et intègre les autres lots après revue.
+  - Les tâches TODO peuvent être préparées en parallèle, mais leur validation attend leurs dépendances.
+  - Les tests lourds et benchmarks CPU/GPU ne sont pas lancés simultanément sur le même matériel ; la concurrence fausserait les comparaisons.
+  - Aucun lot ne modifie les seuils, les annotations de référence ou les tests tenus à part pour obtenir un résultat favorable.
+
+delegation:
+  integration_owner: Agent principal ; plan global, dépendances, contrats partagés, revue, intégration et publication.
+  assignment_scope: Les quatre subagents préparent des lots techniques implémentables ; ils ne modifient pas le runtime livré dans cette phase de planification.
+  constraints: Écritures disjointes, pas de publication autonome, pas de changement serveur et pas de déclaration de qualification sans preuve.
+  dispatch: Quatre subagents effectivement lancés le 2 novembre 2026 ; leurs identifiants ci-dessous correspondent aux appels de délégation de cette session.
+  agents:
+    - role: runtime_cache
+      nickname: Hegel
+      agent_id: 01a19b1f-cb23-7a02-acd3-ec408fdf9d36
+      deliverable: docs/local-harness/runtime-work-package.yaml
+    - role: mcp_capabilities
+      nickname: Kepler
+      agent_id: 01a19b1f-ce89-7612-b110-5811fdd11f6d
+      deliverable: docs/local-harness/mcp-work-package.yaml
+    - role: context_routing
+      nickname: Aristotle
+      agent_id: 01a19b1f-d00b-7813-9a16-02513c0f95a0
+      deliverable: docs/local-harness/context-routing-work-package.yaml
+    - role: qualification
+      nickname: Avicenna
+      agent_id: 01a19b1f-ccfc-7d92-accf-929026e6f7c7
+      deliverable: docs/local-harness/qualification-work-package.yaml
+
+delivery_order:
+  - increment: A
+    purpose: Mesurer et réduire les coûts techniques avec le modèle actuel, sans changer simultanément de modèle et de stratégie d'intention.
+    items: [LH-00, LH-01, LH-02]
+  - increment: B
+    purpose: Relier compréhension, état pédagogique et capacités réelles ; préparer l'évaluation indépendante avant le réglage du routeur.
+    items: [LH-03, LH-04, LH-05, LH-06, LH-07]
+  - increment: C
+    purpose: Étendre la boucle pédagogique vérifiée, comparer moteurs/modèles et exploiter le matériel cible.
+    items: [LH-08, LH-09, LH-10]
+  - increment: D
+    purpose: Qualifier la chaîne complète sur Windows/P2000 puis livrer une préversion accompagnée de résultats vérifiables.
+    items: [LH-11, LH-12]
+
+items:
+  - id: LH-00
+    title: Mesures de référence et attribution des délais
+    owner: runtime_cache
+    status: TODO
+    depends_on: []
+    paths: [client/local-agent/src/runtime.rs, client/local-agent/src/acp.rs, client/scripts/qualify-local-agent.py]
+    acceptance:
+      - Séparer vérification/chargement des poids, tokenisation, allocation, prefill, décodage, routage, connexion/appel MCP, attente humaine et affichage.
+      - Distinguer premier token interne, première réponse utile et réponse terminée ; ne pas afficher un statut comme une réponse utile.
+      - Relever froid/chaud et versions, empreintes, options et environnement ; préserver les champs ACP existants via métadonnées optionnelles.
+      - Reproduire une référence avec le GGUF actuel, sur données temporaires et serveur local réel ; absence de matériel cible marquée INCOMPLETE.
+    evidence_required: Rapport brut associé au commit et aux artefacts ; aucun résultat du microbenchmark de recherche n'est assimilé à une mesure produit.
+
+  - id: LH-01
+    title: Worker résident et cache d'inférence isolé
+    owner: runtime_cache
+    status: TODO
+    depends_on: [LH-00]
+    paths: [client/local-agent/src/runtime.rs, client/local-agent/src/acp.rs, client/local-agent/src/harness.rs]
+    acceptance:
+      - Préserver ownership et durée de vie modèle/contexte sans élargir implicitement les garanties Send/Sync ni utiliser une durée de vie fabriquée.
+      - Réutiliser seulement le préfixe de tokens réellement identique et admissible dans le bon binding ; exposer tokens réutilisés et recalculés.
+      - Tester changement d'identité, de serveur, de conversation, de modèle, de template et de budget ; aucune fuite ou sélection de contexte périmé.
+      - Après erreur, annulation, sortie maximale ou éviction, produire une nouvelle réponse correcte et journalisée, sans queue ni tokens résiduels.
+      - Comparer cache actif/inactif sur les mêmes requêtes ; premier fragment et décision complète mesurés séparément, modèle et paramètres constants.
+
+  - id: LH-02
+    title: Connexion MCP et catalogue résidents
+    owner: mcp_capabilities
+    status: TODO
+    depends_on: [LH-00]
+    paths: [client/local-agent/src/harness.rs, client/local-agent/src/mcp_client.rs, client/local-agent/src/mcp_stdio.rs, client/local-agent/src/acp.rs]
+    acceptance:
+      - Réutiliser une connexion HTTP/stdio et le catalogue sur deux tours admissibles ; mesurer le coût supprimé et le coût réel des appels.
+      - Révoquer les anciens bindings sur changement de compte, serveur, conversation ou autorisation ; actualiser le catalogue vivant.
+      - Un échec de transport n'entraîne aucun rejeu automatique d'une opération envoyée ; les mutations inconnues restent identifiées.
+      - Annulation, rebind, EOF et fermeture du client libèrent transports et processus ; permissions toujours vérifiées sur l'outil métier réel.
+
+  - id: LH-03
+    title: État pédagogique persistant et projection bornée
+    owner: context_routing
+    status: TODO
+    depends_on: [LH-00]
+    paths: [client/local-agent/src/context.rs, client/local-agent/src/session_store.rs, client/local-agent/src/journal.rs, client/local-agent/src/host_context.rs]
+    acceptance:
+      - Restaurer formation, activité, question attendue et dernière liste après redémarrage à partir de références vérifiables.
+      - Distinguer explicitement faits serveur, propos de l'apprenant, hypothèses et résumés secondaires ; aucun résumé ne devient preuve de maîtrise.
+      - Résoudre « la deuxième », « on reprend » et « je bloque » uniquement avec l'état correspondant ; clarifier si cet état manque ou est périmé.
+      - Conserver le journal complet et les preuves requises après cent tours ; toute omission est traçable et le budget exact est respecté.
+      - Préserver un ordre stable du prompt sans remettre identifiants aléatoires ni données variables dans son préfixe stable.
+
+  - id: LH-04
+    title: Registre de capacités et premières lectures utiles
+    owner: mcp_capabilities
+    status: TODO
+    depends_on: [LH-02, LH-03]
+    paths: [client/local-agent/src/fast_harness.rs, client/local-agent/src/harness.rs, client/local-agent/src/catalog.rs, client/local-agent/src/executor.rs]
+    acceptance:
+      - Profil composé de champs sourcés, formation active distincte des formations accessibles, historique et niveau inconnus signalés honnêtement.
+      - Recherche via list_training_library, pagination exacte, distinction liste vide/accès refusé/erreur et absence de sélection implicite.
+      - Un choix de formation utilise l'identifiant d'un résultat réel et le contrat de sélection/version du serveur ; un numéro seul ne devient pas un ID inventé.
+      - Quelques capacités pertinentes seulement sont montrées au modèle ; le catalogue complet ne rejoint pas son prompt.
+      - Schémas, permissions, garde de tour et arguments vérifiés sont conservés ; une capacité manquante ne devient pas une autorisation générique.
+
+  - id: LH-05
+    title: Corpus indépendant et protocole de comparaison
+    owner: qualification
+    status: TODO
+    depends_on: [LH-00]
+    acceptance:
+      - Réserver au test tenu à part au moins 200 demandes et 50 dialogues français avec cas ordinaires et difficiles ; consigner intention, préconditions, effets attendus et références.
+      - Constituer entraînement et calibration en dehors de ces volumes ; paraphrases d'un même scénario restent dans le même groupe ; le test tenu à part n'est pas utilisé pour régler le routeur.
+      - Couvrir fautes, négations, explication sans consultation, références, demandes composées, permissions, pagination et changements de conversation.
+      - Garder les huit cas de recherche comme régressions connues, sans les compter comme preuve de généralisation.
+      - Conserver aussi discovery-fr.json comme régression réglée historiquement ; ses 80 requêtes et leurs paraphrases ne constituent pas un test indépendant.
+      - Définir la réussite du parcours et les critères de coaching avant de comparer les configurations ; revue des annotations et des ambiguïtés.
+
+  - id: LH-06
+    title: Routage sémantique avec rejet et repli borné
+    owner: context_routing
+    status: TODO
+    depends_on: [LH-03, LH-04, LH-05]
+    acceptance:
+      - Comparer encodeur CPU/classificateur calibré, décision LLM bornée et cascade sur le même corpus et les mêmes capacités.
+      - Mesurer latence et mémoire du routeur ainsi que les actions fausses et clarifications inutiles ; ni proximité vectorielle ni confiance auto-déclarée du LLM ne suffit à exécuter.
+      - Conserver les négations, résoudre les références vérifiées et traiter les demandes composées sans supprimer un de leurs objectifs.
+      - Un rejet produit une analyse bornée ou une clarification utile ; une demande de données n'est pas envoyée aveuglément à un chat qui invente son indisponibilité.
+      - Au moins 95 % d'intentions/parcours correctement traités sur le test tenu à part, avec résultats par catégorie et dénominateurs explicites.
+
+  - id: LH-07
+    title: Intégration ACP des deux chemins
+    owner: integration_owner
+    status: TODO
+    depends_on: [LH-01, LH-04, LH-06]
+    acceptance:
+      - Les lectures factuelles rendues par Rust n'imposent pas de synthèse LLM ; l'explication générale ne subit pas deux générations obligatoires.
+      - Une génération supplémentaire est réservée aux demandes qui nécessitent une lecture puis une explication ; les étapes et budgets sont explicites.
+      - Statuts UI issus de phases réelles, streaming, autorisations, arrêt et reprise restent accessibles et sans faux succès.
+      - Tester les chemins depuis l'application ACP, y compris rebind, journal et agents externes ; un test du routeur seul ne valide pas ce lot.
+
+  - id: LH-08
+    title: Boucle pédagogique vérifiée
+    owner: mcp_capabilities
+    status: TODO
+    depends_on: [LH-03, LH-04, LH-07]
+    acceptance:
+      - Relier reprise, activité, demande d'indice et explication au programme et à la sélection confirmés par Tutor.
+      - Raccorder progressivement les transitions de pedagogical.rs, avec préconditions explicites pour préparation, tentative, feedback et enregistrement.
+      - Appliquer les règles existantes de formation personnelle pour une demande d'apprentissage ; retrouver une formation avant toute création, et ne pas recréer un résultat existant.
+      - Toute écriture possède arguments prouvés, permission, clé d'idempotence et reçu ; refus/annulation/panne ne créent ni progression inventée ni double enregistrement.
+      - Une tentative réelle précède l'évaluation ; le LLM ne valide pas sa propre réponse comme réussite de l'apprenant ; les limites d'une correction non déterministe sont explicites.
+      - Qualifier de vrais échanges apprenant/tuteur avec le serveur inchangé, et pas seulement des reçus simulés.
+
+  - id: LH-09
+    title: Profils de modèles et moteur compatible
+    owner: runtime_cache
+    status: TODO
+    depends_on: [LH-01, LH-04, LH-05]
+    acceptance:
+      - Profils explicites avec architecture, GGUF/révision/SHA-256, licence, tokenizer, template, format d'outil, sampler et budgets ; aucun échange silencieux de modèle.
+      - Évaluer Qwen3-1.7B de référence, LFM3-1.7B, Qwen3.5-2B et LFM2.5-2.6B après vérification de compatibilité ; un candidat indisponible reste INCOMPLETE.
+      - Adapter chaque format d'outils et vérifier les tokens réellement présentés au modèle ; JSON valide ne vaut pas intention correcte.
+      - Mesurer préfixe, état récurrent et désactivation du raisonnement ; un candidat trop lent ou incompatible n'est pas retenu malgré ses scores publiés.
+      - Comparer qualité française, parcours et coaching sous le même harness ; ne pas comparer directement BFCL v3 et v4 ni transposer BF16 à Q4 sans essai.
+    model_decision: Aucune adoption dans le lot de planification ; un rapport de comparaison doit motiver le profil retenu.
+    scheduling: Préparer les adaptateurs et comparer les candidats pendant LH-06, sans exiger que Qwen atteigne déjà le seuil final ; l'adoption produit attend LH-11 et les parcours ACP intégrés.
+
+  - id: LH-10
+    title: Accélération et enveloppe matérielle
+    owner: runtime_cache
+    status: TODO
+    depends_on: [LH-01, LH-09]
+    acceptance:
+      - Construire un backend compatible Pascal sm_61 avec chaîne CUDA 12.9 ou antérieure et version llama.cpp épinglée ; tester Vulkan séparément.
+      - Détecter la vraie carte et la VRAM libre, mesurer placement effectif des couches, buffers et cache ; UHD 630 ne remplace pas la P2000.
+      - Comparer CPU, CUDA et Vulkan sur le même PC, le même modèle et les mêmes requêtes, avec vérification de qualité à chaque backend.
+      - Préserver une génération active et un budget initial de 3,2 Gio de VRAM en charge ajusté à la mémoire libre ; repli CPU explicite et mesuré si nécessaire.
+      - Mesurer alimentation secteur, échauffement et stabilité sur une conversation prolongée ; une compilation CUDA ne valide pas l'inférence.
+
+  - id: LH-11
+    title: Banc d'essai et décision sur Windows/P2000
+    owner: qualification
+    status: TODO
+    depends_on: [LH-07, LH-08, LH-09, LH-10]
+    acceptance:
+      - Fournir une commande ou interface simple depuis le paquet Windows et un rapport exportable associé au commit, modèle, pilote et paramètres exacts.
+      - Rejouer les scénarios avec le vrai serveur local temporaire puis le client installé ; toute institution réelle reste hors des fixtures automatiques.
+      - Rapporter froid/chaud, cache touché/manqué, première réponse utile et total ; isoler attentes humaines sans les faire disparaître du temps total observé.
+      - Sur les parcours concernés à chaud, viser réponse utile médiane au plus 2 s, p95 au plus 4 s et génération au moins 15 tokens/s ; mesurer séparément routeur, outils et coaching.
+      - Publier les répétitions, catégories, erreurs et dénominateurs ; aucun percentile sur trois observations ni succès sur une assertion sautée.
+      - Corpus indépendant, dialogues et revue pédagogique réussis ; chaque critère reçoit GO, NO_GO ou INCOMPLETE, absence de GPU exclut GO matériel.
+
+  - id: LH-12
+    title: Distribution et validation utilisateur
+    owner: integration_owner
+    status: TODO
+    depends_on: [LH-11]
+    acceptance:
+      - Installer et mettre à jour sans perdre comptes, clés, conversations, formations, journaux et modèles compatibles.
+      - Livrer un installateur versionné, profils exacts, rapports et SHA-256 ; vérifier les empreintes des assets GitHub après envoi.
+      - Vérifier les contrôles GitHub requis du commit puis publier staging et main via finish_task ; distinguer publication, installation et qualification matérielle.
+      - Un résultat Windows manquant ou un critère NO_GO reste déclaré ; une préversion de test n'est jamais présentée comme distribution qualifiée.
+
+decisions:
+  fixed: [serveur inchangé, journal exact, autorisations existantes, budgets mesurés, intégration Rust locale]
+  pending: [stratégie de routage gagnante, encodeur éventuel, modèle et quantification, backend P2000, nombre de contextes résidents, politique d'éviction]
+  selection_rule: Choisir sur la qualité et le temps de réponse utile de bout en bout, en conservant les refus corrects et l'isolation ; pas sur la taille ou le débit seuls.
+
+validation_commands:
+  available_now:
+    - python3 -B client/scripts/qualify-local-agent.py --help
+    - python3 -B client/scripts/qualify-local-harness.py --help
+    - python3 -B client/scripts/qualify-local-context.py --help
+    - bash scripts/verify-local-agent.sh
+    - python3 scripts/finish_task.py publish
+  to_implement: Le banc multi-configurations, la mesure de réponse utile UI et les exports Windows de LH-11 ; aucune commande inexistante n'est présentée comme disponible.
+
+completion_policy:
+  planning: Les quatre lots sont rédigés, relus, liés à ce plan et les dépendances/critères sont cohérents ; cela ne termine pas l'implémentation.
+  implementation: Les douze lots techniques et la référence LH-00 disposent de preuves correspondant à tous leurs critères.
+  hardware: Seules des observations sur le PC Windows/P2000 exact valident la fluidité cible.
+  publication: Toute modification terminée respecte AGENTS.md, préserve les fichiers hors lot et publie par le workflow mainteneur.

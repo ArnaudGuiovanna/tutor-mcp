@@ -1,6 +1,8 @@
 version: 1
 title: Harness local Tutor ACP — Qwen GGUF, découverte MCP et contexte borné
-authority: Backlog de référence pour toute l’implémentation H00–H12 convenue dans la conversation.
+authority: Historique H00–H12 ; les nouveaux travaux suivent docs/plan-local-harness.yaml, accepté le 2 novembre 2026.
+superseded_for_new_work_by: docs/plan-local-harness.yaml
+historical_scope_notice: Les exigences originales Qwen 4B et fenêtre 4096 ci-dessous décrivent la cible historique ; elles ne contraignent pas la nouvelle comparaison de petits modèles. Les preuves historiques ne sont pas transférées à un autre modèle ni à la P2000.
 status: IN_PROGRESS
 scope:
   objective: Livrer et qualifier le harness local intégré au client ACP, jusqu’à la distribution Windows.

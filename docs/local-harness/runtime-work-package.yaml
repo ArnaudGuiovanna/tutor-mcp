@@ -1,0 +1,283 @@
+version: 1
+title: Lot moteur/cache — Tutor local ACP
+date: '2026-11-02'
+status: PLANNED
+implementation_status: NOT_STARTED
+parent_plan: docs/plan-local-harness.yaml
+owner: runtime_cache
+items: [LH-00, LH-01, LH-09, LH-10]
+baseline_commit: e8185e5ebedddedd691bfd6adf4798e99ac9eb90
+scope: Plan technique à relire ; aucun code produit, benchmark supplémentaire ou publication dans ce lot de planification.
+target:
+  os: Windows x64
+  cpu: Intel Core i7-9750H
+  ram_gib: 32
+  gpu: Quadro P2000
+  vram_gib: 4
+  users: 1
+  invariants: [un modèle résident, une génération active, serveur MCP inchangé]
+  proposed_initial_policy: Un seul contexte actif et un seul préfixe admissible ; arbitrage définitif en LH-00/LH-01.
+  model_decision: Ouverte ; garder le Qwen actuel comme référence, sans adopter maintenant un autre modèle.
+  hardware_qualification: TODO ; les observations Linux CPU ne prouvent aucune performance Windows ou GPU.
+
+observations:
+  - source: client/local-agent/src/runtime.rs:105
+    fact: LocalEngine conserve Loaded ; modèle puis backend sont détruits dans cet ordre.
+  - source: client/local-agent/src/runtime.rs:125
+    fact: Chargement paresseux, contrôle GGUF/SHA-256 et validation explicitement limitée au Qwen3-1.7B Q4_K_M actuel.
+  - source: client/local-agent/src/runtime.rs:252
+    fact: generate tokenise à nouveau et alloue un LlamaContext et un batch ; aucun KV n'est conservé entre générations.
+  - source: client/local-agent/src/runtime.rs:377
+    fact: count_input et generate utilisent le même template réel ; thinking désactivé et outils absents dans ce rendu actuel.
+  - source: client/local-agent/src/acp.rs:911
+    fact: Un seul Active ; spawn_blocking prend le verrou Engine pendant le parcours ; annulation et flux ACP sont déjà bornés.
+  - source: client/local-agent/src/acp.rs:1186
+    fact: Métadonnées generation.inputTokens/outputTokens/elapsedMs ; elapsedMs est remplacé par la durée du tour côté ACP.
+  - source: client/local-agent/src/config.rs:10
+    fact: Défaut contexte 2048, sortie 192, marge 256, batch 128, threads 6 et gpu_layers 0 ; plafond contexte 4096.
+  - source: client/local-agent/model-profile.json
+    fact: llama-cpp-2/sys-2 0.1.146, KV F16, flash attention désactivée ; qualifications Windows/P2000 pending.
+  - source: docs/local-harness/research-baseline.json
+    fact: Trois paires chaudes exploratoires ; premier texte médian 7696,22 contre 1110,01 ms, 225 tokens réutilisés.
+    limit: Mesure interne sur VM quatre vCPU, hors chargement/MCP/UI ; ni réponse utile, ni percentile robuste, ni promesse de gain produit.
+  - source: docs/local-harness/research-baseline.json
+    fact: Huit intentions synthétiques ; Qwen 5/8 et LFM2.5-1.2B 1/8 dans ces adaptations précises.
+    limit: Ni précision générale, ni classement de modèles ; le cache ne corrige pas une mauvaise intention.
+observed_profile_path: Le profil existant est client/local-agent/model-profile.json ; config/model-profile.json n'existe pas ici.
+
+actor_contract:
+  status: TODO
+  public_adapter: Préserver Engine:Send et ses méthodes synchrones ; un handle Send transporte des commandes possédées vers un thread dédié.
+  ownership: Le thread crée backend, modèle, puis contexte ; il effectue seul tokenisation, prefill, sampling et accès KV.
+  lifetimes: |
+    worker(config, rx) possède backend puis model comme variables locales.
+    run_context_epoch(&model, &backend, rx) crée LlamaContext<'model>, batch et état de cache.
+    La boucle interne traite plusieurs commandes sans déplacer ces objets hors de ce scope.
+    Une reconfiguration quitte cette boucle, détruit contexte/sampler/batch, puis crée une nouvelle époque.
+    Une sortie définitive détruit contexte, modèle et backend dans cet ordre.
+  forbidden_shortcuts: Pas de struct auto-référente improvisée, transmute vers 'static, fuite Box::leak ou impl Send/Sync ajouté au contexte.
+  lazy_load: Premier besoin de tokenizer/génération charge et vérifie le modèle ; une lecture rendue par Rust ne doit pas charger le GGUF.
+  artifact_integrity: GGUF vérifié puis traité comme immuable pendant son mmap ; qualifier la course entre hash et chargement, interdire toute réécriture en place.
+  model_residency: Une allocation de poids par worker sain ; changer de contexte ou de session ne recharge pas les poids.
+  commands:
+    - CountInput avec messages possédés, scope, job_id, annulation et canal de résultat ; ne modifie jamais le KV.
+    - Generate avec InferenceRequest possédé, scope, budget, mode, job_id et canal d'événements borné.
+    - Finalize avec job_id et issue journalisée ; valide la candidature au cache ou l'invalide.
+    - Invalidate avec motif typé et époque cible ; acquittement avant admission du travail suivant.
+    - Shutdown ; annule l'actif, ferme les canaux, détruit les ressources et joint le thread hors boucle ACP.
+  bridge: |
+    Engine::generate garde emit et &AtomicBool sur le thread appelant ; ces références ne traversent pas le canal.
+    Le proxy pompe les événements, appelle emit et répercute l'annulation dans un Arc<AtomicBool> propre au job.
+    count_input utilise le même pont pour surveiller son annulation, sans envoyer une référence empruntée.
+    Une erreur de emit annule le job, vide ses événements et attend son acquittement ; aucune émission tardive n'est admise.
+  limits: File de commande de capacité 1, chunks bornés en nombre et en octets ; pas de backlog non borné de générations.
+  cancellation_priority: Signal atomique hors file ; try_send/recv avec attente courte annulable, jamais un envoi bloquant sans borne.
+  scheduler: ACP conserve son refus -32003 d'une seconde génération ; le worker ne traite aucun CountInput concurrent au decode actif.
+  generation_identity: (époque du worker, session ACP, tour, génération) ; rejeter événements et Finalize d'un ancien job.
+  liveness: Un timeout Tokio ne tue pas un thread natif ; si le worker ne répond plus, ne pas créer un second worker en parallèle.
+  fatal_recovery: Arrêter le processus agent et laisser le client le relancer ; résultat interrompu/inconnu conservé, aucun rejeu automatique.
+
+cache_contract:
+  status: TODO
+  trust: Scope fourni par l'adaptateur ACP depuis les bindings vérifiés ; jamais extrait d'une intention, d'un prompt ou d'un ID proposé par le LLM.
+  identity_fields:
+    - profile_id et account_id de session_store::Owner.
+    - institution via Owner.tenant_id et serveur via Owner.server_id, validés par la liaison hôte existante.
+    - session ACP, UUID durable de conversation et époque de connexion/reprise ; pas de réutilisation entre conversations.
+    - Époque de droits et de liaison non secrète, actualisée par rebind/changement de configuration.
+  execution_fields:
+    - SHA-256 réellement vérifié du GGUF, version du profil et identité du moteur/build/backend/périphérique.
+    - Empreinte des octets du template, options de rendu, tokenizer/tokens spéciaux et mode de raisonnement.
+    - Version des instructions, mode de sortie/format d'outil, grammaire et configuration sampler.
+    - Contexte alloué, type KV, RoPE, batch et paramètres d'exécution pertinents ; première version conservatrice.
+  missing_identity: Désactiver la réutilisation et vider le contexte ; un parcours anonyme compatible peut continuer à froid.
+  storage: Mémoire du worker seulement ; pas de KV sur disque, de cache partagé entre processus ou de prompt dans les diagnostics.
+  token_state: Un vecteur de tokens effectivement évalués et une longueur de préfixe validée ; ne jamais confondre tokens émis et décodés.
+  prepared_input: Un seul candidat de tokenisation par job, keyed par messages/options exacts ; le dernier count_input ne vaut pas automatiquement Generate.
+  algorithm: |
+    1. Valider scope, messages, template et budget complet avant de muter le contexte.
+    2. Tokeniser le rendu exact, ou vérifier l'identité exacte d'un candidat préparé par ce même job.
+    3. Calculer le plus long préfixe de tokens identiques avec le préfixe KV admissible ; aucun match sémantique.
+    4. Borner reused à min(préfixe commun, longueur effectivement valide, input_tokens - 1).
+    5. Retirer tout le suffixe KV à partir de reused, y compris les anciens tokens générés.
+    6. Si clear_kv_cache_seq échoue ou retourne false, vider complètement, repartir de 0 et enregistrer le miss.
+    7. Évaluer tokens[reused..] aux positions absolues ; recalculer au moins le dernier token pour obtenir des logits valides.
+    8. Initialiser un nouveau sampler/état grammatical et décodeur UTF-8 ; aucun état de sampling de la requête précédente.
+    9. Générer ; après succès, retirer la queue générée et conserver seulement le préfixe d'entrée vérifié comme candidat.
+    10. Finalize après persistance réussie rend ce candidat réutilisable ; Abort ou absence d'acquittement le détruit.
+  transactions: |
+    Chaque appel LLM a son génération_id et sa finalisation après journalisation de son résultat/étape.
+    Un parcours à plusieurs générations peut finaliser chaque étape acceptée, avant la suivante.
+    Une erreur ultérieure du tour invalide le contexte avant le tour suivant, y compris après succès du runtime.
+    Les sorties max_tokens, interrompues et non journalisées ne sont pas promues comme cache validé en première version.
+  scope_boundaries: Changer propriétaire ou conversation impose clear_kv_cache complet avec données, pas seulement une suppression de suffixe.
+  recurrent_models: La suppression partielle peut être impossible ; réutilisation désactivée tant que rollback/état récurrent n'est pas qualifié.
+  equality_policy: Comparer les tokens exacts et le binding typé ; un hash facilite l'identification mais ne remplace pas cette vérification.
+  isolation_limit: Effacer les buffers via l'API native ne constitue pas une garantie d'effacement physique de toute copie RAM/VRAM.
+
+invalidation:
+  full_reset:
+    - Changement de profil, compte, institution, serveur, session ou conversation ; logout, suppression, chargement/reprise de session.
+    - Rebind modifiant autorité/configuration pertinente, révocation ou variation des droits ; même propriétaire ne signifie pas mêmes autorisations.
+    - Nouveau modèle/profil/tokenizer/template/format/raisonnement, budget ou paramètres du contexte ; mise à jour du moteur/backend.
+    - Annulation, timeout, EOF, canal fermé, overflow, échec de journal, erreur de decode, grammaire ou callback.
+    - Éviction explicite, erreur d'intégrité du cache, état natif incertain et sortie max_tokens.
+  ordinary_changes: Nouvelle donnée pédagogique ou liste → nouveau rendu et nouveau préfixe exact ; ne jamais garder un fait ancien pour favoriser un hit.
+  identical_rebind: Un rebind strictement identique ne change pas l'époque et ne vide pas le cache ; tester le chemin desktop réel qui rafraîchit une session connue entre tours.
+  model_change: Détruire d'abord contexte puis ancien modèle ; vérifier le nouveau profil avant tout chargement, sans co-résidence de deux modèles.
+  budget_failure: Erreur context_budget_exceeded, aucune génération ni preuve obligatoire tronquée ; ne pas confondre tokens réutilisés et place libre.
+  native_failure: Marquer cache invalide avant de retourner ; recréer uniquement le contexte si récupération sûre, sinon arrêter le processus.
+  rebind_order: Invalidation acquittée avant acknowledgement ACP du rebind ; aucun travail de l'ancienne époque accepté après celui-ci.
+  admission_check: Revalider scope/époque à l'admission et à la finalisation ; un vieux Finalize ne réactive jamais un contexte révoqué.
+
+prompt_layout:
+  owner: LH-03/LH-06 produisent les messages ; runtime applique seulement le template réel et expose comptage/cache.
+  stable_first: Rôle, règles pédagogiques et de provenance, version de format et descriptions métier durables utiles à ce chemin.
+  dynamic_after: État pédagogique confirmé, sélection de capacités, preuves MCP, historique choisi, demande actuelle et préfixe assistant.
+  excluded: Catalogue MCP exhaustif, credentials, horodatages techniques, UUID de trace et accusés du journal sans utilité pédagogique.
+  evidence_identity: Références métier nécessaires et versions restent exactes ; le journal maintient l'audit complet hors prompt.
+  determinism: Ordre des champs et des capacités stable ; pas de déplacement des consignes en données ou de suppression de provenance pour augmenter le cache.
+  budgets: 2048/192/256 initialement ; tester 4096 séparément seulement après mesure, réserve explicite par mode et comptage du template inclus.
+
+observability:
+  status: TODO
+  shared_contract: turn_observation de LH-00, consommé par LH-11 ; corrélation par identifiant éphémère sans texte privé.
+  clocks: Instant monotone par processus ; transmettre des durées, pas soustraire des horloges arbitraires de processus différents.
+  phases:
+    - Admission/file du worker ; ouverture/stat du modèle, SHA-256, initialisation backend et allocation/chargement des poids séparés.
+    - Rendu template et tokenisation, avec nombre d'appels dus à la projection ; distinguer ces appels de la tokenisation finale.
+    - Allocation/recréation du contexte et du batch ; suppression de suffixe/cache, prefill, sampling/decode et conversion UTF-8.
+    - Routage, connexion/catalogue MCP, permission humaine, appels MCP, persistance et attente d'émission ACP fournis par les lots propriétaires.
+    - Première émission interne, premier texte visible ACP, premier rendu UI, première réponse utile et fin de réponse.
+  counts: input_tokens total, reused_tokens, evaluated_input_tokens, output_tokens, generation_count, model_load_count et context_allocation_count.
+  cache_fields: hit/miss/disabled, motif typé, longueur commune, tokens réellement réutilisés, invalidation et backend effectif.
+  invariants: input_tokens = reused_tokens + evaluated_input_tokens ; les appels de comptage ne consomment pas de tokens de génération.
+  useful_response: |
+    Profil/liste : première unité utile définie avant l'essai par l'oracle LH-11, rendue dans l'UI et cohérente avec la réponse finale.
+    Un premier résultat seul ne termine pas une page ou une liste exhaustive demandée.
+    Coaching : première proposition pédagogique répondant à la demande, validée par annotation de scénario/revue.
+    Statut « je consulte », spinner, guillemet JSON ou étiquette interne ne comptent pas.
+    Runtime fournit les événements techniques ; banc/UI et annotations qualifient l'utilité, sans prétendre la déduire d'un token seul.
+    Une réponse fausse ou hors sujet conserve sa latence brute mais n'est pas un succès de réponse utile.
+  human_time: Publier durée totale utilisateur et durée hors attente d'autorisation, ainsi que cette attente séparée ; aucun retrait silencieux.
+  memory: RSS/working set et pic, mémoire dédiée GPU effectivement mesurable, mémoire libre au départ et placement des couches/buffers/KV.
+  missing: Valeur absente/null avec motif si WDDM/backend ne fournit pas la mesure ; ne pas remplacer par la taille du fichier GGUF.
+  privacy: Pas de messages, tokens bruts, chemins privés, arguments, secrets ou identifiants personnels dans les exports techniques par défaut.
+
+compatibility:
+  status: TODO
+  engine_api: Adapter Engine via proxy ; ajouter des hooks internes à valeur par défaut pour scope/finalisation/observation sans casser les moteurs simulés.
+  missing_hook: Réutilisation désactivée si le scope ou la finalisation n'est pas fourni ; aucun cache implicite fondé sur l'appel précédent.
+  stats: Conserver GenerationStats(input_tokens, output_tokens, elapsed_ms, stop_reason) et les agrégations existantes.
+  acp: Garder _meta.tutor.generation.inputTokens/outputTokens/elapsedMs et les stopReason existants ; extensions optionnelles versionnées.
+  metadata_proposal: _meta.tutor.runtime avec schemaVersion=1 et phases/comptages ; nom final à figer avec turn_observation en LH-00.
+  legacy_elapsed: elapsedMs ACP continue de représenter le tour ; nouveau runtimeElapsedMs distinct, sans changer subrepticement la métrique historique.
+  logical_tokens: inputTokens reste le total logique, pas uniquement les nouveaux tokens de prefill ; sortie factuelle Rust garde 0 tokens LLM.
+  aggregation: Identifier chaque génération interne et la réponse finale ; somme des durées de phase sans double comptage du temps total du tour.
+  clients: Anciens lecteurs ignorent les extensions ; nouveaux lecteurs tolèrent leur absence et les erreurs/annulations sans statistiques complètes.
+
+work_items:
+  - id: LH-00
+    status: TODO
+    depends_on: []
+    changes: Instrumenter runtime.rs/acp.rs et le qualificateur avec le contrat turn_observation, avant toute optimisation ou changement de modèle.
+    acceptance: Rejouer le GGUF de référence sur CPU release ; distinguer chargement, projection, génération, MCP et rendu ; rapport commit/hash/options.
+    handoff: Fournir à LH-05/LH-11 événements, unités, dénominateurs, définition de réponse utile et champs explicitement indisponibles.
+  - id: LH-01
+    status: TODO
+    depends_on: [LH-00]
+    steps:
+      - Stabiliser InferenceRequest, scope vérifié, génération_id et Finalize/Invalidate avec intégrateur ACP et LH-02/LH-03.
+      - Extraire le worker résident sans activer le cache ; prouver un chargement unique et une seule génération.
+      - Rendre le contexte résident à cache désactivé, puis ajouter réutilisation exacte et invalidation derrière option de comparaison.
+      - Raccorder finalisation du journal, annulation, rebind et EOF ; comparer cache on/off sur CPU, prompt et sampler constants.
+    planned_paths: [client/local-agent/src/runtime.rs, client/local-agent/src/config.rs, client/local-agent/src/acp.rs, client/local-agent/src/harness.rs]
+    ownership: Un agent propriétaire de runtime/config ; intégrateur seul propriétaire de acp.rs/harness.rs durant les adaptations concurrentes.
+    acceptance: Tests d'isolation/erreur ci-dessous et rapport A/B réel ; un cache hit déclaré doit correspondre à un prefill effectivement réduit.
+  - id: LH-09
+    status: TODO
+    depends_on: [LH-01, LH-04, LH-05]
+    changes: Profils versionnés explicites, validation par architecture et couple binding/sys épinglé ; pas de simple assouplissement du garde Qwen actuel.
+    profile_fields: Révision/SHA-256/licence, métadonnées GGUF, tokenizer/template, format d'outil, raisonnement, sampler, budget et capacité de cache.
+    candidates: [Qwen3-1.7B de référence, LFM3-1.7B, Qwen3.5-2B, LFM2.5-2.6B]
+    admission: Vérifier disponibilité et format exact de chaque candidat ; moteur insuffisant ou état récurrent non validé → INCOMPLETE.
+    acceptance: Même corpus tenu à part et mêmes parcours ; qualité française, outils et réponse utile mesurés ; nouveau modèle adopté seulement sur rapport.
+  - id: LH-10
+    status: TODO
+    depends_on: [LH-01, LH-09]
+    changes: Binaries CPU/CUDA/Vulkan identifiés, backend réel observé et options d'offload bornées ; aucune optimisation activée sur score publié seul.
+    cpu_first: Référence release mesurable avant GPU ; essais séquentiels de threads 2/4/6 et batch 32/64/128, sans changer tout simultanément.
+    cuda: Chaîne <=12.9, CMAKE_CUDA_ARCHITECTURES=61 et version llama.cpp épinglée ; vérifier support des kernels et pilote Windows effectif.
+    vulkan: Build, pilotes et opérations du modèle à qualifier séparément ; aucune présomption d'équivalence avec CUDA.
+    gpu_selection: P2000 explicite, pas UHD 630 ; GPU demandé mais absent ou couches non offloadées → échec clair, pas résultat CPU étiqueté GPU.
+    memory_target: Pic initial visé 3,2 Gio dédiés, ajusté à la VRAM libre mesurée ; poids + KV + buffers + coexistence Windows, pas taille GGUF seule.
+    fallback: CPU explicite via profil/reprise du client, après arrêt de l'ancien worker ; tracer ce changement et réinitialiser le cache.
+    acceptance: Rapport sur le PC cible secteur, pilotes/toolkit/build, couches placées, mémoire, qualité et stabilité thermique ; compilation seule insuffisante.
+
+validation:
+  status: TODO
+  lightweight_tests:
+    - Préfixes identiques, divergents au début/milieu/fin, prompt plus court, rendu identique et changement de tokens spéciaux.
+    - Même préfixe texte mais un champ d'identité changé à la fois ; reused=0 pour profil/compte/institution/serveur/session/modèle/template.
+    - Changement droits/rebind/budget ; Finalize et chunks d'ancienne époque ignorés ; aucune réactivation d'un cache invalidé.
+    - Retrait partiel false/erreur, budget à la limite, preuve trop grande, prompt vide, grammaire erronée et allocation échouée.
+    - Annulation avant chargement, pendant SHA/tokenisation/prefill/decode, durant backpressure et après émission avant Finalize.
+    - Erreur de journal/emit/EOF, sortie max_tokens, timeout et shutdown ; requête suivante propre, sans texte ni suffixe du tour interrompu.
+    - Deuxième génération refusée, file bornée, worker non réactif sans duplication ; destruction contexte avant modèle/backend.
+    - Anciennes statistiques et moteurs simulés compatibles ; directe Rust sans chargement modèle ni tokens LLM ; données techniques sans secrets.
+  live_cpu:
+    - Test natif avec vrai GGUF release et tokenizer/template exacts ; un model_load_count, contexte réutilisé et prompt frais égal au comptage.
+    - A/B cache off/on avec mêmes requêtes, seed et réglages ; contrôler contenu/parcours attendu et compteurs, pas seulement la vitesse.
+    - Baseline et candidat après annulation/rebind/erreur ; cent tours séquentiels pour stabilité des allocations et absence de croissance continue.
+    - Vrai ACP + Tutor local temporaire + UI pour première réponse utile ; essais sans MCP séparés, jamais présentés comme qualification intégrée.
+  repeated_measurements: Au moins 30 répétitions par strate pour les microbenchmarks de développement ; séparer froid, chaud-hit, chaud-miss et invalidation. Les p95 d'acceptation LH-11 exigent les volumes supérieurs du paquet qualification.
+  statistical_limit: Publier dispersion, intervalle d'incertitude et erreurs ; trente répétitions ne prouvent pas la stabilité de toute la population de requêtes.
+  cancellation_target: Acquittement ACP visé sous 2 s sur PC cible, avec durée d'arrêt natif séparée ; dépasser cette borne reste un échec mesuré, pas une préemption supposée.
+  parity: Comparer les attentes de scénario et la qualité entre cache off/on et backends ; tolérance numérique définie, pas promesse universelle de tokens identiques.
+  targets_not_observations:
+    warm_useful_response_p50_ms: 2000
+    warm_useful_response_p95_ms: 4000
+    decode_tokens_per_second: 15
+    qualification: Cibles bout en bout LH-11 sur Windows cible, par parcours ; aucune garantie issue des trois paires exploratoires.
+  stop_conditions: Fuite inter-propriétaires, succès inventé, coût caché, corruption KV, mémoire hors budget ou processus natif bloqué → NO_GO de la configuration.
+  missing_hardware: INCOMPLETE sur Windows/P2000 jusqu'au retour du banc cible ; un succès CPU peut valider LH-01, jamais LH-10 matériel.
+
+dependencies_and_open_questions:
+  - LH-02 fournit les époques de connexion/droits ; les caches de catalogue et de KV ne partagent pas une autorisation implicite.
+  - LH-03/LH-06 stabilisent la disposition du prompt et l'état pédagogique ; runtime ne résout ni intention ni référence métier.
+  - LH-05/LH-11 possèdent corpus indépendant, annotation utile, revue pédagogique et exécution matérielle ; benchmarks lourds sérialisés.
+  - L'intégrateur raccorde Finalize à la persistance et garantit invalidation en cas d'échec tardif du tour ; aucune sélection d'outil dans ce lot.
+  - Déterminer support d'interruption native pendant un batch et borne réellement observée ; le polling entre batches ne préempte pas un kernel.
+  - Vérifier rollback/cache pour chaque architecture hybride ou récurrente ; désactiver la réutilisation avant preuve, sans l'assimiler à un échec de qualité.
+  - Choisir version du moteur et variantes de build à partir des tests de modèle et de sm_61 ; un upgrade peut changer API, kernels et templates.
+  - Fixer durée d'inactivité avant éviction et stratégie mémoire après mesures ; première proposition sans LRU multi-session ni sauvegarde KV.
+
+sources:
+  - path: client/local-agent/src/runtime.rs
+    lines: [30, 37, 105, 125, 252, 377]
+    use: API Engine/GenerationStats, chargement, validation modèle, allocation par génération et tokenizer réel.
+  - path: client/local-agent/src/acp.rs
+    lines: [40, 660, 911, 985, 1100, 1186]
+    use: Limites, rebind, verrou/génération active, journalisation, annulation et statistiques historiques.
+  - path: client/local-agent/src/session_store.rs
+    lines: [26, 145, 169]
+    use: Owner profil/compte/tenant/serveur et binding de session au hash modèle.
+  - path: client/local-agent/src/context.rs
+    lines: [29, 72, 85, 108]
+    use: Provenance, TaskContext et budget exact ; pas de troncature d'une preuve requise.
+  - path: .tmp/tutor-harness-study-2026-11-01/source/bin/prefix.rs
+    use: Prototype local de préfixe exact, retrait de suffixe et recalcul du dernier token ; pas code produit.
+  - path: docs/local-harness/research-baseline.json
+    use: Observations synthétiques et environnement archivés ; trois paires et huit intentions, sans preuve produit ni runner portable déjà livré.
+  - url: https://docs.rs/crate/llama-cpp-2/0.1.146/source/src/context.rs
+    local_verified: /home/ubuntu/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/llama-cpp-2-0.1.146/src/context.rs
+    use: LlamaContext emprunte LlamaModel ; model.rs:853 expose new_context<'a> ; kv_cache.rs:90 vérifie retrait partiel et remise à zéro complète.
+  - url: https://developer.nvidia.com/cuda/gpus/legacy
+    verified_at: '2026-11-02'
+    use: Quadro P2000 répertoriée en compute capability 6.1.
+  - url: https://developer.nvidia.com/blog/navigating-gpu-architecture-support-a-guide-for-nvidia-cuda-developers/
+    verified_at: '2026-11-02'
+    use: CUDA 13 retire compilation pré-7.5 ; conserver chaîne <=12.9, sans en déduire compatibilité du moteur ou du pilote installé.
+  - url: https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md
+    verified_at: '2026-11-02'
+    use: Options de compilation CUDA/Vulkan et architecture CMake ; documentation master, pas preuve de support du commit livré.

@@ -1,0 +1,276 @@
+version: 1
+title: État pédagogique, gestion du contexte et interprétation des intentions Tutor ACP
+date: '2026-11-02'
+status: PLANNED
+implementation_status: TODO
+owner: context_routing
+parent_plan: docs/plan-local-harness.yaml
+parent_items: [LH-03, LH-06, LH-07]
+baseline_commit: e8185e5ebedddedd691bfd6adf4798e99ac9eb90
+deliverable: Plan technique pour revue ; aucun code produit implémenté ou benchmark exécuté par ce lot.
+scope:
+  objective: Comprendre une demande dans sa conversation pédagogique et produire une proposition admise par Rust avec un contexte borné.
+  target: Windows x64, i7-9750H, 32 Gio RAM, Quadro P2000 4 Gio, un utilisateur.
+  exclusions: [modification serveur MCP, LoRA, Needle, correctif limité à une faute ou une phrase]
+  cooperation: LH-01 fournit le cache ; LH-04 les capacités ; LH-05 le corpus ; LH-07 intègre ACP ; LH-08 exécute la pédagogie.
+  publication: Ce paquet est remis au principal pour revue ; aucune publication autonome.
+
+observed_sources:
+  fast_harness:
+    path: client/local-agent/src/fast_harness.rs
+    facts: Route par requête entière ; routes fixes profil/contexte/alertes ; Chat sans MCP et sans capacités candidates.
+  projection:
+    path: client/local-agent/src/context.rs
+    facts: Budget exact après template, preuves requises intactes, omissions auditées ; project_recent sélectionne des tours entiers.
+    gap: Evidence contient origine/id/payload mais ne fournit pas à elle seule une validation de provenance ou de fraîcheur.
+  sessions:
+    path: client/local-agent/src/session_store.rs
+    facts: SQLite par propriétaire et session ; input et fragments persistés ; reprise liée au SHA du modèle ; tour sans fin marqué interrompu.
+  journal:
+    path: client/local-agent/src/journal.rs
+    facts: ContentRef vérifie binding et empreinte ; les références doivent aussi rester dans leur session ; séquences tours et événements distinctes.
+  host:
+    path: client/local-agent/src/host_context.rs
+    facts: Métadonnées typées liées à la conversation du transport Tutor ; formation, domaine, révision et selection_version validés.
+  desktop:
+    path: client/src-tauri/src/backend.rs
+    symbol: learning_prompt_params
+    facts: Voie locale transmet texte courant et trainingContext par _meta ; rôle détaillé des agents externes non transmis au modèle local.
+    cost: send_prompt consulte déjà get_conversation_context ; inclure cette lecture desktop dans la mesure de bout en bout.
+  shared_foundations:
+    paths: [client/local-agent/src/harness.rs, client/local-agent/src/call_validation.rs, client/local-agent/src/pedagogical.rs]
+    facts: Réutiliser verified_training/bind_host_context et Workflow ; ne pas créer un second moteur de droits ou de progression.
+  backlog:
+    path: docs/backlog-local-harness.yaml
+    alignment: Précise H04/H06/H07/H08/H10 ; suivi opérationnel désormais LH-03/LH-06 du plan parent.
+    discrepancy: Cible historique 4B/4096 encore présente ; référence livrée 1.7B/2048 décrite dans model-profile.json et le plan parent.
+  evidence_policy: Ces constats portent sur les sources au commit indiqué ; les solutions et seuils ci-dessous restent proposés.
+
+dialogue_state:
+  design: État dérivé versionné, reconstruit par un réducteur déterministe ; le journal exact reste la source durable.
+  scope_key: Propriétaire existant (profil/compte/tenant/serveur), session ACP et conversation Tutor ; binding courant en mémoire.
+  field_envelope: Valeur typée, classe de source, référence de contenu, chemin sélectionné, révision, statut et dépendances.
+  statuses: [unknown, known_absent, current, stale, denied, unavailable]
+  layers:
+    server_facts: Résultats MCP réussis et contexte hôte vérifié, avec origine/version ; seuls reçus autoritaires pour droits et progression.
+    learner_statements: Texte exact et choix explicites ; déclarent une préférence ou intention, jamais une mutation distante réussie.
+    observations: Messages effectivement émis/affichés, liste proposée, contrat local validé ; décrivent l'échange, pas la maîtrise.
+    hypotheses: Interprétations du modèle ou du classificateur, révocables et sourcées ; jamais utilisées comme identités ou reçus.
+    summaries: Aides secondaires reliées aux originaux ; aucune promotion automatique en fait, rubrique ou réponse d'apprenant.
+  fields:
+    formation: training_id/domain_id/révision/selection_version et nom ; distinguer aucune sélection confirmée et sélection inconnue.
+    objective: Objectif serveur confirmé et souhait utilisateur séparés ; divergence conservée jusqu'à confirmation ou reçu d'écriture.
+    activity: Séance/activité/tentative/concept, phase, version du contrat et références exactes ; option distincte pour exercice conversationnel.
+    expected_question: Texte exact, type de réponse attendu, activité liée, provenance et état de livraison ; jamais déduit du seul dernier point d'interrogation.
+    last_list: Identifiant de présentation, ordre affiché, titres, identifiants serveur, révisions, périmètre, pages/cursor et complétude.
+    difficulty: Déclaration exacte de difficulté et cible connue ; inférence de découragement conservée comme hypothèse, sans diagnostic.
+    references: Registre local reliant alias courts à ContentRef, JSON Pointer validé, empreinte, session et conversation.
+    missing: Champs nécessaires mais absents, périmés ou inaccessibles et clarification/lecture requise pour poursuivre.
+  transitions:
+    - event: Contexte hôte courant vérifié pour le tour et la conversation.
+      effect: Actualiser sélection/langue ; un changement de sélection invalide activité, question et références dépendantes.
+    - event: Résultat MCP réussi dont enveloppe, schéma et binding sont contrôlés.
+      effect: Mettre à jour uniquement les champs documentés ; conserver le reçu exact et les versions ; ignorer un résultat d'ancien binding.
+    - event: Demande ou choix explicite enregistré dans le tour courant.
+      effect: Enregistrer intention/préférence ; résoudre un ordinal vers une liste ; attendre le reçu serveur pour confirmer une sélection.
+    - event: Présentation locale validée puis livraison observée.
+      effect: Activer la liste ou question attendue avec texte/ordre exacts ; distinguer Emitted et UiAcknowledged.
+    - event: Réponse de l'apprenant compatible avec une seule question encore active.
+      effect: Lier le texte exact à cette activité ; aucune soumission/évaluation automatique sans parcours LH-08 admis.
+    - event: Refus, annulation, livraison partielle, panne ou résultat inconnu.
+      effect: Conserver l'incertitude ; aucun statut terminé ou progrès inventé ; ne pas consommer une réponse attendue par défaut.
+    - event: Reprise, changement de droits, rebind ou conflit de versions.
+      effect: Reconstruire puis marquer les faits dépendants à revalider ; révoquer propositions/permis ; aucun rejeu d'opération.
+  durability:
+    reducer: Fonction pure State + événement validé → State + changements ; ordre journalisé, déduplication par identité d'événement.
+    checkpoint: Événement de snapshot dérivé avec version du réducteur et références sources ; peut être supprimé puis reconstruit.
+    cursors: Conserver séparément curseurs de tours et événements ; aucun ordre global déduit de leurs numéros distincts.
+    replay: Rejouer les événements métier dans leur ordre persistant ; migrer ou reconstruire les snapshots incompatibles.
+    recovery: Une référence manquante/corrompue/purgée invalide ses dérivés ; aucune substitution par le résumé le plus proche.
+    permissions: Recharger uniquement dans le propriétaire d'origine ; revalider droits et sélection avant tout nouvel appel sensible.
+    model_change: Respecter ModelMismatch actuel ; migration explicite éventuelle, jamais contournée par ce lot.
+    delivery_dependency: Définir avec LH-07 l'accusé UI ; un callback d'émission ACP ne prouve pas un affichage effectif.
+
+context_manager:
+  profiles:
+    baseline: {context: 2048, output: 192, margin: 256, input_limit: 1600}
+    candidate: {context: 4096, output: 512, margin: 256, input_limit: 3328}
+  selection: 2048 par défaut ; profil 4096 seulement après mesure modèle/backend/mémoire ; sortie adaptée à chaque tâche sans dépasser le total.
+  exact_count: Même tokenizer, template, tokens spéciaux et amorce de génération que l'inférence ; compter tous les messages et capacités.
+  inequality: input_tokens + output_reserved + safety_margin <= context_tokens ; erreur de tokenizer bloquante, aucune approximation caractères/tokens.
+  prefix_order:
+    - Rôle Tutor, langue et règles de provenance stables, versionnés par profil et type de tâche.
+    - Contrat de sortie court stable pour interprétation ou coaching ; aucun catalogue complet ni horodatage de tour.
+    - État utile et preuves requises sélectionnées, avec alias stables et ordre de sérialisation déterministe.
+    - Quelques capacités candidates si décision requise, puis preuves retrouvées et échanges récents sélectionnés.
+    - Message courant exact, sans remplacement par une correction orthographique supposée équivalente.
+  cache:
+    keys: Binding vérifié, conversation, modèle/tokenizer/template, mode de tâche, paramètres et budget ; clé construite par Rust.
+    volatile: UUID de tour, durées et métadonnées d'audit restent dans le journal ; nécessaires à une décision, ils vont dans le suffixe variable.
+    guarantee: Seuls tokens réellement identiques peuvent être réutilisés ; état modifié invalide le suffixe, pas promesse de cache intégral.
+    isolation: Éviction ou remise à zéro lors de changement d'autorité ; accords avec le contrat inference_request de LH-01.
+  projection:
+    required: Demande courante, contraintes actives, question/réponse/rubrique utile, paramètres de sélection et preuves nécessaires au parcours.
+    optional: Échanges récents pertinents, résumés secondaires et extraits retrouvés ; chaque inclusion/omission est auditée.
+    whole_records: Conserver exactement les unités utiles ; jamais couper une réponse ou rubrique à la limite de tokens.
+    facts_to_model: Ne fournir que champs nécessaires ; identifiants/versions d'exécution conservés dans le registre Rust si inutiles à la compréhension.
+    oversize: Lecture ciblée autorisée, pagination ou décomposition ; si preuve incompressible, limite explicite sans évaluation inventée.
+    audit: Références, chemins, versions, motifs d'omission, comptes exacts et empreinte du préfixe ; pas de corps privés dans les diagnostics.
+  retrieval:
+    first: Résolution directe question/activité/liste ; puis index local de métadonnées et recherche lexicale du journal lié.
+    optional: Recherche vectorielle à comparer ; ses scores ordonnent des candidats, jamais la vérité ou les autorisations.
+    bounded: Au plus 8 références candidates et 3 extraits optionnels initialement ; plafonds configurés, puis filtrés par le budget exact.
+    validation: Résoudre ContentRef et vérifier empreinte, propriétaire/session, conversation, fraîcheur et JSON Pointer avant projection.
+    retention: Respecter la rétention explicite existante ; purger index/dérivés quand sources effacées, préserver mutations à réconcilier.
+
+routing:
+  vocabulary: Capacités métier typées du registre LH-04 ; pas de noms d'outils ou JSON Pointer produits librement par le modèle.
+  examples: [learner.profile.read, training.list, training.current.read, training.select, learning.resume, activity.hint, activity.answer, learning.explain]
+  availability: Exposer seulement capacités présentes et implémentées ; sélection de formation après qualification LH-04, évaluations et enregistrement après LH-08.
+  path_a:
+    status: TODO
+    design: Encodeur multilingue CPU local + petit classificateur supervisé calibré, alimenté par texte courant et caractéristiques d'état bornées.
+    training: Poids de l'encodeur figés dans la première comparaison ; tête linéaire légère, par exemple, sans LoRA du LLM.
+    evidence: Évaluer encodeur, modèle ONNX, licence, tokenizer/prétraitement et empaquetage Windows ; aucune dépendance réseau à l'exécution.
+    features: Embedding du message, présence de question/liste/formation, disponibilité des capacités ; pas de concaténation exhaustive de l'historique.
+    reject: Probabilité calibrée par classe, marge entre candidats et détecteur hors périmètre ; seuils choisis uniquement sur calibration.
+    authority: Cosine seule ne déclenche rien ; classification et contrôles de portée/référence/préconditions précèdent toute admission.
+    limitations: Probabilités et scores ne prouvent ni la portée d'une négation ni une autorisation ; rejeter les cas non fiables.
+  path_b:
+    status: TODO
+    design: Sélection LLM contrainte parmi au plus 3 capacités candidates, Reply, Clarify et Unsupported.
+    candidates: Recherche lexicale/sémantique et état courant ; mesurer rappel des candidats et erreur de sélection séparément.
+    output: Proposition versionnée, intentions bornées et références de slots ; grammaire valide la forme, Rust valide le sens exécutable.
+    limits: Une analyse de 96 tokens au maximum pour le premier essai ; pas de chaîne de pensée affichée ni boucle de découverte libre.
+    confidence: Un score de confiance déclaré par le LLM est ignoré comme autorité ; calibrer uniquement les résultats observés sur données séparées.
+    failure: Sortie invalide, capacité absente ou candidats insuffisants → clarification précise ou indisponibilité honnête, sans appel inventé.
+  cascade: Comparer A seul, B seul, A puis B sur rejet ; décider après mesures, sans imposer un routage LLM supplémentaire à chaque message.
+  code_responsibilities:
+    - Résoudre identifiants, versions, ordinals, liste active, conversation et question attendue depuis les sources vérifiées.
+    - Valider schéma, portée, préconditions, fraîcheur, droits, permission ACP, garde de tour, idempotence et budgets d'appels.
+    - Appliquer choix utilisateur explicite et reçus ; ordonner les opérations dépendantes ; rendre listes et faits sans synthèse obligatoire.
+  llm_responsibilities:
+    - Proposer une intention et des contraintes sémantiques ; distinguer explication générale, lecture personnelle et demande d'action.
+    - Expliquer une notion, reformuler une difficulté ou donner un indice fondé sur les faits/contrats présentés.
+  slots:
+    authoritative: IDs et versions issus du registre et des reçus ; un alias proposé n'est résolu que dans le bon scope.
+    lexical: Sujet, requête de recherche ou extrait utilisateur validé en taille/type ; aucune normalisation ne supprime négation ou citation.
+    missing: Slot nécessaire inconnu → lecture autorisée ou clarification ; aucune valeur devinée pour compléter un appel.
+  difficult_cases:
+    reference: « la deuxième » nécessite une liste visible non ambiguë ; « reprenons » une activité encore valide ; sinon clarifier.
+    negation: Respecter « ne consulte pas mon profil » et « pas celle-ci, l'autre » ; les négations complexes ne sont pas un simple filtre lexical.
+    quotation: Un exemple cité, une question sur les capacités ou une description d'outil ne valent pas demande d'exécution.
+    compound: Préserver chaque objectif ; au plus 2 intentions par proposition initiale, dépendances explicites et aucune branche silencieusement perdue.
+    compound_overflow: Au-delà de la limite ou en cas de conflit, proposer une priorité à clarifier ; ne pas exécuter un sous-ensemble arbitraire.
+    ambiguity: « mon profil ou ma formation » n'est pas automatiquement ramené à profil ; expliciter ce qui est souhaité ou proposer les deux lectures.
+    expected_answer: « je bloque » diffère d'une réponse ; l'état attendu est un indice de routage, pas une soumission automatique.
+    unavailable: Distinguer serveur inaccessible, permission refusée, capacité non implémentée et information absente ; indiquer une suite possible.
+
+proposed_rust_interfaces:
+  status: PROPOSED ; à stabiliser avec LH-00/LH-04 avant édition des modules partagés.
+  sketch: |
+    // Signatures conceptuelles ; détails d'ownership, erreurs et sérialisation à valider.
+    struct DialogueSnapshot { scope: OwnerBinding, version: u64, facts: DialogueFacts,
+      statements: Vec<LearnerStatement>, observations: Vec<Observation>, hypotheses: Vec<Hypothesis> }
+    struct EvidenceHandle { session: SessionId, conversation: ConversationId,
+      content: ContentRef, pointer: CheckedPointer, freshness: Freshness }
+    enum StateEvent { HostConfirmed(VerifiedHost), ToolSucceeded(VerifiedReceipt),
+      LearnerDeclared(ExactTurn), PresentationObserved(DeliveryObservation), Invalidated(Invalidation) }
+    fn reduce(state: &DialogueSnapshot, event: &StateEvent) -> Result<StateDelta, StateError>;
+    fn restore(store: &SessionStore, scope: &OwnerBinding) -> Result<DialogueSnapshot, StateError>;
+    struct RoutingRequest<'a> { user: &'a str, state: &'a DialogueSnapshot,
+      capabilities: &'a [CapabilityBrief], deadline: Deadline }
+    enum RouteDecision { Propose(CapabilityProposal), Reply, Clarify(Clarification), Unsupported }
+    trait IntentRouter { fn route(&mut self, request: RoutingRequest<'_>) -> Result<RouteDecision, RouteError>; }
+    fn resolve_slots(proposal: &CapabilityProposal, state: &DialogueSnapshot,
+      registry: &EvidenceRegistry) -> Result<ResolvedProposal, ResolutionError>;
+    fn project_task(request: &ProjectionRequest, counter: &mut dyn ExactTokenCounter)
+      -> Result<Projection, ContextError>;
+  admission_boundary: ResolvedProposal n'est pas un permis ; LH-04 admet puis l'exécuteur existant exige permissions et garde de tour.
+  compatibility: Réutiliser dialogue_snapshot/capability_proposal/inference_request/turn_observation du plan parent ; pas de deuxième binding.
+  visibility: Constructeurs de preuves privés ou contrôlés ; désérialiser un JSON fourni au modèle ne crée jamais VerifiedHost ou VerifiedReceipt.
+
+implementation_steps:
+  - id: CR-01
+    parent: LH-03
+    status: TODO
+    files: [client/local-agent/src/dialogue_state.rs, client/local-agent/src/host_context.rs, client/local-agent/src/lib.rs]
+    work: Définir enveloppes de sources, transitions et invalidations ; réutiliser les reçus existants et figer les contrats avec LH-04.
+    acceptance: Réducteur déterministe et idempotent ; choix utilisateur distinct d'une sélection confirmée ; aucun résumé promu en preuve.
+  - id: CR-02
+    parent: LH-03
+    status: TODO
+    depends_on: [CR-01]
+    files: [client/local-agent/src/session_store.rs, client/local-agent/src/journal.rs]
+    work: Journaliser les événements typés et snapshots ; ajouter lecture incrémentale d'événements si nécessaire, sans confondre les curseurs.
+    acceptance: Reprise après crash identique au replay complet ; références invalides rejetées ; aucune opération rejouée ni traversée d'identité/session.
+  - id: CR-03
+    parent: LH-03
+    status: TODO
+    depends_on: [CR-02, LH-01]
+    files: [client/local-agent/src/context.rs, client/local-agent/src/context_retrieval.rs, client/local-agent/src/harness.rs]
+    work: Projeter état utile, preuves et retrieval borné ; ordonner le préfixe ; conserver les audits et le compteur exact.
+    acceptance: 100 tours et gros reçus sans croissance du prompt ; preuves exactes aux deux budgets ; préfixe réutilisable mesuré par LH-01.
+  - id: CR-04
+    parent: LH-06
+    status: TODO
+    depends_on: [CR-01, LH-04, LH-05]
+    files: [client/local-agent/src/intent_router.rs, client/local-agent/src/fast_harness.rs, client/local-agent/src/lib.rs]
+    work: Implémenter décisions bornées, résolution de slots et voie LLM ; garder commandes explicites comme référence, sans enrichir une liste ad hoc.
+    acceptance: Ambiguïté/rejet exposés ; négations et références préservées ; aucune confiance déclarative ne suffit à admettre une action.
+  - id: CR-05
+    parent: LH-06
+    status: TODO
+    depends_on: [CR-04, LH-05]
+    files: [client/local-agent/src/intent_encoder.rs, client/local-agent/Cargo.toml, client/local-agent/Cargo.lock]
+    work: Ajouter encodeur CPU optionnel et tête calibrée ; figer artefacts, seuils et features ; comparer les trois variantes avant adoption.
+    acceptance: Modèle/poids/tokenizer/normalisation/calibration identifiés ; fonctionnement hors ligne ; qualité, RAM et latence réellement mesurées.
+  - id: CR-06
+    parent: LH-07
+    owner: integration_owner
+    status: TODO
+    depends_on: [CR-03, CR-04, CR-05, LH-04, LH-05]
+    files: [client/local-agent/src/acp.rs, client/local-agent/src/harness.rs, client/src-tauri/src/backend.rs]
+    work: Remettre les adaptateurs au principal LH-07 ; enrichir _meta uniquement avec données typées vérifiées utiles et attestations de livraison définies.
+    acceptance: Deux chemins réels depuis ACP ; reprise/rebind sans replay ; agents externes préservés ; aucune répétition du prompt pédagogique complet.
+file_ownership: Fichiers partagés édités par un seul propriétaire désigné ; listes ci-dessus décrivent les futures étapes, pas des modifications de ce paquet.
+
+evaluation:
+  status: TODO ; co-construction avec LH-05, exécution et rapport matériel dans LH-11.
+  corpus:
+    floor: Au moins 200 demandes et 50 dialogues indépendants selon le plan parent ; augmenter avant de conclure sur les catégories rares.
+    split: Réserver entraînement, calibration et test ; groupes par scénario, famille de paraphrases, auteur/source et dialogue entier.
+    leakage: Fautes, traductions et paraphrases d'un même cas restent ensemble ; huit cas de recherche connus uniquement comme régressions.
+    calibration: Ajuster probabilités puis seuils de rejet sur sous-ensembles disjoints ou validation croisée interne ; aucun réglage sur le test final.
+    independence: Référent qualification conserve le test tenu à part ; annotations relues, ambiguïtés et plusieurs réponses admissibles documentées.
+    labels: Intentions, portée/négation, références/slots, sources requises, appels autorisés/interdits, clarification attendue et réussite de dialogue.
+  ablations:
+    routing: Routeur actuel, lexical seul, encodeur/classificateur, LLM borné, cascade ; capacités et protocole constants.
+    state: Deux tours seuls contre état sourcé ; état sans/avec retrieval ; résumés secondaires activés/désactivés.
+    context: Cache actif/inactif, 2048/4096, préfixe stable/variable ; même modèle/backend ; ne changer qu'un facteur à la fois.
+    models: Réexécuter la stratégie retenue sur les profils LH-09 ; respecter template et tokenizer propres à chacun.
+  metrics:
+    quality: Exactitude des intentions/slots et réussite de dialogue, précision par classe, couverture automatique, rejets, faux appels et clarifications inutiles.
+    rejection: Rapporter la courbe risque/couverture ; ne pas masquer un routeur inutile qui rejette presque tout derrière sa précision.
+    latency: Chargement encodeur, routage, tokenisation, prefill, cache, MCP, premier texte utile et total ; froid/chaud séparés.
+    resources: RAM, VRAM, tokens par section, extraits/omissions, nombre de générations et appels ; attente humaine explicitée.
+    statistics: Effectifs et intervalles d'incertitude ; pas de p95 déduit de quelques essais ; aucune promesse de latence encodeur.
+  acceptance_targets:
+    semantic: Au moins 95 % de décisions/intention-parcours correctes sur test indépendant, clarifications jugées nécessaires incluses selon annotation préalable.
+    useful_coverage: Rapport obligatoire des réponses utiles et rejets par catégorie ; seuil d'automatisation fixé avant test, sans changer l'objectif pour obtenir un GO.
+    invariants: Zéro appel interdit, identité inventée, preuve requise altérée ou double mutation observé dans la suite ; cela ne prouve pas un risque universel nul.
+    hardware: Cibles parent de 2 s médiane, 4 s p95 et 15 tokens/s à vérifier sur Windows/P2000 ; aucun résultat Linux ne les valide.
+  required_tests:
+    - Références « la deuxième », « on reprend », « je bloque » avec état valide, absent, périmé, liste partielle et deux listes concurrentes.
+    - Négation, citation, explication sans consultation, demande composée conflictuelle et demande hors capacités disponibles.
+    - Crash avant/après snapshot, réponse partielle, faux accusé d'affichage, migration, rétention et événement dupliqué/hors binding.
+    - Changement de profil/tenant/serveur/conversation/modèle, droits révoqués et réponse MCP tardive après rebind.
+    - Égalité des preuves requises avec originaux et compteur du GGUF réel aux deux budgets ; dépassement obligatoire explicitement refusé.
+    - Serveur Tutor réel inchangé et ACP intégré pour le parcours complet ; doubles déterministes réservés aux invariants unitaires.
+
+open_decisions:
+  - Encodeur/classificateur, décision LLM ou cascade retenue après ablations ; artefacts et budget mémoire optionnel à approuver par mesure.
+  - Accusé d'affichage et contrat de question pédagogique avec LH-07/LH-08 ; distinguer question conversationnelle et tentative serveur.
+  - Granularité des snapshots, TTL et conflits de versions par source ; aucune expiration arbitraire ne remplace une revalidation nécessaire.
+  - Seuil de couverture utile et volumes par catégorie à figer avec LH-05 avant ouverture du test indépendant.
+  - Passage à 4096 et politique de cache/éviction décidés avec LH-01/LH-10 ; modèle et backend finaux restent hors de ce lot.
