@@ -105,6 +105,60 @@ impl Session {
     }
 }
 
+#[derive(Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TurnObservation {
+    schema_version: u32,
+    component_scope: &'static str,
+    inference: Option<crate::runtime::RuntimeObservation>,
+    mcp: Option<crate::mcp_client::McpObservation>,
+    worker_elapsed_ms: Option<f64>,
+}
+
+impl TurnObservation {
+    fn new() -> Self {
+        Self {
+            schema_version: 1,
+            component_scope: "native_agent",
+            ..Self::default()
+        }
+    }
+}
+
+struct WorkerObservationGuard {
+    observation: Arc<Mutex<TurnObservation>>,
+    started: std::time::Instant,
+}
+impl Drop for WorkerObservationGuard {
+    fn drop(&mut self) {
+        if let Ok(mut observation) = self.observation.lock() {
+            observation.worker_elapsed_ms = Some(self.started.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+}
+
+fn attach_turn_observation(
+    mut response: Value,
+    observation: &Arc<Mutex<TurnObservation>>,
+) -> Value {
+    let Ok(observation) = observation.lock() else {
+        return response;
+    };
+    // Older/simulated engines opt out, and replay never measures a new turn.
+    if observation.inference.is_none() && observation.mcp.is_none() {
+        return response;
+    }
+    let Ok(value) = serde_json::to_value(&*observation) else {
+        return response;
+    };
+    if response.get("result").is_some() {
+        response["result"]["_meta"]["tutor"]["runtime"] = value;
+    } else if response.get("error").is_some() {
+        response["error"]["data"]["_meta"]["tutor"]["runtime"] = value;
+    }
+    response
+}
+
 struct Active {
     id: Value,
     session_id: String,
@@ -113,6 +167,7 @@ struct Active {
     output_overflow: Arc<AtomicBool>,
     deadline: Instant,
     projection: Arc<Mutex<Option<context::ProjectionAudit>>>,
+    observation: Arc<Mutex<TurnObservation>>,
     replay: bool,
     permission: Option<PendingPermission>,
 }
@@ -151,6 +206,7 @@ struct WorkerOutput {
     turn: String,
     bytes: usize,
     controls: usize,
+    observation: Arc<Mutex<TurnObservation>>,
 }
 impl WorkerOutput {
     fn send(&self, mut item: StreamItem) -> Result<(), String> {
@@ -238,6 +294,11 @@ impl WorkerOutput {
 }
 
 impl crate::harness::Ui for WorkerOutput {
+    fn observe_mcp(&mut self, value: crate::mcp_client::McpObservation) {
+        if let Ok(mut observation) = self.observation.lock() {
+            observation.mcp = Some(value);
+        }
+    }
     fn text(&mut self, text: &str) -> Result<(), String> {
         WorkerOutput::text(self, text)
     }
@@ -873,6 +934,7 @@ impl Server {
             output_overflow: Arc::new(AtomicBool::new(false)),
             deadline: Instant::now() + GENERATION_TIMEOUT,
             projection: Arc::new(Mutex::new(None)),
+            observation: Arc::new(Mutex::new(TurnObservation::new())),
             replay: true,
             permission: None,
         });
@@ -982,8 +1044,18 @@ impl Server {
         let worker_cancel = cancel.clone();
         let projection = Arc::new(Mutex::new(None));
         let worker_projection = projection.clone();
+        let observation = Arc::new(Mutex::new(TurnObservation::new()));
+        let worker_observation = observation.clone();
         let worker = tokio::task::spawn_blocking(move || {
             let turn_started = std::time::Instant::now();
+            let _observation_guard = WorkerObservationGuard {
+                observation: worker_observation.clone(),
+                started: turn_started,
+            };
+            worker_engine
+                .lock()
+                .map_err(|_| "engine_unavailable".to_owned())?
+                .begin_turn_observation();
             if let Some(store) = &durable {
                 store
                     .lock()
@@ -1022,6 +1094,7 @@ impl Server {
                     turn: durable_turn_id.clone(),
                     bytes: 0,
                     controls: 0,
+                    observation: worker_observation.clone(),
                 };
                 // Even lock acquisition stays on the blocking pool.
                 let mut engine = worker_engine
@@ -1097,6 +1170,14 @@ impl Server {
                 stats.elapsed_ms = turn_started.elapsed().as_millis() as u64;
                 Ok(stats)
             })();
+            // Harvest component observations even when generation failed. These
+            // are wall-clock component timings, not UI usefulness evidence.
+            if let Ok(mut engine) = worker_engine.lock() {
+                let runtime = engine.take_runtime_observation();
+                if let Ok(mut observation) = worker_observation.lock() {
+                    observation.inference = runtime;
+                }
+            }
             if let Some(store) = &durable {
                 let status = match &generated {
                     Ok(stats)
@@ -1125,6 +1206,7 @@ impl Server {
             output_overflow,
             deadline: Instant::now() + turn_timeout,
             projection,
+            observation,
             replay: false,
             permission: None,
         });
@@ -1132,6 +1214,7 @@ impl Server {
     }
 
     async fn finish(&mut self, active: Active, cancel: &AtomicBool) -> Value {
+        let observation = active.observation.clone();
         let result = active.worker.await;
         if active.replay {
             return if matches!(result, Ok(Ok(WorkResult::Replay)))
@@ -1163,13 +1246,19 @@ impl Server {
             .and_then(|mut audit| audit.take());
         if active.output_overflow.load(Ordering::Acquire) {
             turn.status = TurnStatus::Interrupted;
-            return error(active.id, -32005, "Generation output exceeded the limit.");
+            return attach_turn_observation(
+                error(active.id, -32005, "Generation output exceeded the limit."),
+                &observation,
+            );
         }
         if cancel.load(Ordering::Acquire) {
             turn.status = TurnStatus::Interrupted;
-            return success(active.id, json!({"stopReason":"cancelled"}));
+            return attach_turn_observation(
+                success(active.id, json!({"stopReason":"cancelled"})),
+                &observation,
+            );
         }
-        match result {
+        let response = match result {
             Ok(Ok(WorkResult::Generation(stats)))
                 if matches!(
                     stats.stop_reason.as_str(),
@@ -1221,7 +1310,8 @@ impl Server {
                 // Never forward native/provider errors, panic payloads or paths.
                 error(active.id, -32603, "Local generation failed.")
             }
-        }
+        };
+        attach_turn_observation(response, &observation)
     }
 }
 
@@ -2442,6 +2532,7 @@ mod tests {
             output_overflow: Arc::new(AtomicBool::new(false)),
             deadline: Instant::now() + GENERATION_TIMEOUT,
             projection: Arc::new(Mutex::new(None)),
+            observation: Arc::new(Mutex::new(TurnObservation::new())),
             replay: false,
             permission: None,
         });
@@ -2497,6 +2588,7 @@ mod tests {
                 turn: "fixture".into(),
                 bytes: 0,
                 controls: 0,
+                observation: Arc::new(Mutex::new(TurnObservation::new())),
             };
             output.tool_update(json!({"sessionUpdate":"tool_call","toolCallId":"fixture","title":"get_pending_alerts","status":"pending"})).unwrap();
             output.approve("fixture", json!({"sessionId":"session"}))
@@ -2514,5 +2606,53 @@ mod tests {
             "cancelled"
         );
         drop(event);
+    }
+
+    #[test]
+    fn optional_component_observations_preserve_legacy_result_and_do_not_claim_usefulness() {
+        let response = success(
+            json!(3),
+            json!({"stopReason":"end_turn","_meta":{"tutor":{"generation":{"inputTokens":10,"outputTokens":2,"elapsedMs":150}}}}),
+        );
+        let observation = Arc::new(Mutex::new(TurnObservation::new()));
+        assert_eq!(
+            attach_turn_observation(response.clone(), &observation),
+            response
+        );
+        observation.lock().unwrap().inference = Some(crate::runtime::RuntimeObservation::default());
+        let actual = attach_turn_observation(response.clone(), &observation);
+        assert_eq!(
+            actual["result"]["stopReason"],
+            response["result"]["stopReason"]
+        );
+        assert_eq!(
+            actual["result"]["_meta"]["tutor"]["generation"],
+            response["result"]["_meta"]["tutor"]["generation"]
+        );
+        let metrics = &actual["result"]["_meta"]["tutor"]["runtime"];
+        assert_eq!(metrics["schemaVersion"], 1);
+        assert_eq!(metrics["componentScope"], "native_agent");
+        assert!(metrics["inference"]["firstUsefulResponseMs"].is_null());
+        assert!(metrics["mcp"].is_null());
+    }
+
+    #[test]
+    fn failed_turn_component_observations_do_not_replace_rpc_error() {
+        let observation = Arc::new(Mutex::new(TurnObservation::new()));
+        observation.lock().unwrap().mcp = Some(crate::mcp_client::McpObservation::default());
+        let actual = attach_turn_observation(
+            error(json!(4), -32007, "Could not connect to Tutor MCP."),
+            &observation,
+        );
+        assert!(actual.get("result").is_none());
+        assert_eq!(actual["error"]["code"], -32007);
+        assert_eq!(
+            actual["error"]["message"],
+            "Could not connect to Tutor MCP."
+        );
+        let metrics = &actual["error"]["data"]["_meta"]["tutor"]["runtime"];
+        assert_eq!(metrics["schemaVersion"], 1);
+        assert!(metrics["inference"].is_null());
+        assert!(metrics["mcp"]["initializeTotalMs"].is_null());
     }
 }

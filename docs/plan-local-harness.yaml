@@ -4,9 +4,9 @@ requested_at: '2026-11-02'
 baseline_commit: e8185e5ebedddedd691bfd6adf4798e99ac9eb90
 authority: Plan de référence pour les nouveaux travaux du harness, après acceptation de la recommandation du 1 novembre 2026.
 historical_backlog: docs/backlog-local-harness.yaml
-status: PLANNED
+status: IN_PROGRESS
 planning_delivery: REVIEWED ; quatre lots remis et intégrés, dépendances et contrats recoupés par l'agent principal.
-implementation_status: NOT_STARTED
+implementation_status: IN_PROGRESS
 status_meaning: Les lots ci-dessous décrivent des travaux à réaliser ; leur présence ne prouve ni leur implémentation ni leur qualification.
 
 objective:
@@ -31,6 +31,15 @@ current_state:
   retained_foundations: [journal SQLite, provenance, validation de schéma, permissions ACP, garde de tour, reçus et idempotence]
   qualification: Windows installateur/UI qualifiés ; inférence P2000, compréhension générale et pédagogie complète non qualifiées.
   measurements: docs/local-harness/research-baseline.json
+
+implementation_checkpoint:
+  scope: Sources de l'agent natif ; aucun nouvel installateur ni profil matériel qualifié.
+  native_observation_contract: docs/local-harness/native-observations.yaml
+  native_observation_report: docs/local-harness/native-observation-baseline.json
+  implemented: Mesures optionnelles et versionnées du moteur, du transport MCP et du worker ACP, y compris les erreurs observées.
+  verified: 206 tests natifs réussis, deux essais GGUF spéciaux ignorés ; neuf cas de développement avec le GGUF épinglé, Tutor réel temporaire et une connexion refusée.
+  limits: Ces cas connus ne qualifient ni la compréhension générale, ni la pédagogie, ni la réponse utile dans l'UI, ni Windows/P2000.
+  next: Mesurer le coût de l'observateur, puis worker/cache et connexion MCP résidents ; aucun gain produit présumé.
 
 invariants:
   - Le serveur reste autorité sur les droits, formations, versions, décisions et progression.
@@ -94,7 +103,7 @@ parallel_work_rules:
 
 delegation:
   integration_owner: Agent principal ; plan global, dépendances, contrats partagés, revue, intégration et publication.
-  assignment_scope: Les quatre subagents préparent des lots techniques implémentables ; ils ne modifient pas le runtime livré dans cette phase de planification.
+  assignment_scope: Les quatre lots de planification ont été remis ; les implémentations suivantes sont déléguées séparément avec écritures disjointes et intégration par le principal.
   constraints: Écritures disjointes, pas de publication autonome, pas de changement serveur et pas de déclaration de qualification sans preuve.
   dispatch: Quatre subagents effectivement lancés le 2 novembre 2026 ; leurs identifiants ci-dessous correspondent aux appels de délégation de cette session.
   agents:
@@ -133,7 +142,7 @@ items:
   - id: LH-00
     title: Mesures de référence et attribution des délais
     owner: runtime_cache
-    status: TODO
+    status: IN_PROGRESS
     depends_on: []
     paths: [client/local-agent/src/runtime.rs, client/local-agent/src/acp.rs, client/scripts/qualify-local-agent.py]
     acceptance:
@@ -142,6 +151,7 @@ items:
       - Relever froid/chaud et versions, empreintes, options et environnement ; préserver les champs ACP existants via métadonnées optionnelles.
       - Reproduire une référence avec le GGUF actuel, sur données temporaires et serveur local réel ; absence de matériel cible marquée INCOMPLETE.
     evidence_required: Rapport brut associé au commit et aux artefacts ; aucun résultat du microbenchmark de recherche n'est assimilé à une mesure produit.
+    checkpoint: Contrat natif et cas de développement dans native-observations.yaml ; ACP existant conservé. Attribution UI/routage/permissions, mesure utile et banc portable restent à réaliser.
 
   - id: LH-01
     title: Worker résident et cache d'inférence isolé

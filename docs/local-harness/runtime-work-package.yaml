@@ -1,13 +1,13 @@
 version: 1
 title: Lot moteur/cache — Tutor local ACP
 date: '2026-11-02'
-status: PLANNED
-implementation_status: NOT_STARTED
+status: IN_PROGRESS
+implementation_status: IN_PROGRESS
 parent_plan: docs/plan-local-harness.yaml
 owner: runtime_cache
 items: [LH-00, LH-01, LH-09, LH-10]
 baseline_commit: e8185e5ebedddedd691bfd6adf4798e99ac9eb90
-scope: Plan technique à relire ; aucun code produit, benchmark supplémentaire ou publication dans ce lot de planification.
+scope: Plan technique de référence ; premier incrément d'observation natif intégré et décrit dans native-observations.yaml. Worker/cache et modèles restent à réaliser et qualifier.
 target:
   os: Windows x64
   cpu: Intel Core i7-9750H
@@ -151,7 +151,7 @@ observability:
     - Première émission interne, premier texte visible ACP, premier rendu UI, première réponse utile et fin de réponse.
   counts: input_tokens total, reused_tokens, evaluated_input_tokens, output_tokens, generation_count, model_load_count et context_allocation_count.
   cache_fields: hit/miss/disabled, motif typé, longueur commune, tokens réellement réutilisés, invalidation et backend effectif.
-  invariants: input_tokens = reused_tokens + evaluated_input_tokens ; les appels de comptage ne consomment pas de tokens de génération.
+  invariants: input_tokens = reused_tokens + evaluated_input_tokens après prefill intégralement réussi seulement ; progrès partiel inconnu reste null. Les appels de comptage ne consomment pas de tokens de génération.
   useful_response: |
     Profil/liste : première unité utile définie avant l'essai par l'oracle LH-11, rendue dans l'UI et cohérente avec la réponse finale.
     Un premier résultat seul ne termine pas une page ou une liste exhaustive demandée.

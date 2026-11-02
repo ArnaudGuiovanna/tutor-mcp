@@ -1,0 +1,1853 @@
+{
+  "schema_version": 1,
+  "status": "complete_exploratory",
+  "scope": "Exploratory real ACP/GGUF Linux CPU, no MCP, no useful-response or target qualification",
+  "target_hardware_qualified": false,
+  "baseline_ref": "4714d5b965fa3d1844fbd3f12531b973b53d7ea2",
+  "started_utc": "2026-11-02T09:11:27.529792+00:00",
+  "configuration": {
+    "context": 2048,
+    "max_output": 8,
+    "threads": 4,
+    "batch": 128,
+    "gpu_layers": 0,
+    "prompt": "Compte de 1 à 4 sans explication.",
+    "sampler": {
+      "temperature": 0.7,
+      "top_k": 20,
+      "top_p": 0.8,
+      "min_p": 0,
+      "seed": 42
+    },
+    "mcp_servers": []
+  },
+  "model": {
+    "sha256": "b139949c5bd74937ad8ed8c8cf3d9ffb1e99c866c823204dc42c0d91fa181897",
+    "bytes": 1107409472
+  },
+  "source_verification": {
+    "scope": "Isolated build preparation only; not a performance result",
+    "baseline_ref": "4714d5b965fa3d1844fbd3f12531b973b53d7ea2",
+    "candidate": {
+      "sha256": "dc4e17e809f9dfcf425227275577ef432274273e4c6b3d30b5eff48aec8f8753",
+      "bytes": 17800520
+    },
+    "modified_files": [
+      "src/acp.rs",
+      "src/harness.rs",
+      "src/mcp_client.rs",
+      "src/runtime.rs"
+    ],
+    "unchanged_files": [
+      "Cargo.lock",
+      "Cargo.toml",
+      "fixtures/catalog-local.json",
+      "fixtures/discovery-fr.json",
+      "fixtures/h07-receipts.json",
+      "model-profile.json",
+      "notices/QWEN-LICENSE.txt",
+      "notices/QWEN-SOURCE.txt",
+      "src/call_validation.rs",
+      "src/catalog.rs",
+      "src/config.rs",
+      "src/context.rs",
+      "src/executor.rs",
+      "src/fast_harness.rs",
+      "src/host_context.rs",
+      "src/journal.rs",
+      "src/lib.rs",
+      "src/main.rs",
+      "src/mcp.rs",
+      "src/mcp_stdio.rs",
+      "src/pedagogical.rs",
+      "src/pedagogical_tests.rs",
+      "src/session_store.rs"
+    ],
+    "source_sha256": {
+      "Cargo.lock": {
+        "baseline": "1ea6d39ec20f915ff10c4ef777fe9fd4f08e7646d603d6e8826fb0ba244f798c",
+        "candidate_worktree": "1ea6d39ec20f915ff10c4ef777fe9fd4f08e7646d603d6e8826fb0ba244f798c"
+      },
+      "Cargo.toml": {
+        "baseline": "079ad94fd212cf464ec09301b1db63b2bbceda992647a3dce92fbe1a621716fd",
+        "candidate_worktree": "079ad94fd212cf464ec09301b1db63b2bbceda992647a3dce92fbe1a621716fd"
+      },
+      "fixtures/catalog-local.json": {
+        "baseline": "45d5828d006fb9837caf4da2a1af0c11bf0fc2e45307fdfecd8459ba852480bf",
+        "candidate_worktree": "45d5828d006fb9837caf4da2a1af0c11bf0fc2e45307fdfecd8459ba852480bf"
+      },
+      "fixtures/discovery-fr.json": {
+        "baseline": "a04289bef61e4b1b3d0d724137f07ac062beb5fab7cc9f2ea287fee120bd6cd5",
+        "candidate_worktree": "a04289bef61e4b1b3d0d724137f07ac062beb5fab7cc9f2ea287fee120bd6cd5"
+      },
+      "fixtures/h07-receipts.json": {
+        "baseline": "498e24444648b7e9749b57a7983443fea7742984eb382a7c4c8d020cf011c19b",
+        "candidate_worktree": "498e24444648b7e9749b57a7983443fea7742984eb382a7c4c8d020cf011c19b"
+      },
+      "model-profile.json": {
+        "baseline": "9f02c9b26b2f9e7ac54e1a333886bcf55c7ab4df60689c1fdc7c5a577fb1dc36",
+        "candidate_worktree": "9f02c9b26b2f9e7ac54e1a333886bcf55c7ab4df60689c1fdc7c5a577fb1dc36"
+      },
+      "notices/QWEN-LICENSE.txt": {
+        "baseline": "832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e",
+        "candidate_worktree": "832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e"
+      },
+      "notices/QWEN-SOURCE.txt": {
+        "baseline": "fbd0d6ffd8bcdc09b60692d515977ce6b9b29b6d599569e1855e91cc3f005efc",
+        "candidate_worktree": "fbd0d6ffd8bcdc09b60692d515977ce6b9b29b6d599569e1855e91cc3f005efc"
+      },
+      "src/acp.rs": {
+        "baseline": "4f56b6d685956a5429256717eae0363bcaa7a7c90d6454962298e998567c718d",
+        "candidate_worktree": "d4672cc96db38f94e0d080070d7c3a8c2d285798a4b8cf242862c4c9cb5e4d25"
+      },
+      "src/call_validation.rs": {
+        "baseline": "1714d9cae303a5d983e87a0605b29a618d4d068a970036defc3d57345b5dab3d",
+        "candidate_worktree": "1714d9cae303a5d983e87a0605b29a618d4d068a970036defc3d57345b5dab3d"
+      },
+      "src/catalog.rs": {
+        "baseline": "c9f5b8b3c43033f5477271ce86d96cc90c8575f9e017e28cc73964590988fc25",
+        "candidate_worktree": "c9f5b8b3c43033f5477271ce86d96cc90c8575f9e017e28cc73964590988fc25"
+      },
+      "src/config.rs": {
+        "baseline": "c65d0b0fd64bcc23492cf887e529c39003ab49b0c31d318d0b62a96dbb2a950c",
+        "candidate_worktree": "c65d0b0fd64bcc23492cf887e529c39003ab49b0c31d318d0b62a96dbb2a950c"
+      },
+      "src/context.rs": {
+        "baseline": "287421a0b33b53051f9efa8ef62b7ebf652cc49402598c495d8fe1a5cbb90bbf",
+        "candidate_worktree": "287421a0b33b53051f9efa8ef62b7ebf652cc49402598c495d8fe1a5cbb90bbf"
+      },
+      "src/executor.rs": {
+        "baseline": "37428a1e6725d727192d134d19e9e037c5cec1614bf1cccfacef55c38a9e0f3f",
+        "candidate_worktree": "37428a1e6725d727192d134d19e9e037c5cec1614bf1cccfacef55c38a9e0f3f"
+      },
+      "src/fast_harness.rs": {
+        "baseline": "d7c907889cccc03bc24ff27efba60537e2de657c2c88710e2bd8998d2e0ddd0b",
+        "candidate_worktree": "d7c907889cccc03bc24ff27efba60537e2de657c2c88710e2bd8998d2e0ddd0b"
+      },
+      "src/harness.rs": {
+        "baseline": "0d17c089cf885be6bcd8d26889f56a7a559f266f4a63d716b6caf9cff579d0b5",
+        "candidate_worktree": "594f0eba110101326fd6437615258591dcd384e85a5b357db0339f76ffdf5b9f"
+      },
+      "src/host_context.rs": {
+        "baseline": "be4ef8494819bb5908060362e1cf1839562d7256761faf8dd5f6fc3d00003480",
+        "candidate_worktree": "be4ef8494819bb5908060362e1cf1839562d7256761faf8dd5f6fc3d00003480"
+      },
+      "src/journal.rs": {
+        "baseline": "d228ef4d815cfbbacb2b2a051f440cd17db7e3412f0a04813801763c2522cf6d",
+        "candidate_worktree": "d228ef4d815cfbbacb2b2a051f440cd17db7e3412f0a04813801763c2522cf6d"
+      },
+      "src/lib.rs": {
+        "baseline": "c451d13148bf8565bfd8d289d2a8a035fb9513b1e201615d0e27a5f0c26beb4f",
+        "candidate_worktree": "c451d13148bf8565bfd8d289d2a8a035fb9513b1e201615d0e27a5f0c26beb4f"
+      },
+      "src/main.rs": {
+        "baseline": "c306c068afaaa2d8040fc75c1b4953b3fab009d7fd0747d90f730ecc10d2771e",
+        "candidate_worktree": "c306c068afaaa2d8040fc75c1b4953b3fab009d7fd0747d90f730ecc10d2771e"
+      },
+      "src/mcp.rs": {
+        "baseline": "b91cbf7b734c151995748ad636dbecc46ba8c213390d50554c4eb6bee9fb3536",
+        "candidate_worktree": "b91cbf7b734c151995748ad636dbecc46ba8c213390d50554c4eb6bee9fb3536"
+      },
+      "src/mcp_client.rs": {
+        "baseline": "908a348d5aa8b015131fd5127af636fcd05a909ec96b0a8eba3b1079bd70d370",
+        "candidate_worktree": "16e319ea9a06a198fde88f14a0ead141fba911a9d151fa88461105c66b735dd8"
+      },
+      "src/mcp_stdio.rs": {
+        "baseline": "03081b236f331572fabddde684a33b93f5de094b4053790096eccf97da4aa85d",
+        "candidate_worktree": "03081b236f331572fabddde684a33b93f5de094b4053790096eccf97da4aa85d"
+      },
+      "src/pedagogical.rs": {
+        "baseline": "6dd6831ccb588a9b5535bda12475c45f5aa77aa72815ef56de9fb4669dec456c",
+        "candidate_worktree": "6dd6831ccb588a9b5535bda12475c45f5aa77aa72815ef56de9fb4669dec456c"
+      },
+      "src/pedagogical_tests.rs": {
+        "baseline": "1b9ffc58b6b3491dfb99a9a135078b0332b58a106923bf5d8507e688b5b86cd3",
+        "candidate_worktree": "1b9ffc58b6b3491dfb99a9a135078b0332b58a106923bf5d8507e688b5b86cd3"
+      },
+      "src/runtime.rs": {
+        "baseline": "495d319484d9249db0f8310c010f44e29d18dfd50c90c476ed8f82a6d5e8283c",
+        "candidate_worktree": "a843d2c68f8419b4a6e63a8a7dc9cfaf7f8d40b48eb5b582bea5726c07585a8c"
+      },
+      "src/session_store.rs": {
+        "baseline": "6ac924674c6233070f19b9b8a308fda543fdaae871e0a11e0b01ad2d9df9c20e",
+        "candidate_worktree": "6ac924674c6233070f19b9b8a308fda543fdaae871e0a11e0b01ad2d9df9c20e"
+      }
+    },
+    "snapshot_before": {
+      "tracked_files_sha256": "ac40c5c0df49fd03ad8f24d7a2b7fce3d286cc271edf5eebd7112e82c463a9ce",
+      "index_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "agent_diff_sha256": "4c3f599d8171f63d1a44e5b51599eaf794d2dd5136ef26b4bffeadf3676c680d"
+    },
+    "snapshot_after": {
+      "tracked_files_sha256": "ac40c5c0df49fd03ad8f24d7a2b7fce3d286cc271edf5eebd7112e82c463a9ce",
+      "index_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "agent_diff_sha256": "4c3f599d8171f63d1a44e5b51599eaf794d2dd5136ef26b4bffeadf3676c680d"
+    },
+    "manifest_only_change": "Additional distinct [[bin]] tutor-lh00-baseline"
+  },
+  "baseline_binary": {
+    "sha256": "24c359ddfdcb931614ab7d32abc556304cf1b4479830ec06ab4782e34298482e",
+    "bytes": 17768392
+  },
+  "candidate_binary": {
+    "sha256": "dc4e17e809f9dfcf425227275577ef432274273e4c6b3d30b5eff48aec8f8753",
+    "bytes": 17800520
+  },
+  "environment_before": {
+    "loadavg": [
+      1.31982421875,
+      0.822265625,
+      1.318359375
+    ],
+    "logical_cpus": 4,
+    "cgroup_cpu_stat": {
+      "usage_usec": 40087482582,
+      "user_usec": 36483654822,
+      "system_usec": 3603827759,
+      "nr_periods": 0,
+      "nr_throttled": 0,
+      "throttled_usec": 0
+    },
+    "cgroup_cpu_max": "max 100000",
+    "host_cpu_ticks": {
+      "user": 4003541,
+      "nice": 2057,
+      "system": 651754,
+      "idle": 149988992,
+      "iowait": 97932,
+      "irq": 0,
+      "softirq": 19824,
+      "steal": 730734,
+      "guest": 0,
+      "guest_nice": 0
+    }
+  },
+  "runs": [
+    {
+      "order": 1,
+      "variant": "baseline",
+      "binary_before": {
+        "sha256": "24c359ddfdcb931614ab7d32abc556304cf1b4479830ec06ab4782e34298482e",
+        "bytes": 17768392
+      },
+      "turns": [
+        {
+          "cache_label": "cold_process",
+          "os_cache": "uncontrolled_preflight_model_hash_reads_weights",
+          "environment_before": {
+            "loadavg": [
+              1.31982421875,
+              0.822265625,
+              1.318359375
+            ],
+            "logical_cpus": 4,
+            "cgroup_cpu_stat": {
+              "usage_usec": 40087627366,
+              "user_usec": 36483773815,
+              "system_usec": 3603853551,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "throttled_usec": 0
+            },
+            "cgroup_cpu_max": "max 100000",
+            "host_cpu_ticks": {
+              "user": 4003550,
+              "nice": 2057,
+              "system": 651757,
+              "idle": 149989017,
+              "iowait": 97932,
+              "irq": 0,
+              "softirq": 19824,
+              "steal": 730738,
+              "guest": 0,
+              "guest_nice": 0
+            }
+          },
+          "first_text_ms": 13775.347791030072,
+          "response_synthetic": "1  \n2  \n3  \n4",
+          "chunks": 7,
+          "outcome": "completed",
+          "stop_reason": "end_turn",
+          "generation": {
+            "elapsedMs": 14542,
+            "inputTokens": 71,
+            "outputTokens": 7
+          },
+          "observation": null,
+          "total_ms": 14544.136320997495,
+          "environment_after": {
+            "loadavg": [
+              1.48876953125,
+              0.88134765625,
+              1.3291015625
+            ],
+            "logical_cpus": 4,
+            "cgroup_cpu_stat": {
+              "usage_usec": 40114682035,
+              "user_usec": 36506927346,
+              "system_usec": 3607754689,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "throttled_usec": 0
+            },
+            "cgroup_cpu_max": "max 100000",
+            "host_cpu_ticks": {
+              "user": 4005776,
+              "nice": 2057,
+              "system": 652162,
+              "idle": 149991908,
+              "iowait": 97935,
+              "irq": 0,
+              "softirq": 19829,
+              "steal": 731019,
+              "guest": 0,
+              "guest_nice": 0
+            }
+          },
+          "environment_delta": {
+            "cgroup_cpu_stat": {
+              "usage_usec": 27054669,
+              "user_usec": 23153531,
+              "system_usec": 3901138,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "throttled_usec": 0
+            },
+            "host_cpu_ticks": {
+              "user": 2226,
+              "nice": 0,
+              "system": 405,
+              "idle": 2891,
+              "iowait": 3,
+              "irq": 0,
+              "softirq": 5,
+              "steal": 281,
+              "guest": 0,
+              "guest_nice": 0
+            }
+          }
+        },
+        {
+          "cache_label": "warm_process",
+          "os_cache": "uncontrolled_preflight_model_hash_reads_weights",
+          "environment_before": {
+            "loadavg": [
+              1.48876953125,
+              0.88134765625,
+              1.3291015625
+            ],
+            "logical_cpus": 4,
+            "cgroup_cpu_stat": {
+              "usage_usec": 40114684011,
+              "user_usec": 36506929311,
+              "system_usec": 3607754700,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "throttled_usec": 0
+            },
+            "cgroup_cpu_max": "max 100000",
+            "host_cpu_ticks": {
+              "user": 4005776,
+              "nice": 2057,
+              "system": 652162,
+              "idle": 149991908,
+              "iowait": 97935,
+              "irq": 0,
+              "softirq": 19829,
+              "steal": 731019,
+              "guest": 0,
+              "guest_nice": 0
+            }
+          },
+          "first_text_ms": 3360.3218760108575,
+          "response_synthetic": "1  \n2  \n3  \n4",
+          "chunks": 7,
+          "outcome": "completed",
+          "stop_reason": "end_turn",
+          "generation": {
+            "elapsedMs": 4274,
+            "inputTokens": 100,
+            "outputTokens": 7
+          },
+          "observation": null,
+          "total_ms": 4281.169529014733,
+          "environment_after": {
+            "loadavg": [
+              1.68994140625,
+              0.93359375,
+              1.34375
+            ],
+            "logical_cpus": 4,
+            "cgroup_cpu_stat": {
+              "usage_usec": 40130454734,
+              "user_usec": 36522342040,
+              "system_usec": 3608112694,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "throttled_usec": 0
+            },
+            "cgroup_cpu_max": "max 100000",
+            "host_cpu_ticks": {
+              "user": 4007274,
+              "nice": 2057,
+              "system": 652203,
+              "idle": 149992012,
+              "iowait": 97935,
+              "irq": 0,
+              "softirq": 19832,
+              "steal": 731086,
+              "guest": 0,
+              "guest_nice": 0
+            }
+          },
+          "environment_delta": {
+            "cgroup_cpu_stat": {
+              "usage_usec": 15770723,
+              "user_usec": 15412729,
+              "system_usec": 357994,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "throttled_usec": 0
+            },
+            "host_cpu_ticks": {
+              "user": 1498,
+              "nice": 0,
+              "system": 41,
+              "idle": 104,
+              "iowait": 0,
+              "irq": 0,
+              "softirq": 3,
+              "steal": 67,
+              "guest": 0,
+              "guest_nice": 0
+            }
+          }
+        }
+      ],
+      "errors": [],
+      "environment_before": {
+        "loadavg": [
+          1.31982421875,
+          0.822265625,
+          1.318359375
+        ],
+        "logical_cpus": 4,
+        "cgroup_cpu_stat": {
+          "usage_usec": 40087583182,
+          "user_usec": 36483741294,
+          "system_usec": 3603841888,
+          "nr_periods": 0,
+          "nr_throttled": 0,
+          "throttled_usec": 0
+        },
+        "cgroup_cpu_max": "max 100000",
+        "host_cpu_ticks": {
+          "user": 4003549,
+          "nice": 2057,
+          "system": 651756,
+          "idle": 149989013,
+          "iowait": 97932,
+          "irq": 0,
+          "softirq": 19824,
+          "steal": 730736,
+          "guest": 0,
+          "guest_nice": 0
+        }
+      },
+      "shutdown": {
+        "graceful_eof": true,
+        "forced": false,
+        "reaped": true,
+        "exit_code": 0
+      },
+      "binary_after": {
+        "sha256": "24c359ddfdcb931614ab7d32abc556304cf1b4479830ec06ab4782e34298482e",
+        "bytes": 17768392
+      },
+      "environment_after": {
+        "loadavg": [
+          1.68994140625,
+          0.93359375,
+          1.34375
+        ],
+        "logical_cpus": 4,
+        "cgroup_cpu_stat": {
+          "usage_usec": 40130993739,
+          "user_usec": 36522663948,
+          "system_usec": 3608329790,
+          "nr_periods": 0,
+          "nr_throttled": 0,
+          "throttled_usec": 0
+        },
+        "cgroup_cpu_max": "max 100000",
+        "host_cpu_ticks": {
+          "user": 4007301,
+          "nice": 2057,
+          "system": 652224,
+          "idle": 149992124,
+          "iowait": 97935,
+          "irq": 0,
+          "softirq": 19833,
+          "steal": 731104,
+          "guest": 0,
+          "guest_nice": 0
+        }
+      },
+      "environment_delta": {
+        "cgroup_cpu_stat": {
+          "usage_usec": 43410557,
+          "user_usec": 38922654,
+          "system_usec": 4487902,
+          "nr_periods": 0,
+          "nr_throttled": 0,
+          "throttled_usec": 0
+        },
+        "host_cpu_ticks": {
+          "user": 3752,
+          "nice": 0,
+          "system": 468,
+          "idle": 3111,
+          "iowait": 3,
+          "irq": 0,
+          "softirq": 9,
+          "steal": 368,
+          "guest": 0,
+          "guest_nice": 0
+        }
+      }
+    },
+    {
+      "order": 2,
+      "variant": "candidate",
+      "binary_before": {
+        "sha256": "dc4e17e809f9dfcf425227275577ef432274273e4c6b3d30b5eff48aec8f8753",
+        "bytes": 17800520
+      },
+      "turns": [
+        {
+          "cache_label": "cold_process",
+          "os_cache": "uncontrolled_preflight_model_hash_reads_weights",
+          "environment_before": {
+            "loadavg": [
+              1.68994140625,
+              0.93359375,
+              1.34375
+            ],
+            "logical_cpus": 4,
+            "cgroup_cpu_stat": {
+              "usage_usec": 40131156549,
+              "user_usec": 36522791578,
+              "system_usec": 3608364970,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "throttled_usec": 0
+            },
+            "cgroup_cpu_max": "max 100000",
+            "host_cpu_ticks": {
+              "user": 4007311,
+              "nice": 2057,
+              "system": 652227,
+              "idle": 149992153,
+              "iowait": 97935,
+              "irq": 0,
+              "softirq": 19833,
+              "steal": 731108,
+              "guest": 0,
+              "guest_nice": 0
+            }
+          },
+          "first_text_ms": 14171.597807027865,
+          "response_synthetic": "1  \n2  \n3  \n4",
+          "chunks": 7,
+          "outcome": "completed",
+          "stop_reason": "end_turn",
+          "generation": {
+            "elapsedMs": 15231,
+            "inputTokens": 71,
+            "outputTokens": 7
+          },
+          "observation": {
+            "componentScope": "native_agent",
+            "inference": {
+              "counts": {
+                "cancelledOperations": 0,
+                "contextAllocationAttempts": 1,
+                "contextAllocations": 1,
+                "countInputCalls": 1,
+                "countedInputTokens": 71,
+                "evaluatedInputTokens": 71,
+                "failedOperations": 0,
+                "generationCalls": 1,
+                "inputTokens": 71,
+                "modelLoadAttempts": 1,
+                "modelLoadCount": 1,
+                "outputTokens": 7,
+                "reusedTokens": 0,
+                "templateCalls": 2,
+                "tokenizationCalls": 2
+              },
+              "cpuTimeMs": null,
+              "elapsedMs": 15231.576976,
+              "firstEmissionMs": 14168.492205999999,
+              "firstTokenMs": 14168.267037,
+              "firstUsefulResponseMs": null,
+              "gpuSynchronizedMs": null,
+              "lastOutcome": "end_turn",
+              "operations": {
+                "countInputMs": 11082.806593000001,
+                "generationMs": 4148.5833999999995
+              },
+              "phases": {
+                "backendSetupMs": 0.048102,
+                "batchAllocationMs": 0.007089,
+                "contextAllocationMs": 361.19620299999997,
+                "decodeMs": 1025.409284,
+                "emitMs": 0.339329,
+                "modelHashMs": 8506.348807,
+                "modelLoadMs": 2552.764903,
+                "modelOpenMs": 0.045443,
+                "modelValidationMs": 0.08814799999999999,
+                "prefillMs": 2692.911423,
+                "samplerSetupMs": 0.013823,
+                "samplingMs": 7.922654,
+                "templateMs": 51.036024999999995,
+                "tokenConversionMs": 0.055308,
+                "tokenizationMs": 1.74733
+              },
+              "schemaVersion": 1,
+              "timingKind": "host_wall_clock"
+            },
+            "mcp": null,
+            "schemaVersion": 1,
+            "workerElapsedMs": 15231.587894
+          },
+          "total_ms": 15233.177044021431,
+          "environment_after": {
+            "loadavg": [
+              2.564453125,
+              1.16552734375,
+              1.41357421875
+            ],
+            "logical_cpus": 4,
+            "cgroup_cpu_stat": {
+              "usage_usec": 40160510014,
+              "user_usec": 36548767198,
+              "system_usec": 3611742816,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "throttled_usec": 0
+            },
+            "cgroup_cpu_max": "max 100000",
+            "host_cpu_ticks": {
+              "user": 4009775,
+              "nice": 2057,
+              "system": 652583,
+              "idle": 149995046,
+              "iowait": 97935,
+              "irq": 0,
+              "softirq": 19840,
+              "steal": 731484,
+              "guest": 0,
+              "guest_nice": 0
+            }
+          },
+          "environment_delta": {
+            "cgroup_cpu_stat": {
+              "usage_usec": 29353465,
+              "user_usec": 25975620,
+              "system_usec": 3377846,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "throttled_usec": 0
+            },
+            "host_cpu_ticks": {
+              "user": 2464,
+              "nice": 0,
+              "system": 356,
+              "idle": 2893,
+              "iowait": 0,
+              "irq": 0,
+              "softirq": 7,
+              "steal": 376,
+              "guest": 0,
+              "guest_nice": 0
+            }
+          }
+        },
+        {
+          "cache_label": "warm_process",
+          "os_cache": "uncontrolled_preflight_model_hash_reads_weights",
+          "environment_before": {
+            "loadavg": [
+              2.564453125,
+              1.16552734375,
+              1.41357421875
+            ],
+            "logical_cpus": 4,
+            "cgroup_cpu_stat": {
+              "usage_usec": 40160518973,
+              "user_usec": 36548773801,
+              "system_usec": 3611745171,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "throttled_usec": 0
+            },
+            "cgroup_cpu_max": "max 100000",
+            "host_cpu_ticks": {
+              "user": 4009776,
+              "nice": 2057,
+              "system": 652584,
+              "idle": 149995047,
+              "iowait": 97935,
+              "irq": 0,
+              "softirq": 19840,
+              "steal": 731484,
+              "guest": 0,
+              "guest_nice": 0
+            }
+          },
+          "first_text_ms": 3670.8120700204745,
+          "response_synthetic": "1  \n2  \n3  \n4",
+          "chunks": 7,
+          "outcome": "completed",
+          "stop_reason": "end_turn",
+          "generation": {
+            "elapsedMs": 4508,
+            "inputTokens": 100,
+            "outputTokens": 7
+          },
+          "observation": {
+            "componentScope": "native_agent",
+            "inference": {
+              "counts": {
+                "cancelledOperations": 0,
+                "contextAllocationAttempts": 1,
+                "contextAllocations": 1,
+                "countInputCalls": 2,
+                "countedInputTokens": 171,
+                "evaluatedInputTokens": 100,
+                "failedOperations": 0,
+                "generationCalls": 1,
+                "inputTokens": 100,
+                "modelLoadAttempts": 0,
+                "modelLoadCount": 1,
+                "outputTokens": 7,
+                "reusedTokens": 0,
+                "templateCalls": 3,
+                "tokenizationCalls": 3
+              },
+              "cpuTimeMs": null,
+              "elapsedMs": 4508.0502400000005,
+              "firstEmissionMs": 3667.8855439999998,
+              "firstTokenMs": 3667.833133,
+              "firstUsefulResponseMs": null,
+              "gpuSynchronizedMs": null,
+              "lastOutcome": "end_turn",
+              "operations": {
+                "countInputMs": 40.865885000000006,
+                "generationMs": 4467.109128
+              },
+              "phases": {
+                "backendSetupMs": null,
+                "batchAllocationMs": 0.00933,
+                "contextAllocationMs": 241.136786,
+                "decodeMs": 806.9001659999999,
+                "emitMs": 0.18388,
+                "modelHashMs": null,
+                "modelLoadMs": null,
+                "modelOpenMs": null,
+                "modelValidationMs": null,
+                "prefillMs": 3365.40297,
+                "samplerSetupMs": 0.055166,
+                "samplingMs": 7.1090160000000004,
+                "templateMs": 57.44087999999999,
+                "tokenConversionMs": 0.07677700000000001,
+                "tokenizationMs": 2.5727919999999997
+              },
+              "schemaVersion": 1,
+              "timingKind": "host_wall_clock"
+            },
+            "mcp": null,
+            "schemaVersion": 1,
+            "workerElapsedMs": 4508.056407
+          },
+          "total_ms": 4510.451164969709,
+          "environment_after": {
+            "loadavg": [
+              2.759765625,
+              1.2294921875,
+              1.43310546875
+            ],
+            "logical_cpus": 4,
+            "cgroup_cpu_stat": {
+              "usage_usec": 40177345559,
+              "user_usec": 36565209716,
+              "system_usec": 3612135843,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "throttled_usec": 0
+            },
+            "cgroup_cpu_max": "max 100000",
+            "host_cpu_ticks": {
+              "user": 4011356,
+              "nice": 2057,
+              "system": 652629,
+              "idle": 149995138,
+              "iowait": 97935,
+              "irq": 0,
+              "softirq": 19842,
+              "steal": 731571,
+              "guest": 0,
+              "guest_nice": 0
+            }
+          },
+          "environment_delta": {
+            "cgroup_cpu_stat": {
+              "usage_usec": 16826586,
+              "user_usec": 16435915,
+              "system_usec": 390672,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "throttled_usec": 0
+            },
+            "host_cpu_ticks": {
+              "user": 1580,
+              "nice": 0,
+              "system": 45,
+              "idle": 91,
+              "iowait": 0,
+              "irq": 0,
+              "softirq": 2,
+              "steal": 87,
+              "guest": 0,
+              "guest_nice": 0
+            }
+          }
+        }
+      ],
+      "errors": [],
+      "environment_before": {
+        "loadavg": [
+          1.68994140625,
+          0.93359375,
+          1.34375
+        ],
+        "logical_cpus": 4,
+        "cgroup_cpu_stat": {
+          "usage_usec": 40131123126,
+          "user_usec": 36522769165,
+          "system_usec": 3608353961,
+          "nr_periods": 0,
+          "nr_throttled": 0,
+          "throttled_usec": 0
+        },
+        "cgroup_cpu_max": "max 100000",
+        "host_cpu_ticks": {
+          "user": 4007309,
+          "nice": 2057,
+          "system": 652226,
+          "idle": 149992146,
+          "iowait": 97935,
+          "irq": 0,
+          "softirq": 19833,
+          "steal": 731106,
+          "guest": 0,
+          "guest_nice": 0
+        }
+      },
+      "shutdown": {
+        "graceful_eof": true,
+        "forced": false,
+        "reaped": true,
+        "exit_code": 0
+      },
+      "binary_after": {
+        "sha256": "dc4e17e809f9dfcf425227275577ef432274273e4c6b3d30b5eff48aec8f8753",
+        "bytes": 17800520
+      },
+      "environment_after": {
+        "loadavg": [
+          2.759765625,
+          1.2294921875,
+          1.43310546875
+        ],
+        "logical_cpus": 4,
+        "cgroup_cpu_stat": {
+          "usage_usec": 40177842391,
+          "user_usec": 36565513515,
+          "system_usec": 3612328875,
+          "nr_periods": 0,
+          "nr_throttled": 0,
+          "throttled_usec": 0
+        },
+        "cgroup_cpu_max": "max 100000",
+        "host_cpu_ticks": {
+          "user": 4011382,
+          "nice": 2057,
+          "system": 652647,
+          "idle": 149995245,
+          "iowait": 97935,
+          "irq": 0,
+          "softirq": 19842,
+          "steal": 731579,
+          "guest": 0,
+          "guest_nice": 0
+        }
+      },
+      "environment_delta": {
+        "cgroup_cpu_stat": {
+          "usage_usec": 46719265,
+          "user_usec": 42744350,
+          "system_usec": 3974914,
+          "nr_periods": 0,
+          "nr_throttled": 0,
+          "throttled_usec": 0
+        },
+        "host_cpu_ticks": {
+          "user": 4073,
+          "nice": 0,
+          "system": 421,
+          "idle": 3099,
+          "iowait": 0,
+          "irq": 0,
+          "softirq": 9,
+          "steal": 473,
+          "guest": 0,
+          "guest_nice": 0
+        }
+      }
+    },
+    {
+      "order": 3,
+      "variant": "candidate",
+      "binary_before": {
+        "sha256": "dc4e17e809f9dfcf425227275577ef432274273e4c6b3d30b5eff48aec8f8753",
+        "bytes": 17800520
+      },
+      "turns": [
+        {
+          "cache_label": "cold_process",
+          "os_cache": "uncontrolled_preflight_model_hash_reads_weights",
+          "environment_before": {
+            "loadavg": [
+              2.759765625,
+              1.2294921875,
+              1.43310546875
+            ],
+            "logical_cpus": 4,
+            "cgroup_cpu_stat": {
+              "usage_usec": 40177960047,
+              "user_usec": 36565606941,
+              "system_usec": 3612353106,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "throttled_usec": 0
+            },
+            "cgroup_cpu_max": "max 100000",
+            "host_cpu_ticks": {
+              "user": 4011392,
+              "nice": 2057,
+              "system": 652650,
+              "idle": 149995271,
+              "iowait": 97935,
+              "irq": 0,
+              "softirq": 19842,
+              "steal": 731581,
+              "guest": 0,
+              "guest_nice": 0
+            }
+          },
+          "first_text_ms": 15112.409743014723,
+          "response_synthetic": "1  \n2  \n3  \n4",
+          "chunks": 7,
+          "outcome": "completed",
+          "stop_reason": "end_turn",
+          "generation": {
+            "elapsedMs": 16336,
+            "inputTokens": 71,
+            "outputTokens": 7
+          },
+          "observation": {
+            "componentScope": "native_agent",
+            "inference": {
+              "counts": {
+                "cancelledOperations": 0,
+                "contextAllocationAttempts": 1,
+                "contextAllocations": 1,
+                "countInputCalls": 1,
+                "countedInputTokens": 71,
+                "evaluatedInputTokens": 71,
+                "failedOperations": 0,
+                "generationCalls": 1,
+                "inputTokens": 71,
+                "modelLoadAttempts": 1,
+                "modelLoadCount": 1,
+                "outputTokens": 7,
+                "reusedTokens": 0,
+                "templateCalls": 2,
+                "tokenizationCalls": 2
+              },
+              "cpuTimeMs": null,
+              "elapsedMs": 16337.021896999999,
+              "firstEmissionMs": 15103.619885,
+              "firstTokenMs": 15103.56699,
+              "firstUsefulResponseMs": null,
+              "gpuSynchronizedMs": null,
+              "lastOutcome": "end_turn",
+              "operations": {
+                "countInputMs": 12197.998023,
+                "generationMs": 4138.948262999999
+              },
+              "phases": {
+                "backendSetupMs": 0.106525,
+                "batchAllocationMs": 0.019826999999999997,
+                "contextAllocationMs": 416.416829,
+                "decodeMs": 1190.597228,
+                "emitMs": 0.266235,
+                "modelHashMs": 8937.157071,
+                "modelLoadMs": 3238.03848,
+                "modelOpenMs": 0.075187,
+                "modelValidationMs": 0.08419,
+                "prefillMs": 2453.09333,
+                "samplerSetupMs": 0.013781999999999999,
+                "samplingMs": 25.525167,
+                "templateMs": 41.004564,
+                "tokenConversionMs": 0.131474,
+                "tokenizationMs": 1.689286
+              },
+              "schemaVersion": 1,
+              "timingKind": "host_wall_clock"
+            },
+            "mcp": null,
+            "schemaVersion": 1,
+            "workerElapsedMs": 16337.024497000002
+          },
+          "total_ms": 16344.647539022844,
+          "environment_after": {
+            "loadavg": [
+              2.60986328125,
+              1.26806640625,
+              1.4423828125
+            ],
+            "logical_cpus": 4,
+            "cgroup_cpu_stat": {
+              "usage_usec": 40209068325,
+              "user_usec": 36593849513,
+              "system_usec": 3615218811,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "throttled_usec": 0
+            },
+            "cgroup_cpu_max": "max 100000",
+            "host_cpu_ticks": {
+              "user": 4014000,
+              "nice": 2057,
+              "system": 652955,
+              "idle": 149998363,
+              "iowait": 97937,
+              "irq": 0,
+              "softirq": 19848,
+              "steal": 732064,
+              "guest": 0,
+              "guest_nice": 0
+            }
+          },
+          "environment_delta": {
+            "cgroup_cpu_stat": {
+              "usage_usec": 31108278,
+              "user_usec": 28242572,
+              "system_usec": 2865705,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "throttled_usec": 0
+            },
+            "host_cpu_ticks": {
+              "user": 2608,
+              "nice": 0,
+              "system": 305,
+              "idle": 3092,
+              "iowait": 2,
+              "irq": 0,
+              "softirq": 6,
+              "steal": 483,
+              "guest": 0,
+              "guest_nice": 0
+            }
+          }
+        },
+        {
+          "cache_label": "warm_process",
+          "os_cache": "uncontrolled_preflight_model_hash_reads_weights",
+          "environment_before": {
+            "loadavg": [
+              2.60986328125,
+              1.26806640625,
+              1.4423828125
+            ],
+            "logical_cpus": 4,
+            "cgroup_cpu_stat": {
+              "usage_usec": 40209075667,
+              "user_usec": 36593856855,
+              "system_usec": 3615218811,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "throttled_usec": 0
+            },
+            "cgroup_cpu_max": "max 100000",
+            "host_cpu_ticks": {
+              "user": 4014001,
+              "nice": 2057,
+              "system": 652955,
+              "idle": 149998365,
+              "iowait": 97937,
+              "irq": 0,
+              "softirq": 19848,
+              "steal": 732064,
+              "guest": 0,
+              "guest_nice": 0
+            }
+          },
+          "first_text_ms": 3454.01499903528,
+          "response_synthetic": "1  \n2  \n3  \n4",
+          "chunks": 7,
+          "outcome": "completed",
+          "stop_reason": "end_turn",
+          "generation": {
+            "elapsedMs": 4588,
+            "inputTokens": 100,
+            "outputTokens": 7
+          },
+          "observation": {
+            "componentScope": "native_agent",
+            "inference": {
+              "counts": {
+                "cancelledOperations": 0,
+                "contextAllocationAttempts": 1,
+                "contextAllocations": 1,
+                "countInputCalls": 2,
+                "countedInputTokens": 171,
+                "evaluatedInputTokens": 100,
+                "failedOperations": 0,
+                "generationCalls": 1,
+                "inputTokens": 100,
+                "modelLoadAttempts": 0,
+                "modelLoadCount": 1,
+                "outputTokens": 7,
+                "reusedTokens": 0,
+                "templateCalls": 3,
+                "tokenizationCalls": 3
+              },
+              "cpuTimeMs": null,
+              "elapsedMs": 4588.995677,
+              "firstEmissionMs": 3451.654849,
+              "firstTokenMs": 3451.6186470000002,
+              "firstUsefulResponseMs": null,
+              "gpuSynchronizedMs": null,
+              "lastOutcome": "end_turn",
+              "operations": {
+                "countInputMs": 42.846191,
+                "generationMs": 4546.062129
+              },
+              "phases": {
+                "backendSetupMs": null,
+                "batchAllocationMs": 0.010474,
+                "contextAllocationMs": 243.95317,
+                "decodeMs": 1098.008493,
+                "emitMs": 0.141237,
+                "modelHashMs": null,
+                "modelLoadMs": null,
+                "modelOpenMs": null,
+                "modelValidationMs": null,
+                "prefillMs": 3141.5809879999997,
+                "samplerSetupMs": 0.040132,
+                "samplingMs": 7.083155,
+                "templateMs": 61.506449999999994,
+                "tokenConversionMs": 0.056115,
+                "tokenizationMs": 3.195504
+              },
+              "schemaVersion": 1,
+              "timingKind": "host_wall_clock"
+            },
+            "mcp": null,
+            "schemaVersion": 1,
+            "workerElapsedMs": 4589.002331
+          },
+          "total_ms": 4591.579316009302,
+          "environment_after": {
+            "loadavg": [
+              2.72119140625,
+              1.3134765625,
+              1.45654296875
+            ],
+            "logical_cpus": 4,
+            "cgroup_cpu_stat": {
+              "usage_usec": 40225916966,
+              "user_usec": 36610348271,
+              "system_usec": 3615568695,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "throttled_usec": 0
+            },
+            "cgroup_cpu_max": "max 100000",
+            "host_cpu_ticks": {
+              "user": 4015596,
+              "nice": 2057,
+              "system": 652998,
+              "idle": 149998478,
+              "iowait": 97937,
+              "irq": 0,
+              "softirq": 19851,
+              "steal": 732145,
+              "guest": 0,
+              "guest_nice": 0
+            }
+          },
+          "environment_delta": {
+            "cgroup_cpu_stat": {
+              "usage_usec": 16841299,
+              "user_usec": 16491416,
+              "system_usec": 349884,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "throttled_usec": 0
+            },
+            "host_cpu_ticks": {
+              "user": 1595,
+              "nice": 0,
+              "system": 43,
+              "idle": 113,
+              "iowait": 0,
+              "irq": 0,
+              "softirq": 3,
+              "steal": 81,
+              "guest": 0,
+              "guest_nice": 0
+            }
+          }
+        }
+      ],
+      "errors": [],
+      "environment_before": {
+        "loadavg": [
+          2.759765625,
+          1.2294921875,
+          1.43310546875
+        ],
+        "logical_cpus": 4,
+        "cgroup_cpu_stat": {
+          "usage_usec": 40177936182,
+          "user_usec": 36565593181,
+          "system_usec": 3612343001,
+          "nr_periods": 0,
+          "nr_throttled": 0,
+          "throttled_usec": 0
+        },
+        "cgroup_cpu_max": "max 100000",
+        "host_cpu_ticks": {
+          "user": 4011391,
+          "nice": 2057,
+          "system": 652649,
+          "idle": 149995267,
+          "iowait": 97935,
+          "irq": 0,
+          "softirq": 19842,
+          "steal": 731581,
+          "guest": 0,
+          "guest_nice": 0
+        }
+      },
+      "shutdown": {
+        "graceful_eof": true,
+        "forced": false,
+        "reaped": true,
+        "exit_code": 0
+      },
+      "binary_after": {
+        "sha256": "dc4e17e809f9dfcf425227275577ef432274273e4c6b3d30b5eff48aec8f8753",
+        "bytes": 17800520
+      },
+      "environment_after": {
+        "loadavg": [
+          2.72119140625,
+          1.3134765625,
+          1.45654296875
+        ],
+        "logical_cpus": 4,
+        "cgroup_cpu_stat": {
+          "usage_usec": 40226386318,
+          "user_usec": 36610606279,
+          "system_usec": 3615780039,
+          "nr_periods": 0,
+          "nr_throttled": 0,
+          "throttled_usec": 0
+        },
+        "cgroup_cpu_max": "max 100000",
+        "host_cpu_ticks": {
+          "user": 4015621,
+          "nice": 2057,
+          "system": 653019,
+          "idle": 149998588,
+          "iowait": 97937,
+          "irq": 0,
+          "softirq": 19851,
+          "steal": 732157,
+          "guest": 0,
+          "guest_nice": 0
+        }
+      },
+      "environment_delta": {
+        "cgroup_cpu_stat": {
+          "usage_usec": 48450136,
+          "user_usec": 45013098,
+          "system_usec": 3437038,
+          "nr_periods": 0,
+          "nr_throttled": 0,
+          "throttled_usec": 0
+        },
+        "host_cpu_ticks": {
+          "user": 4230,
+          "nice": 0,
+          "system": 370,
+          "idle": 3321,
+          "iowait": 2,
+          "irq": 0,
+          "softirq": 9,
+          "steal": 576,
+          "guest": 0,
+          "guest_nice": 0
+        }
+      }
+    },
+    {
+      "order": 4,
+      "variant": "baseline",
+      "binary_before": {
+        "sha256": "24c359ddfdcb931614ab7d32abc556304cf1b4479830ec06ab4782e34298482e",
+        "bytes": 17768392
+      },
+      "turns": [
+        {
+          "cache_label": "cold_process",
+          "os_cache": "uncontrolled_preflight_model_hash_reads_weights",
+          "environment_before": {
+            "loadavg": [
+              2.72119140625,
+              1.3134765625,
+              1.45654296875
+            ],
+            "logical_cpus": 4,
+            "cgroup_cpu_stat": {
+              "usage_usec": 40226513095,
+              "user_usec": 36610706018,
+              "system_usec": 3615807077,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "throttled_usec": 0
+            },
+            "cgroup_cpu_max": "max 100000",
+            "host_cpu_ticks": {
+              "user": 4015631,
+              "nice": 2057,
+              "system": 653021,
+              "idle": 149998617,
+              "iowait": 97937,
+              "irq": 0,
+              "softirq": 19851,
+              "steal": 732159,
+              "guest": 0,
+              "guest_nice": 0
+            }
+          },
+          "first_text_ms": 14711.281785974279,
+          "response_synthetic": "1  \n2  \n3  \n4",
+          "chunks": 7,
+          "outcome": "completed",
+          "stop_reason": "end_turn",
+          "generation": {
+            "elapsedMs": 16099,
+            "inputTokens": 71,
+            "outputTokens": 7
+          },
+          "observation": null,
+          "total_ms": 16100.980119023006,
+          "environment_after": {
+            "loadavg": [
+              2.4072265625,
+              1.31396484375,
+              1.45361328125
+            ],
+            "logical_cpus": 4,
+            "cgroup_cpu_stat": {
+              "usage_usec": 40256863523,
+              "user_usec": 36638046271,
+              "system_usec": 3618817251,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "throttled_usec": 0
+            },
+            "cgroup_cpu_max": "max 100000",
+            "host_cpu_ticks": {
+              "user": 4018261,
+              "nice": 2057,
+              "system": 653344,
+              "idle": 150001755,
+              "iowait": 97938,
+              "irq": 0,
+              "softirq": 19857,
+              "steal": 732485,
+              "guest": 0,
+              "guest_nice": 0
+            }
+          },
+          "environment_delta": {
+            "cgroup_cpu_stat": {
+              "usage_usec": 30350428,
+              "user_usec": 27340253,
+              "system_usec": 3010174,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "throttled_usec": 0
+            },
+            "host_cpu_ticks": {
+              "user": 2630,
+              "nice": 0,
+              "system": 323,
+              "idle": 3138,
+              "iowait": 1,
+              "irq": 0,
+              "softirq": 6,
+              "steal": 326,
+              "guest": 0,
+              "guest_nice": 0
+            }
+          }
+        },
+        {
+          "cache_label": "warm_process",
+          "os_cache": "uncontrolled_preflight_model_hash_reads_weights",
+          "environment_before": {
+            "loadavg": [
+              2.4072265625,
+              1.31396484375,
+              1.45361328125
+            ],
+            "logical_cpus": 4,
+            "cgroup_cpu_stat": {
+              "usage_usec": 40256869721,
+              "user_usec": 36638052445,
+              "system_usec": 3618817276,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "throttled_usec": 0
+            },
+            "cgroup_cpu_max": "max 100000",
+            "host_cpu_ticks": {
+              "user": 4018261,
+              "nice": 2057,
+              "system": 653344,
+              "idle": 150001757,
+              "iowait": 97938,
+              "irq": 0,
+              "softirq": 19857,
+              "steal": 732485,
+              "guest": 0,
+              "guest_nice": 0
+            }
+          },
+          "first_text_ms": 3174.4634350179695,
+          "response_synthetic": "1  \n2  \n3  \n4",
+          "chunks": 7,
+          "outcome": "completed",
+          "stop_reason": "end_turn",
+          "generation": {
+            "elapsedMs": 4085,
+            "inputTokens": 100,
+            "outputTokens": 7
+          },
+          "observation": null,
+          "total_ms": 4086.772396985907,
+          "environment_after": {
+            "loadavg": [
+              2.53515625,
+              1.35888671875,
+              1.4677734375
+            ],
+            "logical_cpus": 4,
+            "cgroup_cpu_stat": {
+              "usage_usec": 40271907656,
+              "user_usec": 36652738010,
+              "system_usec": 3619169646,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "throttled_usec": 0
+            },
+            "cgroup_cpu_max": "max 100000",
+            "host_cpu_ticks": {
+              "user": 4019694,
+              "nice": 2057,
+              "system": 653386,
+              "idle": 150001859,
+              "iowait": 97938,
+              "irq": 0,
+              "softirq": 19859,
+              "steal": 732540,
+              "guest": 0,
+              "guest_nice": 0
+            }
+          },
+          "environment_delta": {
+            "cgroup_cpu_stat": {
+              "usage_usec": 15037935,
+              "user_usec": 14685565,
+              "system_usec": 352370,
+              "nr_periods": 0,
+              "nr_throttled": 0,
+              "throttled_usec": 0
+            },
+            "host_cpu_ticks": {
+              "user": 1433,
+              "nice": 0,
+              "system": 42,
+              "idle": 102,
+              "iowait": 0,
+              "irq": 0,
+              "softirq": 2,
+              "steal": 55,
+              "guest": 0,
+              "guest_nice": 0
+            }
+          }
+        }
+      ],
+      "errors": [],
+      "environment_before": {
+        "loadavg": [
+          2.72119140625,
+          1.3134765625,
+          1.45654296875
+        ],
+        "logical_cpus": 4,
+        "cgroup_cpu_stat": {
+          "usage_usec": 40226489738,
+          "user_usec": 36610689460,
+          "system_usec": 3615800277,
+          "nr_periods": 0,
+          "nr_throttled": 0,
+          "throttled_usec": 0
+        },
+        "cgroup_cpu_max": "max 100000",
+        "host_cpu_ticks": {
+          "user": 4015630,
+          "nice": 2057,
+          "system": 653021,
+          "idle": 149998614,
+          "iowait": 97937,
+          "irq": 0,
+          "softirq": 19851,
+          "steal": 732158,
+          "guest": 0,
+          "guest_nice": 0
+        }
+      },
+      "shutdown": {
+        "graceful_eof": true,
+        "forced": false,
+        "reaped": true,
+        "exit_code": 0
+      },
+      "binary_after": {
+        "sha256": "24c359ddfdcb931614ab7d32abc556304cf1b4479830ec06ab4782e34298482e",
+        "bytes": 17768392
+      },
+      "environment_after": {
+        "loadavg": [
+          2.53515625,
+          1.35888671875,
+          1.4677734375
+        ],
+        "logical_cpus": 4,
+        "cgroup_cpu_stat": {
+          "usage_usec": 40272405251,
+          "user_usec": 36653031007,
+          "system_usec": 3619374243,
+          "nr_periods": 0,
+          "nr_throttled": 0,
+          "throttled_usec": 0
+        },
+        "cgroup_cpu_max": "max 100000",
+        "host_cpu_ticks": {
+          "user": 4019721,
+          "nice": 2057,
+          "system": 653406,
+          "idle": 150001968,
+          "iowait": 97939,
+          "irq": 0,
+          "softirq": 19859,
+          "steal": 732550,
+          "guest": 0,
+          "guest_nice": 0
+        }
+      },
+      "environment_delta": {
+        "cgroup_cpu_stat": {
+          "usage_usec": 45915513,
+          "user_usec": 42341547,
+          "system_usec": 3573966,
+          "nr_periods": 0,
+          "nr_throttled": 0,
+          "throttled_usec": 0
+        },
+        "host_cpu_ticks": {
+          "user": 4091,
+          "nice": 0,
+          "system": 385,
+          "idle": 3354,
+          "iowait": 2,
+          "irq": 0,
+          "softirq": 8,
+          "steal": 392,
+          "guest": 0,
+          "guest_nice": 0
+        }
+      }
+    }
+  ],
+  "errors": [],
+  "environment_after": {
+    "loadavg": [
+      2.53515625,
+      1.35888671875,
+      1.4677734375
+    ],
+    "logical_cpus": 4,
+    "cgroup_cpu_stat": {
+      "usage_usec": 40272414856,
+      "user_usec": 36653037295,
+      "system_usec": 3619377560,
+      "nr_periods": 0,
+      "nr_throttled": 0,
+      "throttled_usec": 0
+    },
+    "cgroup_cpu_max": "max 100000",
+    "host_cpu_ticks": {
+      "user": 4019721,
+      "nice": 2057,
+      "system": 653406,
+      "idle": 150001968,
+      "iowait": 97939,
+      "irq": 0,
+      "softirq": 19859,
+      "steal": 732550,
+      "guest": 0,
+      "guest_nice": 0
+    }
+  },
+  "environment_delta": {
+    "cgroup_cpu_stat": {
+      "usage_usec": 184932274,
+      "user_usec": 169382473,
+      "system_usec": 15549801,
+      "nr_periods": 0,
+      "nr_throttled": 0,
+      "throttled_usec": 0
+    },
+    "host_cpu_ticks": {
+      "user": 16180,
+      "nice": 0,
+      "system": 1652,
+      "idle": 12976,
+      "iowait": 7,
+      "irq": 0,
+      "softirq": 35,
+      "steal": 1816,
+      "guest": 0,
+      "guest_nice": 0
+    }
+  },
+  "source_snapshot_after": {
+    "tracked_files_sha256": "ac40c5c0df49fd03ad8f24d7a2b7fce3d286cc271edf5eebd7112e82c463a9ce",
+    "index_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "agent_diff_sha256": "4c3f599d8171f63d1a44e5b51599eaf794d2dd5136ef26b4bffeadf3676c680d"
+  },
+  "tracked_files_and_index_unchanged": true,
+  "candidate_unchanged": true,
+  "comparison": {
+    "cold_process": {
+      "samples_per_variant": {
+        "baseline": 2,
+        "candidate": 2
+      },
+      "same_response_tokens_stop_across_variants": true,
+      "first_text_ms": {
+        "samples": {
+          "baseline": [
+            13775.347791030072,
+            14711.281785974279
+          ],
+          "candidate": [
+            14171.597807027865,
+            15112.409743014723
+          ]
+        },
+        "median": {
+          "baseline": 14243.314788502175,
+          "candidate": 14642.003775021294
+        },
+        "candidate_over_baseline_ratio": 1.027991306268184,
+        "candidate_delta_percent": 2.7991306268184024
+      },
+      "total_ms": {
+        "samples": {
+          "baseline": [
+            14544.136320997495,
+            16100.980119023006
+          ],
+          "candidate": [
+            15233.177044021431,
+            16344.647539022844
+          ]
+        },
+        "median": {
+          "baseline": 15322.55822001025,
+          "candidate": 15788.912291522138
+        },
+        "candidate_over_baseline_ratio": 1.0304357839478044,
+        "candidate_delta_percent": 3.043578394780444
+      },
+      "adjacent_pair_ratios": [
+        {
+          "first_text_ms": 1.0287651551168686,
+          "total_ms": 1.0473758432825717
+        },
+        {
+          "first_text_ms": 1.0272666898014882,
+          "total_ms": 1.0151337010665549
+        }
+      ]
+    },
+    "warm_process": {
+      "samples_per_variant": {
+        "baseline": 2,
+        "candidate": 2
+      },
+      "same_response_tokens_stop_across_variants": true,
+      "first_text_ms": {
+        "samples": {
+          "baseline": [
+            3360.3218760108575,
+            3174.4634350179695
+          ],
+          "candidate": [
+            3670.8120700204745,
+            3454.01499903528
+          ]
+        },
+        "median": {
+          "baseline": 3267.3926555144135,
+          "candidate": 3562.4135345278773
+        },
+        "candidate_over_baseline_ratio": 1.0902924472562407,
+        "candidate_delta_percent": 9.029244725624075
+      },
+      "total_ms": {
+        "samples": {
+          "baseline": [
+            4281.169529014733,
+            4086.772396985907
+          ],
+          "candidate": [
+            4510.451164969709,
+            4591.579316009302
+          ]
+        },
+        "median": {
+          "baseline": 4183.97096300032,
+          "candidate": 4551.015240489505
+        },
+        "candidate_over_baseline_ratio": 1.087726296557751,
+        "candidate_delta_percent": 8.772629655775098
+      },
+      "adjacent_pair_ratios": [
+        {
+          "first_text_ms": 1.0923989443470248,
+          "total_ms": 1.0535558413188424
+        },
+        {
+          "first_text_ms": 1.0880626190031162,
+          "total_ms": 1.1235221514649805
+        }
+      ]
+    }
+  },
+  "interpretation": {
+    "nature": "Exploratory ABBA, n=2 per variant per process temperature, no p95 or target qualification",
+    "large_delta_flag_threshold_percent": 20,
+    "large_delta": false,
+    "attribution": "Measured difference is a binary/configuration comparison, not proof of instrumentation causality. Load/cgroup counters are context, not causal diagnosis.",
+    "limitations": [
+      "Short max-output=8 sample does not cover 51–80s decoding, long MCP workflows, UI or useful response latency.",
+      "Process-cold is not OS-cold; preflight hashing warms file cache.",
+      "Two repetitions and ABBA ordering cannot isolate all VM load variance.",
+      "max_tokens is retained as observed, not relabeled as an end_turn or successful task."
+    ]
+  },
+  "completed_utc": "2026-11-02T09:12:49.910001+00:00",
+  "review": {
+    "language": "fr",
+    "comparability": {
+      "same_sampler_calls_order_and_values": true,
+      "sampler_calls": [
+        "LlamaSampler::temp(0.7)",
+        "LlamaSampler::top_k(20)",
+        "LlamaSampler::top_p(0.8, 1)",
+        "LlamaSampler::dist(42)"
+      ],
+      "same_context_parameter_calls": true,
+      "same_manifest_except_additional_distinct_binary": true,
+      "same_Cargo_lock_and_model_profile": true,
+      "bindings": {
+        "llama-cpp-2": "0.1.146",
+        "llama-cpp-sys-2": "0.1.146"
+      },
+      "requested_baseline_features": [
+        "default",
+        "inference"
+      ],
+      "baseline_build": {
+        "profile": "release",
+        "offline": true,
+        "locked": true,
+        "bin": "tutor-lh00-baseline",
+        "target_dir": "client/local-agent/target",
+        "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+        "build_log_sha256": "f30fcd4ad38c82da88be0acaa28e5acf1b61ee23d2d25325141d657bac21a94a"
+      },
+      "candidate_provenance_limit": "Candidate prebuilt supplied hash matched before/after. Worktree source correspondence is supplied by parent, not independently proven by a reproducible candidate rebuild. Baseline rebuilt from verified sources with only an additional bin manifest entry. Binary-name/path/build-layout difference is not eliminated."
+    },
+    "checks": {
+      "eight_prompts_completed": true,
+      "all_processes_reaped_gracefully": true,
+      "no_errors": true,
+      "same_answers": true,
+      "same_inputs_cold": 71,
+      "same_inputs_warm": 100,
+      "same_outputs": 7,
+      "same_stop_reason": "end_turn"
+    },
+    "environment_context": {
+      "loadavg_1m_before": 1.31982421875,
+      "loadavg_1m_after": 2.53515625,
+      "cgroup_cpu_max": "max 100000",
+      "cgroup_throttled_usec_delta": 0,
+      "host_steal_ticks_percent_of_observed_cpu_ticks": 5.559297128512827
+    },
+    "conclusion": "Sur cette courte séquence ABBA, aucune régression massive de temps n'est observée. Écart candidat/référence d'environ +3 % à froid et +9 % à chaud. Cet écart de quelques centaines de millisecondes peut inclure instrumentation et variance de VM ; deux observations ne permettent pas de les séparer ni de certifier un surcoût nul.",
+    "environment_limit": "Charge moyenne variable et temps steal observés ; aucun throttling rapporté par le cgroup échantillonné. Ces compteurs ne démontrent pas une cause du delta ni de la lenteur antérieure.",
+    "scope_limit": "Ne reproduit pas le prefill de 381/404 tokens ni 51–80 secondes de décodage. Aucun serveur MCP, UI, latence utile ou matériel Windows/P2000 qualifié. Pas de p95 et pas de conclusion de speedup."
+  },
+  "archive": {
+    "originalFileSha256": "5ad198e454a5b5aeb61c2f9d221b56d8ac3c507fee6970deec2e5841eff48b49",
+    "method": "Unmodified exploratory report plus this archival record; no measurements removed.",
+    "qualification": "No target hardware, UI usefulness or independent intent/coaching score."
+  }
+}

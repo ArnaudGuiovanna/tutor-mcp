@@ -36,6 +36,8 @@ const MAX_READS: usize = 4;
 const MAX_TEXT_BYTES: usize = 128 * 1024;
 
 pub trait Ui {
+    /// Content-free connection summary; this does not attest business success.
+    fn observe_mcp(&mut self, _observation: crate::mcp_client::McpObservation) {}
     fn text(&mut self, text: &str) -> Result<(), String>;
     /// ACP update object; the host wraps sessionId and session/update.
     fn tool_update(&mut self, update: Value) -> Result<(), String>;
@@ -68,11 +70,20 @@ pub fn run(
 ) -> Result<GenerationStats, String> {
     validate_input(store, &input)?;
     check_cancel(cancel)?;
-    let mut client = handle
-        .block_on(Client::connect(&input.servers[0], input.cwd, cancel))
-        .map_err(|_| "harness_mcp_connection_failed".to_owned())?;
+    let connect_started = std::time::Instant::now();
+    let mut client = match handle.block_on(Client::connect(&input.servers[0], input.cwd, cancel)) {
+        Ok(client) => client,
+        Err(_) => {
+            ui.observe_mcp(crate::mcp_client::McpObservation {
+                connect_total_ms: Some(connect_started.elapsed().as_secs_f64() * 1000.0),
+                ..crate::mcp_client::McpObservation::default()
+            });
+            return Err("harness_mcp_connection_failed".to_owned());
+        }
+    };
     let outcome = run_connected(engine, store, &input, cancel, handle, ui, &mut client);
     let closed = handle.block_on(client.close());
+    ui.observe_mcp(client.take_observation());
     match (outcome, closed) {
         (Err(error), _) => Err(error),
         (Ok(_), Err(_)) => Err("harness_mcp_close_failed".into()),
@@ -91,11 +102,20 @@ pub(crate) fn run_fixed(
 ) -> Result<GenerationStats, String> {
     validate_input(store, &input)?;
     check_cancel(cancel)?;
-    let mut client = handle
-        .block_on(Client::connect(&input.servers[0], input.cwd, cancel))
-        .map_err(|_| "harness_mcp_connection_failed".to_owned())?;
+    let connect_started = std::time::Instant::now();
+    let mut client = match handle.block_on(Client::connect(&input.servers[0], input.cwd, cancel)) {
+        Ok(client) => client,
+        Err(_) => {
+            ui.observe_mcp(crate::mcp_client::McpObservation {
+                connect_total_ms: Some(connect_started.elapsed().as_secs_f64() * 1000.0),
+                ..crate::mcp_client::McpObservation::default()
+            });
+            return Err("harness_mcp_connection_failed".to_owned());
+        }
+    };
     let outcome = fixed_connected(engine, store, &input, cancel, handle, ui, &mut client);
     let closed = handle.block_on(client.close());
+    ui.observe_mcp(client.take_observation());
     match (outcome, closed) {
         (Err(error), _) => Err(error),
         (Ok(_), Err(_)) => Err("harness_mcp_close_failed".into()),
