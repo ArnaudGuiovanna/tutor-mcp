@@ -50,7 +50,7 @@ impl Default for Appearance {
     fn default() -> Self {
         Self {
             theme: "dark".into(),
-            font_size: 20,
+            font_size: 14,
             line_height: 1.65,
             reduce_motion: false,
         }
@@ -564,7 +564,7 @@ mod tests {
     fn old_settings_gain_language_and_reading_defaults_without_replacing_data() {
         let settings:Settings=serde_json::from_value(serde_json::json!({"targetId":"existing-agent","cwd":"existing-work","tutor":{"mode":"remote","url":"https://institution.example"}})).unwrap();
         assert_eq!(settings.language, "fr");
-        assert_eq!(settings.appearance.font_size, 20);
+        assert_eq!(settings.appearance.font_size, 14);
         assert_eq!(settings.appearance.theme, "dark");
         assert_eq!(settings.target_id, "existing-agent");
         assert!(settings.review_plans.is_empty());

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { isTauri } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { t, useTranslation } from './i18n';
+import { Icon } from './icons';
 
 export interface WindowControls {
   minimize(): Promise<void>;
@@ -16,7 +17,7 @@ export interface WindowControls {
 const nativeWindow = isTauri() ? getCurrentWindow() : undefined;
 
 /** Only the title's empty surface is draggable; controls keep ordinary pointer/keyboard input. */
-export function WindowChrome({ controls = nativeWindow }: { controls?: WindowControls }) {
+export function WindowChrome({ controls = nativeWindow, sidebarOpen, onToggleSidebar }: { controls?: WindowControls; sidebarOpen?: boolean; onToggleSidebar?: () => void }) {
   useTranslation();
   const [maximized, setMaximized] = useState(false);
   const [focused, setFocused] = useState(true);
@@ -42,10 +43,8 @@ export function WindowChrome({ controls = nativeWindow }: { controls?: WindowCon
   }
 
   return <header className={`window-chrome ${focused ? '' : 'window-inactive'}`} aria-label={t('Fenêtre Tutor')}>
-    <div className="window-drag" data-tauri-drag-region>
-      <span className="wm window-brand" aria-hidden="true">Tutor-MCP<span className="cursor still" /></span>
-      <span className="window-caption">{t('Votre espace d’apprentissage')}</span>
-    </div>
+    {onToggleSidebar && <button className="workspace-icon" type="button" aria-label={t(sidebarOpen ? 'Masquer la barre latérale' : 'Afficher la barre latérale')} title={t(sidebarOpen ? 'Masquer la barre latérale' : 'Afficher la barre latérale')} aria-expanded={sidebarOpen} aria-controls="workspace-sidebar" onClick={onToggleSidebar}><Icon name="panel" size={18}/></button>}
+    <div className="window-drag" data-tauri-drag-region />
     {error && <span className="window-error" role="alert">{t('Impossible de modifier la fenêtre. Réessayez.')}</span>}
     <div className="window-controls" role="group" aria-label={t('Commandes de la fenêtre')}>
       <button type="button" className="window-control" title={t('Réduire la fenêtre')} aria-label={t('Réduire la fenêtre')} disabled={!controls} onClick={() => void act('minimize')}><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M1 6.5h10" /></svg></button>

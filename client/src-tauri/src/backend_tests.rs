@@ -610,13 +610,189 @@ async fn reading_and_language_changes_preserve_the_live_connections() {
 }
 
 #[tokio::test]
-async fn changing_settings_disconnects_old_agent_before_new_requests() {
+async fn simultaneous_connects_reuse_the_initialized_process_without_authentication() {
     let directory = tempfile::tempdir().unwrap();
     let (backend, _) = connected(directory.path()).await;
+    let generation = backend
+        .agent
+        .lock()
+        .await
+        .as_ref()
+        .unwrap()
+        .generation
+        .clone();
+    let cwd = directory.path().to_string_lossy().into_owned();
+    let (a, b) = tokio::join!(
+        backend.connect_agent(fixture_target(), cwd.clone()),
+        backend.connect_agent(fixture_target(), cwd)
+    );
+    assert_eq!(a.unwrap(), b.unwrap());
+    assert_eq!(
+        backend.agent.lock().await.as_ref().unwrap().generation,
+        generation
+    );
+    assert_eq!(
+        backend.snapshot().await["agentStatus"]["authentication"],
+        "unknown"
+    );
+    backend.shutdown().await;
+}
+
+#[tokio::test]
+async fn explicit_disconnect_cancels_a_queued_automatic_launch() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Backend::new(directory.path(), Arc::new(|_, _| {})).unwrap();
+    let operation = backend.operation.lock().await;
+    let worker = backend.clone();
+    let cwd = directory.path().to_string_lossy().into_owned();
+    let launch = tokio::spawn(async move { worker.connect_agent(fixture_target(), cwd).await });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !backend.agent_requested.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    backend.disconnect_agent().await.unwrap();
+    drop(operation);
+    assert!(launch.await.unwrap().unwrap_err().contains("annulée"));
+    assert_eq!(backend.snapshot().await["agentConnected"], false);
+}
+
+#[tokio::test]
+async fn changing_harness_preserves_the_remote_tutor_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let (backend, _) = connected(directory.path()).await;
+    let mut settings = backend.settings().await;
+    settings.tutor.mode = "remote".into();
+    settings.tutor.url = "https://institution.example".into();
+    backend.save_settings(settings.clone()).await.unwrap();
+    backend.tutor.lock().await.status = TutorStatus {
+        connected: true,
+        label: "Institution".into(),
+        message: None,
+    };
+    let credentials = api_credentials("https://institution.example");
+    backend.tutor.lock().await.credentials = Some(credentials.clone());
+    settings.manual_target.as_mut().unwrap().label = "Another harness".into();
+    backend.save_settings(settings.clone()).await.unwrap();
+    backend
+        .connect_agent(settings.manual_target.unwrap(), settings.cwd)
+        .await
+        .unwrap();
+    assert_eq!(backend.snapshot().await["tutorStatus"]["connected"], true);
+    assert_eq!(
+        backend
+            .tutor
+            .lock()
+            .await
+            .credentials
+            .as_ref()
+            .unwrap()
+            .session_id,
+        credentials.session_id
+    );
+    backend.shutdown().await;
+}
+
+#[tokio::test]
+async fn harness_authentication_is_reused_and_account_details_stay_private() {
+    for (kind, expected) in [
+        ("account", "authenticated"),
+        ("api_key", "authenticated"),
+        ("none", "none"),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("fixture-auth-status.json"), json!({"kind":kind,"label":"private-provider-token","account":{"email":"private-provider-token"}}).to_string()).unwrap();
+        let (backend, mut events) = connected(directory.path()).await;
+        backend.drain_agent_events(false).await.unwrap();
+        let snapshot = backend.snapshot().await;
+        assert_eq!(snapshot["agentStatus"]["authentication"], expected);
+        assert!(!snapshot.to_string().contains("private-provider-token"));
+        if kind != "none" {
+            backend.authenticate_agent(String::new()).await.unwrap();
+        }
+        while let Ok(event) = events.try_recv() {
+            assert!(!event.to_string().contains("private-provider-token"));
+        }
+        backend.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn rpc_refusals_keep_the_harness_alive_and_do_not_invent_a_subscription_balance() {
+    let directory = tempfile::tempdir().unwrap();
+    let (backend, mut events) = connected(directory.path()).await;
+    let generation = backend
+        .agent
+        .lock()
+        .await
+        .as_ref()
+        .unwrap()
+        .generation
+        .clone();
+    let conversation = backend.start_conversation(None, None).await.unwrap();
+    for (marker, expected) in [
+        ("RATE", "limitation temporaire"),
+        ("CLAUDE_RATE", "limitation temporaire"),
+        ("CLAUDE_BILLING", "limite d’utilisation"),
+        ("QUOTA", "limite d’utilisation"),
+        ("AUTH", "Authentification"),
+        ("UNKNOWN", "cause fournisseur n’est pas précisée"),
+    ] {
+        let error = backend
+            .send_prompt(conversation.id.clone(), format!("EXPERIENCE_RPC:{marker}"))
+            .await
+            .unwrap_err();
+        assert!(error.contains(expected), "{error}");
+        assert!(!error.contains("quota du fournisseur est atteint"));
+        assert_eq!(
+            backend.agent.lock().await.as_ref().unwrap().generation,
+            generation
+        );
+        assert_eq!(
+            backend.snapshot().await["agentStatus"]["lastFailure"]["source"],
+            "acp"
+        );
+    }
+    assert_eq!(
+        backend.snapshot().await["agentStatus"]["authentication"],
+        "none"
+    );
+    while let Ok(event) = events.try_recv() {
+        assert!(!event.to_string().contains("private-provider-token"));
+    }
+    let captured: Value = serde_json::from_slice(
+        &std::fs::read(directory.path().join("fixture-agent-sessions.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        captured[conversation.agent_session_id.unwrap()]["promptCount"],
+        6
+    );
+    backend.shutdown().await;
+}
+
+#[tokio::test]
+async fn changing_mcp_settings_replaces_old_agent_and_restores_process_before_new_requests() {
+    let directory = tempfile::tempdir().unwrap();
+    let (backend, _) = connected(directory.path()).await;
+    let generation = backend
+        .agent
+        .lock()
+        .await
+        .as_ref()
+        .unwrap()
+        .generation
+        .clone();
     let mut settings = backend.store.lock().await.data.settings.clone();
     settings.tutor.url = "https://other.example".into();
     backend.save_settings(settings).await.unwrap();
-    assert_eq!(backend.snapshot().await["agentConnected"], false);
+    assert_eq!(backend.snapshot().await["agentConnected"], true);
+    assert_ne!(
+        backend.agent.lock().await.as_ref().unwrap().generation,
+        generation
+    );
     assert_eq!(backend.snapshot().await["tutorStatus"]["connected"], false);
     backend.shutdown().await;
 }
@@ -1239,8 +1415,42 @@ async fn native_login_negotiates_contribution_owner_trainer_and_learner_grants()
         settings.tutor.mode = "remote".into();
         settings.tutor.activity = "auto".into();
         settings.tutor.url = origin.clone();
+        settings.target_id = "manual".into();
+        settings.manual_target = Some(fixture_target());
         backend.save_settings(settings).await.unwrap();
+        let cwd = directory.path().join("work").to_string_lossy().into_owned();
+        let agent_first = role != "trainer";
+        let previous_generation = if agent_first {
+            backend
+                .connect_agent(fixture_target(), cwd.clone())
+                .await
+                .unwrap();
+            let mut guard = backend.agent.lock().await;
+            let agent = guard.as_mut().unwrap();
+            agent
+                .mcp_configurations
+                .insert("old-session".into(), "old-credential".into());
+            Some(agent.generation.clone())
+        } else {
+            None
+        };
         backend.connect_tutor(origin, false).await.unwrap();
+        if !agent_first {
+            backend.connect_agent(fixture_target(), cwd).await.unwrap();
+        }
+        assert_eq!(
+            backend.snapshot().await["agentConnected"],
+            true,
+            "connection order for {role}"
+        );
+        {
+            let guard = backend.agent.lock().await;
+            let agent = guard.as_ref().unwrap();
+            assert!(agent.mcp_configurations.is_empty());
+            if let Some(previous) = previous_generation {
+                assert_ne!(agent.generation, previous);
+            }
+        }
         assert_eq!(
             issued.lock().unwrap().as_slice(),
             &["formation:contribute", expected]
@@ -1704,3 +1914,37 @@ async fn queued_message_survives_restart_and_is_consumed_with_one_user_turn() {
 
 #[path = "experience_acceptance_tests.rs"]
 mod experience_acceptance;
+
+#[tokio::test]
+async fn workspace_title_metadata_is_persisted_without_an_extra_prompt() {
+    for (marker, expected) in [
+        ("WORKSPACE_TITLE_BLOCK", "Mon profil d’apprenant"),
+        ("WORKSPACE_TITLE_EVENT", "Comprendre les boucles"),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let (backend, _) = connected(directory.path()).await;
+        let conversation = backend.start_conversation(None, None).await.unwrap();
+        backend
+            .send_prompt(conversation.id.clone(), marker.into())
+            .await
+            .unwrap();
+        let snapshot = backend.snapshot().await;
+        assert_eq!(snapshot["conversations"][0]["title"], expected);
+        assert_eq!(
+            snapshot["conversations"][0]["messages"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            WorkspaceStore::load(directory.path())
+                .unwrap()
+                .data
+                .conversations[0]
+                .title,
+            expected
+        );
+        backend.shutdown().await;
+    }
+}

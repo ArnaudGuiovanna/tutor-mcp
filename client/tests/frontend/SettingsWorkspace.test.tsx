@@ -21,7 +21,7 @@ describe('Compte et paramètres persistants',()=>{
  it('enregistre thème, taille, interligne et réduction des animations pour le compte',async()=>{
   const fixture=client();await settings(fixture.api);await userEvent.click(screen.getByRole('tab',{name:'Ergonomie'}));await userEvent.selectOptions(screen.getByLabelText('Apparence'),'light');await waitFor(()=>expect(document.documentElement.dataset.theme).toBe('light'));
   await userEvent.selectOptions(screen.getByLabelText('Interligne'),'1.9');await userEvent.click(screen.getByLabelText('Réduire les animations'));await waitFor(()=>expect(document.documentElement.dataset.reduceMotion).toBe('true'));
-  expect(fixture.getState().settings.appearance).toEqual({theme:'light',fontSize:20,lineHeight:1.9,reduceMotion:true});
+  expect(fixture.getState().settings.appearance).toEqual({theme:'light',fontSize:14,lineHeight:1.9,reduceMotion:true});
  });
  it('conserve les autorisations réelles dans la portée du compte, serveur et agent',async()=>{
   const state=initialState(true);state.settings.tutor.mode='remote';state.settings.tutor.url='https://institution.example/';const fixture=client(state);
@@ -86,7 +86,7 @@ it('conserve le reçu pending d’un effacement accepté lorsque le serveur reti
  expect(await screen.findByText('Demande d’effacement : En attente')).toBeTruthy();expect(screen.queryByText(/Effacement terminé/)).toBeNull();expect(await screen.findByRole('alert')).toHaveProperty('textContent',expect.stringContaining('La demande est enregistrée.'));
 });
 
-it('connecte Tutor puis l’agent et règle les outils sur le même écran, sans écraser la nouvelle adresse',async()=>{
+it('connecte Tutor avec l’agent déjà lancé et règle les outils sur le même écran, sans écraser la nouvelle adresse',async()=>{
  const state=initialState();state.settings.tutor={mode:'remote',url:'https://old.example',command:'tutor-mcp',args:['--local']};state.identity={exists:true,backupConfirmed:true,needsBackup:false};
  const fixture=client(state);vi.mocked(fixture.api.tutorOverview).mockResolvedValue({identity:{tenantId:'tenant-1',userId:'u',membershipId:'member-1'},context:{},formations:{},availableFormations:{}});
  vi.mocked(fixture.api.listMcpTools).mockResolvedValue({tools:[{name:'record_interaction'}]});
@@ -95,9 +95,8 @@ it('connecte Tutor puis l’agent et règle les outils sur le même écran, sans
  await user.click(screen.getByRole('button',{name:'Vérifier l’institution'}));await waitFor(()=>expect((screen.getByRole('button',{name:'Connecter avec ma clé'})as HTMLButtonElement).disabled).toBe(false));
  await user.click(screen.getByRole('button',{name:'Connecter avec ma clé'}));await waitFor(()=>expect(fixture.api.connectTutor).toHaveBeenCalledWith('https://new.example',false));
  expect(screen.getByRole('tab',{name:'Connexion et outils'}).getAttribute('aria-selected')).toBe('true');
- await waitFor(()=>expect((screen.getByRole('button',{name:'Rechercher les installations'})as HTMLButtonElement).disabled).toBe(false));
- await user.click(screen.getByRole('button',{name:'Rechercher les installations'}));await screen.findByRole('radio',{name:/Codex — Ubuntu/});
- await user.click(screen.getByRole('button',{name:'Connecter Codex'}));await waitFor(()=>expect(fixture.getState().agentConnected).toBe(true));
+ await waitFor(()=>expect(fixture.getState().agentConnected).toBe(true));
+ expect(fixture.api.connectAgent).toHaveBeenCalledTimes(1);
  expect(fixture.getState().settings.tutor.url).toBe('https://new.example');
  await user.selectOptions(screen.getByLabelText('Règle pour les outils Tutor'),'allow');
  await waitFor(()=>expect(fixture.getState().settings.permissionPolicy).toMatchObject({origin:'https://new.example',institutionId:'tenant-1',agentId:state.settings.targetId,defaultDecision:'allow'}));

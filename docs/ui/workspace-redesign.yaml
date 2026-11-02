@@ -1,0 +1,132 @@
+version: 1
+date: '2026-11-02'
+status: integrated_for_release_0_0_10
+reference: brief_textuel_du_mainteneur
+baseline: 818b51f0fa0dcc9c9bf0480fce095c56422f5df5
+worktree: /tmp/mcp-workspace-redesign-20261102
+acp_baseline_worktree: /tmp/mcp-harness-audit-20261102
+publication: pending_required_checks_on_release_commit
+
+initial_audit:
+  layout: client/src/App.tsx
+  window_controls: client/src/WindowChrome.tsx
+  themes: client/src/styles.css
+  composer: client/src/StudyComposer.tsx
+  messages: client/src/MessageBody.tsx
+  activities: client/src/LearningActivity.tsx
+  training_data: client/src/TrainingWorkspace.tsx
+  fonts: self_hosted_Inter_and_JetBrains_Mono
+  icons: existing_inline_SVG_library
+  initial_sidebar: vertical_menu_252px
+  initial_titlebar_height: 44
+  old_light_palette:
+    void: '#EDF1F7'
+    bg: '#F7F9FC'
+    surface: '#FFFFFF'
+    raised: '#EEF2F8'
+    hover: '#E4EAF4'
+    line: '#DEE4EE'
+    line_strong: '#C4CEDD'
+    fg: '#0C131F'
+    fg_2: '#4B5872'
+    fg_3: '#7B879C'
+    blue_action: '#296FE8'
+    blue_hi: '#2466CC'
+    blue_soft: 'rgba(61,139,255,.16)'
+    mastery: '#137B4B'
+    review: '#946009'
+    alert: '#C8323F'
+
+light_token_mapping:
+  bg_app: void
+  bg_panel: surface
+  border_panel: line
+  bg_hover: hover
+  bg_active: raised
+  bg_card: surface
+  bg_card_alt: bg
+  bg_inset: bg
+  bg_user_bubble: raised
+  border_card: line
+  border_strong: line_strong
+  text_strong: fg
+  text: fg
+  text_body: fg
+  text_muted: fg_2
+  text_disabled: fg_3
+  accent: blue_action
+  accent_text: blue_hi
+  accent_soft: blue_soft
+  btn_primary_bg: fg
+  btn_primary_fg: surface
+  status_warn: review
+  status_ok: mastery
+  ok_text: mastery
+  error: alert
+  error_text: alert
+
+implementation:
+  - Titlebar_40px_rail_56px_sidebar_264px_raised_panel
+  - Persistent_sidebar_preference_and_overlay_below_1100px
+  - Existing_navigation_search_accounts_settings_and_MCP_connection
+  - Courses_and_recent_conversations_without_dates
+  - Home_logo_heading_resume_card_and_fixed_composer
+  - Attached_context_training_picker_and_existing_slash_commands
+  - Learner_bubbles_plain_tutor_responses_and_collapsible_live_tool_lines
+  - Quiz_radio_grid_correction_icons_feedback_and_flashcard_recall_buttons
+  - Keyboard_shortcuts_Ctrl_K_Ctrl_N_Ctrl_Enter
+  - Default_conversation_font_14px_existing_saved_sizes_preserved
+  - Native_window_minimum_width_960px
+
+additional_features_authorized:
+  attachments:
+    formats: UTF8_text_and_source_code
+    max_files: 5
+    max_file_bytes: 32000
+    max_prompt_bytes_including_envelope: 64000
+    unsupported: [images, PDF, binary_files]
+    transport: quoted_tutor_attachments_JSON_in_existing_ACP_text_prompt
+    persistence: existing_message_and_outbox_storage
+    send: only_on_user_submission
+  sharing:
+    delivery: clipboard_or_local_Markdown_export
+    native_export: existing_Tauri_save_file_dialog
+    excludes: [connection_settings, credentials, attachment_contents, hidden_quiz_and_flashcard_answers]
+    preview: visible_before_copy_or_export
+    hosting_or_public_link: none
+  titles:
+    external_harness: first_response_presentation_envelope_or_ACP_session_info_update
+    local_chat: same_first_response_presentation_envelope
+    local_fixed_routes: title_derived_from_confirmed_host_route
+    extra_model_request: false
+    checks: completed_response_bounded_title_current_session_and_agent_generation
+    fallback: provisional_title_when_harness_does_not_return_a_valid_title
+
+real_data_limits:
+  course_completion: API_has_per_concept_estimates_but_no_global_completion_percentage
+  course_display: En_cours_or_Nouveau_never_fabricated_completion_or_chapter
+  exercise_count: only_questions_already_present_are_numbered_no_invented_future_total
+  recall_ratings: again_hard_easy_preserved_including_existing_with_effort_choice
+  tool_details: available_title_and_status_no_new_tool_payload_persistence
+
+validation:
+  screenshots: [home_dark, home_light, conversation_dark, conversation_960px]
+  browser: Chrome_headless_real_React_components_with_isolated_fixtures
+  widths_checked: [1280, 960, 600]
+  checks: [no_document_overflow, sidebar_overlay, quiz_single_column, share_preview, no_browser_exceptions]
+  windows_file_dialog: requires_Windows_desktop_CI_or_manual_check
+  linux_desktop_build: unavailable_GTK_and_WebKit_development_libraries
+  live_harness_accounts: not_exercised
+  frontend_tests: 133_passed
+  client_native_tests: 163_passed_2_ignored
+  local_agent_tests_before_base_refresh: 190_passed
+  default_font_test: passed
+  frontend_build: passed_existing_chunk_size_warning
+  client_clippy: passed
+  local_agent_clippy_before_base_refresh: passed
+  text_contrast_minimum_dark: 5.80
+  text_contrast_minimum_light: 4.62
+  windows_cross_check: blocked_missing_x86_64_w64_mingw32_gcc
+  local_agent_tests_after_base_refresh: 228_passed
+  local_agent_clippy_after_base_refresh: passed
+  remote_own_commits: none

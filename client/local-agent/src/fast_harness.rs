@@ -170,6 +170,8 @@ pub(crate) fn run_with_options(
     options: RouteOptions<'_>,
 ) -> Result<GenerationStats, String> {
     harness::validate_input(store, &input)?;
+    let first_turn = input.history.is_empty();
+    let english = input.language == Some("en");
     let resident = options.resident;
     let mut selected = route(input.user);
     let mut decision_stats = None;
@@ -197,6 +199,15 @@ pub(crate) fn run_with_options(
                         capability: harness::Capability::Profile,
                     },
                 )?;
+                append_first_title(
+                    ui,
+                    first_turn,
+                    if english {
+                        "My learner profile"
+                    } else {
+                        "Mon profil d’apprenant"
+                    },
+                )?;
                 return Ok(combine(decision.stats, stats));
             }
             Proposal::TrainingSearch { query } => {
@@ -215,6 +226,15 @@ pub(crate) fn run_with_options(
                         capability: harness::Capability::Library(request),
                     },
                 )?;
+                append_first_title(
+                    ui,
+                    first_turn,
+                    if english {
+                        "Find a course"
+                    } else {
+                        "Rechercher une formation"
+                    },
+                )?;
                 return Ok(combine(decision.stats, stats));
             }
             Proposal::ActiveTraining => selected = Route::Training,
@@ -229,11 +249,33 @@ pub(crate) fn run_with_options(
                         "Souhaitez-vous consulter votre profil Tutor, rechercher une formation ou travailler une question d’apprentissage ? Précisez une demande."
                     },
                 )?;
+                append_first_title(
+                    ui,
+                    first_turn,
+                    if english {
+                        "Clarify my request"
+                    } else {
+                        "Préciser ma demande"
+                    },
+                )?;
                 return Ok(combine(decision.stats, stats));
             }
         }
         decision_stats = Some(decision.stats);
     }
+    let title = match (selected, english) {
+        (Route::Profile, false) => Some("Mon profil d’apprenant"),
+        (Route::Profile, true) => Some("My learner profile"),
+        (Route::Training, false) => Some("Ma formation en cours"),
+        (Route::Training, true) => Some("My current course"),
+        (Route::Alerts, false) => Some("Mes alertes d’apprentissage"),
+        (Route::Alerts, true) => Some("My learning alerts"),
+        (Route::Context, false) => Some("Mon contexte d’apprentissage"),
+        (Route::Context, true) => Some("My learning context"),
+        (Route::Welcome | Route::Help, false) => Some("Découvrir Tutor"),
+        (Route::Welcome | Route::Help, true) => Some("Getting started with Tutor"),
+        _ => None,
+    };
     let stats = match selected {
         Route::Alerts | Route::Context | Route::Profile => {
             if let Some(resident) = resident {
@@ -263,6 +305,14 @@ pub(crate) fn run_with_options(
             } else {
                 "Tu es Tutor, un coach d'apprentissage pour tous les sujets. Réponds brièvement en français à la demande actuelle. Donne une explication ou une première action concrète avant de poser, si utile, une seule question. Utilise la formation active confirmée lorsqu'elle est fournie. Sans formation sélectionnée, la discussion reste possible. Pour un exercice que tu proposes, attends une tentative avant la solution. N'invente ni donnée personnelle ni progrès enregistré."
             };
+            let instructions = if first_turn {
+                format!(
+                    "{instructions}\n{}",
+                    include_str!("../../protocol/conversation-title.txt")
+                )
+            } else {
+                instructions.to_owned()
+            };
             harness::generate_text(
                 engine,
                 store,
@@ -270,7 +320,7 @@ pub(crate) fn run_with_options(
                 cancel,
                 ui,
                 &context::TaskContext {
-                    instructions,
+                    instructions: &instructions,
                     current_user: input.user,
                     required: &required,
                     optional: &[],
@@ -306,10 +356,29 @@ pub(crate) fn run_with_options(
             },
         ),
     }?;
+    if let Some(title) = title {
+        append_first_title(ui, first_turn, title)?;
+    }
     Ok(match decision_stats {
         Some(decision) => combine(decision, stats),
         None => stats,
     })
+}
+
+// The tool channel is reserved for MCP calls; presentation metadata uses the
+// same text envelope as external harnesses, without another model request.
+fn append_first_title(
+    ui: &mut dyn harness::Ui,
+    first_turn: bool,
+    title: &str,
+) -> Result<(), String> {
+    if first_turn {
+        ui.text(&format!(
+            "\n\n```tutor-conversation-title\n{}\n```",
+            serde_json::json!({"title":title})
+        ))?;
+    }
+    Ok(())
 }
 
 fn combine(decision: GenerationStats, mut answer: GenerationStats) -> GenerationStats {

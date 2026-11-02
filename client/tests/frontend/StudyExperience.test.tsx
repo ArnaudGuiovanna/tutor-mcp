@@ -27,17 +27,19 @@ describe('Modalités visuelles et planning intégrés', () => {
   it('place le menu des modalités puis Envoyer dans l’ordre de tabulation de Windows', async () => {
     const fixture = client(initialState(true)); render(<App api={fixture.api}/>);
     const user = userEvent.setup();
-    await user.type(await screen.findByLabelText('Votre message au tuteur'), 'Apprendre Go');
+    await user.type(await screen.findByLabelText('Message au tuteur'), 'Apprendre Go');
+    await user.tab();
+    expect(document.activeElement).toBe(screen.getByRole('button', {name:'Joindre des fichiers texte ou de code'}));
     await user.tab();
     expect(document.activeElement).toBe(screen.getByRole('button', {name:'Choisir Quiz ou Flashcards'}));
     await user.tab();
-    expect(document.activeElement).toBe(screen.getByRole('button', {name:'Envoyer'}));
+    expect(document.activeElement).toBe(screen.getByRole('button', {name:'Envoyer (Ctrl Entrée)'}));
     expect(fixture.api.sendPrompt).not.toHaveBeenCalled();
   });
 
   it('ouvre le menu avec / et choisit le quiz au clavier sans envoyer avant validation', async () => {
     const fixture = client(initialState(true)); render(<App api={fixture.api}/>);
-    const input = await screen.findByLabelText('Votre message au tuteur'); const user = userEvent.setup();
+    const input = await screen.findByLabelText('Message au tuteur'); const user = userEvent.setup();
     await user.type(input, '/');
     expect(screen.getByRole('menu', {name:'Modalités d’apprentissage'})).toBeTruthy();
     await user.keyboard('{ArrowDown}{Enter}');
@@ -45,7 +47,7 @@ describe('Modalités visuelles et planning intégrés', () => {
     expect(document.activeElement).toBe(input);
     expect(fixture.api.sendPrompt).not.toHaveBeenCalled();
     await user.type(input, 'les variables en Go');
-    await user.click(screen.getByRole('button', {name:'Envoyer'}));
+    await user.click(screen.getByRole('button', {name:'Envoyer (Ctrl Entrée)'}));
     await waitFor(() => expect(fixture.api.sendPrompt).toHaveBeenCalledTimes(1));
     const sent = vi.mocked(fixture.api.sendPrompt).mock.calls[0][1];
     expect(parseStudyRequest(sent)).toEqual({version:1,format:'quiz',intent:'practice'});
@@ -96,13 +98,13 @@ describe('Modalités visuelles et planning intégrés', () => {
     expect(await screen.findByText(quiz.question)).toBeTruthy();
     expect(screen.queryByText(quiz.explanation)).toBeNull();
     await user.click(screen.getByRole('radio', {name:/5/}));
-    await user.click(screen.getByRole('button', {name:'Valider ma réponse'}));
+    await user.click(screen.getByRole('button', {name:'Valider'}));
     await screen.findByText(quiz.explanation);
     expect(fixture.api.sendPrompt).toHaveBeenCalledTimes(1);
     expect(parseLearningResponse(vi.mocked(fixture.api.sendPrompt).mock.calls[0][1])).toMatchObject({activityId:quiz.id,selectedOptionId:'b',attemptId:'attempt-quiz'});
     view.unmount(); render(<App api={fixture.api}/>);
     await screen.findByText(quiz.explanation);
-    expect(screen.queryByRole('button', {name:'Valider ma réponse'})).toBeNull();
+    expect(screen.queryByRole('button', {name:'Valider'})).toBeNull();
     expect(fixture.api.sendPrompt).toHaveBeenCalledTimes(1);
   });
 

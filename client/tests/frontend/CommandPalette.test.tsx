@@ -12,7 +12,7 @@ async function ready(api: ReturnType<typeof client>['api']) {
 describe('Palette de commandes', () => {
   it('garde Tab dans le dialogue et restitue le focus à sa fermeture', async () => {
     const {api}=client();await ready(api);
-    const trigger=screen.getByRole('button',{name:'Palette de commandes'});
+    const trigger=screen.getByRole('button',{name:'Rechercher'});
     await userEvent.click(trigger);
     const search=await screen.findByRole('combobox',{name:'Rechercher une commande'});
     await waitFor(()=>expect(document.activeElement).toBe(search));
@@ -21,20 +21,20 @@ describe('Palette de commandes', () => {
     await userEvent.tab({shift:true});
     expect(document.activeElement).toBe(search);
     await userEvent.keyboard('{Escape}');
-    await waitFor(()=>expect(screen.queryByRole('dialog',{name:'Palette de commandes'})).toBeNull());
+    await waitFor(()=>expect(screen.queryByRole('dialog',{name:'Rechercher'})).toBeNull());
     expect(document.activeElement).toBe(trigger);
   });
 
   it('s’ouvre avec Ctrl K, filtre sans accents et navigue vers les réglages', async () => {
     const {api}=client();await ready(api);
-    expect(screen.queryByRole('dialog',{name:'Palette de commandes'})).toBeNull();
+    expect(screen.queryByRole('dialog',{name:'Rechercher'})).toBeNull();
     fireEvent.keyDown(window,{key:'k',ctrlKey:true});
     await screen.findByRole('dialog',{name:'Palette de commandes'});
     await waitFor(()=>expect(document.activeElement).toBe(screen.getByRole('combobox',{name:'Rechercher une commande'})));
     await userEvent.keyboard('ergonomie');
     const option=screen.getByRole('option',{name:/Ergonomie/});expect(option.getAttribute('aria-selected')).toBe('true');
     await userEvent.keyboard('{Enter}');
-    await waitFor(()=>expect(screen.queryByRole('dialog',{name:'Palette de commandes'})).toBeNull());
+    await waitFor(()=>expect(screen.queryByRole('dialog',{name:'Rechercher'})).toBeNull());
     expect(screen.getByRole('tab',{name:'Ergonomie'}).getAttribute('aria-selected')).toBe('true');
     expect(screen.getByRole('heading',{level:1,name:'Paramètres'})).toBeTruthy();
   });
@@ -42,17 +42,17 @@ describe('Palette de commandes', () => {
   it('ouvre une conversation existante au clavier et se ferme avec Échap', async () => {
     const state=initialState(true);state.conversations=[conversation];const {api}=client(state);render(<App api={api}/>);
     await screen.findByText('Commençons par observer la Grande Ourse.');
-    await userEvent.click(screen.getByRole('button',{name:'Palette de commandes'}));
+    await userEvent.click(screen.getByRole('button',{name:'Rechercher'}));
     await screen.findByRole('dialog',{name:'Palette de commandes'});
     await userEvent.keyboard('{Escape}');
-    await waitFor(()=>expect(screen.queryByRole('dialog',{name:'Palette de commandes'})).toBeNull());
+    await waitFor(()=>expect(screen.queryByRole('dialog',{name:'Rechercher'})).toBeNull());
     fireEvent.keyDown(window,{key:'K',metaKey:true});
     await screen.findByRole('dialog',{name:'Palette de commandes'});
     await userEvent.keyboard('constellations');
     // A real browser never clicks the refocused sidebar button on a prevented Enter; user-event would.
     fireEvent.keyDown(screen.getByRole('combobox',{name:'Rechercher une commande'}),{key:'Enter'});
     await waitFor(()=>expect(api.selectConversation).toHaveBeenCalledWith(conversation.id));
-    expect(screen.queryByRole('dialog',{name:'Palette de commandes'})).toBeNull();
+    expect(screen.queryByRole('dialog',{name:'Rechercher'})).toBeNull();
   });
 
   it('change le thème depuis la palette et conserve les autres réglages', async () => {
@@ -60,7 +60,7 @@ describe('Palette de commandes', () => {
     fireEvent.keyDown(window,{key:'k',ctrlKey:true});await screen.findByRole('dialog',{name:'Palette de commandes'});
     await userEvent.keyboard('clair{Enter}');
     await waitFor(()=>expect(document.documentElement.dataset.theme).toBe('light'));
-    expect(fixture.getState().settings.appearance).toEqual({theme:'light',fontSize:20,lineHeight:1.65,reduceMotion:false});
-    expect(screen.getByRole('button',{name:'Palette de commandes'})).toBeTruthy();
+    expect(fixture.getState().settings.appearance).toEqual({theme:'light',fontSize:14,lineHeight:1.65,reduceMotion:false});
+    expect(screen.getByRole('button',{name:'Rechercher'})).toBeTruthy();
   });
 });

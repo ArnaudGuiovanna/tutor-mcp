@@ -16,12 +16,14 @@ export interface LearningActivityCardProps {
   onRespond: (response: LearningResponse) => Promise<boolean>;
   openLink?: ClientBridge['openExternalLink'];
   onContinue?: () => void;
+  onHint?: () => void;
+  questionNumber?: number;
 }
 
 const ratings: { value: RecallRating; label: string }[] = [
-  { value: 'again', label: 'Pas retrouvé' },
+  { value: 'again', label: 'À revoir' },
   { value: 'hard', label: 'Retrouvé avec effort' },
-  { value: 'easy', label: 'Retrouvé facilement' },
+  { value: 'easy', label: 'Je savais' },
 ];
 
 export function LearningActivityCard(props: LearningActivityCardProps) {
@@ -30,7 +32,7 @@ export function LearningActivityCard(props: LearningActivityCardProps) {
   return <ActivityContent key={JSON.stringify([activity.trainingId, activity.domainId, activity.id])} {...props} />;
 }
 
-function ActivityContent({ activity, response, disabled = false, onRespond, openLink, onContinue }: LearningActivityCardProps) {
+function ActivityContent({ activity, response, disabled = false, onRespond, openLink, onContinue, onHint, questionNumber=1 }: LearningActivityCardProps) {
   const inputName = useId();
   const titleId = useId();
   const [selected, setSelected] = useState('');
@@ -70,31 +72,32 @@ function ActivityContent({ activity, response, disabled = false, onRespond, open
   }
 
   return <section className={`learning-card ${activity.kind}`} aria-labelledby={titleId} aria-busy={submitting}>
-    <header className="learning-card-heading"><span className="learning-card-kind"><Icon name={activity.kind === 'quiz' ? 'check' : 'copy'} size={18} />{activity.kind === 'quiz' ? t('Quiz de récupération') : t('Flashcard')}</span><span className="learning-card-concept">{activity.concept}</span></header>
+    <header className="learning-card-heading"><span className="learning-card-kind">{activity.kind === 'quiz' ? t('QUIZ') : t('FLASHCARDS')}</span><span className="learning-card-concept">{t(activity.kind==='quiz'?'Question {number}':'Carte {number}',{number:questionNumber})}</span><span className="learning-segments" aria-hidden="true">{Array.from({length:Math.min(questionNumber,10)},(_,index)=><span key={index}/>)}</span></header>
     <div id={titleId} className="learning-question"><MessageBody text={activity.question} openLink={openLink} /></div>
     {activity.kind === 'quiz' ? <>
-      <fieldset className="learning-quiz-options" disabled={locked}>
+      <fieldset className="learning-quiz-options" role="radiogroup" aria-label={t('Choisissez une réponse')} disabled={locked}>
         <legend className="visually-hidden">{t('Choisissez une réponse')}</legend>
         {activity.options.map((option, index) => <label className={`learning-quiz-option ${selectedId === option.id ? 'selected' : ''} ${committed && option.id === activity.correctOptionId ? 'correct' : ''} ${committed && selectedId === option.id && !quizCorrect ? 'incorrect' : ''}`} key={option.id}>
-          <input type="radio" name={inputName} value={option.id} checked={selectedId === option.id} onChange={() => setSelected(option.id)} />
+          <input type="radio" aria-label={option.text} name={inputName} value={option.id} checked={selectedId === option.id} onChange={() => setSelected(option.id)} />
           <span className="learning-option-letter" aria-hidden="true">{String.fromCharCode(65 + index)}</span>
           <span className="learning-option-text">{option.text}</span>
           {committed && option.id === activity.correctOptionId && <span className="learning-answer-mark"><Icon name="check" size={18} /><span className="visually-hidden">{t('Réponse proposée par la correction')}</span></span>}
+          {committed && selectedId === option.id && !quizCorrect && <span className="learning-answer-mark"><Icon name="close" size={18}/><span className="visually-hidden">{t('Réponse incorrecte')}</span></span>}
         </label>)}
       </fieldset>
-      {!committed && <div className="learning-card-actions"><span className="learning-card-hint">{t('Répondez avant de consulter la correction.')}</span><button className="button blue" disabled={locked || !selected} onClick={() => void respond()}>{submitting ? t('Envoi…') : t('Valider ma réponse')}</button></div>}
+      {!committed && <div className="learning-card-actions">{onHint && <button className="workspace-outline" disabled={locked} onClick={onHint}>{t('Un indice')}</button>}<button className="workspace-primary" disabled={locked || !selected} onClick={() => void respond()}>{submitting ? t('Envoi…') : t('Valider')}</button></div>}
       {committed && <div ref={feedback} className={`learning-feedback ${quizCorrect ? 'correct' : 'incorrect'}`} tabIndex={-1} role="status">
-        <p className="learning-feedback-title"><Icon name={quizCorrect ? 'check' : 'refresh'} size={18} />{quizCorrect ? t('Réponse correcte') : t('Reprenons ce point')}</p>
+        <p className="learning-feedback-title"><Icon name={quizCorrect ? 'check' : 'close'} size={18} />{quizCorrect ? t('Bonne réponse') : t('Reprenons ce point')}</p>
         <MessageBody text={activity.explanation} openLink={openLink} />
         <p className="learning-card-hint">{t('Correction proposée par le tuteur. Le suivi pédagogique reste géré par Tutor-MCP.')}</p>
       </div>}
     </> : <>
       {!answerShown && <div className="learning-flashcard-front"><p>{t('Cherchez la réponse de mémoire, puis retournez la carte.')}</p><button className="button blue" disabled={locked} onClick={() => { recallSeconds.current = elapsed(); setRevealed(true); }}>{t('Retourner la carte')}<Icon name="refresh" size={16} /></button></div>}
       {answerShown && <div ref={flashcardAnswer} className="learning-flashcard-back" role="region" aria-label={t('Réponse de la flashcard')} tabIndex={-1}><p className="learning-answer-label">{t('Réponse')}</p><MessageBody text={activity.answer} openLink={openLink} /></div>}
-      {answerShown && !committed && <fieldset className="learning-recall" disabled={locked}><legend>{t('Aviez-vous retrouvé la réponse ?')}</legend><div className="learning-recall-buttons">{ratings.map(rating => <button className="button secondary" key={rating.value} onClick={() => void respond(rating.value)}>{t(rating.label)}</button>)}</div></fieldset>}
+      {answerShown && !committed && <fieldset className="learning-recall" disabled={locked}><legend>{t('Aviez-vous retrouvé la réponse ?')}</legend><div className="learning-recall-buttons">{ratings.map(rating => <button className={`workspace-outline recall-${rating.value}`} key={rating.value} onClick={() => void respond(rating.value)}>{rating.value !== 'hard' && <Icon name={rating.value==='easy'?'check':'close'} size={14}/>} {t(rating.label)}</button>)}</div></fieldset>}
       {committed?.kind === 'flashcard' && <div ref={feedback} className="learning-feedback self-report" tabIndex={-1} role="status"><p className="learning-feedback-title">{t('Votre autoévaluation : {rating}', { rating: t(ratings.find(rating => rating.value === committed.rating)!.label) })}</p><p>{t('Votre déclaration reste distincte d’une réponse vérifiée dans un quiz.')}</p></div>}
     </>}
     {error && <p className="learning-card-error" role="alert">{error}</p>}
-    {committed && onContinue && <div className="learning-card-actions"><span className="learning-card-hint">{activity.kind === 'flashcard' ? t('Autoévaluation') : t('Réponse donnée')}</span><button className="button blue" disabled={disabled || submitting} onClick={onContinue}>{t('Continuer')}<Icon name="arrow" size={16} /></button></div>}
+    {committed && onContinue && <div className="learning-card-actions"><button className="workspace-primary" disabled={disabled || submitting} onClick={onContinue}>{t(activity.kind === 'quiz' ? 'Question suivante' : 'Carte suivante')}</button></div>}
   </section>;
 }

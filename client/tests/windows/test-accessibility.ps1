@@ -241,21 +241,23 @@ if ($Mode -eq 'Exercise') {
     Save-WindowCapture ($Report + '.window.png')
     $conversation = Find-Control 'Conversation' $buttonType
     $formations = Find-Control 'Formations' $buttonType
-    Focus-Control 'Votre message au tuteur' $editType
+    Focus-Control 'Message au tuteur' $editType
     [System.Windows.Forms.SendKeys]::SendWait('Je veux apprendre le Go')
-    [void](Find-ReadyControl 'Envoyer' $buttonType)
+    [void](Find-ReadyControl 'Envoyer (Ctrl Entrée)' $buttonType)
     # The message is typed but never submitted. The test profile is offline.
     Activate-Control $formations
     # Wait for actual page content, not the sidebar button that never leaves.
     [void](Find-Control 'Connecter Tutor' $buttonType)
     Activate-Control $conversation
-    Focus-Control 'Votre message au tuteur' $editType
-    [void](Find-ReadyControl 'Envoyer' $buttonType)
+    Focus-Control 'Message au tuteur' $editType
+    [void](Find-ReadyControl 'Envoyer (Ctrl Entrée)' $buttonType)
     [System.Windows.Forms.SendKeys]::SendWait('{TAB}')
-    # The visual-activity menu is now the first keyboard action after input.
+    # Attachments precede the exercise menu and Send in the new composer.
+    Assert-ControlFocus 'Joindre des fichiers texte ou de code' $buttonType
+    [System.Windows.Forms.SendKeys]::SendWait('{TAB}')
     Assert-ControlFocus 'Choisir Quiz ou Flashcards' $buttonType
     [System.Windows.Forms.SendKeys]::SendWait('{TAB}')
-    Assert-ControlFocus 'Envoyer' $buttonType
+    Assert-ControlFocus 'Envoyer (Ctrl Entrée)' $buttonType
 
     Exercise-CommandPalette
     Open-Settings $false
@@ -291,7 +293,7 @@ if ($Mode -eq 'Exercise') {
     Select-ComboByKeyboard 'Apparence' 0 $true
     Assert-ComboValue 'Apparence' @('Sombre', 'dark') $true
     Activate-Control (Find-Control 'Conversation' $buttonType)
-    Focus-Control 'Votre message au tuteur' $editType
+    Focus-Control 'Message au tuteur' $editType
 }
 $parent = Split-Path -Parent $Report
 if ($parent -and -not (Test-Path -LiteralPath $parent)) { [void](New-Item -ItemType Directory -Path $parent) }

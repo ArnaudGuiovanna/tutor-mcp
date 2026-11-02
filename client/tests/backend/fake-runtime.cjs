@@ -36,6 +36,9 @@ readline.createInterface({input:process.stdin}).on('line', (line) => {
       typedFailures=air?.version===1 && air.capabilities?.includes('sessionFailure');
     }
     result(request, local ? {protocolVersion:params.protocolVersion,capabilities:{tools:{}},serverInfo:{name:'fixture-tutor',version:'1'}} : {protocolVersion:1,agentCapabilities:{loadSession:true,mcpCapabilities:{http:true}},agentInfo:{name:'fixture-acp',version:'1'},authMethods:[]});
+    if (!local && fs.existsSync(path.join(process.cwd(), 'fixture-auth-status.json'))) {
+      send({jsonrpc:'2.0',method:'_auth/status_update',params:{authStatus:JSON.parse(fs.readFileSync(path.join(process.cwd(),'fixture-auth-status.json'),'utf8'))}});
+    }
   } else if (request.method === 'tools/list') {
     result(request,{tools:[{name:'get_next_activity',description:'Fixture next activity',inputSchema:{type:'object'}}]});
   } else if (request.method === 'tools/call') {
@@ -62,13 +65,27 @@ readline.createInterface({input:process.stdin}).on('line', (line) => {
     result(request,{configOptions:options});
   } else if (request.method === 'session/prompt') {
     const text = params.prompt.map((part) => part.text || '').join('');
-    sessions[params.sessionId].lastPrompt=text;fs.writeFileSync(sessionFile,JSON.stringify(sessions));
+    sessions[params.sessionId].lastPrompt=text;sessions[params.sessionId].promptCount=(sessions[params.sessionId].promptCount||0)+1;fs.writeFileSync(sessionFile,JSON.stringify(sessions));
     waiting = request;
     const experience=text.match(/EXPERIENCE_PERMISSION:([A-Z_]+)$/)?.[1];
     const typed=text.match(/EXPERIENCE_TYPED:([A-Z_]+)$/)?.[1];
-    if (typed) {
+    const rpcFailure=text.match(/EXPERIENCE_RPC:([A-Z_]+)$/)?.[1];
+    if(text.endsWith('WORKSPACE_TITLE_BLOCK')) {
+      chunk(params.sessionId,'Votre profil est chargé.\n\n```tutor-conversation-title\n{"title":"Mon profil d’apprenant"}\n```');
+      result(request,{stopReason:'end_turn'});waiting=undefined;
+    } else if(text.endsWith('WORKSPACE_TITLE_EVENT')) {
+      send({jsonrpc:'2.0',method:'session/update',params:{sessionId:'stale-session',update:{sessionUpdate:'session_info_update',title:'Titre périmé'}}});
+      send({jsonrpc:'2.0',method:'session/update',params:{sessionId:params.sessionId,update:{sessionUpdate:'session_info_update',title:'Comprendre les boucles'}}});
+      chunk(params.sessionId,'Une boucle répète une action.');result(request,{stopReason:'end_turn'});waiting=undefined;
+    } else if (rpcFailure) {
+      const codexErrorInfo={RATE:{httpConnectionFailed:{httpStatusCode:429}},QUOTA:'usageLimitExceeded',AUTH:'unauthorized',UNKNOWN:'other'}[rpcFailure];
+      const errorKind={CLAUDE_RATE:'rate_limit',CLAUDE_BILLING:'billing_error'}[rpcFailure];
+      send({jsonrpc:'2.0',id:request.id,error:{code:-32603,message:'private-provider-token',data:{message:'private-provider-token',codexErrorInfo,errorKind}}});
+      waiting=undefined;
+    } else if (typed) {
       if(!typedFailures) return send({jsonrpc:'2.0',id:request.id,error:{code:-32602,message:'Fixture requires typed failure capability'}});
       const failure={id:'incident-1',revision:1,category:'limit',severity:typed==='WARNING'?'warning':'error',title:'private-provider-token',details:'private-provider-token',actions:['retry']};
+      if(typed==='NO_CAUSE') failure.actions=[];
       const metadata=(value)=>({_meta:{jetbrains:{air:{version:1,sessionFailure:value}}}});
       const update=(sessionId,value)=>send({jsonrpc:'2.0',method:'session/update',params:{sessionId,update:{sessionUpdate:'session_info_update',...metadata(value)}}});
       if(typed==='RESULT_ERROR') {

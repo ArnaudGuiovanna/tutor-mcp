@@ -18,6 +18,7 @@ export function t(message: string, values: Record<string, string | number> = {})
     const exited=/^L’agent s’est arrêté avec une erreur \(code (-?\d+)\)\. Vérifiez sa connexion et son installation\.$/.exec(message);
     if(exited)translated=`The agent stopped with an error (code ${exited[1]}). Check its sign-in and installation.`;
     else if(/ \(HTTP \d{3}\)\.$/.test(message)){const http=/^(.*) \(HTTP (\d{3})\)\.$/.exec(message)!;translated=t(http[1])+` (HTTP ${http[2]}).`;}
+    else if(/ \(JSON-RPC -?\d+\)\.$/.test(message)){const rpc=/^(.*) \(JSON-RPC (-?\d+)\)\.$/.exec(message)!;translated=t(rpc[1])+` (JSON-RPC ${rpc[2]}).`;}
     else if(message.startsWith('Initialisation de l’agent : '))translated='Agent initialisation: '+t(message.slice('Initialisation de l’agent : '.length));
   }
   return translated.replace(/\{([A-Za-z0-9_]+)\}/g, (token, key: string) => Object.hasOwn(values, key) ? String(values[key]) : token);

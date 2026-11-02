@@ -68,7 +68,8 @@ pub async fn discover_agents() -> Vec<AgentTarget> {
     let mut targets = crate::bundled::targets();
     #[cfg(windows)]
     let external_start = targets.len();
-    targets.push(discover_native().await);
+    let (codex, claude) = tokio::join!(discover_native(false), discover_native(true));
+    targets.extend([codex, claude]);
     #[cfg(windows)]
     {
         let wsl = wsl_program();
@@ -85,14 +86,20 @@ pub async fn discover_agents() -> Vec<AgentTarget> {
                 .take(MAX_WSL_DISTRIBUTIONS)
             {
                 let wsl = wsl.clone();
-                pending.spawn(async move { discover_wsl(&wsl, &distro).await });
+                pending.spawn(async move {
+                    let (codex, claude) = tokio::join!(
+                        discover_wsl(&wsl, &distro, false),
+                        discover_wsl(&wsl, &distro, true)
+                    );
+                    vec![codex, claude]
+                });
             }
             while let Some(result) = pending.join_next().await {
-                if let Ok(target) = result {
-                    targets.push(target);
+                if let Ok(targets_found) = result {
+                    targets.extend(targets_found);
                 }
             }
-            targets[external_start + 1..].sort_by(|a, b| a.label.cmp(&b.label));
+            targets[external_start + 2..].sort_by(|a, b| a.label.cmp(&b.label));
         }
     }
     // Append without changing the order/defaults of existing Codex/Claude/WSL
@@ -101,16 +108,33 @@ pub async fn discover_agents() -> Vec<AgentTarget> {
     targets
 }
 
-async fn discover_native() -> AgentTarget {
+async fn discover_native(claude: bool) -> AgentTarget {
     let paths = native_search_paths();
-    let adapter = std::env::var_os("TUTOR_CODEX_ACP_PATH")
-        .map(PathBuf::from)
-        .filter(|path| path.is_file())
-        .or_else(|| find_program("codex-acp", &paths));
-    let codex = find_program("codex", &paths);
+    let adapter_name = if claude {
+        "claude-agent-acp"
+    } else {
+        "codex-acp"
+    };
+    let name = if claude { "Claude" } else { "Codex" };
+    let adapter = std::env::var_os(if claude {
+        "TUTOR_CLAUDE_ACP_PATH"
+    } else {
+        "TUTOR_CODEX_ACP_PATH"
+    })
+    .map(PathBuf::from)
+    .filter(|path| path.is_file())
+    .or_else(|| find_program(adapter_name, &paths));
+    let codex = if claude {
+        None
+    } else {
+        find_program("codex", &paths)
+    };
     let mut target = AgentTarget {
-        id: "native".into(),
-        label: if cfg!(windows) { "Codex — Windows" } else { "Codex — local" }.into(),
+        id: if claude { "native:claude" } else { "native" }.into(),
+        label: format!(
+            "{name} — {}",
+            if cfg!(windows) { "Windows" } else { "local" }
+        ),
         environment: "native".into(),
         distribution: None,
         wsl_user: None,
@@ -119,7 +143,9 @@ async fn discover_native() -> AgentTarget {
         adapter_version: None,
         codex_version: None,
         available: false,
-        detail: "Adaptateur ACP introuvable. Installez codex-acp ou indiquez son chemin. Codex Desktop n’est pas requis.".into(),
+        detail: format!(
+            "Adaptateur ACP introuvable. Installez {adapter_name} ou indiquez son chemin."
+        ),
     };
     if let Some(path) = codex {
         target.codex_version = probe_native_version(&path, &paths).await;
@@ -135,7 +161,7 @@ async fn discover_native() -> AgentTarget {
                 // The ACP initialize handshake performs the definitive version
                 // check. An adapter can omit a --version switch and still work.
                 target.available = true;
-                target.detail = "Adaptateur ACP trouvé. Connexion et capacités à vérifier au démarrage ; le runtime Codex compatible de l’adaptateur sera utilisé.".into();
+                target.detail = format!("Adaptateur ACP trouvé. La connexion existante de {name} dans cet environnement sera utilisée.");
             }
             Err(message) => target.detail = message,
         }
@@ -246,6 +272,61 @@ fn manual_codex_override(target: &AgentTarget) -> Result<Option<&str>, String> {
         return Err("Le Codex choisi dans WSL doit utiliser un chemin Linux absolu.".into());
     }
     Ok(Some(path))
+}
+
+/// Terminal authentication uses the exact ACP invocation and WSL user, with
+/// argv supplied by initialize. Never execute an advertised shell command.
+#[cfg(any(windows, test))]
+pub(crate) async fn terminal_auth_launch(
+    target: &AgentTarget,
+    cwd: &str,
+    method: &serde_json::Value,
+) -> Result<LaunchSpec, String> {
+    if method["type"] != "terminal" {
+        return Err("Méthode de connexion non interactive.".into());
+    }
+    let mut spec = launch_spec(target, cwd).await?;
+    if let Some(args) = method.get("args") {
+        let args = args
+            .as_array()
+            .filter(|args| args.len() <= 32)
+            .ok_or("Arguments de connexion invalides.")?;
+        for arg in args {
+            let arg = arg
+                .as_str()
+                .filter(|arg| arg.len() <= 4096 && !arg.contains('\0'))
+                .ok_or("Argument de connexion invalide.")?;
+            spec.args.push(arg.into());
+        }
+    }
+    if let Some(env) = method.get("env") {
+        let env = env
+            .as_object()
+            .filter(|env| env.len() <= 32)
+            .ok_or("Environnement de connexion invalide.")?;
+        for (name, value) in env {
+            if name.is_empty()
+                || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                || name.as_bytes()[0].is_ascii_digit()
+            {
+                return Err("Variable de connexion invalide.".into());
+            }
+            let value = value
+                .as_str()
+                .filter(|value| value.len() <= 32768 && !value.contains('\0'))
+                .ok_or("Variable de connexion invalide.")?;
+            spec.env.push((name.clone(), value.into()));
+        }
+        if target.environment == "wsl" && !env.is_empty() {
+            let mut forwarded = std::env::var("WSLENV").unwrap_or_default();
+            for name in env.keys() {
+                forwarded.push(':');
+                forwarded.push_str(name);
+            }
+            spec.env.push(("WSLENV".into(), forwarded));
+        }
+    }
+    Ok(spec)
 }
 
 async fn validate_native_codex(path: &str, cwd: &Path) -> Result<(), String> {
@@ -550,7 +631,22 @@ fn adapter_invocation(path: &Path, paths: &[PathBuf]) -> Result<LaunchSpec, Stri
         .and_then(|v| v.to_str())
         .unwrap_or_default();
     if extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat") {
-        let script = npm_package_bin(path, "@agentclientprotocol/codex-acp", "codex-acp")?;
+        let claude = path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("claude-agent-acp"));
+        let script = if claude {
+            npm_package_bin(
+                path,
+                "@agentclientprotocol/claude-agent-acp",
+                "claude-agent-acp",
+            )
+            .or_else(|_| {
+                npm_package_bin(path, "@zed-industries/claude-agent-acp", "claude-agent-acp")
+            })?
+        } else {
+            npm_package_bin(path, "@agentclientprotocol/codex-acp", "codex-acp")?
+        };
         return node_invocation(&script, paths);
     }
     if extension.eq_ignore_ascii_case("js")
@@ -769,10 +865,21 @@ fn wsl_args(distribution: &str, user: Option<&str>) -> Result<Vec<String>, Strin
 }
 
 #[cfg(windows)]
-async fn discover_wsl(wsl: &str, distribution: &str) -> AgentTarget {
+async fn discover_wsl(wsl: &str, distribution: &str, claude: bool) -> AgentTarget {
+    let name = if claude { "Claude" } else { "Codex" };
+    let adapter_name = if claude {
+        "claude-agent-acp"
+    } else {
+        "codex-acp"
+    };
+    let cli_name = if claude { "claude" } else { "codex" };
     let mut target = AgentTarget {
-        id: format!("wsl:{distribution}"),
-        label: format!("Codex — WSL · {distribution}"),
+        id: if claude {
+            format!("wsl:claude:{distribution}")
+        } else {
+            format!("wsl:{distribution}")
+        },
+        label: format!("{name} — WSL · {distribution}"),
         environment: "wsl".into(),
         distribution: Some(distribution.into()),
         wsl_user: None,
@@ -785,7 +892,7 @@ async fn discover_wsl(wsl: &str, distribution: &str) -> AgentTarget {
             "Distribution inaccessible ou démarrage trop long. Réessayez après avoir ouvert WSL."
                 .into(),
     };
-    let script = format!("{WSL_ENV}\nprintf '%s\\0%s\\0%s\\0%s\\0' '{PROBE_MARKER}' \"$(command -v codex-acp || true)\" \"$(command -v codex || true)\" \"$(id -un)\"");
+    let script = format!("{WSL_ENV}\nprintf '%s\\0%s\\0%s\\0%s\\0' '{PROBE_MARKER}' \"$(command -v {adapter_name} || true)\" \"$(command -v {cli_name} || true)\" \"$(id -un)\"");
     let Ok(mut args) = wsl_args(distribution, None) else {
         return target;
     };
@@ -799,15 +906,13 @@ async fn discover_wsl(wsl: &str, distribution: &str) -> AgentTarget {
     if let Ok(output) = run_probe(spec, WSL_TIMEOUT).await {
         if let Some((adapter, codex, user)) = parse_wsl_probe(&output) {
             target.adapter_path = adapter;
-            target.codex_path = codex;
+            target.codex_path = if claude { None } else { codex };
             target.wsl_user = Some(user);
             target.available = target.adapter_path.is_some();
             target.detail = if target.available {
-                "Adaptateur trouvé dans WSL2. Il utilisera la connexion Codex du même utilisateur Linux et son runtime compatible.".into()
-            } else if target.codex_path.is_some() {
-                "Codex est installé dans WSL2 ; l’adaptateur codex-acp manque dans cette distribution.".into()
+                format!("Adaptateur trouvé dans WSL2. Il utilisera la connexion {name} du même utilisateur Linux.")
             } else {
-                "Installez l’adaptateur codex-acp dans cette distribution WSL2, puis relancez la détection.".into()
+                format!("Installez l’adaptateur {adapter_name} dans cette distribution WSL2, puis relancez la détection.")
             };
         }
     }
@@ -1595,6 +1700,66 @@ mod tests {
         )
         .is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn terminal_login_uses_the_selected_adapter_and_literal_arguments() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut target = wsl_target();
+        target.id = "manual".into();
+        target.environment = "native".into();
+        target.codex_path = None;
+        target.adapter_path = Some(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../tests/backend/fake-runtime.cjs")
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let method = serde_json::json!({"type":"terminal","args":["--cli","auth","login","literal $(not-executed)"],"env":{"TUTOR_LOGIN_FIXTURE":"value"}});
+        let spec = terminal_auth_launch(&target, directory.path().to_str().unwrap(), &method)
+            .await
+            .unwrap();
+        assert_eq!(
+            spec.args[spec.args.len() - 4..],
+            ["--cli", "auth", "login", "literal $(not-executed)"]
+        );
+        assert_eq!(spec.cwd.as_deref(), Some(directory.path()));
+        assert!(spec
+            .env
+            .contains(&("TUTOR_LOGIN_FIXTURE".into(), "value".into())));
+        assert!(terminal_auth_launch(
+            &target,
+            directory.path().to_str().unwrap(),
+            &serde_json::json!({"type":"terminal","args":["bad\0arg"]})
+        )
+        .await
+        .is_err());
+    }
+
+    #[test]
+    fn claude_npm_wrapper_resolves_its_own_package_without_shell_execution() {
+        for scope in ["@agentclientprotocol", "@zed-industries"] {
+            let root = tempfile::tempdir().unwrap();
+            let package = root
+                .path()
+                .join(format!("node_modules/{scope}/claude-agent-acp"));
+            std::fs::create_dir_all(package.join("dist")).unwrap();
+            std::fs::write(
+                package.join("package.json"),
+                r#"{"bin":{"claude-agent-acp":"dist/index.js"}}"#,
+            )
+            .unwrap();
+            std::fs::write(package.join("dist/index.js"), "// fixture").unwrap();
+            let shim = root.path().join("claude-agent-acp.cmd");
+            std::fs::write(&shim, "never execute this shell wrapper").unwrap();
+            let spec = adapter_invocation(&shim, &native_search_paths()).unwrap();
+            assert_eq!(
+                Path::new(&spec.args[0]).canonicalize().unwrap(),
+                package.join("dist/index.js").canonicalize().unwrap()
+            );
+        }
     }
 
     #[cfg(windows)]

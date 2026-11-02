@@ -213,8 +213,8 @@ describe('Préparation du modèle local', () => {
     expect(api.downloadLocalModel).not.toHaveBeenCalled();
   });
 
-  it('actualise les agents intégrés dans App sans découverte WSL, sélection ou connexion automatique', async () => {
-    const fixture = client();
+  it('actualise les agents intégrés sans relancer la découverte WSL ou changer l’agent connecté', async () => {
+    const fixture = client(initialState(true));
     vi.mocked(fixture.api.bundledAgents).mockResolvedValueOnce([target, {...localTarget, available:false}])
       .mockResolvedValue([localTarget]);
     vi.mocked(fixture.api.downloadLocalModel).mockResolvedValue(ready);
@@ -227,7 +227,7 @@ describe('Préparation du modèle local', () => {
     fireEvent.click(screen.getByRole('button', {name:'Télécharger le modèle'}));
     await waitFor(() => expect(radio.disabled).toBe(false));
     expect(fixture.api.bundledAgents).toHaveBeenCalledTimes(2);
-    expect(fixture.api.discoverAgents).not.toHaveBeenCalled();
+    expect(fixture.api.discoverAgents).toHaveBeenCalledTimes(1);
     expect(radio.checked).toBe(false);
     expect((screen.getByRole('radio', {name:/Codex — Ubuntu/}) as HTMLInputElement).checked).toBe(true);
     expect(fixture.getState().settings.targetId).toBe(target.id);

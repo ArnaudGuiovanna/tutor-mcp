@@ -149,8 +149,8 @@ export function learningProtocolFences(source: string): Fence[] {
     if (!opening) continue;
     const tag = opening[2].trim().toLowerCase();
     // A partially streamed tag is kept out of the Markdown/code renderer too.
-    const reserved = /^tutor-(activity|response|study-request)/.test(tag)
-      || (!!tag && ['tutor-activity', 'tutor-response', 'tutor-study-request'].some(known => known.startsWith(tag)));
+    const reserved = /^tutor-(activity|response|study-request|attachments|conversation-title)/.test(tag)
+      || (!!tag && ['tutor-activity', 'tutor-response', 'tutor-study-request', 'tutor-attachments', 'tutor-conversation-title'].some(known => known.startsWith(tag)));
     open = { start: line.index, bodyStart: line.index + line[0].length, delimiter: opening[1][0],
       length: opening[1].length, tag, reserved };
   }
@@ -166,7 +166,8 @@ export function parseLearningContent(source: string, { complete }: { complete: b
   let cursor = 0;
   for (const fence of fences) {
     if (fence.start > cursor) segments.push({ type: 'text', text: source.slice(cursor, fence.start) });
-    if (!complete) segments.push({ type: 'pending' });
+    if (fence.tag === 'tutor-conversation-title' || fence.tag === 'tutor-attachments') { /* Presentation metadata is never rendered as prose. */ }
+    else if (!complete) segments.push({ type: 'pending' });
     else if (fence.closed && fence.tag === 'tutor-activity' && !multipleActivities) {
       const activity = validateLearningActivity(parseJson(fence.body));
       segments.push(activity ? { type: 'activity', activity } : { type: 'invalid' });

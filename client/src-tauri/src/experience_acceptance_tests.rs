@@ -64,30 +64,35 @@ async fn typed_terminal_provider_failures_are_errors_in_both_languages_without_r
     for (language, marker, expected) in [
         (
             "fr",
+            "NO_CAUSE",
+            "L’agent signale une limite d’utilisation, sans en préciser la cause. Consultez l’état de votre accès dans le harness.",
+        ),
+        (
+            "fr",
             "ERROR",
-            "Le fournisseur limite temporairement les requêtes. Réessayez plus tard.",
+            "L’agent signale une limitation temporaire des requêtes. Réessayez plus tard ; cela ne confirme pas un forfait épuisé.",
         ),
         (
             "en",
             "RESULT_ERROR",
-            "The provider is temporarily limiting requests. Try again later.",
+            "The agent reports a temporary request limit. Try again later; this does not confirm an exhausted plan.",
         ),
         (
             "fr",
             "CLEARED_ERROR",
-            "Le fournisseur limite temporairement les requêtes. Réessayez plus tard.",
+            "L’agent signale une limitation temporaire des requêtes. Réessayez plus tard ; cela ne confirme pas un forfait épuisé.",
         ),
         (
             "en",
             "MALFORMED",
-            "The provider could not finish the response. Try again later.",
+            "The agent could not finish the response. The cause was not specified.",
         ),
     ] {
         let directory = tempfile::tempdir().unwrap();
         let (backend, mut events) = typed_failure_backend(directory.path(), language).await;
         let conversation = backend.start_conversation(None, None).await.unwrap();
         let error = backend
-            .send_prompt(conversation.id, format!("EXPERIENCE_TYPED:{marker}"))
+            .send_prompt(conversation.id.clone(), format!("EXPERIENCE_TYPED:{marker}"))
             .await
             .unwrap_err();
         assert_eq!(error, expected, "typed case {marker}");
@@ -105,7 +110,7 @@ async fn typed_terminal_provider_failures_are_errors_in_both_languages_without_r
                 ""
             }
         );
-        assert_eq!(snapshot["agentConnected"], false);
+        assert_eq!(snapshot["agentConnected"], true);
         let mut statuses = 0;
         while let Ok(event) = events.try_recv() {
             assert!(
@@ -124,6 +129,11 @@ async fn typed_terminal_provider_failures_are_errors_in_both_languages_without_r
         assert!(!serde_json::to_string(&saved.data)
             .unwrap()
             .contains("private-provider-token"));
+        let generation = backend.agent.lock().await.as_ref().unwrap().generation.clone();
+        backend.send_prompt(conversation.id.clone(), "Une nouvelle demande explicite".into()).await.unwrap();
+        assert_eq!(backend.agent.lock().await.as_ref().unwrap().generation, generation);
+        let saved = WorkspaceStore::load(directory.path()).unwrap();
+        assert_eq!(saved.data.conversations[0].messages.iter().filter(|m| m.role == "user").count(), 2);
         backend.shutdown().await;
     }
 }
@@ -131,8 +141,8 @@ async fn typed_terminal_provider_failures_are_errors_in_both_languages_without_r
 #[tokio::test]
 async fn typed_retry_warnings_recover_and_stale_session_failures_are_ignored() {
     for (language, expected) in [
-        ("fr", "Le fournisseur réessaie la requête…"),
-        ("en", "The provider is retrying the request…"),
+        ("fr", "L’agent réessaie la requête…"),
+        ("en", "The agent is retrying the request…"),
     ] {
         let directory = tempfile::tempdir().unwrap();
         let (backend, mut events) = typed_failure_backend(directory.path(), language).await;

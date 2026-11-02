@@ -18,6 +18,21 @@ function props(): ComponentProps<typeof Connections> {
 }
 
 describe('Nom de l’agent sélectionné', () => {
+  it('connecte le harness choisi immédiatement et réutilise son identification sans choix de facturation', () => {
+    const current = props();
+    const view = render(<Connections {...current}/>);
+    fireEvent.click(screen.getByRole('radio', {name:/Qwen — local/}));
+    expect(current.onConnect).toHaveBeenCalledTimes(1);
+    view.rerender(<Connections {...current} connected agentStatus={{phase:'running', authentication:'authenticated'}}
+      connection={{protocolVersion:1,agentInfo:{},agentCapabilities:{},authMethods:[{id:'api-key',name:'API key'},{id:'chat-gpt',name:'ChatGPT'}]}}/>);
+    expect(screen.queryByText('Identification')).toBeNull();
+    expect(screen.queryByRole('button', {name:/Ouvrir la connexion officielle/})).toBeNull();
+    view.rerender(<Connections {...current} connected agentStatus={{phase:'running', authentication:'none'}}
+      connection={{protocolVersion:1,agentInfo:{},agentCapabilities:{},authMethods:[{id:'api-key',name:'API key'},{id:'chat-gpt',name:'ChatGPT'}]}}/>);
+    fireEvent.click(screen.getByRole('button', {name:/Ouvrir la connexion officielle/}));
+    expect(current.onAuthenticate).toHaveBeenCalledWith('');
+    expect(screen.queryByText('API key')).toBeNull();
+  });
   it.each(['fr', 'en'] as const)('nomme Qwen dans la connexion, la déconnexion et le résumé (%s)', language => {
     setInterfaceLanguage(language);
     const current = props();

@@ -1,7 +1,11 @@
-import { useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Icon } from './icons';
 import { t } from './i18n';
 import './studyComposer.css';
+import type { Training } from './types';
+import { TrainingColor } from './WorkspaceNavigation';
+import { attachmentAccept, readTextAttachments, withAttachments } from './conversationFiles';
+import type { TextAttachment } from './conversationFiles';
 
 const modifier = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl';
 const modes = [
@@ -9,12 +13,33 @@ const modes = [
   {command: '/flashcards', label: 'Flashcards', description: 'Retrouver une réponse, retourner la carte, s’autoévaluer.'},
 ];
 
-export function StudyComposer({draft,onChange,disabled,canSend,pending,onSend,onCancel}: {
+export function StudyComposer({draft,onChange,disabled,canSend,pending,onSend,onCancel,home=false,trainingName,trainings=[],onChooseTraining,onOpenLibrary,menuRequest=0,mode,attachments=[],onAttachments}: {
   draft:string; onChange:(value:string)=>void; disabled:boolean; canSend:boolean; pending:boolean; onSend:()=>void; onCancel:()=>void;
+  mode?:'quiz'|'flashcard'; home?:boolean; trainingName?:string; trainings?:Training[]; onChooseTraining?:(item:Training)=>void; onOpenLibrary?:()=>void; menuRequest?:number;
+  attachments?:TextAttachment[]; onAttachments?:(files:TextAttachment[])=>void;
 }) {
   const input = useRef<HTMLTextAreaElement>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [fileError,setFileError] = useState('');
+  const [readingFiles,setReadingFiles] = useState(false);
+  const readEpoch = useRef(0);
+  useEffect(()=>()=>{readEpoch.current++;},[]);
+  async function attach(files:File[]) {
+    const epoch=++readEpoch.current;setReadingFiles(true);setFileError('');
+    try {
+      const next=[...attachments,...await readTextAttachments(files)];
+      withAttachments(draft,next);
+      if(epoch===readEpoch.current)onAttachments?.(next);
+    } catch(reason) {if(epoch===readEpoch.current)setFileError(reason instanceof Error?reason.message:String(reason));}
+    finally {if(epoch===readEpoch.current)setReadingFiles(false);}
+  }
   const choices = useRef<(HTMLButtonElement | null)[]>([]);
   const [open, setOpen] = useState(false);
+  const [trainingOpen,setTrainingOpen] = useState(false);
+  const trainingButton = useRef<HTMLButtonElement>(null);
+  const trainingChoices = useRef<HTMLDivElement>(null);
+  useEffect(()=>{if(menuRequest){setOpen(true);setTrainingOpen(false);input.current?.focus();}},[menuRequest]);
+  useEffect(()=>{if(trainingOpen)trainingChoices.current?.querySelector('button')?.focus();},[trainingOpen]);
   const query = /^\/[^\s]*$/.test(draft) ? draft.toLowerCase() : '';
   const visibleModes = modes.filter(mode => !query || mode.command.startsWith(query) || (query === '/quizz' && mode.command === '/quiz'));
   useLayoutEffect(() => {
@@ -22,12 +47,25 @@ export function StudyComposer({draft,onChange,disabled,canSend,pending,onSend,on
     if (!element) return;
     const resize = () => { element.style.height = 'auto'; element.style.height = `${element.scrollHeight}px`; };
     resize(); window.addEventListener('resize', resize); return () => window.removeEventListener('resize', resize);
-  }, [draft]);
+  }, [draft,home]);
   function choose(command: string) {
     const topic = draft.replace(/^\/\S*\s*/, '').trim();
     onChange(`${command} ${topic}`); setOpen(false); input.current?.focus();
   }
-  return <form className="composer" onSubmit={event => { event.preventDefault(); if (canSend && draft.trim() !== '/') {setOpen(false); onSend();} }}>
+  return <form className="composer" onSubmit={event => { event.preventDefault(); if (canSend && !readingFiles && draft.trim() !== '/') {setOpen(false); onSend();} }}>
+    {trainingOpen && <div ref={trainingChoices} className="training-picker" role="group" aria-label={t('Choisir une formation')} onBlur={event=>{if(!event.currentTarget.contains(event.relatedTarget)&&event.relatedTarget!==trainingButton.current)setTrainingOpen(false);}} onKeyDown={event=>{if(event.key==='Escape'){event.preventDefault();setTrainingOpen(false);trainingButton.current?.focus();}}}>
+      {trainings.map(item=><button type="button" key={item.id} onClick={()=>{setTrainingOpen(false);onChooseTraining?.(item);input.current?.focus();}}><TrainingColor name={item.name}/><span>{item.name}</span></button>)}
+      {!trainings.length && <p>{t('Retrouvez vos formations dans la bibliothèque.')}</p>}
+      <button type="button" onClick={()=>{setTrainingOpen(false);onOpenLibrary?.();}}><Icon name="book" size={14}/>{t('Ouvrir la bibliothèque')}</button>
+    </div>}
+    <div className="composer-context">
+      <button ref={trainingButton} type="button" className={trainingName?'has-training':''} disabled={disabled} aria-expanded={trainingOpen} onClick={()=>{setTrainingOpen(value=>!value);setOpen(false);}}><Icon name="book" size={14}/><span>{trainingName || t('Choisir une formation')}</span><Icon name="chevron" size={10}/></button>
+      <button type="button" disabled={disabled} onClick={()=>{setOpen(value=>!value);setTrainingOpen(false);}} aria-haspopup="menu" aria-expanded={open}><Icon name="clock" size={14}/><span>{t((draft.startsWith('/quiz')||mode==='quiz')?'Mode quiz':(draft.startsWith('/flashcard')||mode==='flashcard')?'Mode flashcards':'À votre rythme')}</span></button>
+    </div>
+    <div className="composer-box">
+    {!!attachments.length && <ul className="composer-attachments" aria-label={t('Fichiers joints')}>{attachments.map((file,index)=><li key={index}><Icon name="book" size={14}/><span>{file.name}</span><button className="workspace-icon" type="button" disabled={disabled || readingFiles} aria-label={t('Retirer {name}',{name:file.name})} onClick={()=>onAttachments?.(attachments.filter((_,i)=>i!==index))}><Icon name="close" size={14}/></button></li>)}</ul>}
+    {fileError && <p className="attachment-error" role="alert">{t(fileError)}</p>}
+    {readingFiles && <p role="status">{t('Lecture des fichiers…')}</p>}
     {open && !disabled && visibleModes.length > 0 && <div className="study-command-menu" id="study-command-menu" role="menu" aria-label={t('Modalités d’apprentissage')} onKeyDown={event => {
       if (event.key === 'Escape') { event.preventDefault(); setOpen(false); input.current?.focus(); }
       if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
@@ -39,10 +77,10 @@ export function StudyComposer({draft,onChange,disabled,canSend,pending,onSend,on
         <Icon name={mode.command === '/quiz' ? 'check' : 'book'} size={18}/><span><strong>{t(mode.label)}</strong><small>{t(mode.description)}</small></span><kbd>{mode.command}</kbd>
       </button>)}
     </div>}
-    <label className="visually-hidden" htmlFor="prompt">{t('Votre message au tuteur')}</label>
-    <textarea ref={input} autoFocus id="prompt" rows={1} value={draft} disabled={disabled} maxLength={64000}
+    <label className="visually-hidden" htmlFor="prompt">{t('Message au tuteur')}</label>
+    <textarea ref={input} autoFocus id="prompt" rows={home?2:1} value={draft} disabled={disabled} maxLength={64000}
       aria-controls={open ? 'study-command-menu' : undefined} aria-expanded={open && !disabled && visibleModes.length > 0}
-      placeholder={t('Un message, ou / pour un quiz et des flashcards…')}
+      placeholder={t(home?'Posez une question, ou / pour un quiz et des flashcards':'Répondre, demander un indice, ou / pour changer d’exercice')}
       onChange={event => {onChange(event.target.value); setOpen(/^\/[^\s]*$/.test(event.target.value));}}
       onKeyDown={event => {
         if (event.nativeEvent.isComposing) return;
@@ -51,10 +89,12 @@ export function StudyComposer({draft,onChange,disabled,canSend,pending,onSend,on
         if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); }
       }}/>
     <div className="composer-footer">
-      <button className="study-command-trigger" type="button" disabled={disabled} aria-label={t('Choisir Quiz ou Flashcards')} aria-haspopup="menu" aria-expanded={open && !disabled && visibleModes.length > 0} onClick={() => setOpen(value => !value)}>/</button>
-      <span className="composer-hint"><kbd>{modifier} ↵</kbd>{t('pour envoyer · L’IA peut se tromper.')}</span>
-      {pending ? <button type="button" className="button secondary" onClick={onCancel}><Icon name="pause" size={16}/>{t('Interrompre')}</button>
-        : <button className="button blue" disabled={!canSend || draft.trim() === '/'}>{t('Envoyer')}<Icon name="arrow" size={16}/></button>}
+      <input ref={fileInput} type="file" className="visually-hidden" tabIndex={-1} aria-label={t('Joindre des fichiers texte ou de code')} accept={attachmentAccept} multiple disabled={disabled || readingFiles} onChange={event=>{void attach(Array.from(event.target.files || []));event.target.value='';}}/>
+      <button className="workspace-icon" type="button" disabled={disabled || readingFiles} aria-label={t('Joindre des fichiers texte ou de code')} title={t('Joindre des fichiers texte ou de code (32 Ko par fichier)')} onClick={()=>fileInput.current?.click()}><Icon name="plus" size={18}/></button>
+      <button className="study-command-trigger" type="button" disabled={disabled} aria-label={t('Choisir Quiz ou Flashcards')} aria-haspopup="menu" aria-expanded={open && !disabled && visibleModes.length > 0} onClick={() => {setOpen(value => !value);setTrainingOpen(false);}}><span className="slash" aria-hidden="true">/</span><span>{t('Quiz & flashcards')}</span></button>
+      {pending ? <button type="button" className="composer-send" aria-label={t('Interrompre')} title={t('Interrompre')} onClick={onCancel}><Icon name="stop" size={16}/></button>
+        : <button className="composer-send" aria-label={t('Envoyer ({shortcut} Entrée)',{shortcut:modifier})} title={t('Envoyer ({shortcut} Entrée)',{shortcut:modifier})} aria-keyshortcuts="Control+Enter Meta+Enter" disabled={!canSend || readingFiles || draft.trim() === '/'}><span className="send-arrow"><Icon name="arrow" size={18}/></span></button>}
+    </div>
     </div>
   </form>;
 }

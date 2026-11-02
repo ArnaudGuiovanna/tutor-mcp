@@ -310,6 +310,36 @@ async fn create_identity(
     let backend = backend.current().await;
     backend.create_identity(nsec).await
 }
+#[tauri::command]
+async fn export_conversation<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    content: String,
+) -> Result<(), String> {
+    if content.len() > 4 * 1024 * 1024 {
+        return Err("Cette conversation dépasse la taille maximale d’export (4 Mo).".into());
+    }
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("Conversation Markdown", &["md"])
+        .set_file_name("conversation-tutor.md")
+        .save_file(move |file| {
+            let _ = sender.send(file);
+        });
+    let selected = receiver
+        .await
+        .map_err(|_| "La sélection du fichier a été interrompue.")?;
+    let Some(selected) = selected else {
+        return Ok(());
+    };
+    let path = selected
+        .into_path()
+        .map_err(|_| "Choisissez un fichier local.")?;
+    tokio::fs::write(path, content)
+        .await
+        .map_err(|_| "Le fichier n’a pas pu être enregistré.".into())
+}
+
 async fn select_backup<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     save: bool,
@@ -464,6 +494,7 @@ fn command_handler<R: tauri::Runtime>(
         clone_formation_version,
         enable_learning,
         training_action,
+        export_conversation,
         queue_prompt,
         select_conversation,
         load_state,

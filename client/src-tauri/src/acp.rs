@@ -643,8 +643,51 @@ async fn dispatch(inner: &Inner, frame: &[u8]) -> Result<(), String> {
         // Error data and arbitrary provider text can contain a credential or a
         // copied request. Preserve the code and useful category, not its text.
         let lower = message.to_lowercase();
-        let category = if lower.contains("auth") || lower.contains("api key") {
+        let info = error
+            .pointer("/data/codexErrorInfo")
+            .unwrap_or(&Value::Null);
+        // Claude uses errorKind; Codex uses codexErrorInfo. Only recognized
+        // enums/numeric statuses influence the message, never data.message.
+        let kind = error
+            .pointer("/data/errorKind")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let http_status = error
+            .pointer("/data/httpStatusCode")
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                info.as_object().and_then(|fields| {
+                    fields
+                        .values()
+                        .find_map(|value| value.get("httpStatusCode").and_then(Value::as_u64))
+                })
+            });
+        let auth_required = code == -32000
+            || http_status == Some(401)
+            || info == "unauthorized"
+            || matches!(kind, "authentication_failed" | "oauth_org_not_allowed")
+            || lower.contains("auth")
+            || lower.contains("api key");
+        if auth_required {
+            let _ = inner.events.send(json!({"type":"authentication_required"}));
+        }
+        let category = if auth_required {
             "Authentification de l’agent nécessaire ou refusée"
+        } else if http_status == Some(429) || info == "rateLimitExceeded" || kind == "rate_limit" {
+            "L’adaptateur ACP signale une limitation temporaire des requêtes, pas un état vérifié de votre forfait"
+        } else if info == "usageLimitExceeded"
+            || matches!(kind, "billing_error" | "account_on_hold")
+        {
+            "Le harness signale une limite d’utilisation ; consultez son état de connexion et d’accès"
+        } else if info == "contextWindowExceeded"
+            || info == "sessionBudgetExceeded"
+            || kind == "max_output_tokens"
+        {
+            "La limite de cette session est atteinte ; ouvrez une nouvelle conversation"
+        } else if matches!(kind, "verification_required" | "cloud_credential_error") {
+            "Le harness demande une vérification des accès dans son environnement fournisseur"
+        } else if matches!(kind, "overloaded" | "server_error") {
+            "Le harness signale une indisponibilité temporaire du fournisseur"
         } else if lower.contains("cancel") {
             "Requête annulée"
         } else if lower.contains("not found") {
@@ -652,7 +695,7 @@ async fn dispatch(inner: &Inner, frame: &[u8]) -> Result<(), String> {
         } else if lower.contains("not support") || code == -32601 {
             "Opération non prise en charge"
         } else {
-            "L’agent a refusé la requête"
+            "L’adaptateur ACP a refusé la requête ; la cause fournisseur n’est pas précisée"
         };
         Err(format!("{category} (JSON-RPC {code})."))
     } else {
@@ -1144,6 +1187,10 @@ mod tests {
         assert!(!error.contains("sk-private"));
         let result = client.request("test/count", json!({})).await.unwrap();
         assert_eq!(result["ignored"], 0);
+        assert_eq!(
+            events.try_recv().unwrap(),
+            json!({"type":"authentication_required"})
+        );
         assert!(events.try_recv().is_err(), "stderr must not be forwarded");
         client.stop().await.unwrap();
     }

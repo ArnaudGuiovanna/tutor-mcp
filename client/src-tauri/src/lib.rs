@@ -12,6 +12,7 @@ pub mod local_agent;
 pub mod local_model;
 pub mod native_auth;
 pub mod permissions;
+pub mod presentation;
 pub mod profiles;
 pub mod vault;
 pub mod workspace;

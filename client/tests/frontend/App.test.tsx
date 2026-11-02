@@ -12,10 +12,55 @@ async function ready(api: ClientBridge) {
 }
 
 describe('Apprendre depuis la conversation', () => {
+  it('conserve le message en attente tant que le harness ne confirme pas son accès', async () => {
+    const state=initialState(true);state.pendingMessage={text:'Bonjour'};state.agentStatus={phase:'running',authentication:'checking'};
+    const fixture=client(state);await ready(fixture.api);
+    expect(fixture.api.sendPrompt).not.toHaveBeenCalled();
+    act(()=>fixture.broadcast({...fixture.getState(),agentStatus:{phase:'running',authentication:'none'}}));
+    expect(fixture.api.sendPrompt).not.toHaveBeenCalled();
+    act(()=>fixture.broadcast({...fixture.getState(),agentStatus:{phase:'running',authentication:'authenticated'}}));
+    await waitFor(()=>expect(fixture.api.sendPrompt).toHaveBeenCalledTimes(1));
+  });
+  it('retrouve et lance le harness mémorisé avant MCP sans lancer de connexion fournisseur', async () => {
+    const fixture=client();await ready(fixture.api);
+    await waitFor(()=>expect(fixture.getState().agentConnected).toBe(true));
+    expect(fixture.api.connectAgent).toHaveBeenCalledTimes(1);
+    expect(fixture.api.connectAgent).toHaveBeenCalledWith(target,'/home/lea/apprendre');
+    expect(fixture.getState().tutorStatus.connected).toBe(false);
+    expect(fixture.api.authenticateAgent).not.toHaveBeenCalled();
+    expect(fixture.api.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('rétablit le processus après une déconnexion involontaire, sans rejouer de message', async () => {
+    const fixture=client(initialState(true));await ready(fixture.api);
+    const disconnected=fixture.getState();disconnected.agentConnected=false;fixture.setState(disconnected);
+    act(()=>fixture.emit({type:'connection',status:'closed',message:'Processus arrêté'}));
+    await waitFor(()=>expect(fixture.getState().agentConnected).toBe(true));
+    expect(fixture.api.connectAgent).toHaveBeenCalledTimes(1);
+    expect(fixture.api.sendPrompt).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button',{name:'Paramètres'}));
+    await userEvent.click(screen.getByRole('button',{name:'Déconnecter Codex'}));
+    await waitFor(()=>expect(fixture.getState().agentConnected).toBe(false));
+    vi.useFakeTimers();
+    try { await act(async()=>{await vi.advanceTimersByTimeAsync(10000);}); }
+    finally { vi.useRealTimers(); }
+    expect(fixture.api.connectAgent).toHaveBeenCalledTimes(1);
+  });
+
+  it('borne les tentatives de lancement après des échecs répétés', async () => {
+    const fixture=client();vi.mocked(fixture.api.connectAgent).mockRejectedValue(new Error('Harness indisponible'));
+    await ready(fixture.api);
+    await waitFor(()=>expect(fixture.api.connectAgent).toHaveBeenCalledTimes(3), {timeout:6000});
+    vi.useFakeTimers();
+    try { for(let i=0;i<4;i++) await act(async()=>{await vi.advanceTimersByTimeAsync(4000);}); }
+    finally { vi.useRealTimers(); }
+    expect(fixture.api.connectAgent).toHaveBeenCalledTimes(3);
+    expect(fixture.api.sendPrompt).not.toHaveBeenCalled();
+  });
   it('ouvre directement une conversation et crée sans formulaire d’intention', async () => {
     const {api}=client(initialState(true));await ready(api);const user=userEvent.setup();
-    await user.type(screen.getByLabelText('Votre message au tuteur'),'Je veux apprendre le Go');
-    await user.click(screen.getByRole('button',{name:'Envoyer'}));
+    await user.type(screen.getByLabelText('Message au tuteur'),'Je veux apprendre le Go');
+    await user.click(screen.getByRole('button',{name:'Envoyer (Ctrl Entrée)'}));
     await waitFor(()=>expect(api.sendPrompt).toHaveBeenCalledWith('conversation-1','Je veux apprendre le Go'));
     expect(api.startConversation).toHaveBeenCalledWith(undefined,undefined);
     expect(api.saveIntent).not.toHaveBeenCalled();
@@ -24,7 +69,7 @@ describe('Apprendre depuis la conversation', () => {
 
   it('conserve un message à envoyer pendant la configuration et le reprend une seule fois', async () => {
     const fixture=client();await ready(fixture.api);const user=userEvent.setup();
-    await user.type(screen.getByLabelText('Votre message au tuteur'),'Je veux apprendre le Go');await user.click(screen.getByRole('button',{name:'Envoyer'}));
+    await user.type(screen.getByLabelText('Message au tuteur'),'Je veux apprendre le Go');await user.click(screen.getByRole('button',{name:'Envoyer (Ctrl Entrée)'}));
     expect(await screen.findByRole('region',{name:'Message à envoyer'})).toBeTruthy();
     expect(fixture.api.queuePrompt).toHaveBeenCalledWith('Je veux apprendre le Go',undefined);
     expect(fixture.api.sendPrompt).not.toHaveBeenCalled();
@@ -39,7 +84,7 @@ describe('Apprendre depuis la conversation', () => {
   it('retrouve un message en attente après fermeture et permet de le modifier', async () => {
     const state=initialState();state.pendingMessage={text:'Apprendre Python'};const {api}=client(state);await ready(api);const user=userEvent.setup();
     await user.click(screen.getByRole('button',{name:'Modifier'}));
-    await waitFor(()=>expect((screen.getByLabelText('Votre message au tuteur')as HTMLTextAreaElement).value).toBe('Apprendre Python'));
+    await waitFor(()=>expect((screen.getByLabelText('Message au tuteur')as HTMLTextAreaElement).value).toBe('Apprendre Python'));
     expect(api.queuePrompt).toHaveBeenCalledWith(null);expect(api.sendPrompt).not.toHaveBeenCalled();
   });
 
@@ -47,7 +92,7 @@ describe('Apprendre depuis la conversation', () => {
     const state=initialState(true);state.settings.tutor.mode='remote';const fixture=client(state);
     vi.mocked(fixture.api.tutorOverview).mockResolvedValue({identity:{tenantId:'t',userId:'u',membershipId:'m',roles:['owner']},capabilities:{canEnableLearning:true},context:{},formations:{items:[]},availableFormations:{items:[]}});
     vi.mocked(fixture.api.enableLearning).mockImplementation(async()=>{const next=fixture.getState();next.agentConnected=false;fixture.setState(next);return next;});
-    await ready(fixture.api);await userEvent.type(screen.getByLabelText('Votre message au tuteur'),'Je veux apprendre le Go');await userEvent.click(screen.getByRole('button',{name:'Envoyer'}));
+    await ready(fixture.api);await userEvent.type(screen.getByLabelText('Message au tuteur'),'Je veux apprendre le Go');await userEvent.click(screen.getByRole('button',{name:'Envoyer (Ctrl Entrée)'}));
     await waitFor(()=>expect(fixture.api.sendPrompt).toHaveBeenCalledTimes(1));expect(fixture.api.enableLearning).toHaveBeenCalledTimes(1);
     expect(fixture.api.connectAgent).toHaveBeenCalled();expect(fixture.api.startConversation).toHaveBeenCalledWith(undefined,undefined);
     expect(screen.queryByText('Mon activité dans l’institution')).toBeNull();
@@ -56,7 +101,7 @@ describe('Apprendre depuis la conversation', () => {
   it('reprend la conversation existante sans rejouer un ancien message', async () => {
     const state=initialState(true);state.conversations=[conversation];state.activeConversationId=conversation.id;const {api}=client(state);render(<App api={api}/>);
     await screen.findByText('Commençons par observer la Grande Ourse.');expect(api.sendPrompt).not.toHaveBeenCalled();
-    await userEvent.type(screen.getByLabelText('Votre message au tuteur'),'Continuons');await userEvent.click(screen.getByRole('button',{name:'Envoyer'}));
+    await userEvent.type(screen.getByLabelText('Message au tuteur'),'Continuons');await userEvent.click(screen.getByRole('button',{name:'Envoyer (Ctrl Entrée)'}));
     await waitFor(()=>expect(api.startConversation).toHaveBeenCalledWith(undefined,conversation.id));expect(api.sendPrompt).toHaveBeenCalledWith(conversation.id,'Continuons');
     expect(screen.getAllByText('Commençons par observer la Grande Ourse.')).toHaveLength(1);
   });
@@ -69,16 +114,16 @@ describe('Apprendre depuis la conversation', () => {
   });
 
   it('sélectionne une installation WSL et conserve son chemin Codex explicite', async () => {
-    const {api}=client();await ready(api);const user=userEvent.setup();await user.click(screen.getByRole('button',{name:'Paramètres'}));
+    const state=initialState();state.settings.targetId='';const {api}=client(state);await ready(api);const user=userEvent.setup();await user.click(screen.getByRole('button',{name:'Paramètres'}));
     await user.click(screen.getByRole('button',{name:'Rechercher les installations'}));await user.click(await screen.findByRole('radio',{name:/Codex — Ubuntu/}));
-    await user.click(screen.getByRole('button',{name:'Connecter Codex'}));await waitFor(()=>expect(api.connectAgent).toHaveBeenCalledWith(target,'/home/lea/apprendre'));
+    await waitFor(()=>expect(api.connectAgent).toHaveBeenCalledWith(target,'/home/lea/apprendre'));
     expect(api.saveSettings).toHaveBeenCalledWith(expect.objectContaining({targetId:target.id}));
   });
 
   it('affiche les outils et attend la décision de permission pendant le streaming', async () => {
     const fixture=client(initialState(true));let finish!:(value:{stopReason:string})=>void;
     vi.mocked(fixture.api.sendPrompt).mockImplementation(()=>new Promise(resolve=>{finish=resolve;}));await ready(fixture.api);
-    await userEvent.type(screen.getByLabelText('Votre message au tuteur'),'Bonjour');await userEvent.click(screen.getByRole('button',{name:'Envoyer'}));await waitFor(()=>expect(fixture.api.sendPrompt).toHaveBeenCalled());
+    await userEvent.type(screen.getByLabelText('Message au tuteur'),'Bonjour');await userEvent.click(screen.getByRole('button',{name:'Envoyer (Ctrl Entrée)'}));await waitFor(()=>expect(fixture.api.sendPrompt).toHaveBeenCalled());
     const waiting = screen.getByText('Je prépare la réponse…').closest('[role="status"]');
     expect(waiting).toBeTruthy();
     expect(screen.getByRole('log').contains(waiting)).toBe(true);
@@ -96,7 +141,7 @@ describe('Apprendre depuis la conversation', () => {
   it('signale une nouvelle tentative du fournisseur puis reprend l’activité sans interrompre la réponse', async () => {
     const fixture=client(initialState(true));let finish!:(value:{stopReason:string})=>void;
     vi.mocked(fixture.api.sendPrompt).mockImplementation(()=>new Promise(resolve=>{finish=resolve;}));await ready(fixture.api);
-    await userEvent.type(screen.getByLabelText('Votre message au tuteur'),'Bonjour');await userEvent.click(screen.getByRole('button',{name:'Envoyer'}));await waitFor(()=>expect(fixture.api.sendPrompt).toHaveBeenCalled());
+    await userEvent.type(screen.getByLabelText('Message au tuteur'),'Bonjour');await userEvent.click(screen.getByRole('button',{name:'Envoyer (Ctrl Entrée)'}));await waitFor(()=>expect(fixture.api.sendPrompt).toHaveBeenCalled());
     const retry={type:'provider_status',severity:'warning',category:'connection',message:'Le fournisseur réessaie la requête…'};
     act(()=>fixture.emit(retry));
     expect((await screen.findByText(retry.message)).closest('[role="status"]')?.getAttribute('aria-live')).toBe('polite');
@@ -132,7 +177,8 @@ describe('Apprendre depuis la conversation', () => {
   });
 });
 
-it('prépare une suggestion sans l’envoyer et rend la saisie au clavier',async()=>{
- const fixture=client(initialState(true));await ready(fixture.api);await userEvent.click(screen.getByRole('button',{name:'Je veux apprendre le Go'}));
- const input=screen.getByLabelText('Votre message au tuteur')as HTMLTextAreaElement;expect(input.value).toBe('Je veux apprendre le Go');expect(document.activeElement).toBe(input);expect(fixture.api.sendPrompt).not.toHaveBeenCalled();
+it('ouvre les exercices depuis le rail sans envoyer de message',async()=>{
+ const fixture=client(initialState(true));await ready(fixture.api);await userEvent.click(screen.getByRole('button',{name:'Quiz et flashcards'}));
+ expect(await screen.findByRole('menu',{name:'Modalités d’apprentissage'})).toBeTruthy();
+ expect(document.activeElement).toBe(screen.getByLabelText('Message au tuteur'));expect(fixture.api.sendPrompt).not.toHaveBeenCalled();
 });

@@ -12,6 +12,11 @@ import { SettingsWorkspace, defaultAppearance } from './SettingsWorkspace';
 import { WindowChrome } from './WindowChrome';
 import { CommandPalette } from './CommandPalette';
 import { StudyComposer } from './StudyComposer';
+import { ShareConversation } from './ShareConversation';
+import { withAttachments, messageAttachments } from './conversationFiles';
+import type { TextAttachment } from './conversationFiles';
+import { WorkspaceNavigation, useWorkspaceSidebar, TrainingColor } from './WorkspaceNavigation';
+import { useWorkspaceTrainings, ResumeTraining, WorkspaceTrainingPanel } from './WorkspaceTraining';
 import { ReviewPlanning } from './ReviewPlanning';
 import { reviewPlanKey } from './reviewPlanningModel';
 import type { ReviewPlanPreference } from './reviewPlanningModel';
@@ -27,8 +32,6 @@ import type { AgentConnection, AgentTarget, Conversation, ConversationContext, P
 type Page = 'conversation' | 'formations' | 'planning' | 'account' | 'settings' | 'agents' | 'institution' | 'members' | 'ergonomics';
 const labels: Record<Page, string> = { conversation: 'Conversation', formations: 'Formations', planning: 'Planning', account: 'Mon compte', settings: 'Paramètres', agents: 'Connexion et outils', institution: 'Institution', members: 'Membres', ergonomics: 'Ergonomie' };
 const settingsPages: Page[] = ['settings', 'agents', 'institution', 'members', 'ergonomics'];
-// Windows is the reference target; macOS users read ⌘ for the same shortcut.
-const modifier = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl';
 const empty: Snapshot = { settings: { targetId: '', cwd: '', tutor: { mode: 'remote', activity: 'auto', url: '', command: 'tutor-mcp', args: ['--local'] } }, identity: { exists: false, backupConfirmed: false, needsBackup: false }, intents: [], conversations: [], tutorStatus: { connected: false, label: 'Tutor non connecté' }, agentConnected: false };
 
 export default function App({ api = bridge }: { api?: ClientBridge }) {
@@ -41,12 +44,19 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [targets, setTargets] = useState<AgentTarget[]>([]);
+  const discoveryRequest = useRef<Promise<AgentTarget[]> | null>(null);
   const [connection, setConnection] = useState<AgentConnection | null>(null);
+  const [autoConnecting, setAutoConnecting] = useState(false);
+  const [reconnectEpoch, setReconnectEpoch] = useState(0);
+  const agentPaused = useRef(false);
+  const launchAttempts = useRef(0);
+  const connectionError = useRef('');
   const [overviewValue, setOverview] = useState<TutorOverview | null>(null);
   const [overviewBinding, setOverviewBinding] = useState('');
   const [overviewFailure, setOverviewFailure] = useState(false);
   const [overviewAttempt, setOverviewAttempt] = useState(0);
   const [draft, setDraft] = useState('');
+  const [attachments,setAttachments] = useState<TextAttachment[]>([]);
   const [activeId, setActiveId] = useState<string>();
   const [newConversation, setNewConversation] = useState(false);
   const [pending, setPending] = useState<string>();
@@ -63,25 +73,40 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   const appearance = {...defaultAppearance,...state.settings.appearance};
   const [preparing,setPreparing] = useState('');
   const [paletteOpen,setPaletteOpen] = useState(false);
+  const sidebar = useWorkspaceSidebar();
+  const [trainingPanel,setTrainingPanel] = useState(false);
+  const [shareOpen,setShareOpen] = useState(false);
+  const [resumeHidden,setResumeHidden] = useState(false);
+  const [practiceMenu,setPracticeMenu] = useState(0);
   const conversation = newConversation ? undefined : state.conversations.find(item => item.id === (activeId || state.activeConversationId)) || [...state.conversations].sort((a,b) => b.updatedAt.localeCompare(a.updatedAt))[0];
   const activeTraining = conversation?.activeTraining;
-  const locked = !!busy || !!pending || sending.current;
+  const agentReady = state.agentConnected && state.agentStatus?.authentication !== 'none' && state.agentStatus?.authentication !== 'checking';
+  const locked = !!busy || !!pending || sending.current || autoConnecting;
   const connectionScope = reviewScope(state, null);
   const overview = overviewBinding === connectionScope ? overviewValue : null;
   const planningScope = reviewScope(state, overview);
+  const library = useWorkspaceTrainings(api,state.tutorStatus.connected && !!overview,planningScope,libraryEpoch);
+  const home = !conversation?.messages.length;
+  const currentActivity = [...(conversation?.messages || [])].reverse().filter(item=>item.role==='assistant').flatMap(item=>parseLearningContent(item.text,{complete:item.status==='complete'})).find(item=>item.type==='activity');
+  const recentTrainingId = [...state.conversations].sort((a,b)=>b.updatedAt.localeCompare(a.updatedAt)).find(item=>item.activeTraining)?.activeTraining?.training_id;
+  const resumeTraining = library.items.find(item=>item.id === recentTrainingId) || [...library.items].filter(item=>item.progress?.some(progress=>progress.last_review)).sort((a,b)=>latestReview(b).localeCompare(latestReview(a)))[0];
   const structuredOutbox = !!state.pendingMessage && (!!parseStudyRequest(state.pendingMessage.text) || !!parseLearningResponse(state.pendingMessage.text));
 
   function applyProfile(next: Snapshot) {
     stateRef.current = next; setState(next); setActiveId(next.activeConversationId); setNewConversation(false);
-    setOverview(null); setConnection(null); setDraft(''); setPending(undefined); pendingRef.current = undefined; sending.current = false;
+    setOverview(null); setConnection(null); setDraft(''); setAttachments([]); setPending(undefined); pendingRef.current = undefined; sending.current = false;
     setStream(''); setProviderStatus(''); setPermissions([]); setTools([]); toolEvents.current=[]; setTrainingId(undefined); setLibraryEpoch(value => value + 1);
+    setShareOpen(false); setResumeHidden(false); setTrainingPanel(false);
     setNotice(next.profileSwitchWarning || ''); setPreparing(''); setPage('conversation');
   }
 
   useEffect(() => {
     let live = true; const disposers: (() => void)[] = [];
     const register = (request: Promise<() => void>) => void request.then(dispose => live ? disposers.push(dispose) : dispose()).catch(() => {});
-    void api.bundledAgents().then(found => { if (live) setTargets(found); }).catch(() => {});
+    const rememberTargets = (found: AgentTarget[]) => { if (live) setTargets(previous => [...new Map([...previous,...found].map(target => [target.id,target])).values()]); };
+    void api.bundledAgents().then(rememberTargets).catch(() => {});
+    discoveryRequest.current = api.discoverAgents();
+    void discoveryRequest.current.then(rememberTargets).catch(() => {});
     void api.loadState().then(next => { if (live) { setState(next); setActiveId(next.activeConversationId); } }).catch(reason => { if (live) setError(errorMessage(reason)); }).finally(() => { if (live) setLoading(false); });
     register(api.listenState(next => {
       if (!live || (next.profileEpoch || 0) < (stateRef.current.profileEpoch || 0)) return;
@@ -91,8 +116,9 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
     register(api.listenAgent(event => {
       if (!live || (typeof event.profileEpoch === 'number' && event.profileEpoch < (stateRef.current.profileEpoch || 0))) return;
       if (event.type === 'connection' && (event.status === 'closed' || event.status === 'error')) {
+        if (event.intentional === true) agentPaused.current = true;
         setState(previous => ({ ...previous, agentConnected: false })); setConnection(null); setPermissions([]); setProviderStatus('');
-        if (text(event.message)) setError(text(event.message)); return;
+        if (text(event.message)) { connectionError.current=text(event.message); setError(connectionError.current); } return;
       }
       const permission = permissionFromEvent(event,toolEvents.current);
       if (permission) { setProviderStatus(''); setPage('conversation'); setPermissions(previous => previous.some(item => JSON.stringify(item.id) === JSON.stringify(permission.id)) ? previous : [...previous, permission]); return; }
@@ -115,6 +141,43 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   }, [api]);
 
   useEffect(() => {
+    agentPaused.current = false; launchAttempts.current = 0;
+  }, [state.profile?.id, state.settings.targetId, state.settings.cwd, JSON.stringify(state.settings.manualTarget)]);
+
+  useEffect(() => {
+    if (state.agentConnected && connectionError.current) {
+      const recovered = connectionError.current;
+      setError(previous => previous === recovered ? '' : previous);
+      connectionError.current = '';
+    }
+  }, [state.agentConnected]);
+
+  // Initialization is independent of MCP and never authenticates or sends a
+  // prompt. Bound retries to three launches; a manual disconnect stays stopped.
+  useEffect(() => {
+    if (loading || state.agentConnected || agentPaused.current || busy || pending || !state.settings.targetId || launchAttempts.current >= 3) return;
+    let live = true;
+    const attempt = launchAttempts.current++;
+    const settings = state.settings;
+    const timer = setTimeout(() => {
+      setAutoConnecting(true);
+      void (async () => {
+        const known = settings.manualTarget || targets.find(target => target.id === settings.targetId && target.available);
+        const discovery = attempt === 0 && discoveryRequest.current ? discoveryRequest.current : api.discoverAgents();
+        void discovery.then(found => { if (live) setTargets(found); }).catch(() => {});
+        const target = known || (await discovery).find(target => target.id === settings.targetId);
+        if (!live) return;
+        if (!target?.available) throw new Error('L’installation choisie est indisponible. Choisissez un agent détecté ou vérifiez son installation.');
+        const connected = await api.connectAgent(target, settings.cwd);
+        if (live) { setConnection(connected); saved(await api.loadState()); const recovered=connectionError.current;setError(previous=>previous===recovered?'':previous); connectionError.current=''; }
+      })().catch(reason => {
+        if (live) { connectionError.current=errorMessage(reason); setError(connectionError.current); setReconnectEpoch(value => value + 1); }
+      }).finally(() => { if (live) setAutoConnecting(false); });
+    }, attempt === 0 ? 0 : 1000 * 2 ** (attempt - 1));
+    return () => { live = false; clearTimeout(timer); setAutoConnecting(false); };
+  }, [api, loading, state.agentConnected, state.profile?.id, state.settings.targetId, state.settings.cwd, JSON.stringify(state.settings.manualTarget), busy, pending, reconnectEpoch]);
+
+  useEffect(() => {
     setOverviewFailure(false);
     if (!state.tutorStatus.connected) { setOverview(null); return; }
     setOverview(null);
@@ -129,6 +192,7 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
 
   async function ensureConversation(resume?: Conversation, allowNewForStudy = false): Promise<Conversation> {
     let current = stateRef.current;
+    if (current.agentStatus?.authentication === 'none') { setPage('agents'); throw new Error('Connexion au harness requise'); }
     if (!current.tutorStatus.connected) throw new Error('Connectez Tutor pour envoyer votre message. Il reste enregistré « À envoyer ».');
     setPreparing(t('Je consulte votre progression…'));
     let info = await api.tutorOverview();
@@ -170,7 +234,7 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
     sending.current = true; setError(''); setNotice(''); setProviderStatus(''); setPreparing(t('Je prépare votre séance…'));
     try {
       if (!alreadyQueued) { const next = await api.queuePrompt(value.trim(), resume?.id); setState(next); stateRef.current = next; accepted = true; }
-      setDraft('');
+      setDraft(''); setAttachments([]);
       if (!stateRef.current.tutorStatus.connected) { setPage('agents'); setNotice(t('Votre message est conservé « À envoyer ». Terminez la connexion pour reprendre.')); return accepted; }
       const request = parseStudyRequest(value);
       const next = await ensureConversation(resume, !!request);
@@ -195,9 +259,8 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
 
   function sendDraft() {
     const command = parseSlashCommand(draft);
-    if (!command) {void dispatch(draft, conversation); return;}
-    void dispatch(studyRequestText({version:1, format:command.format, intent:'practice',
-      trainingId:activeTraining?.training_id, trainingName:activeTraining?.name, domainId:activeTraining?.domain_id}, command.topic), conversation);
+    const value = command ? studyRequestText({version:1,format:command.format,intent:'practice',trainingId:activeTraining?.training_id,trainingName:activeTraining?.name,domainId:activeTraining?.domain_id},command.topic) : draft;
+    try {void dispatch(withAttachments(value,attachments),conversation);} catch(reason) {setError(errorMessage(reason));}
   }
 
   async function saveReviewPreference(trainingId: string, preference: ReviewPlanPreference) {
@@ -238,14 +301,14 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   // Native persistence consumes the outbox atomically with the new user turn.
   const previousReady = useRef(false);
   useEffect(() => {
-    const ready = state.tutorStatus.connected && state.agentConnected;
+    const ready = state.tutorStatus.connected && agentReady;
     const transitioned = ready && !previousReady.current; previousReady.current = ready;
     if (transitioned && state.pendingMessage && !sending.current) {
       const queued = state.pendingMessage;
       const resume = queued.conversationId ? state.conversations.find(item => item.id === queued.conversationId) : undefined;
       void dispatch(queued.text, resume, true);
     }
-  }, [state.tutorStatus.connected, state.agentConnected, state.pendingMessage]);
+  }, [state.tutorStatus.connected, agentReady, state.pendingMessage]);
 
   async function learn(training: { id: string; name: string; domain_id?: string }) {
     const message = training.domain_id ? t('Reprenons la formation « {name} » ({id}). Sélectionne-la explicitement dans cette conversation, puis propose la prochaine activité.',{name:training.name,id:training.id}) : t('Présente-moi la formation « {name} » ({id}) et ses conditions d’inscription.',{name:training.name,id:training.id});
@@ -268,9 +331,27 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   }
 
   const settingsPage = settingsPages.includes(page);
-  useEffect(()=>{const onKey=(event:KeyboardEvent)=>{if((event.ctrlKey||event.metaKey)&&!event.altKey&&event.key.toLowerCase()==='k'){event.preventDefault();setPaletteOpen(value=>!value);}};window.addEventListener('keydown',onKey);return()=>window.removeEventListener('keydown',onKey);},[]);
-  async function openNewConversation(){await perform('Nouvelle conversation…', async () => { await api.selectConversation(); setNewConversation(true); setActiveId(undefined); setPage('conversation'); setTools([]); setDraft(''); });}
-  async function openConversation(id:string){await perform('Lecture de la conversation…', async () => { const next = await api.selectConversation(id); setState(next); setActiveId(id); setNewConversation(false); setPage('conversation'); setDraft(''); setTools([]); });}
+  useEffect(() => {
+    const onKey = (event:KeyboardEvent) => {
+      if (event.isComposing || event.altKey || !(event.ctrlKey || event.metaKey)) return;
+      if (event.key.toLowerCase() === 'k') {event.preventDefault();setPaletteOpen(value=>!value);}
+      if (event.key.toLowerCase() === 'n') {event.preventDefault();if(!locked && !state.pendingMessage)void openNewConversation();}
+    };
+    window.addEventListener('keydown',onKey);return()=>window.removeEventListener('keydown',onKey);
+  },[locked,state.pendingMessage]);
+  useEffect(() => {setTrainingPanel(false);sidebar.closeOverlay();},[page,activeId]);
+  async function chooseTraining(training:Training) {
+    if(locked || state.pendingMessage)return;
+    await perform('Sélection de la formation…',async()=>{
+      const current=await ensureConversation(conversation,true);
+      const selected=await selectStudyTraining(api,current.id,{version:1,format:'quiz',intent:'practice',trainingId:training.id,domainId:training.domain_id});
+      const next=await api.loadState();
+      setState({...next,conversations:next.conversations.map(item=>item.id===current.id?{...item,activeTraining:selected}:item)});
+    });
+  }
+
+  async function openNewConversation(){await perform('Nouvelle conversation…', async () => { await api.selectConversation(); setNewConversation(true); setActiveId(undefined); setPage('conversation'); setTools([]); setDraft(''); setAttachments([]); });}
+  async function openConversation(id:string){await perform('Lecture de la conversation…', async () => { const next = await api.selectConversation(id); setState(next); setActiveId(id); setNewConversation(false); setPage('conversation'); setDraft(''); setAttachments([]); setTools([]); });}
   const commands:Command[]=[
     ...(['conversation','formations','planning','account','settings','agents','institution','members','ergonomics'] as Page[]).map(item=>({id:`page-${item}`,group:t('Aller à'),label:t(labels[item]),icon:(item==='conversation'?'chat':item==='formations'?'book':item==='planning'?'clock':item==='account'?'shield':item==='members'?'users':item==='agents'?'plug':'gear') as Command['icon'],hint:settingsPages.includes(item)&&item!=='settings'?t('Paramètres'):undefined,run:()=>{setPage(item);if(item==='formations')setTrainingId(undefined);}})),
     {id:'new-conversation',group:t('Conversations'),label:t('Nouvelle conversation'),icon:'plus',disabled:locked||!!state.pendingMessage,run:()=>void openNewConversation()},
@@ -289,53 +370,65 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
       return [...refreshed.values()];
     });
   }, [api]);
-  function connections(section:'account'|'agents'|'institution',sectionBusy=locked){return <Connections key={`${state.profile?.id}:${section}`} section={section} settings={state.settings} targets={targets} connected={state.agentConnected} tutorStatus={state.tutorStatus} connection={connection} identity={state.identity} api={api} busy={sectionBusy}
+  function connections(section:'account'|'agents'|'institution',sectionBusy=locked){return <Connections key={`${state.profile?.id}:${section}`} section={section} settings={state.settings} targets={targets} connected={state.agentConnected} connecting={autoConnecting} agentStatus={state.agentStatus} tutorStatus={state.tutorStatus} connection={state.agentConnected ? state.agentConnection ?? connection : null} identity={state.identity} api={api} busy={sectionBusy}
     onIdentityAction={(label,action)=>perform(label,async()=>{await action();saved(await api.loadState());return true;}).then(result=>result===true)}
     onDiscover={()=>void perform('Recherche des installations…',async()=>setTargets(await api.discoverAgents()))}
     onSave={settings=>void perform('Enregistrement des réglages…',async()=>saved(await api.saveSettings(settings)))}
-    onConnect={(target,settings)=>void perform('Connexion à votre agent…',async()=>{await api.saveSettings(settings);setConnection(await api.connectAgent(target,settings.cwd));saved(await api.loadState());})}
+    onConnect={(target,settings)=>void perform('Connexion à votre agent…',async()=>{const restoreLocal=stateRef.current.tutorStatus.connected && settings.tutor.mode==='local';agentPaused.current=false;launchAttempts.current=0;await api.saveSettings(settings);setConnection(await api.connectAgent(target,settings.cwd));try{if(restoreLocal)await api.tutorOverview();}finally{saved(await api.loadState());}})}
     onAuthenticate={method=>void perform('Identification auprès du fournisseur…',async()=>{await api.authenticateAgent(method);saved(await api.loadState());})}
-    onDisconnectAgent={()=>void perform('Déconnexion…',async()=>{await api.disconnectAgent();setConnection(null);saved(await api.loadState());})}
+    onDisconnectAgent={()=>void perform('Déconnexion…',async()=>{agentPaused.current=true;await api.disconnectAgent();setConnection(null);saved(await api.loadState());})}
     onConnectTutor={(settings,authoring)=>void configureTutor(settings,authoring)}
-    onDisconnectTutor={()=>void perform('Déconnexion de Tutor…',async()=>saved(await api.disconnectTutor()))}/>;}
+    onDisconnectTutor={()=>void perform('Déconnexion de Tutor…',async()=>{agentPaused.current=true;saved(await api.disconnectTutor());})}/>;}
   if (loading) return <div className="app-shell loading-shell"><WindowChrome /><div className="loading-screen" role="status"><span className="spinner" />{t("Ouverture de Tutor…")}</div></div>;
-  return <div className="app-shell" style={{ '--reading-size': `${appearance.fontSize}px`, '--reading-line-height':String(appearance.lineHeight) } as CSSProperties}>
-    <WindowChrome />
+  return <div className={`app-shell ${sidebar.open ? '' : 'sidebar-collapsed'}`} style={{ '--reading-size': `${appearance.fontSize}px`, '--reading-line-height':String(appearance.lineHeight) } as CSSProperties}>
+    <WindowChrome sidebarOpen={sidebar.open} onToggleSidebar={sidebar.toggle}/>
     <a className="skip-link" href="#main-content">{t("Aller au contenu principal")}</a>
-    <aside className="sidebar">
-      <p className="sidebar-caption sidebar-space">{state.profile?.label || t("Mon espace")}</p>
-      <nav className="navigation" aria-label={t("Navigation principale")}>{(['conversation','formations','planning'] as Page[]).map(item => <button className={`nav-item ${page === item ? 'active' : ''}`} aria-label={t(labels[item])} title={t(labels[item])} key={item} aria-current={page === item ? 'page' : undefined} onClick={() => { setPage(item); if (item === 'formations') setTrainingId(undefined); }}><Icon name={item === 'conversation' ? 'chat' : item === 'planning' ? 'clock' : 'book'} /><span>{t(labels[item])}</span></button>)}
-      <button className="nav-item" aria-label={t("Palette de commandes")} title={t("Palette de commandes")} aria-keyshortcuts="Control+K Meta+K" onClick={() => setPaletteOpen(true)}><Icon name="search" /><span>{t("Rechercher")}</span><span className="kbd" aria-hidden="true">{modifier} K</span></button></nav>
-      <button className="new-conversation" aria-label={t("Nouvelle conversation")} title={t("Nouvelle conversation")} disabled={locked || !!state.pendingMessage} onClick={() => void openNewConversation()}><Icon name="plus" size={16} /><span>{t("Nouvelle conversation")}</span></button>
-      <nav className="conversation-history" aria-label={t("Historique des conversations")}><p className="sidebar-caption">{t("Conversations")}</p>{[...state.conversations].sort((a,b) => b.updatedAt.localeCompare(a.updatedAt)).map(item => <button key={item.id} className="history-item" aria-label={item.title} title={item.title} aria-current={conversation?.id === item.id ? 'true' : undefined} disabled={locked || !!state.pendingMessage} onClick={() => void openConversation(item.id)}><span>{item.title}</span><small>{displayDate(item.updatedAt)}</small></button>)}</nav>
-      <nav className="sidebar-bottom" aria-label={t("Compte et réglages")}>{(['account','settings'] as Page[]).map(item=><button className={`nav-item ${page===item||(item==='settings'&&settingsPage)?'active':''}`} aria-label={t(labels[item])} title={t(labels[item])} key={item} aria-current={page===item||(item==='settings'&&settingsPage)?'page':undefined} onClick={()=>setPage(item)}><Icon name={item==='account'?'users':'gear'} size={18}/><span>{t(labels[item])}</span></button>)}</nav>
-    </aside>
+    {sidebar.overlay && <button className="sidebar-scrim" aria-label={t('Fermer la barre latérale')} tabIndex={-1} onClick={sidebar.closeOverlay}/>}
+    <WorkspaceNavigation state={state} page={page} settingsPage={settingsPage} conversation={conversation} trainings={library.items} libraryError={library.error} locked={locked || !!state.pendingMessage} sidebarOpen={sidebar.open}
+      onNavigate={value=>{setPage(value);if(value==='formations')setTrainingId(undefined);sidebar.closeOverlay();}}
+      onNew={()=>void openNewConversation()} onConversation={id=>void openConversation(id)} onTraining={id=>{setTrainingId(id);setPage('formations');}}
+      onSearch={()=>setPaletteOpen(true)} onPractice={()=>{setPage('conversation');setPracticeMenu(value=>value+1);}}/>
     <CommandPalette open={paletteOpen} commands={commands} onClose={() => setPaletteOpen(false)} />
     <main id="main-content" className={`main-shell ${page === 'conversation' ? 'conversation-main' : ''}`} tabIndex={-1}>
-      <header className="workspace-heading"><h1>{t(settingsPage?'Paramètres':labels[page])}</h1>{page === 'conversation' && <><span className="active-training">{activeTraining?.name || t('À votre rythme')}</span>{activeTraining?.training_id && <button className="link-button" onClick={() => { setTrainingId(activeTraining.training_id); setPage('formations'); }}>{t("Voir la formation")}</button>}</>}<button type="button" className="connection-status" aria-label={t("État des connexions")} title={t("Configurer la connexion et les outils")} onClick={() => setPage('agents')}><span className={`dot ${state.tutorStatus.connected && state.agentConnected ? 'online' : ''}`} />{state.tutorStatus.connected && state.agentConnected ? t("Prêt") : t("À connecter")}<Icon name="chevron" size={12} /></button></header>
+      <header className={`workspace-heading ${page === 'conversation' && home ? 'home-heading' : ''}`}>
+        {page === 'conversation' ? <>
+          {!home && <h1>{conversation?.title || t('Nouvelle conversation')}</h1>}
+          {!home && activeTraining && <button className="training-chip" onClick={()=>setTrainingPanel(value=>!value)}><TrainingColor name={activeTraining.name}/><span>{activeTraining.name}</span></button>}
+          <div className="workspace-heading-actions">
+            {!home && <button className="workspace-icon" aria-label={t('Partager la conversation')} title={t('Partager')} onClick={()=>setShareOpen(true)}><Icon name="share" size={18}/></button>}
+            <button className="workspace-icon" aria-label={t('Ouvrir le panneau de la formation')} title={t('Ouvrir le panneau de la formation')} aria-expanded={trainingPanel} onClick={()=>setTrainingPanel(value=>!value)}><Icon name="panel" size={18}/></button>
+          </div>
+        </> : <h1>{t(settingsPage?'Paramètres':labels[page])}</h1>}
+      </header>
       {error && <Notice kind="error" onDismiss={() => setError('')}>{t(error)}</Notice>}
       {notice && <Notice kind="info" onDismiss={() => setNotice('')}>{t(notice)}</Notice>}
       {busy && <div className="notice" role="status"><span className="spinner" />{busy}</div>}
-      {state.pendingMessage && !pending && <section className="outbox" aria-label={t("Message à envoyer")}><div><strong>{t("À envoyer")}</strong><p>{visibleStudyText(state.pendingMessage.text)}</p></div><div className="button-row"><button className="button secondary" disabled={locked} onClick={() => void perform('Retrait du message…', async () => { if (!structuredOutbox) setDraft(visibleStudyText(state.pendingMessage!.text)); setState(await api.queuePrompt(null)); setPage('conversation'); })}>{structuredOutbox ? t("Retirer") : t("Modifier")}</button><button className="button primary" disabled={locked} onClick={() => { if (!state.tutorStatus.connected) setPage('agents'); else if (!state.agentConnected) setPage('agents'); else void dispatch(state.pendingMessage!.text, state.conversations.find(item => item.id === state.pendingMessage!.conversationId), true); }}>{state.tutorStatus.connected && state.agentConnected ? t("Envoyer le message conservé") : t("Terminer la connexion")}</button></div></section>}
+      {state.pendingMessage && !pending && <section className="outbox" aria-label={t("Message à envoyer")}><div><strong>{t("À envoyer")}</strong><p>{visibleStudyText(state.pendingMessage.text)}</p></div><div className="button-row"><button className="button secondary" disabled={locked} onClick={() => void perform('Retrait du message…', async () => { if (!structuredOutbox) {setDraft(visibleStudyText(state.pendingMessage!.text));setAttachments(messageAttachments(state.pendingMessage!.text));} setState(await api.queuePrompt(null)); setPage('conversation'); })}>{structuredOutbox ? t("Retirer") : t("Modifier")}</button><button className="button primary" disabled={locked} onClick={() => { if (!state.tutorStatus.connected) setPage('agents'); else if (!agentReady) setPage('agents'); else void dispatch(state.pendingMessage!.text, state.conversations.find(item => item.id === state.pendingMessage!.conversationId), true); }}>{state.tutorStatus.connected && agentReady ? t("Envoyer le message conservé") : t("Terminer la connexion")}</button></div></section>}
       {page === 'conversation' && <section className="conversation-panel" aria-label={t("Conversation avec votre tuteur")}>
-        <ConversationMessages key={`${state.profile?.id}:${conversation?.id}`} conversation={conversation} streamText={stream} streaming={!!pending} activity={(pending||preparing) ? <TutorActivity tools={tools} streaming={!!stream} permission={!!permissions.length} preparing={preparing} providerStatus={providerStatus}/> : undefined} disabled={locked || !!state.pendingMessage} pendingText={state.pendingMessage?.conversationId === conversation?.id ? state.pendingMessage?.text : undefined} openLink={api.openExternalLink} onRespond={respondToActivity} onContinue={continueActivity} onSuggestion={value => { setDraft(value); document.getElementById('prompt')?.focus(); }} />
+        <ConversationMessages key={`${state.profile?.id}:${conversation?.id}`} conversation={conversation} streamText={stream} streaming={!!pending} toolActivity={tools} activity={(pending||preparing) ? <TutorActivity tools={tools} streaming={!!stream} permission={!!permissions.length} preparing={preparing} providerStatus={providerStatus}/> : undefined} disabled={locked || !!state.pendingMessage} pendingText={state.pendingMessage?.conversationId === conversation?.id ? state.pendingMessage?.text : undefined} openLink={api.openExternalLink} onRespond={respondToActivity} onContinue={continueActivity} onHint={activity=>void dispatch(t('Donne-moi un indice pour cette question, sans révéler la réponse : {question}',{question:activity.question}),conversation)} />
         {permissions.map((permission,index) => <PermissionCard key={JSON.stringify(permission.id)} permission={permission} disabled={permissionBusy || index > 0} onAnswer={optionId => void (async () => { setPermissionBusy(true); try { await api.answerPermission(permission.id,optionId); setPermissions(previous => previous.filter(item => JSON.stringify(item.id) !== JSON.stringify(permission.id))); } catch (reason) { setError(errorMessage(reason)); } finally { setPermissionBusy(false); } })()} />)}
-        <StudyComposer draft={draft} onChange={setDraft} disabled={!!pending || !!state.pendingMessage} canSend={!locked && !!draft.trim() && !state.pendingMessage} pending={!!pending} onSend={sendDraft} onCancel={() => void api.cancelPrompt(pending!).catch(reason => setError(errorMessage(reason)))} />
+        <div className="conversation-compose">
+        {home && !resumeHidden && resumeTraining && <ResumeTraining training={resumeTraining} disabled={locked || !!state.pendingMessage} onResume={()=>void learn(resumeTraining)} onDismiss={()=>setResumeHidden(true)}/>}
+        <StudyComposer key={`${state.profile?.id}:${newConversation?'new':conversation?.id}`} attachments={attachments} onAttachments={setAttachments} home={home} trainingName={activeTraining?.name} trainings={library.items} onChooseTraining={item=>void chooseTraining(item)} onOpenLibrary={()=>{setTrainingId(undefined);setPage('formations');}} mode={currentActivity?.type==='activity'?currentActivity.activity.kind:undefined} menuRequest={practiceMenu} draft={draft} onChange={setDraft} disabled={!!pending || !!state.pendingMessage} canSend={!locked && (!!draft.trim() || !!attachments.length) && !state.pendingMessage} pending={!!pending} onSend={sendDraft} onCancel={() => void api.cancelPrompt(pending!).catch(reason => setError(errorMessage(reason)))} />
+        {home && <p className="composer-disclaimer">{t('L’IA peut se tromper. Vérifiez les points importants.')}</p>}
+        </div>
       </section>}
       {page === 'planning' && (state.tutorStatus.connected && !overview ? <div className="page-content"><p role="status">{t(overviewFailure ? 'Le planning est momentanément indisponible.' : 'Lecture du planning…')}</p>{overviewFailure && <button className="button secondary" disabled={locked} onClick={() => {setError(''); setOverviewAttempt(value => value + 1);}}>{t('Réessayer')}</button>}</div> : <ReviewPlanning key={planningScope} api={api} scope={planningScope} preferences={state.settings.reviewPlans || {}} connected={state.tutorStatus.connected} busy={locked || !!state.pendingMessage} refreshKey={libraryEpoch} onPreference={saveReviewPreference} onStart={startReview}/>)}
       {page === 'formations' && <TrainingWorkspace key={`${state.profile?.id}:${state.settings.tutor.url}:${overview?.identity?.tenantId}:${state.tutorStatus.connected}`} api={api} connected={state.tutorStatus.connected} epoch={libraryEpoch} initialId={trainingId} canCreate={overview?.identity?.roles?.includes('owner') === true} busy={locked} onLearn={learn} onDiscuss={discuss} onConnect={() => setPage('agents')} />}
       {page==='account'&&<div className="settings-content"><AccountMenu key={state.profile?.id} snapshot={state} overview={overview} busy={locked} api={api} onSelect={id=>void perform('Changement de compte…',async()=>applyProfile(await api.selectProfile(id)))} onCreate={label=>void perform('Création du compte…',async()=>{applyProfile(await api.createProfile(label));await api.createIdentity();saved(await api.loadState());setPage('account');})} onRename={label=>void perform('Enregistrement du nom…',async()=>saved(await api.renameProfile(label)))} onDelete={id=>void perform('Retrait du compte…',async()=>{applyProfile(await api.deleteProfile(id,id));setPage('account');})}/>{connections('account')}</div>}
       {settingsPage&&<div className="settings-content"><SettingsWorkspace key={`${state.profile?.id}:${page}`} api={api} snapshot={state} overview={overview} busy={locked} initialTab={page==='settings'?'agents':page as 'agents'|'institution'|'members'|'ergonomics'} renderConnection={connections} onSaved={saved} onLocalModelReady={localModelReady}/></div>}
 
+      {shareOpen && conversation && <ShareConversation conversation={conversation} onClose={()=>setShareOpen(false)}/>}
+      {trainingPanel && page === 'conversation' && <WorkspaceTrainingPanel api={api} id={activeTraining?.training_id} scope={planningScope} onClose={()=>setTrainingPanel(false)} onOpenLibrary={()=>{setTrainingId(activeTraining?.training_id);setPage('formations');}}/>}
     </main>
   </div>;
 }
 
 function Notice({ children,kind,onDismiss }: { children: ReactNode;kind:'error'|'info';onDismiss:()=>void }) { return <div className={`notice ${kind}`} role={kind === 'error' ? 'alert' : 'status'}><div>{children}</div><button className="icon-button" aria-label={t("Fermer le message")} onClick={onDismiss}><Icon name="close" size={16} /></button></div>; }
 
-function ConversationMessages({ conversation,streamText,streaming,activity,disabled,pendingText,openLink,onRespond,onContinue,onSuggestion }: {
-  conversation?: Conversation;streamText:string;streaming:boolean;activity?:ReactNode;disabled:boolean;pendingText?:string;openLink:ClientBridge['openExternalLink'];
-  onRespond:(activity:LearningActivity,response:LearningResponse)=>Promise<boolean>;onContinue:(activity:LearningActivity)=>void;onSuggestion:(value:string)=>void;
+function ConversationMessages({ conversation,streamText,streaming,activity,toolActivity,disabled,pendingText,openLink,onRespond,onContinue,onHint }: {
+  conversation?: Conversation;streamText:string;streaming:boolean;activity?:ReactNode;toolActivity:ToolActivity[];disabled:boolean;pendingText?:string;openLink:ClientBridge['openExternalLink'];
+  onRespond:(activity:LearningActivity,response:LearningResponse)=>Promise<boolean>;onContinue:(activity:LearningActivity)=>void;onHint:(activity:LearningActivity)=>void;
 }) {
   const end = useRef<HTMLDivElement>(null); const nearEnd = useRef(true); const [unread,setUnread] = useState(false);
   const shownActivity = useRef<string | undefined>(undefined);
@@ -372,20 +465,21 @@ function ConversationMessages({ conversation,streamText,streaming,activity,disab
       const matchesActive = conversation?.activeTraining?.training_id === activity.trainingId && conversation.activeTraining.domain_id === activity.domainId && context?.revision === conversation.activeTraining.revision;
       const latest = lastActivity?.messageId === messageId && lastActivity.activity.id === activity.id;
       return <div key={`${index}:${activity.id}`}>
-        <LearningActivityCard activity={activity} response={response} disabled={disabled || !matchesContext || !matchesActive || !latest}
-          openLink={openLink} onRespond={value => onRespond(activity, value)} onContinue={latest && matchesActive && matchesContext && !continued ? () => onContinue(activity) : undefined}/>
+        <LearningActivityCard questionNumber={[...allActivities].reverse().filter(item=>item.activity.kind===activity.kind && item.activity.trainingId===activity.trainingId && item.activity.sessionId===activity.sessionId).findIndex(item=>item.activity.id===activity.id)+1} activity={activity} response={response} disabled={disabled || !matchesContext || !matchesActive || !latest}
+          openLink={openLink} onHint={latest && matchesActive && matchesContext ? ()=>onHint(activity) : undefined} onRespond={value => onRespond(activity, value)} onContinue={latest && matchesActive && matchesContext && !continued ? () => onContinue(activity) : undefined}/>
         {(!matchesContext || !matchesActive) && <p className="learning-context-warning">{t('Cette activité appartient à une autre formation ou son contexte n’est pas confirmé.')}</p>}
       </div>;
     });
   }
   return <div className="conversation-messages" role="log" aria-label={t("Messages de la conversation")} aria-live={streaming ? 'off' : 'polite'} aria-relevant="additions" tabIndex={0} onScroll={event => { const element = event.currentTarget; nearEnd.current = element.scrollHeight - element.scrollTop - element.clientHeight < 96; if (nearEnd.current) setUnread(false); }}>
-    {!messages.length && !streamText && <div className="conversation-welcome"><span className="welcome-mark" aria-hidden="true"><span className="wm">T<span className="cursor still" /></span></span><h2>{t("Qu’avez-vous envie d’apprendre ?")}</h2><p>{t("Un sujet, une question, une envie.")}<br />{t("Votre formation commence ici.")}</p><div className="welcome-examples">{["Je veux apprendre le Go", "Reprenons ma formation Python"].map(value=><button type="button" key={value} onClick={()=>onSuggestion(t(value))}><Icon name={value.startsWith("Je")?"plus":"clock"} size={16}/>{t(value)}<Icon name="arrow" size={14}/></button>)}</div></div>}
+    {!messages.length && !streamText && <div className="conversation-welcome"><span className="welcome-mark" aria-hidden="true"><span className="wm">T<span className="cursor still" /></span></span><h2>{t("Qu’avez-vous envie d’apprendre ?")}</h2></div>}
     {messages.map((message,index) => {
       const visible = message.status === 'streaming' && streamText.length > message.text.length ? streamText : message.text;
       const context: ConversationContext | undefined = message.trainingContext;
       const changed = context?.training_id && context.training_id !== messages[index - 1]?.trainingContext?.training_id;
-      return <article className={`message ${message.role}`} key={message.id}>{changed && <p className="training-turn">{context.name}</p>}<p className="message-label">{message.role === 'user' ? t("Vous") : message.role === 'assistant' ? t("Tutor") : t("Information")}</p><div className="message-text">{message.role === 'assistant' ? assistantContent(visible, message.status === 'complete', message.id, context) : <MessageBody text={visibleStudyText(visible)} openLink={openLink}/>}{message.status === 'streaming' && <span className="streaming-cursor" aria-hidden="true" />}</div>{message.status === 'interrupted' && <p className="message-interrupted">{t("Réponse interrompue — les éléments affichés peuvent être incomplets.")}</p>}{message.status === 'error' && <p className="message-interrupted">{t("La réponse n’a pas été confirmée comme terminée.")}</p>}</article>;
+      return <article className={`message ${message.role}`} key={message.id}>{message.role === 'assistant' && index === messages.length - 1 && <ToolActivityLines tools={toolActivity}/>}{changed && <p className="training-turn">{context.name}</p>}<p className="message-label">{message.role === 'user' ? t("Vous") : message.role === 'assistant' ? t("Tutor") : t("Information")}</p><div className="message-text">{message.role === 'assistant' ? assistantContent(visible, message.status === 'complete', message.id, context) : <><MessageBody text={visibleStudyText(visible)} openLink={openLink}/>{messageAttachments(visible).map((file,i)=><details className="message-attachment" key={i}><summary><Icon name="book" size={14}/>{file.name}</summary><pre>{file.content}</pre></details>)}</>}{message.status === 'streaming' && <span className="streaming-cursor" aria-hidden="true" />}</div>{message.status === 'interrupted' && <p className="message-interrupted">{t("Réponse interrompue — les éléments affichés peuvent être incomplets.")}</p>}{message.status === 'error' && <p className="message-interrupted">{t("La réponse n’a pas été confirmée comme terminée.")}</p>}</article>;
     })}
+    {!!toolActivity.length && messages.at(-1)?.role !== 'assistant' && <div className="conversation-activity"><ToolActivityLines tools={toolActivity}/></div>}
     {!!streamText && messages.at(-1)?.role !== 'assistant' && <article className="message assistant"><p className="message-label">{t("Tutor")}</p><div className="message-text">{assistantContent(streamText, false)}</div></article>}
     {activity && <div className="conversation-activity">{activity}</div>}
     {unread && <button className="button secondary jump-to-latest" onClick={() => { nearEnd.current = true; setUnread(false); end.current?.scrollIntoView?.({block:'nearest'}); }}>{t("Aller aux derniers messages")}</button>}
@@ -407,4 +501,15 @@ export function TutorActivity({tools,streaming,permission,preparing,providerStat
  else if(active){message=/next_activity|assessment|curriculum/.test(name)?t('Je prépare la prochaine activité…'):/progress|interaction|mastery|learner_context/.test(name)?t('Je consulte votre progression…'):/training|domain|formation|library/.test(name)?t('Je retrouve votre formation…'):t('Je consulte le serveur Tutor…');}
  else if(streaming)message=t('Je rédige la réponse…');else if(latest?.status==='failed')message=t('Un outil a rencontré une erreur. Le tuteur examine le résultat…');
  return <div className="tutor-activity" role="status" aria-live="polite" aria-atomic="true"><span className={`activity-mark ${permission?'waiting':''}`} aria-hidden="true"></span><div><p key={message} className="activity-text">{message}</p><small className="activity-elapsed" aria-hidden="true">{t('{seconds} s écoulées',{seconds:elapsed})}</small>{finished>0&&<small>{t('{count} appel(s) terminé(s)',{count:finished})}</small>}</div></div>;
+}
+
+function latestReview(training:Training) {return training.progress?.map(item=>item.last_review || '').sort().at(-1) || '';}
+
+function ToolActivityLines({tools}:{tools:ToolActivity[]}) {
+  return <>{tools.map(tool=><ToolActivityLine key={tool.id} tool={tool}/>)}</>;
+}
+function ToolActivityLine({tool}:{tool:ToolActivity}) {
+  const [expanded,setExpanded]=useState(false);
+  const label=/profile|learner_context/.test(tool.title)?'Profil chargé':/training|formation|library|curriculum/.test(tool.title)?'Formation consultée':'Outil MCP';
+  return <div className="tool-line"><button type="button" aria-expanded={expanded} onClick={()=>setExpanded(value=>!value)}><Icon name="chevron" size={12}/><span>{t(label)}</span><span className="tool-object">{tool.title}</span>{tool.status==='failed'&&<Icon name="close" size={14}/>}</button>{expanded&&<div className="tool-line-detail">{tool.title} · {t(tool.status==='completed'?'Terminé':tool.status==='failed'?'Échec':tool.status==='cancelled'?'Interrompu':'En cours')}</div>}</div>;
 }

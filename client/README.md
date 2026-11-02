@@ -5,9 +5,24 @@ Le client est développé dans ce dossier du dépôt Tutor ; le serveur pédagog
 reste à la racine. La cible de référence est **Windows x64**. Un agent peut être
 exécuté nativement ou dans une distribution **WSL2** choisie explicitement.
 
+## Client ACP 0.0.10
+
+Cette version intègre le workspace avec rail d’icônes, barre latérale masquable,
+accueil allégé, compositeur fixe et cartes de quiz/flashcards. Les thèmes existants,
+les comptes, les formations et les conversations sont conservés. Les connexions
+Codex/Claude sont réutilisées automatiquement ; le harness reste responsable de
+son authentification et de sa facturation. Un refus du fournisseur n’est plus
+présenté comme une preuve d’épuisement de l’abonnement.
+
+Le bouton **+** joint des fichiers texte/code UTF-8 (cinq fichiers, 32 Ko chacun,
+64 Ko avec le message). **Partager** copie ou exporte la conversation en Markdown ;
+les pièces jointes y figurent par leur nom. Les titres sont reformulés au premier
+échange, sans requête de génération supplémentaire. Voir les
+[notes de version](docs/release-0.0.10.md).
+
 ## Agent Qwen local en développement
 
-La préversion Windows CPU regroupe **Tutor 0.0.9 et l’agent local dans un seul
+La préversion Windows CPU regroupe **Tutor 0.0.10 et l’agent local dans un seul
 installateur**. Dans **Paramètres → Connexion et outils**, installer le modèle
 Qwen avec le bouton de téléchargement, ou sélectionner le GGUF déjà disponible
 sur l’ordinateur. L’application conserve le modèle dans son dossier de données
@@ -178,8 +193,9 @@ Les parcours pédagogiques ci-dessous utilisent les agents externes connectés
 aux outils Tutor. Le pilote Qwen local reste limité aux capacités décrites plus
 haut ; ses commandes ne préparent ni quiz ni évaluation.
 
-- Connexions séparées à Codex et à Tutor, avec état réel et erreurs explicites.
-- Détection de l’adaptateur et de Codex sur Windows et dans WSL2 ; chemin manuel.
+- Connexions indépendantes du harness et de Tutor, avec état du processus,
+  état d’authentification annoncé par le harness et incidents de requête distincts.
+- Détection des adaptateurs Codex et Claude sur Windows et dans WSL2 ; chemin manuel.
 - Accueil Conversation : écrire ce que vous souhaitez apprendre crée un programme personnel privé et permet de commencer immédiatement.
 - Conception et tutorat avec les vrais outils MCP, formations et catalogue du
   serveur, conversation progressive, permissions explicites et interruption.
@@ -262,12 +278,17 @@ compatibilité du couple choisi.
 
 L’installateur inclut **Codex ACP 2.2.2**, **Claude ACP 0.95.0**, leurs
 runtimes compatibles et **Node.js 24.13.0**. Aucune installation npm/Node séparée
-n’est nécessaire pour ces deux agents. Choisissez l’agent, puis connectez votre
-compte fournisseur. Le dossier de séance est préparé automatiquement. Une
+n’est nécessaire pour ces deux agents. Choisir l’agent enregistre le choix et
+le lance ; il est retrouvé au prochain démarrage. Sa connexion existante est
+réutilisée sans choisir un mode de facturation dans Tutor. Le dossier de séance
+est préparé automatiquement. Une
 installation WSL2 existante reste accessible dans les réglages avancés.
 
-La connexion Claude ouvre le parcours officiel du fournisseur dans une fenêtre
-séparée : Tutor ne collecte pas les identifiants Claude. Les dépendances système
+Si le harness annonce qu’une identification est nécessaire, le bouton de
+connexion ouvre sa méthode officielle annoncée par ACP. Sur Windows, les méthodes
+interactives de Claude utilisent une fenêtre séparée, avec le même adaptateur,
+la même distribution et le même utilisateur pour WSL. Tutor ne collecte pas
+les identifiants Claude. Les dépendances système
 requises par le fournisseur (notamment Git Bash pour les usages shell de Claude
 sur Windows) restent celles de son CLI. Les outils intégrés de fichiers/terminal
 de Claude sont désactivés dans les séances pédagogiques ; ses outils MCP restent
@@ -291,15 +312,37 @@ sur la machine de compilation. L’utilisateur de l’installateur n’en a pas 
 
 Pour WSL2, installer l’adaptateur **dans la distribution Linux concernée**, puis
 relancer la détection. Le lancement conserve le même utilisateur Linux, retrouve
-son environnement Codex, et passe par `wsl.exe`. Bash et `setsid` (`util-linux`)
+son environnement Codex ou Claude, et passe par `wsl.exe`. Bash et `setsid` (`util-linux`)
 sont nécessaires. Les chemins `~/...`, Linux absolus et Windows sont résolus dans
 la distribution avant la création de la session ACP. Le nettoyage termine le
 groupe de processus de cette séance, sans arrêter la distribution.
 
 La connexion au fournisseur IA suit les méthodes annoncées par l’adaptateur.
-Le compte ou la clé fournisseur reste dans l’environnement Codex sélectionné.
+Le compte ou la clé fournisseur reste dans l’environnement du harness sélectionné.
 Les environnements Windows et WSL ne partagent pas automatiquement leurs accès.
 La connexion fournisseur et son éventuel coût restent distincts du service Tutor.
+
+Le harness peut être lancé avant ou après la connexion à Tutor. Un changement
+de droits MCP invalide les anciennes sessions et restaure le processus ; la
+prochaine session reçoit les accès actualisés. Un changement d’agent ne déconnecte
+pas l’identité Tutor distante. Une déconnexion involontaire du processus entraîne
+au plus trois tentatives de lancement dans l’interface, avec attente progressive.
+Une déconnexion explicite reste arrêtée jusqu’à une nouvelle action de l’utilisateur.
+Aucun prompt échoué n’est rejoué automatiquement.
+
+Les refus de requête conservent le processus ACP tant que son transport et la
+persistance restent sains. La catégorie `limit` seule ne prouve pas un forfait
+épuisé. Les messages distinguent les limites temporaires, les limites de session,
+les besoins d’identification et les causes inconnues. « Dernier incident de
+requête » conserve la source ACP et le diagnostic filtré ; les titres et détails
+bruts susceptibles de contenir des secrets ne sont pas affichés.
+
+L’audit a comparé la séparation préparation/authentification et le traitement
+des erreurs applicatives avec [Buzz de Block](https://github.com/block/buzz/tree/d342cf141cb3211c8e5a6c74f881cf1d39ad3b12).
+Le traitement des méthodes interactives suit le [protocole d’authentification ACP](https://agentclientprotocol.com/protocol/v1/authentication).
+Les tests locaux exercent les processus ACP, les deux ordres de connexion,
+les credentials MCP renouvelés et les relances sans répétition de prompt.
+Ils ne remplacent pas un essai interactif avec les comptes réels sous Windows/WSL.
 
 ## Connexion à Tutor
 

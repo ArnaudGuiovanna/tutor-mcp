@@ -111,7 +111,10 @@ fn optional_bounded(value: &Option<String>, limit: usize) -> bool {
 
 // Match the renderer's Markdown fence scanner: examples quoted inside another
 // fenced block are ordinary text, while duplicate/unfinished payloads fail.
-fn payload<T: for<'de> Deserialize<'de>>(text: &str, tag: &str) -> Result<Option<T>, String> {
+pub(crate) fn payload<T: for<'de> Deserialize<'de>>(
+    text: &str,
+    tag: &str,
+) -> Result<Option<T>, String> {
     let mut open: Option<(char, usize, bool)> = None;
     let mut found = false;
     let mut body = String::new();

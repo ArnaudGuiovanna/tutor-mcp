@@ -14,15 +14,15 @@ describe('activités visuelles dans la conversation', () => {
     const user = userEvent.setup(); const submit = vi.fn(async () => true); const next = vi.fn();
     render(<LearningActivityCard activity={quiz} onRespond={submit} onContinue={next} />);
     expect(screen.queryByText(quiz.explanation)).toBeNull();
-    expect((screen.getByRole('button', { name: 'Valider ma réponse' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'Valider' }) as HTMLButtonElement).disabled).toBe(true);
     await user.click(screen.getByRole('radio', { name: '3' }));
     expect(screen.queryByText(quiz.explanation)).toBeNull();
-    await user.click(screen.getByRole('button', { name: 'Valider ma réponse' }));
+    await user.click(screen.getByRole('button', { name: 'Valider' }));
     expect(submit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ activityId: quiz.id, kind: 'quiz', selectedOptionId: 'a', attemptId: 'attempt-1' }));
     expect(await screen.findByText(quiz.explanation)).toBeTruthy();
     expect(screen.getByText('Reprenons ce point')).toBeTruthy();
     expect(screen.getByRole('radio', { name: '3' }).matches(':disabled')).toBe(true);
-    await user.click(screen.getByRole('button', { name: 'Continuer' }));
+    await user.click(screen.getByRole('button', { name: 'Question suivante' }));
     expect(next).toHaveBeenCalledTimes(1);
   });
 
@@ -35,7 +35,7 @@ describe('activités visuelles dans la conversation', () => {
     await user.keyboard('{ArrowRight}');
     await user.tab(); await user.keyboard('{Enter}');
     expect(submit).toHaveBeenCalledWith(expect.objectContaining({ selectedOptionId: 'b' }));
-    expect(await screen.findByText('Réponse correcte')).toBeTruthy();
+    expect(await screen.findByText('Bonne réponse')).toBeTruthy();
     vi.unstubAllGlobals();
   });
 
@@ -44,12 +44,12 @@ describe('activités visuelles dans la conversation', () => {
     const submit = vi.fn(() => new Promise<boolean>(done => { resolve = done; }));
     render(<LearningActivityCard activity={quiz} onRespond={submit} />);
     await user.click(screen.getByRole('radio', { name: '5' }));
-    await user.dblClick(screen.getByRole('button', { name: 'Valider ma réponse' }));
+    await user.dblClick(screen.getByRole('button', { name: 'Valider' }));
     expect(submit).toHaveBeenCalledTimes(1);
     expect(screen.queryByText(quiz.explanation)).toBeNull();
     await act(async () => resolve(false));
     expect(screen.getByRole('alert')).toBeTruthy(); expect(screen.queryByText(quiz.explanation)).toBeNull();
-    await user.click(screen.getByRole('button', { name: 'Valider ma réponse' }));
+    await user.click(screen.getByRole('button', { name: 'Valider' }));
     await act(async () => resolve(true));
     expect(submit).toHaveBeenCalledTimes(2); expect(await screen.findByText(quiz.explanation)).toBeTruthy();
   });
@@ -57,7 +57,7 @@ describe('activités visuelles dans la conversation', () => {
   it('révèle une flashcard seulement au clic et envoie une autoévaluation sans succès inventé', async () => {
     const user = userEvent.setup(); const submit = vi.fn(async (_response: LearningResponse) => true);
     render(<LearningActivityCard activity={flashcard} onRespond={submit} />);
-    expect(screen.queryByText('Yesterday')).toBeNull(); expect(screen.queryByRole('button', { name: 'Pas retrouvé' })).toBeNull();
+    expect(screen.queryByText('Yesterday')).toBeNull(); expect(screen.queryByRole('button', { name: 'À revoir' })).toBeNull();
     await user.click(screen.getByRole('button', { name: 'Retourner la carte' }));
     expect(await screen.findByText('Yesterday')).toBeTruthy(); expect(submit).not.toHaveBeenCalled();
     await user.click(screen.getByRole('button', { name: 'Retrouvé avec effort' }));
