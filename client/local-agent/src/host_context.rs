@@ -28,6 +28,15 @@ impl HostContext {
         let value: Self = serde_json::from_value(raw.clone()).map_err(|_| InvalidContext)?;
         value.validate()?;
         // Bind the server's conversation scope, independent of model prose.
+        if Self::conversation_from_servers(servers)? != Some(value.conversation_uuid()) {
+            return Err(InvalidContext);
+        }
+        Ok(Some(value))
+    }
+
+    pub(crate) fn conversation_from_servers(
+        servers: &[Value],
+    ) -> Result<Option<uuid::Uuid>, InvalidContext> {
         let mut scoped = Vec::new();
         for server in servers
             .iter()
@@ -68,10 +77,17 @@ impl HostContext {
                 }
             }
         }
-        if scoped.as_slice() != [value.conversation_id.as_str()] {
+        if scoped.is_empty() {
+            return Ok(None);
+        }
+        if scoped.len() != 1 {
             return Err(InvalidContext);
         }
-        Ok(Some(value))
+        let conversation = uuid::Uuid::parse_str(scoped[0]).map_err(|_| InvalidContext)?;
+        if conversation.to_string() != scoped[0] {
+            return Err(InvalidContext);
+        }
+        Ok(Some(conversation))
     }
 
     pub fn validate(&self) -> Result<(), InvalidContext> {

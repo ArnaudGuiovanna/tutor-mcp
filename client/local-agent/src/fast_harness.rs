@@ -129,10 +129,34 @@ pub fn run(
     handle: &tokio::runtime::Handle,
     ui: &mut dyn harness::Ui,
 ) -> Result<GenerationStats, String> {
+    run_with_connection(engine, store, input, cancel, handle, ui, None)
+}
+
+pub(crate) fn run_with_connection(
+    engine: &mut dyn Engine,
+    store: &Arc<Mutex<SessionStore>>,
+    input: harness::Input<'_>,
+    cancel: &AtomicBool,
+    handle: &tokio::runtime::Handle,
+    ui: &mut dyn harness::Ui,
+    resident: Option<harness::ResidentMcp<'_>>,
+) -> Result<GenerationStats, String> {
     harness::validate_input(store, &input)?;
     match route(input.user) {
         Route::Alerts | Route::Context | Route::Profile => {
-            harness::run_fixed(engine, store, input, cancel, handle, ui)
+            if let Some(resident) = resident {
+                harness::run_fixed_with_connection(
+                    engine,
+                    store,
+                    input,
+                    cancel,
+                    handle,
+                    ui,
+                    Some(resident),
+                )
+            } else {
+                harness::run_fixed(engine, store, input, cancel, handle, ui)
+            }
         }
         Route::Chat => {
             // The persistent journal stays complete. Limit the prompt, not the

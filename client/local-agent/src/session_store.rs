@@ -20,6 +20,8 @@ use std::{
 const MAX_USER_BYTES: usize = 64 * 1024;
 const MAX_ASSISTANT_BYTES: usize = 64 * 1024;
 const MAX_EVENTS_PER_TURN: usize = 4096;
+const MAX_LEGACY_BINDING_EVENTS: usize = 16_384;
+const CONVERSATION_BINDING_EVENT: &str = "tutor-conversation-binding";
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -69,6 +71,7 @@ pub enum StoreError {
     Storage,
     MissingSession,
     ModelMismatch,
+    ConversationMismatch,
     CorruptSession,
     FinishedTurn,
     TurnInProgress,
@@ -83,6 +86,7 @@ impl fmt::Display for StoreError {
             Self::Storage => "session_store_failed",
             Self::MissingSession => "session_not_found_for_owner",
             Self::ModelMismatch => "session_model_changed",
+            Self::ConversationMismatch => "session_tutor_conversation_changed",
             Self::CorruptSession => "session_journal_invalid",
             Self::FinishedTurn => "session_turn_already_finished",
             Self::TurnInProgress => "session_turn_in_progress",
@@ -104,6 +108,13 @@ struct Header {
     version: u32,
     session_id: String,
     model_sha256: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConversationBinding {
+    version: u32,
+    conversation_id: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -188,11 +199,20 @@ impl SessionStore {
         if header.model_sha256 != model_sha256 {
             return Err(StoreError::ModelMismatch);
         }
-        Ok(Self {
+        let mut store = Self {
             id: id.into(),
             journal,
             output_bytes: HashMap::new(),
-        })
+        };
+        // Old journals predate the fixed binding record. Recover the one
+        // conversation actually verified there, never choose the newest of
+        // conflicting conversations or silently mix their retained history.
+        if store.conversation_binding()?.is_none() {
+            if let Some(conversation) = store.legacy_conversation_binding()? {
+                store.bind_conversation(conversation)?;
+            }
+        }
+        Ok(store)
     }
 
     pub fn id(&self) -> &str {
@@ -203,6 +223,83 @@ impl SessionStore {
     }
     pub fn journal_mut(&mut self) -> &mut Journal {
         &mut self.journal
+    }
+
+    pub(crate) fn conversation_binding(&self) -> Result<Option<uuid::Uuid>, StoreError> {
+        let Some(event) = self.journal.event(CONVERSATION_BINDING_EVENT)? else {
+            return Ok(None);
+        };
+        if event.kind != "tutor_conversation_binding" || event.turn_id.is_some() {
+            return Err(StoreError::CorruptSession);
+        }
+        let binding: ConversationBinding = decode(&event.payload)?;
+        if binding.version != 1 {
+            return Err(StoreError::CorruptSession);
+        }
+        let conversation = uuid::Uuid::parse_str(&binding.conversation_id)
+            .map_err(|_| StoreError::CorruptSession)?;
+        if conversation.to_string() != binding.conversation_id {
+            return Err(StoreError::CorruptSession);
+        }
+        Ok(Some(conversation))
+    }
+
+    /// An ACP session's retained history belongs to one Tutor conversation.
+    /// This metadata grants no server access or tool permission.
+    pub(crate) fn bind_conversation(&mut self, conversation: uuid::Uuid) -> Result<(), StoreError> {
+        if let Some(bound) = self.conversation_binding()? {
+            return if bound == conversation {
+                Ok(())
+            } else {
+                Err(StoreError::ConversationMismatch)
+            };
+        }
+        if self
+            .legacy_conversation_binding()?
+            .is_some_and(|old| old != conversation)
+        {
+            return Err(StoreError::ConversationMismatch);
+        }
+        self.journal.append_event(
+            CONVERSATION_BINDING_EVENT,
+            None,
+            "tutor_conversation_binding",
+            &encode(&ConversationBinding {
+                version: 1,
+                conversation_id: conversation.to_string(),
+            })?,
+        )?;
+        Ok(())
+    }
+
+    fn legacy_conversation_binding(&self) -> Result<Option<uuid::Uuid>, StoreError> {
+        let mut cursor = None;
+        let mut scanned = 0;
+        let mut bound = None;
+        loop {
+            let page = self.journal.event_refs(None, cursor, 128)?;
+            if page.is_empty() {
+                return Ok(bound);
+            }
+            cursor = page.last().map(|event| event.sequence);
+            scanned += page.len();
+            if scanned > MAX_LEGACY_BINDING_EVENTS {
+                return Err(StoreError::CorruptSession);
+            }
+            for event in page {
+                if event.kind != "verified_host_context" {
+                    continue;
+                }
+                let host: crate::host_context::HostContext =
+                    decode(&self.journal.resolve_content(&event.content)?)?;
+                host.validate().map_err(|_| StoreError::CorruptSession)?;
+                let conversation = host.conversation_uuid();
+                if bound.is_some_and(|old| old != conversation) {
+                    return Err(StoreError::ConversationMismatch);
+                }
+                bound = Some(conversation);
+            }
+        }
     }
 
     /// Commit the exact input before inference or any operation is started.
@@ -402,6 +499,79 @@ mod tests {
             account_id: "account1".into(),
             tenant_id: "tenant1".into(),
             server_id: "https://school.example".into(),
+        }
+    }
+
+    #[test]
+    fn tutor_conversation_binding_survives_reopen_and_cannot_relabel_history() {
+        let root = tempfile::tempdir().unwrap();
+        let conversation = uuid::Uuid::new_v4();
+        let mut store = SessionStore::create(root.path(), &owner(), MODEL).unwrap();
+        let session = store.id().to_owned();
+        store.bind_conversation(conversation).unwrap();
+        store.bind_conversation(conversation).unwrap();
+        let turn = store
+            .begin_turn("Une réponse privée de cette conversation")
+            .unwrap();
+        store
+            .append_assistant(&turn, "Explication conservée")
+            .unwrap();
+        store.finish_turn(&turn, Completion::Complete).unwrap();
+        drop(store);
+        let mut reopened = SessionStore::load(root.path(), &owner(), &session, MODEL).unwrap();
+        assert_eq!(reopened.conversation_binding().unwrap(), Some(conversation));
+        assert_eq!(
+            reopened.bind_conversation(uuid::Uuid::new_v4()),
+            Err(StoreError::ConversationMismatch)
+        );
+        assert_eq!(
+            reopened.read_turn(&turn).unwrap().assistant,
+            "Explication conservée"
+        );
+        assert_eq!(reopened.conversation_binding().unwrap(), Some(conversation));
+    }
+
+    #[test]
+    fn legacy_host_contexts_migrate_only_when_their_conversation_is_unambiguous() {
+        for conflicting in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let first = uuid::Uuid::new_v4();
+            let mut store = SessionStore::create(root.path(), &owner(), MODEL).unwrap();
+            let session = store.id().to_owned();
+            for conversation in [
+                first,
+                if conflicting {
+                    uuid::Uuid::new_v4()
+                } else {
+                    first
+                },
+            ] {
+                let turn = store.begin_turn("Message historique").unwrap();
+                let host = crate::host_context::HostContext {
+                    conversation_id: conversation.to_string(),
+                    language: "fr".into(),
+                    training_context: serde_json::json!({"conversation_id":conversation.to_string(),
+                        "training_id":"training","domain_id":"domain","revision":"1",
+                        "selection_version":1,"name":"Go"}),
+                };
+                store
+                    .journal_mut()
+                    .append_event(
+                        &uuid::Uuid::new_v4().to_string(),
+                        Some(&turn),
+                        "verified_host_context",
+                        &encode(&host).unwrap(),
+                    )
+                    .unwrap();
+                store.finish_turn(&turn, Completion::Complete).unwrap();
+            }
+            drop(store);
+            let loaded = SessionStore::load(root.path(), &owner(), &session, MODEL);
+            if conflicting {
+                assert!(matches!(loaded, Err(StoreError::ConversationMismatch)));
+            } else {
+                assert_eq!(loaded.unwrap().conversation_binding().unwrap(), Some(first));
+            }
         }
     }
 

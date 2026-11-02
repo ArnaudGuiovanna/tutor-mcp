@@ -15,6 +15,7 @@ pub mod host_context;
 pub mod journal;
 pub mod mcp;
 pub mod mcp_client;
+mod mcp_session;
 pub mod mcp_stdio;
 pub mod pedagogical;
 pub mod session_store;

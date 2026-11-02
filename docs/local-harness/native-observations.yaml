@@ -10,11 +10,12 @@ compatibility:
   version: schemaVersion=1, componentScope=native_agent
   legacy: Les champs result._meta.tutor.generation et leurs significations restent inchangés ; elapsedMs historique couvre le tour ACP.
   absence: Les moteurs simulés peuvent ne pas fournir d'observation ; un rejeu de journal ne mesure pas un nouveau tour.
-  privacy: Valeurs numériques, null et enums fixes seulement ; aucun prompt, réponse, nom d'outil, argument, chemin, identifiant privé ou secret dans ces DTO.
+  privacy: Valeurs numériques, booléens, null et enums fixes seulement ; aucun prompt, réponse, nom d'outil, argument, chemin, identifiant privé ou secret dans ces DTO.
+  connection_extension: mcpConnection est optionnel ; son contrat de résidence et priorCleanup est décrit dans resident-integration.yaml.
 
 clock:
   method: Horloge monotone du processus, millisecondes flottantes ; timingKind=host_wall_clock.
-  overlap: Les opérations countInputMs/generationMs sont inclusives ; les phases mesurent des sections distinctes à l'intérieur. Ne jamais additionner opérations, phases et durée worker.
+  overlap: Les opérations countInputMs/generationMs sont inclusives ; les phases mesurent des sections distinctes, y compris certains contrôles de cache hors opération. Ne jamais additionner opérations, phases et durée worker.
   gaps: La somme des phases ne couvre pas nécessairement l'opération ; validation, préparation de batch et autres sections non mesurées restent hors de cette somme.
   unavailable: null signifie non observé ; zéro signifie une valeur observée égale à zéro ou un compteur initialisé sans opération.
   gpu: Aucun ajout de synchronisation GPU ; gpuSynchronizedMs et cpuTimeMs sont null. Ces durées ne sont ni du temps CPU OS ni du temps GPU attesté.
@@ -27,6 +28,7 @@ inference:
     preparation: templateMs, tokenizationMs, contextAllocationMs, batchAllocationMs.
     evaluation: prefillMs pour les decode de prompt ; decodeMs pour les decode autorégressifs.
     output: samplerSetupMs, samplingMs, tokenConversionMs, emitMs.
+    resident_controls: bridgeWaitMs pour le pont worker/callback hors temps du callback ; cacheMaintenanceMs pour les retraits/vidages KV, y compris les contrôles hors count/generate.
   first_token: firstTokenMs est le premier token non EOG échantillonné ; il peut appartenir à une décision interne.
   first_emission: firstEmissionMs est le premier callback de texte non vide réussi ; il ne prouve ni réception ACP ni peinture UI.
   useful_response: firstUsefulResponseMs reste null ; la qualification doit établir l'utilité à partir d'un oracle et de l'affichage réel.
@@ -36,7 +38,7 @@ inference:
     logical_input: inputTokens compte les prompts complets tokenisés pour les générations, une fois par génération.
     evaluated_input: evaluatedInputTokens compte les tokens de prompt acceptés par les decode réussis ; null après un decode natif échoué à progrès partiel inconnu.
     equality: inputTokens = reusedTokens + evaluatedInputTokens seulement pour un prefill intégralement réussi ; une annulation partielle ou un budget refusé ne satisfait pas cette égalité.
-    reused: Zéro dans cet incrément ; les poids restent résidents mais aucun KV n'est réutilisé.
+    reused: Zéro dans la référence native-observation-baseline.json ; le cache optionnel de LH-01 rapporte désormais les positions effectivement réutilisées.
     output: outputTokens compte les tokens non EOG échantillonnés, y compris un token dont la conversion ou le callback échoue.
     loads: modelLoadCount est le compteur de chargements réussis sur la vie du moteur ; modelLoadAttempts est limité à l'observation courante.
     contexts: contextAllocationAttempts et contextAllocations comptent les tentatives et réussites de l'observation ; ce ne sont pas des jauges de contextes vivants.
@@ -50,7 +52,7 @@ mcp:
   interruption: Future abandonnée sans résultat → compteur Interrupted ; aucune annulation distante ni reprise automatique n'en est déduite.
   drain: take_observation et begin_turn_observation drainent les mesures sans fermer ni rejouer le transport ; récolter avant de détruire le Client.
   unavailable: initializeTotalMs et catalogPages restent null ; le wrapper ne peut pas les isoler. closeTotalMs couvre seulement close explicite, pas les nettoyages internes ou Drop.
-  lifecycle: Connexion et catalogue toujours reconstruits par parcours dans cet incrément ; aucun gain de résidence MCP revendiqué.
+  lifecycle: La référence native-observation-baseline.json reconstruisait connexion et catalogue par parcours ; LH-02 permet désormais la résidence de connexion, avec catalogue encore rafraîchi à chaque lease.
 
 worker:
   field: workerElapsedMs
@@ -64,6 +66,7 @@ development_evidence:
   corpus: Huit cas synthétiques connus de qualify-local-context.py et un échec de connexion HTTP ; données Tutor jetables, aucune institution réelle.
   checks: Compteurs cohérents avec generation, lectures sans chargement, poids résidents entre deux générations, refus sans appel et métadonnées sur erreur de connexion.
   native_tests: 206 réussis, zéro échec, deux essais GGUF spéciaux ignorés ; ces derniers ne sont pas déclarés réussis par le rapport.
+  historical: Les mesures et le nombre de tests ci-dessus concernent l'incrément d'observation a81a7a7 ; les contrôles résidents suivants figurent dans resident-integration.yaml.
   quality_limit: Le succès de ces contrôles n'est ni un taux de compréhension, ni une revue de coaching, ni un test indépendant.
   timing_limit: Mesures descriptives sur une VM Linux CPU quatre vCPU ; aucun p95, cache fichier OS non contrôlé, aucune extrapolation P2000.
   trace_cost_report: docs/local-harness/native-observation-overhead.json

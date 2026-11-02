@@ -7,7 +7,7 @@ parent_plan: docs/plan-local-harness.yaml
 owner: runtime_cache
 items: [LH-00, LH-01, LH-09, LH-10]
 baseline_commit: e8185e5ebedddedd691bfd6adf4798e99ac9eb90
-scope: Plan technique de référence ; premier incrément d'observation natif intégré et décrit dans native-observations.yaml. Worker/cache et modèles restent à réaliser et qualifier.
+scope: Plan technique de référence ; observations et premier worker/cache raccordés à ACP, contrat dans resident-integration.yaml. Campagne complète, modèles et matériel restent à qualifier.
 target:
   os: Windows x64
   cpu: Intel Core i7-9750H
@@ -20,6 +20,7 @@ target:
   model_decision: Ouverte ; garder le Qwen actuel comme référence, sans adopter maintenant un autre modèle.
   hardware_qualification: TODO ; les observations Linux CPU ne prouvent aucune performance Windows ou GPU.
 
+observations_scope: Constats historiques au baseline_commit, avant les incréments d'observation et de résidence ; les numéros de lignes ne décrivent pas les sources actuelles.
 observations:
   - source: client/local-agent/src/runtime.rs:105
     fact: LocalEngine conserve Loaded ; modèle puis backend sont détruits dans cet ordre.
@@ -46,7 +47,7 @@ observations:
 observed_profile_path: Le profil existant est client/local-agent/model-profile.json ; config/model-profile.json n'existe pas ici.
 
 actor_contract:
-  status: TODO
+  status: IN_PROGRESS
   public_adapter: Préserver Engine:Send et ses méthodes synchrones ; un handle Send transporte des commandes possédées vers un thread dédié.
   ownership: Le thread crée backend, modèle, puis contexte ; il effectue seul tokenisation, prefill, sampling et accès KV.
   lifetimes: |
@@ -78,7 +79,7 @@ actor_contract:
   fatal_recovery: Arrêter le processus agent et laisser le client le relancer ; résultat interrompu/inconnu conservé, aucun rejeu automatique.
 
 cache_contract:
-  status: TODO
+  status: IN_PROGRESS
   trust: Scope fourni par l'adaptateur ACP depuis les bindings vérifiés ; jamais extrait d'une intention, d'un prompt ou d'un ID proposé par le LLM.
   identity_fields:
     - profile_id et account_id de session_store::Owner.
@@ -178,13 +179,13 @@ compatibility:
 
 work_items:
   - id: LH-00
-    status: TODO
+    status: IN_PROGRESS
     depends_on: []
     changes: Instrumenter runtime.rs/acp.rs et le qualificateur avec le contrat turn_observation, avant toute optimisation ou changement de modèle.
     acceptance: Rejouer le GGUF de référence sur CPU release ; distinguer chargement, projection, génération, MCP et rendu ; rapport commit/hash/options.
     handoff: Fournir à LH-05/LH-11 événements, unités, dénominateurs, définition de réponse utile et champs explicitement indisponibles.
   - id: LH-01
-    status: TODO
+    status: IN_PROGRESS
     depends_on: [LH-00]
     steps:
       - Stabiliser InferenceRequest, scope vérifié, génération_id et Finalize/Invalidate avec intégrateur ACP et LH-02/LH-03.

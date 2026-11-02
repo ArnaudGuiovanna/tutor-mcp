@@ -18,6 +18,8 @@ pub struct Config {
     pub threads: i32,
     pub batch: u32,
     pub data_dir: Option<PathBuf>,
+    pub prefix_cache: bool,
+    pub reuse_mcp: bool,
 }
 
 impl Config {
@@ -31,6 +33,8 @@ impl Config {
             threads: 6,
             batch: 128,
             data_dir: None,
+            prefix_cache: false,
+            reuse_mcp: false,
         };
         let mut args = args.into_iter();
         let mut seen = std::collections::BTreeSet::new();
@@ -42,6 +46,8 @@ impl Config {
             match key.as_str() {
                 "--model" => config.model = value.into(),
                 "--data-dir" => config.data_dir = Some(value.into()),
+                "--prefix-cache" => config.prefix_cache = parse_switch(&value)?,
+                "--reuse-mcp" => config.reuse_mcp = parse_switch(&value)?,
                 "--sha256" => config.expected_sha256 = Some(value.to_ascii_lowercase()),
                 "--context" => config.context = value.parse().map_err(|_| "invalid_context")?,
                 "--max-output" => {
@@ -90,6 +96,14 @@ impl Config {
     }
 }
 
+fn parse_switch(value: &str) -> Result<bool, String> {
+    match value {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        _ => Err("invalid_runtime_switch".into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +118,21 @@ mod tests {
         assert_eq!(config.model, model);
         assert_eq!(config.context, 2048);
         assert_eq!(config.gpu_layers, 0);
+        assert!(!config.prefix_cache && !config.reuse_mcp);
+        let enabled = Config::parse(args.clone().into_iter().chain([
+            "--prefix-cache".into(),
+            "on".into(),
+            "--reuse-mcp".into(),
+            "on".into(),
+        ]))
+        .unwrap();
+        assert!(enabled.prefix_cache && enabled.reuse_mcp);
+        assert!(Config::parse(
+            args.clone()
+                .into_iter()
+                .chain(["--prefix-cache".into(), "auto".into(),])
+        )
+        .is_err());
         for suffix in [
             ["--context", "32000"],
             ["--max-output", "4096"],

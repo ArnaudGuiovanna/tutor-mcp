@@ -1,0 +1,76 @@
+version: 1
+title: Premier raccordement du worker, du cache et de la connexion MCP à ACP
+date: '2026-11-02'
+parent_plan: docs/plan-local-harness.yaml
+source_base: a81a7a7d79c1e119324d4d2e14b8925f316f14fd
+status: IN_PROGRESS
+scope: Agent Rust natif et données de développement temporaires ; serveur Tutor inchangé.
+model: Qwen3-1.7B Q4_K_M épinglé par model-profile.json ; aucun autre modèle adopté.
+activation:
+  defaults: Les deux options restent off dans le profil distribué ; aucun profil GPU ou nouveau modèle n'est sélectionné automatiquement.
+  flags: [--prefix-cache on, --reuse-mcp on]
+  disable: --prefix-cache off et --reuse-mcp off, mêmes messages et mêmes paramètres de génération pour les comparaisons.
+  context_residency: Le worker et le contexte restent résidents même avec réutilisation de préfixe off ; le KV est alors vidé entre générations.
+  trusted_scope: Le cache exige Owner durable et HostContext validés ; la connexion résidente exige aussi une configuration Tutor liée à cette conversation.
+
+runtime:
+  owner: Un thread possède backend, modèle, contexte et batch en portée lexicale ; le proxy Engine est Send sans déplacer de pointeur natif entre threads.
+  bounds: Une génération, canaux commande/événement/accusé de capacité un, fragments UTF-8 bornés, annulation atomique.
+  lazy: Aucun chargement GGUF pour les réponses Rust directes ; chargement au premier besoin réel de tokenizer/génération.
+  cache_key: Empreinte privée de la connexion ACP, Owner, session ACP, conversation Tutor, époque/configuration complète, modèle et sélection/version/révision confirmée. Jamais fournie par une prose utilisateur ou LLM.
+  reuse: Préfixe de tokens réellement identique ; retrait du suffixe précédent ; dernier token recalculé, sampler neuf. Échec de retrait → vidage complet.
+  commit: RuntimeTurn ne confirme la candidature qu'après finish_turn Complete réussi, end_turn non annulé et absence de débordement de sortie. Une sortie précoce ou erreur l'invalide.
+  direct_turn: Un tour direct durable peut terminer son ticket sans créer de nouvelle candidature et conserver le préfixe confirmé antérieur du même binding.
+  failures: Annulation, max_tokens, erreur callback/native/journal et finalisation absente ne produisent aucun préfixe réutilisable ; les observations sont récoltées sur les chemins de sortie.
+  errors: Une erreur secondaire de cache/nettoyage ne remplace pas l'erreur métier/journal d'origine.
+  cancellation_limit: Le binding épinglé ne fournit pas d'abort callback public utilisé ici ; un batch prefill bloqué peut dépasser deux secondes. Le proxy est alors empoisonné, refuse de nouvelles générations et requiert un redémarrage du processus. Aucun second worker n'est créé pour contourner le blocage.
+  qualification: Annulation pendant prefill, endurance et Windows/P2000 restent INCOMPLETE ; le mini-probe d'annulation après émission ne prouve pas l'interruption d'un batch.
+
+mcp:
+  owner: Un Manager pour la vie de la connexion ACP, un emplacement et une lease exclusive ; les mutex de métadonnées ne sont pas détenus pendant les IO ou la permission.
+  reuse: HTTP ou enfant stdio réutilisés seulement dans le scope admissible ; rebind strictement identique sans changement d'époque.
+  invalidation: Configuration différente ou rechargement révoquent l'époque ; nouvelle acquisition attend la fin du nettoyage local, au plus trois secondes, avec annulation.
+  no_replay: Cette attente concerne la réservation locale avant tout envoi. Aucun connect ou tools/call déjà envoyé n'est rejoué.
+  health: Connexion existante ne signifie pas pair vivant ; un tools/list frais au début de chaque lease détecte EOF/échec et interdit le dispatch sur catalogue périmé.
+  catalog: Toujours relu à chaque lease ; catalogReused=false. Le critère de catalogue résident de LH-02 reste ouvert.
+  authority: Schéma vivant, paramètres prouvés, permission métier réelle et changed() après approbation restent vérifiés par l'exécuteur existant.
+  cleanup: EOF appelle shutdown ; une issue de nettoyage non prouvée conserve une quarantaine et demande un redémarrage de l'agent. Aucun nouveau Manager n'efface cette incertitude.
+  metadata: result._meta.tutor.runtime.mcpConnection, également disponible sous error.data._meta.tutor.runtime sur les erreurs observées.
+  fields: [schemaVersion, connectionReused, retained, catalogReused, restartRequired, priorCleanup]
+  intervals: mcp agrège une fois les opérations du tour courant ; priorCleanup contient séparément les observations différées d'un ancien abandon, sans les attribuer au nouveau tour.
+  business_results: isError=true est transport Ok seulement ; jamais preuve de succès métier. Les reçus restent intacts dans le journal.
+
+context_and_journal:
+  affinity: Un enregistrement durable lie chaque journal ACP à une conversation Tutor ; rebind/load incompatibles sont refusés avant tout rejeu d'historique.
+  migration: Les anciens événements verified_host_context sont inspectés avec borne explicite ; un unique scope confirmé est migré, des scopes contradictoires ne sont pas départagés arbitrairement.
+  model_labels: required_0/optional_0 et suivants sont des labels locaux déterministes ; seuls les Evidence.id extérieurs changent dans les messages.
+  unchanged_data: Payloads métier, identifiants serveur, révisions, schémas, références d'outil et textes de l'apprenant restent exacts.
+  audit: kept_ids et omitted conservent les IDs du journal ; evidence_aliases optionnel version 1 fournit alias→source_id, au plus 48 entrées, hors messages modèle.
+  budget: Le tokenizer et le template réels comptent la projection finale ; une preuve obligatoire trop grande reste refusée entière.
+  remaining: État d'activité/question attendue/dernière liste, reprise pédagogique et accusé UI réel ne sont pas implémentés par ces seuls labels stables.
+
+development_validation:
+  unit: 228 tests sans inférence et 237 tests avec moteur natif réussis ; trois essais GGUF ignorés dans la suite native, aucun succès attribué à ces skips.
+  static: Formatage et Clippy all-targets natif avec -D warnings réussis.
+  real_probe: client/scripts/qualify-local-resident.py
+  methodology: Même binaire, données Tutor locales copiées depuis une fixture, configurations bothOff/bothOn, permissions contrôlées, compteurs explicites du relais stdio et observations natives séparés.
+  long_history: Option --welcome-turns 100 ; cent réponses Rust directes, puis une génération qui vérifie contexte confirmé et budget, journal exact inspecté après arrêt.
+  latency: Premier texte seulement, petit échantillon descriptif, pas de p95 ou de première réponse utile. Coût du relais et cache fichier OS non contrôlé déclarés.
+  report: docs/local-harness/resident-development-baseline.json
+  previous_complete_report: docs/local-harness/resident-development-baseline-r2.json
+  initial_fixture_failure: docs/local-harness/resident-probe-initial-fixture-failure.json
+  status: 641 contrôles du banc final apparié réussis ; deux profils temporaires de 108 tours chacun, dont cent réponses Rust directes. Campagne précédente conservée avec ses 639 contrôles réussis.
+  checker_tests: 30 tests Python offline réussis, notamment mauvais domaine, refus, faux cache hit et identifiants RPC de types incompatibles.
+  examples_from: resident-development-baseline-r2.json ; la campagne finale est conservée séparément, aucun meilleur tirage sélectionné.
+  warm_profile_example: Premier texte 1275.31 ms sans options contre 355.06 ms avec options ; une observation par configuration, relais stdio inclus.
+  warm_generation_example: Premier texte 14702.95 ms contre 2518.80 ms ; même réponse exacte, entrée logique 428 tokens dont 356 réutilisés et 72 évalués avec cache.
+  after_hundred_turns: Journal A de 106 tours dont cent accueils, aucun historique durable limité aux 64 tours ; entrée 425 tokens, 286 réutilisés avec cache, nom confirmé toujours exact.
+  binding_change: Nouvelle conversation dans le même processus, zéro token réutilisé, nouveau nom exact ; un seul chargement de modèle par variante.
+  wire_counts: Quatre initialisations sans résidence contre deux avec résidence sur deux conversations ; quatre lectures de catalogue dans les deux variantes et trois dispatchs de profil autorisés. Le refus n'a pas dispatché.
+  limits: Ces points descriptifs ne donnent aucun gain statistique, débit de coaching, taux général de compréhension ou SLA matériel.
+  excluded: [corpus tenu à part, compréhension générale, coaching validé, affichage UI, authentification institution, isolation de comptes en production, Windows/P2000]
+
+hardware_followup:
+  inference: La combinaison i7-9750H et P2000 4 Go semble correspondre à la variante mobile ; l'inventaire de la machine doit le confirmer.
+  source: https://www.nvidia.com/content/dam/en-zz/Solutions/design-visualization/documents/quadro-mobile-pro-graphics-line-card-us-r1-hr.pdf
+  rule: Ne pas transposer les mesures d'une P2000 de bureau 5 Go ; aucun débit cible n'est calculé depuis les caractéristiques théoriques.

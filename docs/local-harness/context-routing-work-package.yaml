@@ -1,13 +1,13 @@
 version: 1
 title: État pédagogique, gestion du contexte et interprétation des intentions Tutor ACP
 date: '2026-11-02'
-status: PLANNED
-implementation_status: TODO
+status: IN_PROGRESS
+implementation_status: IN_PROGRESS
 owner: context_routing
 parent_plan: docs/plan-local-harness.yaml
 parent_items: [LH-03, LH-06, LH-07]
 baseline_commit: e8185e5ebedddedd691bfd6adf4798e99ac9eb90
-deliverable: Plan technique pour revue ; aucun code produit implémenté ou benchmark exécuté par ce lot.
+deliverable: Plan de référence ; premier incrément de projection stable et d'affinité de journal intégré dans resident-integration.yaml. Le noyau pédagogique complet et le routeur restent à intégrer.
 scope:
   objective: Comprendre une demande dans sa conversation pédagogique et produire une proposition admise par Rust avec un contexte borné.
   target: Windows x64, i7-9750H, 32 Gio RAM, Quadro P2000 4 Gio, un utilisateur.
@@ -199,14 +199,14 @@ implementation_steps:
     acceptance: Réducteur déterministe et idempotent ; choix utilisateur distinct d'une sélection confirmée ; aucun résumé promu en preuve.
   - id: CR-02
     parent: LH-03
-    status: TODO
+    status: IN_PROGRESS
     depends_on: [CR-01]
     files: [client/local-agent/src/session_store.rs, client/local-agent/src/journal.rs]
     work: Journaliser les événements typés et snapshots ; ajouter lecture incrémentale d'événements si nécessaire, sans confondre les curseurs.
     acceptance: Reprise après crash identique au replay complet ; références invalides rejetées ; aucune opération rejouée ni traversée d'identité/session.
   - id: CR-03
     parent: LH-03
-    status: TODO
+    status: IN_PROGRESS
     depends_on: [CR-02, LH-01]
     files: [client/local-agent/src/context.rs, client/local-agent/src/context_retrieval.rs, client/local-agent/src/harness.rs]
     work: Projeter état utile, preuves et retrieval borné ; ordonner le préfixe ; conserver les audits et le compteur exact.

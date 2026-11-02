@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -26,12 +27,16 @@ use crate::session_store::{Completion, Owner, SessionStore};
 pub struct Options {
     pub data_dir: Option<std::path::PathBuf>,
     pub model_sha256: String,
+    pub prefix_cache: bool,
+    pub reuse_mcp: bool,
 }
 impl Default for Options {
     fn default() -> Self {
         Self {
             data_dir: None,
             model_sha256: crate::config::MODEL_SHA256.into(),
+            prefix_cache: false,
+            reuse_mcp: false,
         }
     }
 }
@@ -83,6 +88,8 @@ struct Session {
     history_bytes: usize,
     owner: Option<Owner>,
     durable: Option<Arc<Mutex<SessionStore>>>,
+    conversation: Option<uuid::Uuid>,
+    config_epoch: u64,
 }
 
 impl Session {
@@ -112,6 +119,8 @@ struct TurnObservation {
     component_scope: &'static str,
     inference: Option<crate::runtime::RuntimeObservation>,
     mcp: Option<crate::mcp_client::McpObservation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mcp_connection: Option<crate::harness::McpConnectionObservation>,
     worker_elapsed_ms: Option<f64>,
 }
 
@@ -137,6 +146,99 @@ impl Drop for WorkerObservationGuard {
     }
 }
 
+/// Native state remains tentative until the exact durable turn is committed.
+/// Dropping on any early return/panic invalidates it and harvests what was
+/// measured. An optimization failure never replaces a journal/tool error.
+struct RuntimeTurn {
+    engine: Arc<Mutex<Box<dyn Engine>>>,
+    observation: Arc<Mutex<TurnObservation>>,
+    ticket: Option<crate::runtime::CacheTurn>,
+    settled: bool,
+}
+
+impl RuntimeTurn {
+    fn begin(
+        engine: Arc<Mutex<Box<dyn Engine>>>,
+        observation: Arc<Mutex<TurnObservation>>,
+        scope: Option<crate::runtime::CacheScope>,
+    ) -> Self {
+        let ticket = if let Ok(mut provider) = engine.lock() {
+            provider.begin_turn_observation();
+            let enabled = scope.is_some();
+            match provider
+                .set_prefix_cache_enabled(enabled)
+                .and_then(|_| provider.set_cache_scope(scope))
+            {
+                Ok(ticket) => ticket,
+                Err(_) => {
+                    let _ = provider.invalidate_cache();
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        Self {
+            engine,
+            observation,
+            ticket,
+            settled: false,
+        }
+    }
+
+    fn settle(&mut self, persisted_complete: bool) {
+        if self.settled {
+            return;
+        }
+        if let Ok(mut provider) = self.engine.lock() {
+            let committed = persisted_complete
+                && self
+                    .ticket
+                    .take()
+                    .is_some_and(|ticket| provider.finalize_cache(ticket, true).is_ok());
+            if !committed {
+                let _ = provider.invalidate_cache();
+            }
+            let runtime = provider.take_runtime_observation();
+            if let Ok(mut observation) = self.observation.lock() {
+                observation.inference = runtime;
+            }
+        }
+        self.settled = true;
+    }
+}
+
+impl Drop for RuntimeTurn {
+    fn drop(&mut self) {
+        self.settle(false);
+    }
+}
+
+// This is host-only input to a private digest, never model/context/diagnostics.
+#[derive(serde::Serialize)]
+struct CacheBinding<'a> {
+    connection: [u8; 16],
+    owner: &'a Owner,
+    session: &'a str,
+    conversation: [u8; 16],
+    config_epoch: u64,
+    cwd: &'a str,
+    servers: &'a [Value],
+    model_sha256: &'a str,
+    selection: (&'a str, &'a str, &'a str, u64),
+}
+
+fn cache_scope(binding: CacheBinding<'_>) -> RpcResult<crate::runtime::CacheScope> {
+    let encoded = serde_json::to_vec(&binding)
+        .map_err(|_| (-32603, "Could not bind local inference context."))?;
+    let mut digest = Sha256::new();
+    digest.update(b"tutor-acp-cache-binding-v1\0");
+    digest.update(encoded);
+    Ok(crate::runtime::CacheScope::from_verified_binding_digest(
+        digest.finalize().into(),
+    ))
+}
+
 fn attach_turn_observation(
     mut response: Value,
     observation: &Arc<Mutex<TurnObservation>>,
@@ -145,7 +247,10 @@ fn attach_turn_observation(
         return response;
     };
     // Older/simulated engines opt out, and replay never measures a new turn.
-    if observation.inference.is_none() && observation.mcp.is_none() {
+    if observation.inference.is_none()
+        && observation.mcp.is_none()
+        && observation.mcp_connection.is_none()
+    {
         return response;
     }
     let Ok(value) = serde_json::to_value(&*observation) else {
@@ -299,6 +404,11 @@ impl crate::harness::Ui for WorkerOutput {
             observation.mcp = Some(value);
         }
     }
+    fn observe_mcp_connection(&mut self, value: crate::harness::McpConnectionObservation) {
+        if let Ok(mut observation) = self.observation.lock() {
+            observation.mcp_connection = Some(value);
+        }
+    }
     fn text(&mut self, text: &str) -> Result<(), String> {
         WorkerOutput::text(self, text)
     }
@@ -319,6 +429,8 @@ struct Server {
     // The total is bounded; restart the connection when it is exhausted.
     prompt_ids: HashSet<String>,
     active: Option<Active>,
+    mcp: Option<crate::mcp_session::Manager>,
+    cache_connection: uuid::Uuid,
 }
 
 struct CancelOnDrop(Arc<AtomicBool>);
@@ -388,6 +500,10 @@ where
         }
     }));
     let mut server = Server {
+        mcp: options
+            .reuse_mcp
+            .then(|| crate::mcp_session::Manager::new(tokio::runtime::Handle::current())),
+        cache_connection: uuid::Uuid::new_v4(),
         options,
         ..Server::default()
     };
@@ -450,6 +566,16 @@ where
         // Dropping the receiver releases a producer waiting on backpressure.
         drop(active.chunks);
         let _ = timeout(STOP_TIMEOUT, active.worker).await;
+    }
+    if let Some(manager) = &server.mcp {
+        let retirement = manager.shutdown().await;
+        if retirement.status != crate::mcp_session::RetirementStatus::Quiescent
+            || retirement.error.is_some()
+        {
+            // EOF has already cancelled the turn. Never hide unconfirmed
+            // cleanup by constructing a replacement manager or replaying IO.
+            return Err(anyhow::anyhow!("Local MCP cleanup was not confirmed."));
+        }
     }
     outcome
 }
@@ -696,6 +822,8 @@ impl Server {
                 history_bytes: 0,
                 owner,
                 durable,
+                conversation: None,
+                config_epoch: 1,
             },
         );
         let mut metadata = agent_metadata(persistent && !servers.is_empty());
@@ -747,10 +875,27 @@ impl Server {
         if session.owner.as_ref() != Some(&owner) || session.durable.is_none() {
             return Err((-32602, "Session owner does not match."));
         }
+        check_conversation_config(session.conversation, servers)?;
+        let changed =
+            session._connection._cwd != cwd || session._connection._mcp_servers != *servers;
+        // Desktop refreshes a known local session before each prompt. The
+        // identical refresh is a no-op, preserving eligible model/MCP state.
+        if !changed {
+            return Ok(
+                json!({"configOptions":config_options(),"_meta":{"tutor":{"persistentResume":true}}}),
+            );
+        }
+        session.config_epoch = session
+            .config_epoch
+            .checked_add(1)
+            .ok_or((-32004, "Session configuration limit reached; reconnect."))?;
         session._connection = ConnectionConfig {
             _cwd: cwd.into(),
             _mcp_servers: servers.clone(),
         };
+        if let Some(manager) = &self.mcp {
+            let _ = manager.invalidate();
+        }
         Ok(json!({"configOptions":config_options(),"_meta":{"tutor":{"persistentResume":true}}}))
     }
 
@@ -796,6 +941,11 @@ impl Server {
         if serde_json::to_vec(&servers).map_or(true, |s| s.len() > 128 * 1024) {
             return Err((-32602, "MCP configuration exceeds the session limit."));
         }
+        let config_epoch = self
+            .sessions
+            .get(&session_id)
+            .map_or(Some(1), |session| session.config_epoch.checked_add(1))
+            .ok_or((-32004, "Session configuration limit reached; reconnect."))?;
         let existing = match self.sessions.get(&session_id) {
             Some(session) if session.owner.as_ref() == Some(&owner) => session.durable.clone(),
             Some(_) => return Err((-32602, "Session owner does not match.")),
@@ -807,7 +957,7 @@ impl Server {
         let model = self.options.model_sha256.clone();
         let load_id = session_id.clone();
         let load_owner = owner.clone();
-        let (store, history) = timeout(
+        let (store, history, conversation) = timeout(
             Duration::from_secs(2),
             tokio::task::spawn_blocking(move || -> Result<_, String> {
                 let store = match existing {
@@ -817,12 +967,14 @@ impl Server {
                             .map_err(|_| "storage")?,
                     )),
                 };
-                let history = store
-                    .lock()
-                    .map_err(|_| "storage")?
-                    .recent_turns(24)
-                    .map_err(|_| "storage")?;
-                Ok((store, history))
+                let (history, conversation) = {
+                    let store = store.lock().map_err(|_| "storage")?;
+                    (
+                        store.recent_turns(24).map_err(|_| "storage")?,
+                        store.conversation_binding().map_err(|_| "storage")?,
+                    )
+                };
+                Ok((store, history, conversation))
             }),
         )
         .await
@@ -834,6 +986,10 @@ impl Server {
                 "Local session could not be loaded for this owner and model.",
             )
         })?;
+        check_conversation_config(conversation, &servers)?;
+        if let Some(manager) = &self.mcp {
+            let _ = manager.invalidate();
+        }
         let turns: Vec<_> = history
             .into_iter()
             .map(|turn| Turn {
@@ -860,6 +1016,8 @@ impl Server {
                 history_bytes,
                 owner: Some(owner),
                 durable: Some(store.clone()),
+                conversation,
+                config_epoch,
             },
         );
         cancel.store(false, Ordering::Release);
@@ -995,6 +1153,66 @@ impl Server {
         if host_context.is_some() && session.durable.is_none() {
             return Err((-32602, "Verified Tutor context requires a durable session."));
         }
+        if let Some(host) = &host_context {
+            let conversation = host.conversation_uuid();
+            if session
+                .conversation
+                .is_some_and(|bound| bound != conversation)
+            {
+                return Err((
+                    -32602,
+                    "This session belongs to another Tutor conversation.",
+                ));
+            }
+            session.conversation = Some(conversation);
+        }
+        let inference_scope = if self.options.prefix_cache {
+            match (&session.owner, &session.durable, &host_context) {
+                (Some(owner), Some(_), Some(host)) => Some(cache_scope(CacheBinding {
+                    connection: *self.cache_connection.as_bytes(),
+                    owner,
+                    session: &session_id,
+                    conversation: *host.conversation_uuid().as_bytes(),
+                    config_epoch: session.config_epoch,
+                    cwd: &session._connection._cwd,
+                    servers: &session._connection._mcp_servers,
+                    model_sha256: &self.options.model_sha256,
+                    selection: (
+                        host.training_context["training_id"]
+                            .as_str()
+                            .expect("validated host context"),
+                        host.training_context["domain_id"]
+                            .as_str()
+                            .expect("validated host context"),
+                        host.training_context["revision"]
+                            .as_str()
+                            .expect("validated host context"),
+                        host.training_context["selection_version"]
+                            .as_u64()
+                            .expect("validated host context"),
+                    ),
+                })?),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let resident_scope = match (&self.mcp, &session.owner, &host_context) {
+            (Some(_), Some(owner), Some(host)) if session._connection._mcp_servers.len() == 1 => {
+                Some(
+                    crate::mcp_session::Scope::from_host(
+                        owner,
+                        &session_id,
+                        host.conversation_uuid(),
+                        &session._connection._mcp_servers[0],
+                        std::path::Path::new(&session._connection._cwd),
+                    )
+                    .map_err(|_| (-32602, "Invalid verified Tutor connection configuration."))?,
+                )
+            }
+            _ => None,
+        };
+        let resident_manager = self.mcp.clone();
         if session.durable.is_some() {
             while !session.turns.is_empty()
                 && (session.turns.len() >= 24
@@ -1040,6 +1258,7 @@ impl Server {
         let (chunks_tx, chunks) = mpsc::channel(8);
         let overflow = Arc::new(AtomicBool::new(false));
         let output_overflow = overflow.clone();
+        let worker_output_overflow = overflow.clone();
         let worker_engine = engine.clone();
         let worker_cancel = cancel.clone();
         let projection = Arc::new(Mutex::new(None));
@@ -1052,14 +1271,19 @@ impl Server {
                 observation: worker_observation.clone(),
                 started: turn_started,
             };
-            worker_engine
-                .lock()
-                .map_err(|_| "engine_unavailable".to_owned())?
-                .begin_turn_observation();
+            let mut runtime_turn = RuntimeTurn::begin(
+                worker_engine.clone(),
+                worker_observation.clone(),
+                inference_scope,
+            );
             if let Some(store) = &durable {
+                let mut store = store.lock().map_err(|_| "journal_unavailable")?;
+                if let Some(host) = &host_context {
+                    store
+                        .bind_conversation(host.conversation_uuid())
+                        .map_err(|_| "journal_conversation_binding_failed")?;
+                }
                 store
-                    .lock()
-                    .map_err(|_| "journal_unavailable")?
                     .begin_turn_with_id(&durable_turn_id, &current_user)
                     .map_err(|_| "journal_write_failed")?;
             }
@@ -1105,7 +1329,13 @@ impl Server {
                 }
                 if let Some(store) = &durable {
                     if !servers.is_empty() {
-                        let mut stats = crate::fast_harness::run(
+                        let resident = match (&resident_manager, &resident_scope) {
+                            (Some(manager), Some(scope)) => {
+                                Some(crate::harness::ResidentMcp { manager, scope })
+                            }
+                            _ => None,
+                        };
+                        let mut stats = crate::fast_harness::run_with_connection(
                             engine.as_mut(),
                             store,
                             crate::harness::Input {
@@ -1124,6 +1354,7 @@ impl Server {
                             &worker_cancel,
                             &runtime,
                             &mut output,
+                            resident,
                         )?;
                         stats.elapsed_ms = turn_started.elapsed().as_millis() as u64;
                         return Ok(stats);
@@ -1170,19 +1401,13 @@ impl Server {
                 stats.elapsed_ms = turn_started.elapsed().as_millis() as u64;
                 Ok(stats)
             })();
-            // Harvest component observations even when generation failed. These
-            // are wall-clock component timings, not UI usefulness evidence.
-            if let Ok(mut engine) = worker_engine.lock() {
-                let runtime = engine.take_runtime_observation();
-                if let Ok(mut observation) = worker_observation.lock() {
-                    observation.inference = runtime;
-                }
-            }
+            let mut persisted_complete = false;
             if let Some(store) = &durable {
                 let status = match &generated {
                     Ok(stats)
                         if stats.stop_reason == "end_turn"
-                            && !worker_cancel.load(Ordering::Acquire) =>
+                            && !worker_cancel.load(Ordering::Acquire)
+                            && !worker_output_overflow.load(Ordering::Acquire) =>
                     {
                         Completion::Complete
                     }
@@ -1195,7 +1420,11 @@ impl Server {
                     .map_err(|_| "journal_unavailable")?
                     .finish_turn(&durable_turn_id, status)
                     .map_err(|_| "journal_write_failed")?;
+                persisted_complete = matches!(status, Completion::Complete)
+                    && !worker_cancel.load(Ordering::Acquire)
+                    && !worker_output_overflow.load(Ordering::Acquire);
             }
+            runtime_turn.settle(persisted_complete);
             generated.map(WorkResult::Generation)
         });
         self.active = Some(Active {
@@ -1289,6 +1518,29 @@ impl Server {
                 turn.status = TurnStatus::Failed;
                 error(active.id, -32007, "Could not connect to Tutor MCP.")
             }
+            Ok(Err(code)) if code == "harness_mcp_restart_required" => {
+                turn.status = TurnStatus::Failed;
+                error(
+                    active.id,
+                    -32008,
+                    "Restart the local agent to reconnect to Tutor MCP.",
+                )
+            }
+            Ok(Err(code))
+                if matches!(
+                    code.as_str(),
+                    "runtime_worker_unresponsive"
+                        | "runtime_worker_unavailable"
+                        | "runtime_worker_protocol_failed"
+                ) =>
+            {
+                turn.status = TurnStatus::Failed;
+                error(
+                    active.id,
+                    -32008,
+                    "Restart the local agent to resume local inference.",
+                )
+            }
             Ok(Err(code)) if code == "harness_catalog_unavailable" => {
                 turn.status = TurnStatus::Failed;
                 error(
@@ -1316,6 +1568,21 @@ impl Server {
 }
 
 type RpcResult<T> = Result<T, (i64, &'static str)>;
+
+fn check_conversation_config(bound: Option<uuid::Uuid>, servers: &[Value]) -> RpcResult<()> {
+    if let Some(bound) = bound {
+        if crate::host_context::HostContext::conversation_from_servers(servers)
+            .map_err(|_| (-32602, "Invalid verified Tutor conversation configuration."))?
+            != Some(bound)
+        {
+            return Err((
+                -32602,
+                "This session belongs to another Tutor conversation.",
+            ));
+        }
+    }
+    Ok(())
+}
 
 fn prompt_text(params: &Value) -> RpcResult<String> {
     let blocks = params
@@ -1468,6 +1735,215 @@ mod tests {
             elapsed_ms: 1,
             stop_reason: reason.into(),
         }
+    }
+
+    #[derive(Default)]
+    struct CacheProbe {
+        scopes: Vec<Option<crate::runtime::CacheScope>>,
+        finalized: usize,
+        invalidated: usize,
+        observed: usize,
+    }
+
+    struct CacheEngine {
+        store: Arc<Mutex<SessionStore>>,
+        probe: Arc<Mutex<CacheProbe>>,
+        mode: &'static str,
+    }
+    impl Engine for CacheEngine {
+        fn set_prefix_cache_enabled(&mut self, _: bool) -> Result<(), String> {
+            Ok(())
+        }
+        fn set_cache_scope(
+            &mut self,
+            scope: Option<crate::runtime::CacheScope>,
+        ) -> Result<Option<crate::runtime::CacheTurn>, String> {
+            self.probe.lock().unwrap().scopes.push(scope);
+            Ok(scope.map(|_| crate::runtime::CacheTurn::fixture(1)))
+        }
+        fn finalize_cache(
+            &mut self,
+            _: crate::runtime::CacheTurn,
+            persisted: bool,
+        ) -> Result<(), String> {
+            assert!(persisted);
+            // Observe the real journal at the moment the adapter promotes KV.
+            // A completion only in RAM or a future intended write is not enough.
+            let store = self.store.lock().unwrap();
+            assert_eq!(
+                store.recent_turns(1).unwrap()[0].status,
+                Completion::Complete
+            );
+            self.probe.lock().unwrap().finalized += 1;
+            Ok(())
+        }
+        fn invalidate_cache(&mut self) -> Result<(), String> {
+            self.probe.lock().unwrap().invalidated += 1;
+            Ok(())
+        }
+        fn take_runtime_observation(&mut self) -> Option<crate::runtime::RuntimeObservation> {
+            self.probe.lock().unwrap().observed += 1;
+            None
+        }
+        fn count_input(
+            &mut self,
+            _: &[crate::runtime::ChatMessage],
+            _: &AtomicBool,
+        ) -> Result<usize, String> {
+            Ok(64)
+        }
+        fn generate(
+            &mut self,
+            _: GenerationRequest,
+            cancel: &AtomicBool,
+            emit: &mut dyn FnMut(&str) -> Result<(), String>,
+        ) -> Result<GenerationStats, String> {
+            emit("Une explication.")?;
+            match self.mode {
+                "error" => Err("fixture_failed".into()),
+                "cancelled" => {
+                    cancel.store(true, Ordering::Release);
+                    Ok(stats("cancelled"))
+                }
+                "journal_conflict" => {
+                    let mut store = self.store.lock().unwrap();
+                    let id = store.recent_turns(1).unwrap()[0].id.clone();
+                    store.finish_turn(&id, Completion::Failed).unwrap();
+                    Ok(stats("end_turn"))
+                }
+                reason => Ok(stats(reason)),
+            }
+        }
+    }
+
+    fn task_prompt(id: u64, session: &str, conversation: uuid::Uuid) -> Value {
+        let mut value = prompt(json!(id), session, "Explique cette notion simplement.");
+        let conversation = conversation.to_string();
+        value["params"]["_meta"] = json!({"tutorLocal":{"task":{
+            "conversationId":conversation,"language":"fr","trainingContext":{
+                "conversation_id":conversation,"training_id":"training","domain_id":"domain",
+                "revision":"1","selection_version":1,"name":"Go"
+            }
+        }}});
+        value
+    }
+
+    async fn finish_worker(server: &mut Server, cancel: &AtomicBool) -> Value {
+        while let Some(item) = server.active.as_mut().unwrap().chunks.recv().await {
+            server.stream_message(item, cancel).unwrap();
+        }
+        let active = server.active.take().unwrap();
+        server.finish(active, cancel).await
+    }
+
+    #[tokio::test]
+    async fn cache_promotion_requires_actual_complete_journal_and_observes_all_exits() {
+        for mode in [
+            "end_turn",
+            "max_tokens",
+            "cancelled",
+            "error",
+            "journal_conflict",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let conversation = uuid::Uuid::new_v4();
+            let mut server = Server {
+                options: Options {
+                    data_dir: Some(root.path().into()),
+                    prefix_cache: true,
+                    ..Options::default()
+                },
+                cache_connection: uuid::Uuid::new_v4(),
+                ..Server::default()
+            };
+            let created = server
+                .new_session(&json!({
+                    "cwd":root.path(),"mcpServers":[{"type":"http","name":"tutor",
+                        "url":"http://127.0.0.1:9/mcp","headers":[
+                    {"name":"Tutor-Conversation-ID","value":conversation.to_string()}]}],
+                    "_meta":{"tutorLocal":{"owner":{"profileId":"p","accountId":"a",
+                        "tenantId":"t","serverId":"s"}}}
+                }))
+                .await
+                .unwrap();
+            let session = created["sessionId"].as_str().unwrap();
+            let store = server.sessions[session].durable.clone().unwrap();
+            let probe = Arc::new(Mutex::new(CacheProbe::default()));
+            let engine: Arc<Mutex<Box<dyn Engine>>> = Arc::new(Mutex::new(Box::new(CacheEngine {
+                store: store.clone(),
+                probe: probe.clone(),
+                mode,
+            })));
+            let cancel = Arc::new(AtomicBool::new(false));
+            let message = task_prompt(7, session, conversation);
+            server
+                .start_prompt(
+                    &json!(7),
+                    &message["params"],
+                    &engine,
+                    &cancel,
+                    &AtomicBool::new(false),
+                )
+                .unwrap();
+            let response = finish_worker(&mut server, &cancel).await;
+            let recorded = store.lock().unwrap().recent_turns(1).unwrap().remove(0);
+            let state = probe.lock().unwrap();
+            assert_eq!(state.finalized, usize::from(mode == "end_turn"), "{mode}");
+            assert_eq!(state.observed, 1, "{mode}");
+            assert!(state.scopes[0].is_some());
+            if mode == "end_turn" {
+                assert_eq!(recorded.status, Completion::Complete);
+                assert_eq!(response["result"]["stopReason"], "end_turn");
+            } else {
+                assert!(state.invalidated > 0);
+                assert_ne!(recorded.status, Completion::Complete);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn loading_a_different_tutor_conversation_cannot_replay_private_history() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = Owner {
+            profile_id: "p".into(),
+            account_id: "a".into(),
+            tenant_id: "t".into(),
+            server_id: "s".into(),
+        };
+        let mut store =
+            SessionStore::create(root.path(), &owner, crate::config::MODEL_SHA256).unwrap();
+        store.bind_conversation(uuid::Uuid::new_v4()).unwrap();
+        let session = store.id().to_owned();
+        let turn = store.begin_turn("private-old-conversation").unwrap();
+        store.append_assistant(&turn, "private-old-reply").unwrap();
+        store.finish_turn(&turn, Completion::Complete).unwrap();
+        drop(store);
+        let mut client = Client::connect_options(
+            engine(|_, _, _| panic!("loading must never infer")),
+            65536,
+            Options {
+                data_dir: Some(root.path().into()),
+                ..Options::default()
+            },
+        );
+        client.initialize().await;
+        client
+            .send(request(
+                json!(2),
+                "session/load",
+                json!({
+                    "cwd":root.path(),"sessionId":session,"mcpServers":[{"type":"http",
+                        "name":"tutor","url":"http://127.0.0.1:9/mcp","headers":[
+                {"name":"Tutor-Conversation-ID","value":uuid::Uuid::new_v4().to_string()}]}],
+                    "_meta":{"tutorLocal":{"owner":owner}}
+                }),
+            ))
+            .await;
+        let response = client.read().await;
+        assert_eq!(response["id"], 2);
+        assert_eq!(response["error"]["code"], -32602);
+        assert!(!response.to_string().contains("private-old"));
+        client.close().await;
     }
 
     fn request(id: Value, method: &str, params: Value) -> Value {

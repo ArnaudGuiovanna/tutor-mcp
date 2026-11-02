@@ -11,11 +11,12 @@ use crate::{
     context::{self, ActiveTool, Evidence, HistoricalTurn, Origin, TaskContext},
     executor::{self, Preparation},
     journal::ContentRef,
-    mcp_client::{Client, Transport},
+    mcp_client::{Client, McpObservation, Transport},
+    mcp_session::{Lease, Manager, ReleasePolicy, Scope},
     runtime::{Engine, GenerationRequest, GenerationStats},
     session_store::SessionStore,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{HashSet, VecDeque},
@@ -34,15 +35,52 @@ const MAX_ACTION_BYTES: usize = 32 * 1024;
 const MAX_READ_BYTES: usize = 16 * 1024;
 const MAX_READS: usize = 4;
 const MAX_TEXT_BYTES: usize = 128 * 1024;
+const MCP_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 pub trait Ui {
     /// Content-free connection summary; this does not attest business success.
-    fn observe_mcp(&mut self, _observation: crate::mcp_client::McpObservation) {}
+    fn observe_mcp(&mut self, _observation: McpObservation) {}
+    /// Prior cleanup stays separate from the current turn's MCP timings.
+    fn observe_mcp_connection(&mut self, _observation: McpConnectionObservation) {}
     fn text(&mut self, text: &str) -> Result<(), String>;
     /// ACP update object; the host wraps sessionId and session/update.
     fn tool_update(&mut self, update: Value) -> Result<(), String>;
     /// Only the matched ACP host response may be returned here.
     fn approve(&mut self, call_id: &str, params: Value) -> Result<Value, String>;
+}
+
+/// Public UI metadata contains no owner, scope, configuration or tool payload.
+/// Reused means an existing Client was leased, not a live-peer health probe.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpConnectionObservation {
+    pub schema_version: u32,
+    pub connection_reused: bool,
+    pub retained: bool,
+    pub catalog_reused: bool,
+    pub restart_required: bool,
+    pub prior_cleanup: Vec<McpObservation>,
+}
+
+impl Default for McpConnectionObservation {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            connection_reused: false,
+            retained: false,
+            catalog_reused: false,
+            restart_required: false,
+            prior_cleanup: Vec::new(),
+        }
+    }
+}
+
+/// Constructed by ACP only after verified Owner/HostContext and feature flags.
+/// Public UI types never expose either of these private authority objects.
+#[derive(Clone, Copy)]
+pub(crate) struct ResidentMcp<'a> {
+    pub manager: &'a Manager,
+    pub scope: &'a Scope,
 }
 
 pub struct Input<'a> {
@@ -68,27 +106,15 @@ pub fn run(
     handle: &Handle,
     ui: &mut dyn Ui,
 ) -> Result<GenerationStats, String> {
-    validate_input(store, &input)?;
-    check_cancel(cancel)?;
-    let connect_started = std::time::Instant::now();
-    let mut client = match handle.block_on(Client::connect(&input.servers[0], input.cwd, cancel)) {
-        Ok(client) => client,
-        Err(_) => {
-            ui.observe_mcp(crate::mcp_client::McpObservation {
-                connect_total_ms: Some(connect_started.elapsed().as_secs_f64() * 1000.0),
-                ..crate::mcp_client::McpObservation::default()
-            });
-            return Err("harness_mcp_connection_failed".to_owned());
-        }
-    };
-    let outcome = run_connected(engine, store, &input, cancel, handle, ui, &mut client);
-    let closed = handle.block_on(client.close());
-    ui.observe_mcp(client.take_observation());
-    match (outcome, closed) {
-        (Err(error), _) => Err(error),
-        (Ok(_), Err(_)) => Err("harness_mcp_close_failed".into()),
-        (Ok(stats), Ok(())) => Ok(stats),
-    }
+    run_workflow(
+        engine,
+        store,
+        input,
+        cancel,
+        handle,
+        ui,
+        Workflow::Discovery,
+    )
 }
 
 /// Fixed CPU workflow. No model action can reach the executor through this path.
@@ -100,27 +126,281 @@ pub(crate) fn run_fixed(
     handle: &Handle,
     ui: &mut dyn Ui,
 ) -> Result<GenerationStats, String> {
+    run_fixed_with_connection(engine, store, input, cancel, handle, ui, None)
+}
+
+pub(crate) fn run_fixed_with_connection(
+    engine: &mut dyn Engine,
+    store: &Arc<Mutex<SessionStore>>,
+    input: Input<'_>,
+    cancel: &AtomicBool,
+    handle: &Handle,
+    ui: &mut dyn Ui,
+    resident: Option<ResidentMcp<'_>>,
+) -> Result<GenerationStats, String> {
+    run_workflow(
+        engine,
+        store,
+        input,
+        cancel,
+        handle,
+        ui,
+        Workflow::Fixed(resident),
+    )
+}
+
+enum Workflow<'a> {
+    Discovery,
+    Fixed(Option<ResidentMcp<'a>>),
+}
+
+fn run_workflow(
+    engine: &mut dyn Engine,
+    store: &Arc<Mutex<SessionStore>>,
+    input: Input<'_>,
+    cancel: &AtomicBool,
+    handle: &Handle,
+    ui: &mut dyn Ui,
+    workflow: Workflow<'_>,
+) -> Result<GenerationStats, String> {
     validate_input(store, &input)?;
     check_cancel(cancel)?;
+    let fixed = matches!(workflow, Workflow::Fixed(_));
+    let resident = match workflow {
+        Workflow::Discovery => None,
+        Workflow::Fixed(resident) => resident,
+    };
+    let mut connection = McpConnectionObservation::default();
+    if let Some(resident) = resident {
+        let acquired = acquire_resident(resident, &input, cancel, handle, &mut connection);
+        let mut lease = match acquired {
+            Ok(lease) => lease,
+            Err(failure) => {
+                let mut error = resident_error(failure.error);
+                connection.restart_required = failure.error.requires_agent_restart();
+                if let Err(cleanup_error) = harvest_prior_cleanup(resident.manager, &mut connection)
+                {
+                    error = cleanup_error;
+                }
+                emit_mcp(ui, failure.observations, connection);
+                return Err(error);
+            }
+        };
+        // The existing state machine fetches a fresh catalog for EVERY lease.
+        // Approval, changed-after-approval and dispatch stay in its executor.
+        let outcome = if fixed {
+            fixed_connected(engine, store, &input, cancel, handle, ui, &mut lease)
+        } else {
+            run_connected(engine, store, &input, cancel, handle, ui, &mut lease)
+        };
+        let policy = if outcome.is_ok() {
+            ReleasePolicy::RetainIfHealthy
+        } else {
+            ReleasePolicy::Close
+        };
+        let released = handle.block_on(lease.release(policy, cancel));
+        connection.connection_reused = released.connection_reused;
+        connection.retained = released.retained;
+        connection.restart_required = released
+            .error
+            .is_some_and(|error| error.requires_agent_restart());
+        let cleanup_error = harvest_prior_cleanup(resident.manager, &mut connection).err();
+        let restart_required = connection.restart_required;
+        // Both callbacks run before propagating workflow/release errors.
+        // emit_mcp is exactly one observation for current-turn operations.
+        emit_mcp(ui, released.observations, connection);
+        // Preserve the primary journal/tool/UI error, even when cleanup also
+        // requires restart. The metadata above retains that separate fact.
+        let stats = outcome?;
+        if restart_required {
+            return Err("harness_mcp_restart_required".into());
+        }
+        if let Some(error) = cleanup_error {
+            return Err(error);
+        }
+        return match released.error {
+            Some(_) => Err("harness_mcp_close_failed".into()),
+            None => Ok(stats),
+        };
+    }
+
+    // Missing verified scope/disabled option uses the unchanged per-turn path.
     let connect_started = std::time::Instant::now();
     let mut client = match handle.block_on(Client::connect(&input.servers[0], input.cwd, cancel)) {
         Ok(client) => client,
         Err(_) => {
-            ui.observe_mcp(crate::mcp_client::McpObservation {
-                connect_total_ms: Some(connect_started.elapsed().as_secs_f64() * 1000.0),
-                ..crate::mcp_client::McpObservation::default()
-            });
+            emit_mcp(
+                ui,
+                vec![McpObservation {
+                    connect_total_ms: Some(connect_started.elapsed().as_secs_f64() * 1000.0),
+                    ..McpObservation::default()
+                }],
+                connection,
+            );
             return Err("harness_mcp_connection_failed".to_owned());
         }
     };
-    let outcome = fixed_connected(engine, store, &input, cancel, handle, ui, &mut client);
+    let outcome = if fixed {
+        fixed_connected(engine, store, &input, cancel, handle, ui, &mut client)
+    } else {
+        run_connected(engine, store, &input, cancel, handle, ui, &mut client)
+    };
     let closed = handle.block_on(client.close());
-    ui.observe_mcp(client.take_observation());
+    emit_mcp(ui, vec![client.take_observation()], connection);
     match (outcome, closed) {
         (Err(error), _) => Err(error),
         (Ok(_), Err(_)) => Err("harness_mcp_close_failed".into()),
         (Ok(stats), Ok(())) => Ok(stats),
     }
+}
+
+fn resident_error(error: crate::mcp_session::Error) -> String {
+    if error.requires_agent_restart() {
+        "harness_mcp_restart_required"
+    } else if error == crate::mcp_session::Error::Cancelled {
+        "harness_cancelled"
+    } else if error == crate::mcp_session::Error::Busy {
+        "harness_mcp_cleanup_pending"
+    } else if error == crate::mcp_session::Error::Closed {
+        "harness_mcp_connection_closed"
+    } else {
+        "harness_mcp_connection_failed"
+    }
+    .into()
+}
+
+fn acquire_resident(
+    resident: ResidentMcp<'_>,
+    input: &Input<'_>,
+    cancel: &AtomicBool,
+    handle: &Handle,
+    connection: &mut McpConnectionObservation,
+) -> Result<Lease, crate::mcp_session::AcquireFailure> {
+    use crate::mcp_session::{AcquireFailure, Error};
+    let deadline = std::time::Instant::now() + MCP_READY_TIMEOUT;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match handle.block_on(resident.manager.wait_ready(cancel, remaining)) {
+            Ok(observations) => connection.prior_cleanup.extend(observations),
+            Err(error) => {
+                return Err(AcquireFailure {
+                    error,
+                    observations: Vec::new(),
+                })
+            }
+        }
+        match handle.block_on(resident.manager.acquire(
+            resident.scope,
+            &input.servers[0],
+            input.cwd,
+            cancel,
+        )) {
+            // Only these two typed rejections occur BEFORE a slot is reserved,
+            // any connect is polled, or any MCP request can be sent. This loop
+            // waits for local admission; it never retries a connection or call.
+            Err(failure)
+                if matches!(failure.error, Error::Busy | Error::ObservationPending)
+                    && failure.observations.is_empty()
+                    && std::time::Instant::now() < deadline => {}
+            outcome => return outcome,
+        }
+    }
+}
+
+fn harvest_prior_cleanup(
+    manager: &Manager,
+    connection: &mut McpConnectionObservation,
+) -> Result<(), String> {
+    match manager.take_deferred_observations() {
+        Ok(observations) => {
+            connection.prior_cleanup.extend(observations);
+            Ok(())
+        }
+        Err(error) => {
+            connection.restart_required |= error.requires_agent_restart();
+            Err(resident_error(error))
+        }
+    }
+}
+
+fn emit_mcp(
+    ui: &mut dyn Ui,
+    observations: Vec<McpObservation>,
+    connection: McpConnectionObservation,
+) {
+    ui.observe_mcp(aggregate_mcp_observations(&observations));
+    ui.observe_mcp_connection(connection);
+}
+
+fn aggregate_mcp_observations(observations: &[McpObservation]) -> McpObservation {
+    fn sum_ms(total: &mut Option<f64>, next: Option<f64>) {
+        if let Some(next) = next {
+            *total = Some(total.unwrap_or(0.0) + next);
+        }
+    }
+    let mut total = McpObservation::default();
+    let mut pages = Some(0_u64);
+    let mut catalog_observed = false;
+    for observation in observations {
+        sum_ms(&mut total.connect_total_ms, observation.connect_total_ms);
+        sum_ms(
+            &mut total.initialize_total_ms,
+            observation.initialize_total_ms,
+        );
+        sum_ms(&mut total.catalog_total_ms, observation.catalog_total_ms);
+        sum_ms(
+            &mut total.tools_call_total_ms,
+            observation.tools_call_total_ms,
+        );
+        sum_ms(&mut total.close_total_ms, observation.close_total_ms);
+        if observation.catalog_attempts != 0 {
+            catalog_observed = true;
+            pages = pages
+                .zip(observation.catalog_pages)
+                .map(|(a, b)| a.saturating_add(b));
+        }
+        total.catalog_attempts = total
+            .catalog_attempts
+            .saturating_add(observation.catalog_attempts);
+        total.catalog_transport_successes = total
+            .catalog_transport_successes
+            .saturating_add(observation.catalog_transport_successes);
+        total.catalog_transport_failures = total
+            .catalog_transport_failures
+            .saturating_add(observation.catalog_transport_failures);
+        total.catalog_interrupted = total
+            .catalog_interrupted
+            .saturating_add(observation.catalog_interrupted);
+        total.call_attempts = total
+            .call_attempts
+            .saturating_add(observation.call_attempts);
+        total.call_transport_successes = total
+            .call_transport_successes
+            .saturating_add(observation.call_transport_successes);
+        total.call_transport_failures = total
+            .call_transport_failures
+            .saturating_add(observation.call_transport_failures);
+        total.call_interrupted = total
+            .call_interrupted
+            .saturating_add(observation.call_interrupted);
+        total.tool_result_errors = total
+            .tool_result_errors
+            .saturating_add(observation.tool_result_errors);
+        total.close_attempts = total
+            .close_attempts
+            .saturating_add(observation.close_attempts);
+        total.close_transport_successes = total
+            .close_transport_successes
+            .saturating_add(observation.close_transport_successes);
+        total.close_transport_failures = total
+            .close_transport_failures
+            .saturating_add(observation.close_transport_failures);
+        total.close_interrupted = total
+            .close_interrupted
+            .saturating_add(observation.close_interrupted);
+    }
+    total.catalog_pages = if catalog_observed { pages } else { None };
+    total
 }
 
 fn fixed_connected<C: Connection>(
@@ -372,6 +652,18 @@ impl Connection for Client {
             .block_on(self.list_tools(cancel))
             .map_err(|_| "harness_catalog_unavailable".into())
     }
+    fn changed(&mut self) -> bool {
+        self.take_tools_changed()
+    }
+}
+
+impl Connection for Lease {
+    fn list(&mut self, handle: &Handle, cancel: &AtomicBool) -> Result<Vec<ToolEntry>, String> {
+        handle
+            .block_on(self.list_tools(cancel))
+            .map_err(|_| "harness_catalog_unavailable".into())
+    }
+
     fn changed(&mut self) -> bool {
         self.take_tools_changed()
     }
@@ -1615,6 +1907,9 @@ mod tests {
         text: String,
         cancel_on_approval: bool,
         invalidate: Option<Arc<AtomicBool>>,
+        invalidate_resident: Option<Manager>,
+        observations: Vec<McpObservation>,
+        connections: Vec<McpConnectionObservation>,
     }
     impl<'a> UserInterface<'a> {
         fn new(fixture: &'a Fixture, cancel: &'a AtomicBool) -> Self {
@@ -1627,10 +1922,21 @@ mod tests {
                 text: String::new(),
                 cancel_on_approval: false,
                 invalidate: None,
+                invalidate_resident: None,
+                observations: Vec::new(),
+                connections: Vec::new(),
             }
         }
     }
     impl Ui for UserInterface<'_> {
+        fn observe_mcp(&mut self, observation: McpObservation) {
+            assert!(self.fixture.store.try_lock().is_ok());
+            self.observations.push(observation);
+        }
+        fn observe_mcp_connection(&mut self, observation: McpConnectionObservation) {
+            assert!(self.fixture.store.try_lock().is_ok());
+            self.connections.push(observation);
+        }
         fn text(&mut self, text: &str) -> Result<(), String> {
             // ACP's actual callback takes this lock too. A held lock is a bug.
             let mut store = self
@@ -1657,6 +1963,9 @@ mod tests {
             if let Some(changed) = &self.invalidate {
                 changed.store(true, Ordering::Release);
             }
+            if let Some(manager) = &self.invalidate_resident {
+                manager.invalidate();
+            }
             Ok(self.response.clone())
         }
     }
@@ -1677,6 +1986,395 @@ mod tests {
     const CALL: &str = r#"{"action":"call","id":"tutor/get_pending_alerts","arguments":{}}"#;
     const READ: &str = r#"{"action":"read_result","reference":"result_1","pointer":"/alerts"}"#;
     const ANSWER: &str = r#"{"action":"answer"}"#;
+
+    async fn profile_server() -> crate::mcp::tests::Mock {
+        use crate::mcp::tests::{initialization, mock, Reply};
+        mock(|request| initialization(request).unwrap_or_else(|| {
+            let result = match request["method"].as_str().unwrap() {
+                "tools/list" => json!({"tools":[{"name":"get_learner_context","description":"Read learner context",
+                    "inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]}),
+                "tools/call" => {
+                    assert_eq!(request["params"]["name"], "get_learner_context");
+                    assert_eq!(request["params"]["arguments"], json!({}));
+                    json!({"content":[],"structuredContent":{"profile":{"language":"fr"},
+                        "objective":"Cultiver le jardin fixture","unselected":"FIXTURE_PRIVATE_RESULT"}})
+                }
+                _ => panic!("unexpected fixture method"),
+            };
+            Reply::json(json!({"jsonrpc":"2.0","id":request["id"],"result":result}))
+        })).await
+    }
+
+    fn resident_scope(fixture: &mut Fixture, url: &str, conversation: Uuid) -> Scope {
+        fixture.servers = vec![json!({"type":"http","name":"tutor","url":url,"headers":[
+            {"name":"Authorization","value":"Bearer FIXTURE_PRIVATE_CREDENTIAL"},
+            {"name":"Tutor-Conversation-ID","value":conversation.to_string()}
+        ]})];
+        Scope::from_host(
+            &Owner {
+                profile_id: "p".into(),
+                account_id: "a".into(),
+                tenant_id: "t".into(),
+                server_id: "tutor".into(),
+            },
+            &fixture.session,
+            conversation,
+            &fixture.servers[0],
+            fixture.root.path(),
+        )
+        .unwrap()
+    }
+
+    fn method_count(server: &crate::mcp::tests::Mock, method: &str) -> usize {
+        server
+            .observed
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(request, _)| request["method"] == method)
+            .count()
+    }
+
+    #[test]
+    fn mcp_observation_aggregation_preserves_unknown_phases_and_saturates_counters() {
+        let observations = [
+            McpObservation {
+                connect_total_ms: Some(3.0),
+                close_total_ms: Some(2.0),
+                call_attempts: u64::MAX,
+                ..McpObservation::default()
+            },
+            McpObservation {
+                catalog_total_ms: Some(5.0),
+                tools_call_total_ms: Some(7.0),
+                call_attempts: 1,
+                catalog_attempts: 1,
+                ..McpObservation::default()
+            },
+            McpObservation {
+                tools_call_total_ms: Some(11.0),
+                catalog_attempts: 1,
+                catalog_pages: Some(2),
+                ..McpObservation::default()
+            },
+        ];
+        let total = aggregate_mcp_observations(&observations);
+        assert_eq!(total.schema_version, 1);
+        assert_eq!(total.connect_total_ms, Some(3.0));
+        assert_eq!(total.close_total_ms, Some(2.0));
+        assert_eq!(total.catalog_total_ms, Some(5.0));
+        assert_eq!(total.tools_call_total_ms, Some(18.0));
+        assert_eq!(total.initialize_total_ms, None);
+        assert_eq!(total.catalog_pages, None);
+        assert_eq!(total.call_attempts, u64::MAX);
+        assert_eq!(aggregate_mcp_observations(&[]), McpObservation::default());
+        let pages = aggregate_mcp_observations(&[
+            McpObservation {
+                catalog_attempts: 1,
+                catalog_pages: Some(2),
+                ..McpObservation::default()
+            },
+            McpObservation {
+                catalog_attempts: 1,
+                catalog_pages: Some(3),
+                ..McpObservation::default()
+            },
+        ]);
+        assert_eq!(pages.catalog_pages, Some(5));
+    }
+
+    #[test]
+    fn resident_profile_keeps_real_permissions_and_fresh_catalog_on_two_turns() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let server = runtime.block_on(profile_server());
+        let mut fixture = Fixture::for_user("donne moi mon profil");
+        let conversation = Uuid::new_v4();
+        let scope = resident_scope(&mut fixture, &server.url, conversation);
+        let manager = Manager::new(runtime.handle().clone());
+        let cancel = AtomicBool::new(false);
+        for turn in 0..2 {
+            {
+                let mut model = Model::new(&[]);
+                let mut ui = UserInterface::new(&fixture, &cancel);
+                let stats = crate::fast_harness::run_with_connection(
+                    &mut model,
+                    &fixture.store,
+                    fixture.input(),
+                    &cancel,
+                    runtime.handle(),
+                    &mut ui,
+                    Some(ResidentMcp {
+                        manager: &manager,
+                        scope: &scope,
+                    }),
+                )
+                .unwrap();
+                assert_eq!(stats.output_tokens, 0);
+                assert!(model.requests.is_empty());
+                assert!(ui.text.contains("Cultiver le jardin fixture"));
+                assert!(!ui.text.contains("FIXTURE_PRIVATE_RESULT"));
+                assert_eq!(ui.approvals.len(), 1);
+                assert_eq!(
+                    ui.approvals[0]["toolCall"]["rawInput"]["tool"],
+                    "get_learner_context"
+                );
+                assert_eq!(ui.observations.len(), 1);
+                assert_eq!(ui.observations[0].connect_total_ms.is_some(), turn == 0);
+                assert_eq!(ui.observations[0].catalog_attempts, 1);
+                assert_eq!(ui.observations[0].call_attempts, 1);
+                assert_eq!(ui.observations[0].close_total_ms, None);
+                assert_eq!(ui.connections.len(), 1);
+                assert_eq!(ui.connections[0].connection_reused, turn == 1);
+                assert!(ui.connections[0].retained);
+                assert!(!ui.connections[0].catalog_reused);
+                let exported = serde_json::to_string(&ui.connections[0]).unwrap();
+                assert!(!exported.contains("FIXTURE_PRIVATE"));
+                assert!(!exported.contains("http://"));
+            }
+            fixture
+                .store
+                .lock()
+                .unwrap()
+                .finish_turn(&fixture.turn, crate::session_store::Completion::Complete)
+                .unwrap();
+            if turn == 0 {
+                fixture.turn = fixture
+                    .store
+                    .lock()
+                    .unwrap()
+                    .begin_turn(&fixture.user)
+                    .unwrap();
+            }
+        }
+        assert_eq!(method_count(&server, "initialize"), 1);
+        assert_eq!(method_count(&server, "tools/list"), 2);
+        assert_eq!(method_count(&server, "tools/call"), 2);
+        assert_eq!(
+            runtime.block_on(manager.shutdown()).status,
+            crate::mcp_session::RetirementStatus::Quiescent
+        );
+    }
+
+    #[test]
+    fn resident_profile_denial_and_revocation_never_bypass_executor_approval() {
+        for revoked in [false, true] {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap();
+            let server = runtime.block_on(profile_server());
+            let mut fixture = Fixture::for_user("donne moi mon profil");
+            let scope = resident_scope(&mut fixture, &server.url, Uuid::new_v4());
+            let manager = Manager::new(runtime.handle().clone());
+            let cancel = AtomicBool::new(false);
+            let mut model = Model::new(&[]);
+            let mut ui = UserInterface::new(&fixture, &cancel);
+            if revoked {
+                ui.invalidate_resident = Some(manager.clone());
+            } else {
+                ui.response = json!({"outcome":{"outcome":"cancelled"}});
+            }
+            let outcome = crate::fast_harness::run_with_connection(
+                &mut model,
+                &fixture.store,
+                fixture.input(),
+                &cancel,
+                runtime.handle(),
+                &mut ui,
+                Some(ResidentMcp {
+                    manager: &manager,
+                    scope: &scope,
+                }),
+            );
+            assert_eq!(outcome.is_err(), revoked);
+            assert_eq!(ui.approvals.len(), 1);
+            assert_eq!(method_count(&server, "tools/call"), 0);
+            assert_eq!(ui.observations.len(), 1);
+            assert_eq!(ui.observations[0].call_attempts, 0);
+            assert_eq!(ui.connections.len(), 1);
+            assert_eq!(ui.connections[0].retained, !revoked);
+            if !revoked {
+                assert!(ui.text.contains("autorisation n’a pas été accordée"));
+            }
+            let operation = ui.approvals[0]["toolCall"]["toolCallId"].as_str().unwrap();
+            assert_eq!(
+                fixture
+                    .store
+                    .lock()
+                    .unwrap()
+                    .journal()
+                    .operation(operation)
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                OperationState::Rejected
+            );
+            runtime.block_on(manager.shutdown());
+        }
+    }
+
+    #[test]
+    fn old_cleanup_is_waited_for_and_reported_separately_from_current_turn() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let server = runtime.block_on(profile_server());
+        let mut fixture = Fixture::for_user("donne moi mon profil");
+        let scope = resident_scope(&mut fixture, &server.url, Uuid::new_v4());
+        let manager = Manager::new(runtime.handle().clone());
+        let cancel = AtomicBool::new(false);
+        let mut previous = runtime
+            .block_on(manager.acquire(&scope, &fixture.servers[0], fixture.root.path(), &cancel))
+            .unwrap();
+        runtime.block_on(previous.list_tools(&cancel)).unwrap();
+        drop(previous); // cleanup remains pending when this turn is entered
+        let mut model = Model::new(&[]);
+        let mut ui = UserInterface::new(&fixture, &cancel);
+        crate::fast_harness::run_with_connection(
+            &mut model,
+            &fixture.store,
+            fixture.input(),
+            &cancel,
+            runtime.handle(),
+            &mut ui,
+            Some(ResidentMcp {
+                manager: &manager,
+                scope: &scope,
+            }),
+        )
+        .unwrap();
+        assert_eq!(ui.connections.len(), 1);
+        assert_eq!(ui.connections[0].prior_cleanup.len(), 1);
+        let prior = &ui.connections[0].prior_cleanup[0];
+        assert!(prior.connect_total_ms.is_some());
+        assert!(prior.close_total_ms.is_some());
+        assert_eq!(prior.catalog_attempts, 1);
+        assert_eq!(ui.observations.len(), 1);
+        assert_eq!(ui.observations[0].catalog_attempts, 1);
+        assert_eq!(ui.observations[0].call_attempts, 1);
+        assert_eq!(ui.observations[0].close_total_ms, None);
+        assert_eq!(method_count(&server, "initialize"), 2);
+        assert_eq!(method_count(&server, "tools/list"), 2);
+        assert_eq!(method_count(&server, "tools/call"), 1);
+        runtime.block_on(manager.shutdown());
+    }
+
+    #[test]
+    fn no_resident_option_preserves_legacy_per_turn_connections() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let server = runtime.block_on(profile_server());
+        let mut fixture = Fixture::for_user("donne moi mon profil");
+        let _scope = resident_scope(&mut fixture, &server.url, Uuid::new_v4());
+        let cancel = AtomicBool::new(false);
+        for turn in 0..2 {
+            {
+                let mut model = Model::new(&[]);
+                let mut ui = UserInterface::new(&fixture, &cancel);
+                crate::fast_harness::run(
+                    &mut model,
+                    &fixture.store,
+                    fixture.input(),
+                    &cancel,
+                    runtime.handle(),
+                    &mut ui,
+                )
+                .unwrap();
+                assert_eq!(ui.observations.len(), 1);
+                assert!(ui.observations[0].connect_total_ms.is_some());
+                assert!(ui.observations[0].close_total_ms.is_some());
+                assert_eq!(ui.connections.len(), 1);
+                assert!(!ui.connections[0].connection_reused);
+                assert!(!ui.connections[0].retained);
+                assert_eq!(ui.approvals.len(), 1);
+            }
+            fixture
+                .store
+                .lock()
+                .unwrap()
+                .finish_turn(&fixture.turn, crate::session_store::Completion::Complete)
+                .unwrap();
+            if turn == 0 {
+                fixture.turn = fixture
+                    .store
+                    .lock()
+                    .unwrap()
+                    .begin_turn(&fixture.user)
+                    .unwrap();
+            }
+        }
+        assert_eq!(method_count(&server, "initialize"), 2);
+        assert_eq!(method_count(&server, "tools/call"), 2);
+    }
+
+    #[test]
+    fn quarantined_acquire_emits_metadata_and_measurements_before_restart_error() {
+        let fixture = Fixture::for_user("donne moi mon profil");
+        let conversation = Uuid::new_v4();
+        let config = json!({"name":"tutor","command":fixture.root.path().join("missing-native-fixture"), "args":[],
+            "env":[{"name":"TUTOR_CONVERSATION_ID","value":conversation.to_string()}]});
+        let scope = Scope::from_host(
+            &Owner {
+                profile_id: "p".into(),
+                account_id: "a".into(),
+                tenant_id: "t".into(),
+                server_id: "tutor".into(),
+            },
+            &fixture.session,
+            conversation,
+            &config,
+            fixture.root.path(),
+        )
+        .unwrap();
+        let mut input = fixture.input();
+        let servers = vec![config];
+        input.servers = &servers;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let manager = Manager::new(runtime.handle().clone());
+        let cancel = AtomicBool::new(false);
+        let mut model = Model::new(&[]);
+        let mut ui = UserInterface::new(&fixture, &cancel);
+        assert_eq!(
+            crate::fast_harness::run_with_connection(
+                &mut model,
+                &fixture.store,
+                input,
+                &cancel,
+                runtime.handle(),
+                &mut ui,
+                Some(ResidentMcp {
+                    manager: &manager,
+                    scope: &scope
+                })
+            )
+            .err()
+            .as_deref(),
+            Some("harness_mcp_restart_required")
+        );
+        assert_eq!(ui.observations.len(), 1);
+        assert!(ui.observations[0].connect_total_ms.is_some());
+        assert_eq!(ui.observations[0].call_attempts, 0);
+        assert_eq!(ui.connections.len(), 1);
+        assert!(ui.connections[0].restart_required);
+        assert!(ui.approvals.is_empty());
+        assert!(!serde_json::to_string(&ui.connections[0])
+            .unwrap()
+            .contains("missing-native"));
+        runtime.block_on(manager.shutdown());
+    }
 
     #[test]
     fn small_model_chat_bypasses_unreachable_mcp_and_uses_one_generation() {

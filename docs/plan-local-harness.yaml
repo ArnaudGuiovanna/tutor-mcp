@@ -19,6 +19,7 @@ objective:
   qualification_operator: L'utilisateur a confirmé pouvoir exécuter le futur banc sur son PC Windows/P2000 ; demander ce lancement seulement lorsque le paquet et son rapport exportable sont prêts.
 
 current_state:
+  scope: Dernière préversion distribuée ; les sources en cours sont décrites dans implementation_checkpoint.
   desktop_version: 0.0.8
   release: https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/tutor-local-v0.1.0-alpha.4
   runtime_model: Qwen3-1.7B Q4_K_M
@@ -39,7 +40,10 @@ implementation_checkpoint:
   implemented: Mesures optionnelles et versionnées du moteur, du transport MCP et du worker ACP, y compris les erreurs observées.
   verified: 206 tests natifs réussis, deux essais GGUF spéciaux ignorés ; neuf cas de développement avec le GGUF épinglé, Tutor réel temporaire et une connexion refusée.
   limits: Ces cas connus ne qualifient ni la compréhension générale, ni la pédagogie, ni la réponse utile dans l'UI, ni Windows/P2000.
-  next: Mesurer le coût de l'observateur, puis worker/cache et connexion MCP résidents ; aucun gain produit présumé.
+  resident_contract: docs/local-harness/resident-integration.yaml
+  resident_source: Worker/contexte résidents, cache confirmé après journal, connexion MCP réutilisable, projection de preuves à alias stables et liaison durable à la conversation intégrés derrière options explicites.
+  resident_checks: 228 tests sans inférence et 237 tests avec moteur natif réussis ; trois essais GGUF ignorés par cette suite, Clippy strict réussi.
+  next: Vérifier le banc apparié sur vrai Tutor/GGUF, puis terminer la fraîcheur du catalogue, l'état pédagogique et les capacités ; aucun gain produit présumé.
 
 invariants:
   - Le serveur reste autorité sur les droits, formations, versions, décisions et progression.
@@ -156,7 +160,7 @@ items:
   - id: LH-01
     title: Worker résident et cache d'inférence isolé
     owner: runtime_cache
-    status: TODO
+    status: IN_PROGRESS
     depends_on: [LH-00]
     paths: [client/local-agent/src/runtime.rs, client/local-agent/src/acp.rs, client/local-agent/src/harness.rs]
     acceptance:
@@ -165,11 +169,12 @@ items:
       - Tester changement d'identité, de serveur, de conversation, de modèle, de template et de budget ; aucune fuite ou sélection de contexte périmé.
       - Après erreur, annulation, sortie maximale ou éviction, produire une nouvelle réponse correcte et journalisée, sans queue ni tokens résiduels.
       - Comparer cache actif/inactif sur les mêmes requêtes ; premier fragment et décision complète mesurés séparément, modèle et paramètres constants.
+    checkpoint: Worker/contexte unique et cache raccordés à ACP ; promotion après fin durable seulement, invalidation aux erreurs. Interruption native pendant prefill et campagne complète restent non qualifiées.
 
   - id: LH-02
     title: Connexion MCP et catalogue résidents
     owner: mcp_capabilities
-    status: TODO
+    status: IN_PROGRESS
     depends_on: [LH-00]
     paths: [client/local-agent/src/harness.rs, client/local-agent/src/mcp_client.rs, client/local-agent/src/mcp_stdio.rs, client/local-agent/src/acp.rs]
     acceptance:
@@ -177,11 +182,12 @@ items:
       - Révoquer les anciens bindings sur changement de compte, serveur, conversation ou autorisation ; actualiser le catalogue vivant.
       - Un échec de transport n'entraîne aucun rejeu automatique d'une opération envoyée ; les mutations inconnues restent identifiées.
       - Annulation, rebind, EOF et fermeture du client libèrent transports et processus ; permissions toujours vérifiées sur l'outil métier réel.
+    checkpoint: Connexion HTTP/stdio réutilisable, lease exclusive et nettoyage contrôlé raccordés ; catalogue encore relu à chaque lease, donc critère de catalogue résident non satisfait.
 
   - id: LH-03
     title: État pédagogique persistant et projection bornée
     owner: context_routing
-    status: TODO
+    status: IN_PROGRESS
     depends_on: [LH-00]
     paths: [client/local-agent/src/context.rs, client/local-agent/src/session_store.rs, client/local-agent/src/journal.rs, client/local-agent/src/host_context.rs]
     acceptance:
@@ -190,6 +196,7 @@ items:
       - Résoudre « la deuxième », « on reprend » et « je bloque » uniquement avec l'état correspondant ; clarifier si cet état manque ou est périmé.
       - Conserver le journal complet et les preuves requises après cent tours ; toute omission est traçable et le budget exact est respecté.
       - Préserver un ordre stable du prompt sans remettre identifiants aléatoires ni données variables dans son préfixe stable.
+    checkpoint: Labels de preuves stables et audit séparé intégrés ; affinité durable du journal à la conversation. Activité, question attendue et dernière liste avec accusé UI restent à intégrer.
 
   - id: LH-04
     title: Registre de capacités et premières lectures utiles
