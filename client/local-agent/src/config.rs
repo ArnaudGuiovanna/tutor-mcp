@@ -21,6 +21,7 @@ pub struct Config {
     pub prefix_cache: bool,
     pub reuse_mcp: bool,
     pub catalog_cache: bool,
+    pub semantic_router: bool,
 }
 
 impl Config {
@@ -37,6 +38,7 @@ impl Config {
             prefix_cache: false,
             reuse_mcp: false,
             catalog_cache: false,
+            semantic_router: false,
         };
         let mut args = args.into_iter();
         let mut seen = std::collections::BTreeSet::new();
@@ -51,6 +53,7 @@ impl Config {
                 "--prefix-cache" => config.prefix_cache = parse_switch(&value)?,
                 "--reuse-mcp" => config.reuse_mcp = parse_switch(&value)?,
                 "--catalog-cache" => config.catalog_cache = parse_switch(&value)?,
+                "--semantic-router" => config.semantic_router = parse_switch(&value)?,
                 "--sha256" => config.expected_sha256 = Some(value.to_ascii_lowercase()),
                 "--context" => config.context = value.parse().map_err(|_| "invalid_context")?,
                 "--max-output" => {
@@ -69,6 +72,9 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        if self.semantic_router && !self.reuse_mcp {
+            return Err("semantic_router_requires_mcp_reuse".into());
+        }
         if self.catalog_cache && !self.reuse_mcp {
             return Err("catalog_cache_requires_mcp_reuse".into());
         }
@@ -124,7 +130,12 @@ mod tests {
         assert_eq!(config.model, model);
         assert_eq!(config.context, 2048);
         assert_eq!(config.gpu_layers, 0);
-        assert!(!config.prefix_cache && !config.reuse_mcp && !config.catalog_cache);
+        assert!(
+            !config.prefix_cache
+                && !config.reuse_mcp
+                && !config.catalog_cache
+                && !config.semantic_router
+        );
         let enabled = Config::parse(args.clone().into_iter().chain([
             "--prefix-cache".into(),
             "on".into(),
@@ -132,9 +143,25 @@ mod tests {
             "on".into(),
             "--catalog-cache".into(),
             "on".into(),
+            "--semantic-router".into(),
+            "on".into(),
         ]))
         .unwrap();
-        assert!(enabled.prefix_cache && enabled.reuse_mcp && enabled.catalog_cache);
+        assert!(
+            enabled.prefix_cache
+                && enabled.reuse_mcp
+                && enabled.catalog_cache
+                && enabled.semantic_router
+        );
+        assert_eq!(
+            Config::parse(
+                args.clone()
+                    .into_iter()
+                    .chain(["--semantic-router".into(), "on".into()])
+            )
+            .unwrap_err(),
+            "semantic_router_requires_mcp_reuse"
+        );
         assert_eq!(
             Config::parse(
                 args.clone()

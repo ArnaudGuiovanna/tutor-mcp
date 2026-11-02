@@ -1,0 +1,2253 @@
+{
+  "schemaVersion": 1,
+  "modelStage": "OBSERVED_REPORTED_INFERENCE",
+  "status": "failed_or_incomplete",
+  "scope": "Eight development cases, real local Tutor/ACP, synthetic fixture only; no general accuracy claim",
+  "heldout": false,
+  "windowsP2000Qualified": false,
+  "pedagogyQualified": false,
+  "uiQualified": false,
+  "usefulResponseMeasured": false,
+  "cases": [
+    {
+      "case": "no_read",
+      "prompt": "Sans consulter mon profil ni mes formations, explique ce qu’est un objectif d’apprentissage.",
+      "kind": "no_mcp",
+      "permissionAllowed": true,
+      "outcome": "completed",
+      "checks": [
+        {
+          "name": "completed_end_turn",
+          "passed": true
+        },
+        {
+          "name": "only_expected_dispatch",
+          "passed": true
+        },
+        {
+          "name": "matched_permission",
+          "passed": true
+        },
+        {
+          "name": "no_dispatch_before_permission",
+          "passed": true
+        },
+        {
+          "name": "explicit_no_read_zero_mcp_frames",
+          "passed": true
+        },
+        {
+          "name": "generated_general_answer_observed",
+          "passed": true
+        }
+      ],
+      "permissionOperationIds": [],
+      "permissionRpcIds": [],
+      "toolUpdates": [],
+      "observedDispatchesBeforePermission": [],
+      "firstTextMs": 24391.65535796201,
+      "generation": {
+        "elapsedMs": 35312,
+        "inputTokens": 318,
+        "outputTokens": 73
+      },
+      "stopReason": "end_turn",
+      "observation": {
+        "componentScope": "native_agent",
+        "inference": {
+          "counts": {
+            "cancelledOperations": 0,
+            "contextAllocationAttempts": 1,
+            "contextAllocations": 1,
+            "countInputCalls": 1,
+            "countedInputTokens": 318,
+            "evaluatedInputTokens": 318,
+            "failedOperations": 0,
+            "generationCalls": 1,
+            "inputTokens": 318,
+            "modelLoadAttempts": 1,
+            "modelLoadCount": 1,
+            "outputTokens": 73,
+            "reusedTokens": 0,
+            "templateCalls": 2,
+            "tokenizationCalls": 2
+          },
+          "cpuTimeMs": null,
+          "elapsedMs": 35334.908572,
+          "firstEmissionMs": 24387.704318,
+          "firstTokenMs": 24376.792347,
+          "firstUsefulResponseMs": null,
+          "gpuSynchronizedMs": null,
+          "lastOutcome": "end_turn",
+          "operations": {
+            "countInputMs": 11706.982547,
+            "generationMs": 23551.337749
+          },
+          "phases": {
+            "backendSetupMs": 0.092738,
+            "batchAllocationMs": 0.013022,
+            "bridgeWaitMs": 27.696508,
+            "cacheMaintenanceMs": 16.816597,
+            "contextAllocationMs": 379.251346,
+            "decodeMs": 9677.994897999999,
+            "emitMs": 1160.8500470000001,
+            "modelHashMs": 8902.540363,
+            "modelLoadMs": 2780.773086,
+            "modelOpenMs": 0.043761999999999995,
+            "modelValidationMs": 0.057266,
+            "prefillMs": 12187.757437999999,
+            "samplerSetupMs": 0.027966,
+            "samplingMs": 66.80676799999998,
+            "templateMs": 44.957629,
+            "tokenConversionMs": 1.0928269999999998,
+            "tokenizationMs": 10.096615
+          },
+          "schemaVersion": 1,
+          "timingKind": "host_wall_clock"
+        },
+        "mcp": null,
+        "schemaVersion": 1,
+        "workerElapsedMs": 35335.24915
+      },
+      "context": null,
+      "totalMs": 35337.504799012095,
+      "answerSynthetic": "Un objectif d’apprentissage est une déclaration claire et spécifique qui définit ce que l’apprenant doit maîtriser ou accomplir après une période d’apprentissage. Il permet de mesurer l’efficacité de l’enseignement et de suivre le progrès de l’apprenant.",
+      "wireEvents": []
+    },
+    {
+      "case": "quoted_definition",
+      "prompt": "Que signifie « donne moi mon profil » ? Explique la phrase sans exécuter la demande.",
+      "kind": "no_mcp",
+      "permissionAllowed": true,
+      "outcome": "completed",
+      "checks": [
+        {
+          "name": "completed_end_turn",
+          "passed": true
+        },
+        {
+          "name": "only_expected_dispatch",
+          "passed": true
+        },
+        {
+          "name": "matched_permission",
+          "passed": true
+        },
+        {
+          "name": "no_dispatch_before_permission",
+          "passed": true
+        },
+        {
+          "name": "explicit_no_read_zero_mcp_frames",
+          "passed": true
+        },
+        {
+          "name": "generated_general_answer_observed",
+          "passed": true
+        }
+      ],
+      "permissionOperationIds": [],
+      "permissionRpcIds": [],
+      "toolUpdates": [],
+      "observedDispatchesBeforePermission": [],
+      "firstTextMs": 3933.256959018763,
+      "generation": {
+        "elapsedMs": 21429,
+        "inputTokens": 423,
+        "outputTokens": 87
+      },
+      "stopReason": "end_turn",
+      "observation": {
+        "componentScope": "native_agent",
+        "inference": {
+          "counts": {
+            "cancelledOperations": 0,
+            "contextAllocationAttempts": 0,
+            "contextAllocations": 0,
+            "countInputCalls": 2,
+            "countedInputTokens": 740,
+            "evaluatedInputTokens": 109,
+            "failedOperations": 0,
+            "generationCalls": 1,
+            "inputTokens": 423,
+            "modelLoadAttempts": 0,
+            "modelLoadCount": 1,
+            "outputTokens": 87,
+            "reusedTokens": 314,
+            "templateCalls": 3,
+            "tokenizationCalls": 3
+          },
+          "cpuTimeMs": null,
+          "elapsedMs": 21445.031358,
+          "firstEmissionMs": 3931.847851,
+          "firstTokenMs": 3896.264519,
+          "firstUsefulResponseMs": null,
+          "gpuSynchronizedMs": null,
+          "lastOutcome": "end_turn",
+          "operations": {
+            "countInputMs": 56.896753000000004,
+            "generationMs": 21309.208505000002
+          },
+          "phases": {
+            "backendSetupMs": null,
+            "batchAllocationMs": null,
+            "bridgeWaitMs": 48.304795000000006,
+            "cacheMaintenanceMs": 0.14198500000000003,
+            "contextAllocationMs": null,
+            "decodeMs": 15402.088907999996,
+            "emitMs": 1998.6951950000002,
+            "modelHashMs": null,
+            "modelLoadMs": null,
+            "modelOpenMs": null,
+            "modelValidationMs": null,
+            "prefillMs": 3748.573337,
+            "samplerSetupMs": 0.035493000000000004,
+            "samplingMs": 82.80579400000003,
+            "templateMs": 68.569551,
+            "tokenConversionMs": 1.5327420000000007,
+            "tokenizationMs": 13.879386999999998
+          },
+          "schemaVersion": 1,
+          "timingKind": "host_wall_clock"
+        },
+        "mcp": null,
+        "schemaVersion": 1,
+        "workerElapsedMs": 21445.163054999997
+      },
+      "context": null,
+      "totalMs": 21449.40174097428,
+      "answerSynthetic": "« Donne moi mon profil » signifie que l'utilisateur souhaite obtenir ses informations personnelles ou son historique d'apprentissage. Cela inclut généralement des données comme les objectifs d'apprentissage, les réussites, les erreurs, les dates de suivi, etc. La phrase ne se traduit pas en exécutant la demande, mais en expliquant son sens.",
+      "wireEvents": []
+    },
+    {
+      "case": "coaching",
+      "prompt": "Je débute en jardinage. Propose une première action concrète.",
+      "kind": "no_tool",
+      "permissionAllowed": true,
+      "outcome": "completed",
+      "checks": [
+        {
+          "name": "completed_end_turn",
+          "passed": true
+        },
+        {
+          "name": "only_expected_dispatch",
+          "passed": true
+        },
+        {
+          "name": "matched_permission",
+          "passed": true
+        },
+        {
+          "name": "no_dispatch_before_permission",
+          "passed": true
+        },
+        {
+          "name": "generated_general_answer_observed",
+          "passed": true
+        }
+      ],
+      "permissionOperationIds": [],
+      "permissionRpcIds": [],
+      "toolUpdates": [],
+      "observedDispatchesBeforePermission": [],
+      "firstTextMs": 4768.857427989133,
+      "generation": {
+        "elapsedMs": 13309,
+        "inputTokens": 537,
+        "outputTokens": 54
+      },
+      "stopReason": "end_turn",
+      "observation": {
+        "componentScope": "native_agent",
+        "inference": {
+          "counts": {
+            "cancelledOperations": 0,
+            "contextAllocationAttempts": 0,
+            "contextAllocations": 0,
+            "countInputCalls": 3,
+            "countedInputTokens": 1280,
+            "evaluatedInputTokens": 118,
+            "failedOperations": 0,
+            "generationCalls": 1,
+            "inputTokens": 537,
+            "modelLoadAttempts": 0,
+            "modelLoadCount": 1,
+            "outputTokens": 54,
+            "reusedTokens": 419,
+            "templateCalls": 4,
+            "tokenizationCalls": 4
+          },
+          "cpuTimeMs": null,
+          "elapsedMs": 13326.324013000001,
+          "firstEmissionMs": 4756.634220000001,
+          "firstTokenMs": 4747.783203,
+          "firstUsefulResponseMs": null,
+          "gpuSynchronizedMs": null,
+          "lastOutcome": "end_turn",
+          "operations": {
+            "countInputMs": 104.89649899999999,
+            "generationMs": 13128.526921
+          },
+          "phases": {
+            "backendSetupMs": null,
+            "batchAllocationMs": null,
+            "bridgeWaitMs": 50.701319000000005,
+            "cacheMaintenanceMs": 0.041875,
+            "contextAllocationMs": null,
+            "decodeMs": 7486.860585999998,
+            "emitMs": 968.3998410000002,
+            "modelHashMs": null,
+            "modelLoadMs": null,
+            "modelOpenMs": null,
+            "modelValidationMs": null,
+            "prefillMs": 4535.513155000001,
+            "samplerSetupMs": 0.01243,
+            "samplingMs": 55.90033499999999,
+            "templateMs": 108.32671400000001,
+            "tokenConversionMs": 0.7813449999999998,
+            "tokenizationMs": 26.040468
+          },
+          "schemaVersion": 1,
+          "timingKind": "host_wall_clock"
+        },
+        "mcp": null,
+        "schemaVersion": 1,
+        "workerElapsedMs": 13326.509522
+      },
+      "context": null,
+      "totalMs": 13332.239180977922,
+      "answerSynthetic": "Une première action concrète serait de choisir un type de jardinage que vous aimiez, comme le jardinage en pots ou le jardinage en terrasse, et de commencer par des tâches simples comme planter des plantes facilement cultivables.",
+      "wireEvents": []
+    },
+    {
+      "case": "profile_typo",
+      "prompt": "donne moii mon profil",
+      "kind": "profile",
+      "permissionAllowed": true,
+      "outcome": "completed",
+      "checks": [
+        {
+          "name": "completed_end_turn",
+          "passed": true
+        },
+        {
+          "name": "only_expected_dispatch",
+          "passed": true
+        },
+        {
+          "name": "matched_permission",
+          "passed": true
+        },
+        {
+          "name": "no_dispatch_before_permission",
+          "passed": true
+        },
+        {
+          "name": "proposer_calls_without_extra_answer_generation",
+          "passed": true
+        },
+        {
+          "name": "proposer_tokens_present_in_combined_totals",
+          "passed": true
+        },
+        {
+          "name": "direct_read_single_call_limits",
+          "passed": true
+        }
+      ],
+      "permissionOperationIds": [
+        "465dfbad-0bca-491f-bee7-39b46e178ee8"
+      ],
+      "permissionRpcIds": [
+        "permission:465dfbad-0bca-491f-bee7-39b46e178ee8"
+      ],
+      "toolUpdates": [
+        {
+          "operationId": "465dfbad-0bca-491f-bee7-39b46e178ee8",
+          "status": "pending"
+        },
+        {
+          "operationId": "465dfbad-0bca-491f-bee7-39b46e178ee8",
+          "status": "in_progress"
+        },
+        {
+          "operationId": "465dfbad-0bca-491f-bee7-39b46e178ee8",
+          "status": "completed"
+        }
+      ],
+      "observedDispatchesBeforePermission": [
+        0
+      ],
+      "firstTextMs": 12037.894480978139,
+      "generation": {
+        "elapsedMs": 12038,
+        "inputTokens": 264,
+        "outputTokens": 4
+      },
+      "stopReason": "end_turn",
+      "observation": {
+        "componentScope": "native_agent",
+        "inference": {
+          "counts": {
+            "cancelledOperations": 0,
+            "contextAllocationAttempts": 0,
+            "contextAllocations": 0,
+            "countInputCalls": 1,
+            "countedInputTokens": 264,
+            "evaluatedInputTokens": 264,
+            "failedOperations": 0,
+            "generationCalls": 1,
+            "inputTokens": 264,
+            "modelLoadAttempts": 0,
+            "modelLoadCount": 1,
+            "outputTokens": 4,
+            "reusedTokens": 0,
+            "templateCalls": 2,
+            "tokenizationCalls": 2
+          },
+          "cpuTimeMs": null,
+          "elapsedMs": 12060.798714,
+          "firstEmissionMs": 9422.495965,
+          "firstTokenMs": 9422.318407,
+          "firstUsefulResponseMs": null,
+          "gpuSynchronizedMs": null,
+          "lastOutcome": "end_turn",
+          "operations": {
+            "countInputMs": 29.824155,
+            "generationMs": 10240.395515
+          },
+          "phases": {
+            "backendSetupMs": null,
+            "batchAllocationMs": null,
+            "bridgeWaitMs": 3.3453730000000004,
+            "cacheMaintenanceMs": 57.618858,
+            "contextAllocationMs": null,
+            "decodeMs": 636.340005,
+            "emitMs": 0.012455,
+            "modelHashMs": null,
+            "modelLoadMs": null,
+            "modelOpenMs": null,
+            "modelValidationMs": null,
+            "prefillMs": 9132.422493999999,
+            "samplerSetupMs": 0.512279,
+            "samplingMs": 384.578045,
+            "templateMs": 45.001065999999994,
+            "tokenConversionMs": 0.050071000000000004,
+            "tokenizationMs": 10.127872
+          },
+          "schemaVersion": 1,
+          "timingKind": "host_wall_clock"
+        },
+        "mcp": {
+          "callAttempts": 1,
+          "callInterrupted": 0,
+          "callTransportFailures": 0,
+          "callTransportSuccesses": 1,
+          "catalogAttempts": 1,
+          "catalogInterrupted": 0,
+          "catalogPages": null,
+          "catalogTotalMs": 385.54119599999996,
+          "catalogTransportFailures": 0,
+          "catalogTransportSuccesses": 1,
+          "closeAttempts": 0,
+          "closeInterrupted": 0,
+          "closeTotalMs": null,
+          "closeTransportFailures": 0,
+          "closeTransportSuccesses": 0,
+          "connectTotalMs": 1099.830154,
+          "initializeTotalMs": null,
+          "schemaVersion": 1,
+          "toolResultErrors": 0,
+          "toolsCallTotalMs": 11.992785000000001
+        },
+        "mcpConnection": {
+          "catalog": {
+            "cacheHits": 0,
+            "cacheMisses": 1,
+            "lastMissReason": "cold",
+            "schemaVersion": 1
+          },
+          "catalogReused": false,
+          "connectionReused": false,
+          "priorCleanup": [],
+          "restartRequired": false,
+          "retained": true,
+          "schemaVersion": 1
+        },
+        "schemaVersion": 1,
+        "workerElapsedMs": 12060.935766
+      },
+      "context": null,
+      "totalMs": 12064.196743012872,
+      "answerSynthetic": "Informations de profil retournées par Tutor :\n- Objectif : Apprendre 0f97269d83\n- Langue : fr\n- Appareil : laptop\n\nFormation active : Formation Go 0f97269d83",
+      "wireEvents": [
+        {
+          "event": "request",
+          "method": "initialize"
+        },
+        {
+          "event": "reply",
+          "method": "initialize",
+          "rpcError": false
+        },
+        {
+          "direction": "to_server",
+          "event": "other_frame"
+        },
+        {
+          "event": "request",
+          "method": "tools/list"
+        },
+        {
+          "event": "reply",
+          "method": "tools/list",
+          "rpcError": false
+        },
+        {
+          "argumentsSha256": "85f2a1542300d3a71110ae6f37882d7eb9a0c031202628e76b73c591eb341ec6",
+          "event": "call_sent",
+          "tool": "get_learner_context"
+        },
+        {
+          "argumentsSha256": "85f2a1542300d3a71110ae6f37882d7eb9a0c031202628e76b73c591eb341ec6",
+          "event": "call_result",
+          "resultSha256": "f4ca4cc9e9fd64d613204d93be7a7a2ca2fe9e9dcd67667c5c4eea9d686d0434",
+          "rpcError": false,
+          "tool": "get_learner_context"
+        }
+      ]
+    },
+    {
+      "case": "profile_paraphrase",
+      "prompt": "Tu sais quoi sur moi ?",
+      "kind": "profile",
+      "permissionAllowed": true,
+      "outcome": "completed",
+      "checks": [
+        {
+          "name": "completed_end_turn",
+          "passed": true
+        },
+        {
+          "name": "only_expected_dispatch",
+          "passed": true
+        },
+        {
+          "name": "matched_permission",
+          "passed": true
+        },
+        {
+          "name": "no_dispatch_before_permission",
+          "passed": true
+        },
+        {
+          "name": "proposer_calls_without_extra_answer_generation",
+          "passed": true
+        },
+        {
+          "name": "proposer_tokens_present_in_combined_totals",
+          "passed": true
+        },
+        {
+          "name": "direct_read_single_call_limits",
+          "passed": true
+        }
+      ],
+      "permissionOperationIds": [
+        "300a7c73-06eb-41ee-b3cb-9f374a45a5d4"
+      ],
+      "permissionRpcIds": [
+        "permission:300a7c73-06eb-41ee-b3cb-9f374a45a5d4"
+      ],
+      "toolUpdates": [
+        {
+          "operationId": "300a7c73-06eb-41ee-b3cb-9f374a45a5d4",
+          "status": "pending"
+        },
+        {
+          "operationId": "300a7c73-06eb-41ee-b3cb-9f374a45a5d4",
+          "status": "in_progress"
+        },
+        {
+          "operationId": "300a7c73-06eb-41ee-b3cb-9f374a45a5d4",
+          "status": "completed"
+        }
+      ],
+      "observedDispatchesBeforePermission": [
+        0
+      ],
+      "firstTextMs": 1951.9421380246058,
+      "generation": {
+        "elapsedMs": 1954,
+        "inputTokens": 264,
+        "outputTokens": 4
+      },
+      "stopReason": "end_turn",
+      "observation": {
+        "componentScope": "native_agent",
+        "inference": {
+          "counts": {
+            "cancelledOperations": 0,
+            "contextAllocationAttempts": 0,
+            "contextAllocations": 0,
+            "countInputCalls": 1,
+            "countedInputTokens": 264,
+            "evaluatedInputTokens": 15,
+            "failedOperations": 0,
+            "generationCalls": 1,
+            "inputTokens": 264,
+            "modelLoadAttempts": 0,
+            "modelLoadCount": 1,
+            "outputTokens": 4,
+            "reusedTokens": 249,
+            "templateCalls": 2,
+            "tokenizationCalls": 2
+          },
+          "cpuTimeMs": null,
+          "elapsedMs": 1981.104299,
+          "firstEmissionMs": 918.053319,
+          "firstTokenMs": 917.895254,
+          "firstUsefulResponseMs": null,
+          "gpuSynchronizedMs": null,
+          "lastOutcome": "end_turn",
+          "operations": {
+            "countInputMs": 30.386104,
+            "generationMs": 1684.5978850000001
+          },
+          "phases": {
+            "backendSetupMs": null,
+            "batchAllocationMs": null,
+            "bridgeWaitMs": 0.7451789999999999,
+            "cacheMaintenanceMs": 0.04073,
+            "contextAllocationMs": null,
+            "decodeMs": 631.749642,
+            "emitMs": 0.011215,
+            "modelHashMs": null,
+            "modelLoadMs": null,
+            "modelOpenMs": null,
+            "modelValidationMs": null,
+            "prefillMs": 706.8805339999999,
+            "samplerSetupMs": 0.568702,
+            "samplingMs": 316.50133,
+            "templateMs": 50.486231000000004,
+            "tokenConversionMs": 0.057426000000000005,
+            "tokenizationMs": 7.812937
+          },
+          "schemaVersion": 1,
+          "timingKind": "host_wall_clock"
+        },
+        "mcp": {
+          "callAttempts": 1,
+          "callInterrupted": 0,
+          "callTransportFailures": 0,
+          "callTransportSuccesses": 1,
+          "catalogAttempts": 0,
+          "catalogInterrupted": 0,
+          "catalogPages": null,
+          "catalogTotalMs": null,
+          "catalogTransportFailures": 0,
+          "catalogTransportSuccesses": 0,
+          "closeAttempts": 0,
+          "closeInterrupted": 0,
+          "closeTotalMs": null,
+          "closeTransportFailures": 0,
+          "closeTransportSuccesses": 0,
+          "connectTotalMs": null,
+          "initializeTotalMs": null,
+          "schemaVersion": 1,
+          "toolResultErrors": 0,
+          "toolsCallTotalMs": 7.161415
+        },
+        "mcpConnection": {
+          "catalog": {
+            "cacheHits": 1,
+            "cacheMisses": 0,
+            "lastMissReason": null,
+            "schemaVersion": 1
+          },
+          "catalogReused": true,
+          "connectionReused": true,
+          "priorCleanup": [],
+          "restartRequired": false,
+          "retained": true,
+          "schemaVersion": 1
+        },
+        "schemaVersion": 1,
+        "workerElapsedMs": 1981.2043319999998
+      },
+      "context": null,
+      "totalMs": 1983.180649986025,
+      "answerSynthetic": "Informations de profil retournées par Tutor :\n- Objectif : Apprendre 0f97269d83\n- Langue : fr\n- Appareil : laptop\n\nFormation active : Formation Go 0f97269d83",
+      "wireEvents": [
+        {
+          "argumentsSha256": "85f2a1542300d3a71110ae6f37882d7eb9a0c031202628e76b73c591eb341ec6",
+          "event": "call_sent",
+          "tool": "get_learner_context"
+        },
+        {
+          "argumentsSha256": "85f2a1542300d3a71110ae6f37882d7eb9a0c031202628e76b73c591eb341ec6",
+          "event": "call_result",
+          "resultSha256": "f4ca4cc9e9fd64d613204d93be7a7a2ca2fe9e9dcd67667c5c4eea9d686d0434",
+          "rpcError": false,
+          "tool": "get_learner_context"
+        }
+      ]
+    },
+    {
+      "case": "library_question",
+      "prompt": "Quels cours je pourrais suivre ?",
+      "kind": "library",
+      "permissionAllowed": true,
+      "outcome": "completed",
+      "checks": [
+        {
+          "name": "completed_end_turn",
+          "passed": true
+        },
+        {
+          "name": "only_expected_dispatch",
+          "passed": true
+        },
+        {
+          "name": "matched_permission",
+          "passed": true
+        },
+        {
+          "name": "no_dispatch_before_permission",
+          "passed": true
+        },
+        {
+          "name": "proposer_calls_without_extra_answer_generation",
+          "passed": true
+        },
+        {
+          "name": "proposer_tokens_present_in_combined_totals",
+          "passed": true
+        },
+        {
+          "name": "direct_read_single_call_limits",
+          "passed": true
+        }
+      ],
+      "permissionOperationIds": [
+        "75a35cf7-8df5-4bb5-89dd-a13ddabc445b"
+      ],
+      "permissionRpcIds": [
+        "permission:75a35cf7-8df5-4bb5-89dd-a13ddabc445b"
+      ],
+      "toolUpdates": [
+        {
+          "operationId": "75a35cf7-8df5-4bb5-89dd-a13ddabc445b",
+          "status": "pending"
+        },
+        {
+          "operationId": "75a35cf7-8df5-4bb5-89dd-a13ddabc445b",
+          "status": "in_progress"
+        },
+        {
+          "operationId": "75a35cf7-8df5-4bb5-89dd-a13ddabc445b",
+          "status": "completed"
+        }
+      ],
+      "observedDispatchesBeforePermission": [
+        0
+      ],
+      "firstTextMs": 1921.796637994703,
+      "generation": {
+        "elapsedMs": 1923,
+        "inputTokens": 267,
+        "outputTokens": 4
+      },
+      "stopReason": "end_turn",
+      "observation": {
+        "componentScope": "native_agent",
+        "inference": {
+          "counts": {
+            "cancelledOperations": 0,
+            "contextAllocationAttempts": 0,
+            "contextAllocations": 0,
+            "countInputCalls": 1,
+            "countedInputTokens": 267,
+            "evaluatedInputTokens": 18,
+            "failedOperations": 0,
+            "generationCalls": 1,
+            "inputTokens": 267,
+            "modelLoadAttempts": 0,
+            "modelLoadCount": 1,
+            "outputTokens": 4,
+            "reusedTokens": 249,
+            "templateCalls": 2,
+            "tokenizationCalls": 2
+          },
+          "cpuTimeMs": null,
+          "elapsedMs": 1930.323209,
+          "firstEmissionMs": 926.746082,
+          "firstTokenMs": 926.645627,
+          "firstUsefulResponseMs": null,
+          "gpuSynchronizedMs": null,
+          "lastOutcome": "end_turn",
+          "operations": {
+            "countInputMs": 36.388788,
+            "generationMs": 1609.95067
+          },
+          "phases": {
+            "backendSetupMs": null,
+            "batchAllocationMs": null,
+            "bridgeWaitMs": 0.255579,
+            "cacheMaintenanceMs": 0.039969,
+            "contextAllocationMs": null,
+            "decodeMs": 490.648044,
+            "emitMs": 0.005985000000000001,
+            "modelHashMs": null,
+            "modelLoadMs": null,
+            "modelOpenMs": null,
+            "modelValidationMs": null,
+            "prefillMs": 738.457994,
+            "samplerSetupMs": 0.5252100000000001,
+            "samplingMs": 358.403024,
+            "templateMs": 52.689938999999995,
+            "tokenConversionMs": 0.034126000000000004,
+            "tokenizationMs": 5.139148
+          },
+          "schemaVersion": 1,
+          "timingKind": "host_wall_clock"
+        },
+        "mcp": {
+          "callAttempts": 1,
+          "callInterrupted": 0,
+          "callTransportFailures": 0,
+          "callTransportSuccesses": 1,
+          "catalogAttempts": 0,
+          "catalogInterrupted": 0,
+          "catalogPages": null,
+          "catalogTotalMs": null,
+          "catalogTransportFailures": 0,
+          "catalogTransportSuccesses": 0,
+          "closeAttempts": 0,
+          "closeInterrupted": 0,
+          "closeTotalMs": null,
+          "closeTransportFailures": 0,
+          "closeTransportSuccesses": 0,
+          "connectTotalMs": null,
+          "initializeTotalMs": null,
+          "schemaVersion": 1,
+          "toolResultErrors": 0,
+          "toolsCallTotalMs": 23.490955
+        },
+        "mcpConnection": {
+          "catalog": {
+            "cacheHits": 1,
+            "cacheMisses": 0,
+            "lastMissReason": "unreviewed_call",
+            "schemaVersion": 1
+          },
+          "catalogReused": true,
+          "connectionReused": true,
+          "priorCleanup": [],
+          "restartRequired": false,
+          "retained": true,
+          "schemaVersion": 1
+        },
+        "schemaVersion": 1,
+        "workerElapsedMs": 1930.5120439999998
+      },
+      "context": null,
+      "totalMs": 1933.2687240093946,
+      "answerSynthetic": "Formations trouvées :\n\n1. Formation Go 0f97269d83\n2. Formation Jardin 0f97269d83",
+      "wireEvents": [
+        {
+          "argumentsSha256": "ca502dec04523cdc33afece69a9b600d5b9bd022d453791cc693b6b372f808ad",
+          "event": "call_sent",
+          "tool": "list_training_library"
+        },
+        {
+          "argumentsSha256": "ca502dec04523cdc33afece69a9b600d5b9bd022d453791cc693b6b372f808ad",
+          "event": "call_result",
+          "resultSha256": "7bf2c8265d1e5dfb9a3f98f21716c5cc0275e4493c17b860db8c7658dcf7e6e9",
+          "rpcError": false,
+          "tool": "list_training_library"
+        }
+      ]
+    },
+    {
+      "case": "library_paraphrase",
+      "prompt": "Je voudrais voir les formations accessibles",
+      "kind": "library",
+      "permissionAllowed": true,
+      "outcome": "completed",
+      "checks": [
+        {
+          "name": "completed_end_turn",
+          "passed": true
+        },
+        {
+          "name": "only_expected_dispatch",
+          "passed": true
+        },
+        {
+          "name": "matched_permission",
+          "passed": true
+        },
+        {
+          "name": "no_dispatch_before_permission",
+          "passed": true
+        },
+        {
+          "name": "proposer_calls_without_extra_answer_generation",
+          "passed": true
+        },
+        {
+          "name": "proposer_tokens_present_in_combined_totals",
+          "passed": true
+        },
+        {
+          "name": "direct_read_single_call_limits",
+          "passed": true
+        }
+      ],
+      "permissionOperationIds": [
+        "450cb04a-0835-496e-a6d8-81bdb853a2bc"
+      ],
+      "permissionRpcIds": [
+        "permission:450cb04a-0835-496e-a6d8-81bdb853a2bc"
+      ],
+      "toolUpdates": [
+        {
+          "operationId": "450cb04a-0835-496e-a6d8-81bdb853a2bc",
+          "status": "pending"
+        },
+        {
+          "operationId": "450cb04a-0835-496e-a6d8-81bdb853a2bc",
+          "status": "in_progress"
+        },
+        {
+          "operationId": "450cb04a-0835-496e-a6d8-81bdb853a2bc",
+          "status": "completed"
+        }
+      ],
+      "observedDispatchesBeforePermission": [
+        0
+      ],
+      "firstTextMs": 2253.2204249873757,
+      "generation": {
+        "elapsedMs": 2255,
+        "inputTokens": 267,
+        "outputTokens": 4
+      },
+      "stopReason": "end_turn",
+      "observation": {
+        "componentScope": "native_agent",
+        "inference": {
+          "counts": {
+            "cancelledOperations": 0,
+            "contextAllocationAttempts": 0,
+            "contextAllocations": 0,
+            "countInputCalls": 1,
+            "countedInputTokens": 267,
+            "evaluatedInputTokens": 18,
+            "failedOperations": 0,
+            "generationCalls": 1,
+            "inputTokens": 267,
+            "modelLoadAttempts": 0,
+            "modelLoadCount": 1,
+            "outputTokens": 4,
+            "reusedTokens": 249,
+            "templateCalls": 2,
+            "tokenizationCalls": 2
+          },
+          "cpuTimeMs": null,
+          "elapsedMs": 2268.6305,
+          "firstEmissionMs": 936.8673789999999,
+          "firstTokenMs": 936.721355,
+          "firstUsefulResponseMs": null,
+          "gpuSynchronizedMs": null,
+          "lastOutcome": "end_turn",
+          "operations": {
+            "countInputMs": 24.738968,
+            "generationMs": 1661.718403
+          },
+          "phases": {
+            "backendSetupMs": null,
+            "batchAllocationMs": null,
+            "bridgeWaitMs": 3.087259,
+            "cacheMaintenanceMs": 0.031226999999999998,
+            "contextAllocationMs": null,
+            "decodeMs": 617.154448,
+            "emitMs": 0.007312000000000001,
+            "modelHashMs": null,
+            "modelLoadMs": null,
+            "modelOpenMs": null,
+            "modelValidationMs": null,
+            "prefillMs": 757.580164,
+            "samplerSetupMs": 0.552345,
+            "samplingMs": 263.888059,
+            "templateMs": 39.376772,
+            "tokenConversionMs": 0.031955,
+            "tokenizationMs": 4.60772
+          },
+          "schemaVersion": 1,
+          "timingKind": "host_wall_clock"
+        },
+        "mcp": {
+          "callAttempts": 1,
+          "callInterrupted": 0,
+          "callTransportFailures": 0,
+          "callTransportSuccesses": 1,
+          "catalogAttempts": 1,
+          "catalogInterrupted": 0,
+          "catalogPages": null,
+          "catalogTotalMs": 310.78692800000005,
+          "catalogTransportFailures": 0,
+          "catalogTransportSuccesses": 1,
+          "closeAttempts": 0,
+          "closeInterrupted": 0,
+          "closeTotalMs": null,
+          "closeTransportFailures": 0,
+          "closeTransportSuccesses": 0,
+          "connectTotalMs": null,
+          "initializeTotalMs": null,
+          "schemaVersion": 1,
+          "toolResultErrors": 0,
+          "toolsCallTotalMs": 9.975892
+        },
+        "mcpConnection": {
+          "catalog": {
+            "cacheHits": 0,
+            "cacheMisses": 1,
+            "lastMissReason": "unreviewed_call",
+            "schemaVersion": 1
+          },
+          "catalogReused": false,
+          "connectionReused": true,
+          "priorCleanup": [],
+          "restartRequired": false,
+          "retained": true,
+          "schemaVersion": 1
+        },
+        "schemaVersion": 1,
+        "workerElapsedMs": 2268.757466
+      },
+      "context": null,
+      "totalMs": 2270.773463009391,
+      "answerSynthetic": "Formations trouvées :\n\n1. Formation Go 0f97269d83\n2. Formation Jardin 0f97269d83",
+      "wireEvents": [
+        {
+          "event": "request",
+          "method": "tools/list"
+        },
+        {
+          "event": "reply",
+          "method": "tools/list",
+          "rpcError": false
+        },
+        {
+          "argumentsSha256": "ca502dec04523cdc33afece69a9b600d5b9bd022d453791cc693b6b372f808ad",
+          "event": "call_sent",
+          "tool": "list_training_library"
+        },
+        {
+          "argumentsSha256": "ca502dec04523cdc33afece69a9b600d5b9bd022d453791cc693b6b372f808ad",
+          "event": "call_result",
+          "resultSha256": "7bf2c8265d1e5dfb9a3f98f21716c5cc0275e4493c17b860db8c7658dcf7e6e9",
+          "rpcError": false,
+          "tool": "list_training_library"
+        }
+      ]
+    },
+    {
+      "case": "profile_denied",
+      "prompt": "Tu sais quoi sur moi ?",
+      "kind": "profile",
+      "permissionAllowed": false,
+      "outcome": "completed",
+      "checks": [
+        {
+          "name": "completed_end_turn",
+          "passed": true
+        },
+        {
+          "name": "only_expected_dispatch",
+          "passed": true
+        },
+        {
+          "name": "matched_permission",
+          "passed": true
+        },
+        {
+          "name": "no_dispatch_before_permission",
+          "passed": true
+        },
+        {
+          "name": "proposer_calls_without_extra_answer_generation",
+          "passed": true
+        },
+        {
+          "name": "proposer_tokens_present_in_combined_totals",
+          "passed": true
+        },
+        {
+          "name": "direct_read_single_call_limits",
+          "passed": true
+        }
+      ],
+      "permissionOperationIds": [
+        "7d93dd52-d52b-408c-b4e9-7d559eed4e86"
+      ],
+      "permissionRpcIds": [
+        "permission:7d93dd52-d52b-408c-b4e9-7d559eed4e86"
+      ],
+      "toolUpdates": [
+        {
+          "operationId": "7d93dd52-d52b-408c-b4e9-7d559eed4e86",
+          "status": "pending"
+        },
+        {
+          "operationId": "7d93dd52-d52b-408c-b4e9-7d559eed4e86",
+          "status": "failed"
+        }
+      ],
+      "observedDispatchesBeforePermission": [
+        0
+      ],
+      "firstTextMs": 2291.4447860093787,
+      "generation": {
+        "elapsedMs": 2291,
+        "inputTokens": 264,
+        "outputTokens": 4
+      },
+      "stopReason": "end_turn",
+      "observation": {
+        "componentScope": "native_agent",
+        "inference": {
+          "counts": {
+            "cancelledOperations": 0,
+            "contextAllocationAttempts": 0,
+            "contextAllocations": 0,
+            "countInputCalls": 1,
+            "countedInputTokens": 264,
+            "evaluatedInputTokens": 15,
+            "failedOperations": 0,
+            "generationCalls": 1,
+            "inputTokens": 264,
+            "modelLoadAttempts": 0,
+            "modelLoadCount": 1,
+            "outputTokens": 4,
+            "reusedTokens": 249,
+            "templateCalls": 2,
+            "tokenizationCalls": 2
+          },
+          "cpuTimeMs": null,
+          "elapsedMs": 2298.172478,
+          "firstEmissionMs": 1035.14435,
+          "firstTokenMs": 1034.977678,
+          "firstUsefulResponseMs": null,
+          "gpuSynchronizedMs": null,
+          "lastOutcome": "end_turn",
+          "operations": {
+            "countInputMs": 23.898694000000003,
+            "generationMs": 1751.49011
+          },
+          "phases": {
+            "backendSetupMs": null,
+            "batchAllocationMs": null,
+            "bridgeWaitMs": 1.021309,
+            "cacheMaintenanceMs": 0.032858,
+            "contextAllocationMs": null,
+            "decodeMs": 547.719076,
+            "emitMs": 0.005938,
+            "modelHashMs": null,
+            "modelLoadMs": null,
+            "modelOpenMs": null,
+            "modelValidationMs": null,
+            "prefillMs": 781.004995,
+            "samplerSetupMs": 0.43804899999999997,
+            "samplingMs": 399.261664,
+            "templateMs": 41.987892,
+            "tokenConversionMs": 0.024063,
+            "tokenizationMs": 3.762638
+          },
+          "schemaVersion": 1,
+          "timingKind": "host_wall_clock"
+        },
+        "mcp": {
+          "callAttempts": 0,
+          "callInterrupted": 0,
+          "callTransportFailures": 0,
+          "callTransportSuccesses": 0,
+          "catalogAttempts": 1,
+          "catalogInterrupted": 0,
+          "catalogPages": null,
+          "catalogTotalMs": 262.50468,
+          "catalogTransportFailures": 0,
+          "catalogTransportSuccesses": 1,
+          "closeAttempts": 0,
+          "closeInterrupted": 0,
+          "closeTotalMs": null,
+          "closeTransportFailures": 0,
+          "closeTransportSuccesses": 0,
+          "connectTotalMs": null,
+          "initializeTotalMs": null,
+          "schemaVersion": 1,
+          "toolResultErrors": 0,
+          "toolsCallTotalMs": null
+        },
+        "mcpConnection": {
+          "catalog": {
+            "cacheHits": 0,
+            "cacheMisses": 1,
+            "lastMissReason": "cold",
+            "schemaVersion": 1
+          },
+          "catalogReused": false,
+          "connectionReused": true,
+          "priorCleanup": [],
+          "restartRequired": false,
+          "retained": true,
+          "schemaVersion": 1
+        },
+        "schemaVersion": 1,
+        "workerElapsedMs": 2298.3640689999997
+      },
+      "context": null,
+      "totalMs": 2303.926445019897,
+      "answerSynthetic": "Le profil n’a pas été consulté car l’autorisation n’a pas été accordée.",
+      "wireEvents": [
+        {
+          "event": "request",
+          "method": "tools/list"
+        },
+        {
+          "event": "reply",
+          "method": "tools/list",
+          "rpcError": false
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "checks": [
+    {
+      "name": "all_fixture_children_gracefully_reaped",
+      "passed": true
+    },
+    {
+      "name": "agent_gracefully_reaped",
+      "passed": true
+    },
+    {
+      "name": "no_observed_relay_error",
+      "passed": true
+    },
+    {
+      "name": "all_observed_tutor_children_gracefully_reaped",
+      "passed": false
+    },
+    {
+      "name": "artifacts_unchanged",
+      "passed": true
+    },
+    {
+      "name": "sources_unchanged",
+      "passed": true
+    },
+    {
+      "name": "eight_cases_in_order",
+      "passed": true
+    }
+  ],
+  "startedAt": "2026-11-02T21:00:59.618581+00:00",
+  "configuration": {
+    "semanticRouter": true,
+    "prefixCache": true,
+    "reuseMcp": true,
+    "catalogCache": true,
+    "context": 2048,
+    "maxOutput": 96,
+    "threads": 4,
+    "batch": 128,
+    "gpuLayers": 0,
+    "timeoutSeconds": 1800,
+    "turnTimeoutSeconds": 180
+  },
+  "limits": [
+    "Known development utterances, not held-out or a general understanding/accuracy benchmark.",
+    "Synthetic Owner/HostContext, not institution authentication or independent binary/source attestation.",
+    "First TEXT only; no first USEFUL response, UI, hardware, p95 or speedup claim.",
+    "Combined generation totals include the proposer. One observed proposer call plus its single journal projection tests absence of an extra answer generation.",
+    "Pagination oracle validates first-page items/order/next_after. Two seeded trainings with source limit=10 produce no real partial page; offline coverage is not server coverage. No continuation is admitted until the state/ChoiceSet path exists.",
+    "Renderer and proposer-call contract must be confirmed from source before the first run; failures are retained with no prompt or response repair."
+  ],
+  "contract": {
+    "version": 1,
+    "status": "CONFIRMED_BEFORE_FIRST_RUN",
+    "proposerCallsForDirectRead": 1,
+    "libraryLimit": 10,
+    "profile": {
+      "heading": "Informations de profil retournées par Tutor :",
+      "fieldLines": {
+        "objective": "- Objectif : {value}",
+        "language": "- Langue : {value}",
+        "device": "- Appareil : {value}",
+        "affect_baseline": "- Ressenti déclaré : {value}"
+      },
+      "trainingLine": "Formation active : {value}"
+    },
+    "library": {
+      "heading": "Formations trouvées :",
+      "itemLine": "{index}. {name}",
+      "partialLine": "Résultats partiels : cette page n’est pas exhaustive.",
+      "emptyLine": "Aucune formation trouvée pour cette recherche."
+    },
+    "deniedProfile": "Le profil n’a pas été consulté car l’autorisation n’a pas été accordée."
+  },
+  "artifactsBefore": {
+    "agent": {
+      "sha256": "5fc4348d7fd21fd98ee6aba8a0c3582889d60f176474a2bfdacac0e19bf6ddf8",
+      "bytes": 18474056
+    },
+    "server": {
+      "sha256": "9c36faebdb89f7a28fa057cb391f52f2a928d3d3f8d14751c4f7d8914410da63",
+      "bytes": 52117333
+    },
+    "model": {
+      "sha256": "b139949c5bd74937ad8ed8c8cf3d9ffb1e99c866c823204dc42c0d91fa181897",
+      "bytes": 1107409472
+    },
+    "contract": {
+      "sha256": "3bb6fe5cf82a4de9005481847da57885542f68f0b363d4930114e92308006903",
+      "bytes": 808
+    }
+  },
+  "sourceFiles": {
+    "client/local-agent/Cargo.lock": {
+      "sha256": "1ea6d39ec20f915ff10c4ef777fe9fd4f08e7646d603d6e8826fb0ba244f798c",
+      "bytes": 56288
+    },
+    "client/local-agent/Cargo.toml": {
+      "sha256": "079ad94fd212cf464ec09301b1db63b2bbceda992647a3dce92fbe1a621716fd",
+      "bytes": 1605
+    },
+    "client/local-agent/model-profile.json": {
+      "sha256": "9f02c9b26b2f9e7ac54e1a333886bcf55c7ab4df60689c1fdc7c5a577fb1dc36",
+      "bytes": 813
+    },
+    "client/local-agent/src/acp.rs": {
+      "sha256": "1254389737f3be5b464082a3db4fce36a3885e03e469dc85e0816f0c17e3872d",
+      "bytes": 125809
+    },
+    "client/local-agent/src/call_validation.rs": {
+      "sha256": "50c01b7847daaf850661f235df1f1187c2a0755b43b25af5c685aaad10920da7",
+      "bytes": 30278
+    },
+    "client/local-agent/src/catalog.rs": {
+      "sha256": "c9f5b8b3c43033f5477271ce86d96cc90c8575f9e017e28cc73964590988fc25",
+      "bytes": 53220
+    },
+    "client/local-agent/src/config.rs": {
+      "sha256": "0cfd464b273335232d2044c110885e4ba3d9b6e74b572296921cdf7b4b1aa7ac",
+      "bytes": 6726
+    },
+    "client/local-agent/src/consultation.rs": {
+      "sha256": "9b4c0abdb1aba0c4ac096c74f79c84252f31439962661cde8928d3db9c8555bb",
+      "bytes": 16498
+    },
+    "client/local-agent/src/consultation/tests.rs": {
+      "sha256": "0750b596a2324532b2f9f3f3e145b5db5a8f8c54c2ba86ac049a61394f5fde61",
+      "bytes": 41109
+    },
+    "client/local-agent/src/context.rs": {
+      "sha256": "4fbb5a657a216ee3659ba7e406c87ab93e3d55fee81be5de7d216b222eb23955",
+      "bytes": 34894
+    },
+    "client/local-agent/src/executor.rs": {
+      "sha256": "0f85128e579077ef93af0070b95ff11750a4944eff1d59a2886f9c73c4899002",
+      "bytes": 73629
+    },
+    "client/local-agent/src/fast_harness.rs": {
+      "sha256": "31362a967b6714cbbccadb2692dc73fe21595f271e6fafa219138e56cd09e00a",
+      "bytes": 18601
+    },
+    "client/local-agent/src/harness.rs": {
+      "sha256": "f7306f183cced3bd9faefb4e88dbd11a7e1b4f86b5d517256c7525afdadc2250",
+      "bytes": 142206
+    },
+    "client/local-agent/src/harness_semantic_tests.rs": {
+      "sha256": "596923674e039d97c3b0d368187811b06ffe9878bb6fa32660f897a5f0c73a33",
+      "bytes": 12509
+    },
+    "client/local-agent/src/host_context.rs": {
+      "sha256": "62b19a71fb8a07a61e36fb9347bd6481ee6156ff2019875e3fec43e50fe65baa",
+      "bytes": 5885
+    },
+    "client/local-agent/src/journal.rs": {
+      "sha256": "d228ef4d815cfbbacb2b2a051f440cd17db7e3412f0a04813801763c2522cf6d",
+      "bytes": 86723
+    },
+    "client/local-agent/src/lib.rs": {
+      "sha256": "b3e3f1892fd8027afa9441b10eef30aeed837a7436d7417d2e704edf7c5c1bc6",
+      "bytes": 439
+    },
+    "client/local-agent/src/library.rs": {
+      "sha256": "4543490bcb2ec359ae574af8513df2ed143a7211fa85c58afb37314411bc9d99",
+      "bytes": 17752
+    },
+    "client/local-agent/src/library/tests.rs": {
+      "sha256": "2602553f09cf09896287277bb4f8a4c036e4425651c71de75f6e279d8cd1af8c",
+      "bytes": 5828
+    },
+    "client/local-agent/src/main.rs": {
+      "sha256": "86f86551fae8b9db6bd9d92eca447fe91fd2808ff8d2849c867b56db313a285d",
+      "bytes": 1931
+    },
+    "client/local-agent/src/mcp.rs": {
+      "sha256": "67f0768fa6eb3135f41b06ddffbbb0e4bdbff3f619e937d61dd98d656ad3cd52",
+      "bytes": 42356
+    },
+    "client/local-agent/src/mcp_client.rs": {
+      "sha256": "3edc1477780e047a71afc9b973fd1d59b6569356b488ffb62f52fcde13624ed7",
+      "bytes": 24263
+    },
+    "client/local-agent/src/mcp_session.rs": {
+      "sha256": "29279acfbb5f4d488eef9ff703141226a8b328755527f751940dab6098e5c593",
+      "bytes": 116335
+    },
+    "client/local-agent/src/mcp_stdio.rs": {
+      "sha256": "566dad6f8efb8a8820aa41f75657e72ed3f2434e43115551816950f8107310c9",
+      "bytes": 54269
+    },
+    "client/local-agent/src/pedagogical.rs": {
+      "sha256": "6dd6831ccb588a9b5535bda12475c45f5aa77aa72815ef56de9fb4669dec456c",
+      "bytes": 33214
+    },
+    "client/local-agent/src/pedagogical_tests.rs": {
+      "sha256": "1b9ffc58b6b3491dfb99a9a135078b0332b58a106923bf5d8507e688b5b86cd3",
+      "bytes": 51288
+    },
+    "client/local-agent/src/runtime.rs": {
+      "sha256": "fd071e710b2bf871d3e36888450c0098250edae9cf0034b67220c2588dfc320f",
+      "bytes": 100711
+    },
+    "client/local-agent/src/semantic_intent.rs": {
+      "sha256": "38dd0a6f2c2c01fcc6aaf932ee6a1ef3fe2975922b8b0187fc7c1cc59936bd4b",
+      "bytes": 15444
+    },
+    "client/local-agent/src/session_store.rs": {
+      "sha256": "ca74bc6dc9e5046f6b44dea7bffa1e39939405a89d1767923e385b34cd95aa72",
+      "bytes": 25220
+    },
+    "client/scripts/qualify-local-agent.py": {
+      "sha256": "846ca98153127d6576ea5b3770fb919d346c8366355f041245cd2c6c6a801da1",
+      "bytes": 27126
+    },
+    "client/scripts/qualify-local-catalog.py": {
+      "sha256": "d9f106b36db837131792bf2b4070c59329f6ff44a2bb955bd6ea1d34c6a8440e",
+      "bytes": 25925
+    },
+    "client/scripts/qualify-local-context.py": {
+      "sha256": "fcf38ca3d422e5f5807a1c8287c10f39ffdae3373f9541124577f0f33025db15",
+      "bytes": 9332
+    },
+    "client/scripts/qualify-local-resident.py": {
+      "sha256": "7ea98b057dcc1ca57ed3bae0bb75b6a148b63641c8094af9e0cb95119d6589f6",
+      "bytes": 50116
+    }
+  },
+  "environmentAllowlistNames": [
+    "LANG",
+    "PATH"
+  ],
+  "sidecar": {
+    "sha256": "d0bd6feab1e8473ea1a7bd4242a3ba280b43936982818d4416cb527a15342b44",
+    "bytes": 42898
+  },
+  "environmentBefore": {
+    "platform": "linux",
+    "logicalCpus": 4,
+    "loadavg": [
+      1.4501953125,
+      1.05615234375,
+      0.60595703125
+    ],
+    "cgroupCpu": {
+      "usage_usec": 58212417175,
+      "user_usec": 52440036835,
+      "system_usec": 5772380340,
+      "nr_throttled": 0,
+      "throttled_usec": 0
+    },
+    "cgroupCpuMax": "max 100000"
+  },
+  "fixtureShutdowns": [
+    {
+      "graceful_eof": true,
+      "forced": false,
+      "reaped": true,
+      "exit_code": 0
+    },
+    {
+      "graceful_eof": true,
+      "forced": false,
+      "reaped": true,
+      "exit_code": 0
+    },
+    {
+      "graceful_eof": true,
+      "forced": false,
+      "reaped": true,
+      "exit_code": 0
+    }
+  ],
+  "fixture": {
+    "profileSynthetic": {
+      "archived_domains": [],
+      "concepts_count": 2,
+      "day_number": 1,
+      "domains": [
+        {
+          "concept_count": 1,
+          "domain_id": "uxk5nmQb48jPGFn4FGCKWg",
+          "high_stakes": false,
+          "name": "Formation Jardin 0f97269d83",
+          "priority_rank": null
+        },
+        {
+          "concept_count": 1,
+          "domain_id": "3dnVVLo4fO-aoux6UGaRAA",
+          "high_stakes": false,
+          "name": "Formation Go 0f97269d83",
+          "priority_rank": null
+        }
+      ],
+      "interactions_today": 0,
+      "last_session": "first session",
+      "learner_id": "n6PILWylGZ3ilgpY2Dwayw",
+      "needs_domain_setup": false,
+      "objective": "Apprendre 0f97269d83",
+      "opening_message": "Day 1 - Goal: Apprendre 0f97269d83 - first session",
+      "priority_concept": "",
+      "priority_retention": 1,
+      "profile": {
+        "device": "laptop",
+        "language": "fr"
+      },
+      "progress_narrative": null,
+      "_model_sha256": "b139949c5bd74937ad8ed8c8cf3d9ffb1e99c866c823204dc42c0d91fa181897"
+    },
+    "trainingNamesOrdered": [
+      "Formation Go 0f97269d83",
+      "Formation Jardin 0f97269d83"
+    ],
+    "twoRealTrainings": true
+  },
+  "agentProcessStarted": true,
+  "shutdown": {
+    "graceful_eof": true,
+    "forced": false,
+    "reaped": true,
+    "exit_code": 0
+  },
+  "journal": {
+    "checks": [
+      {
+        "name": "all_attempted_turns_present",
+        "passed": true
+      },
+      {
+        "name": "exact_conversation_binding",
+        "passed": true
+      },
+      {
+        "name": "pinned_model_binding",
+        "passed": true
+      },
+      {
+        "name": "no_unlinked_operations",
+        "passed": true
+      },
+      {
+        "name": "all_observed_projections_within_budget",
+        "passed": true
+      }
+    ],
+    "cases": [
+      {
+        "case": "no_read",
+        "checks": [
+          {
+            "name": "exact_user_and_answer",
+            "passed": true
+          },
+          {
+            "name": "complete_durable_commit",
+            "passed": true
+          },
+          {
+            "name": "expected_operation_cardinality",
+            "passed": true
+          }
+        ]
+      },
+      {
+        "case": "quoted_definition",
+        "checks": [
+          {
+            "name": "exact_user_and_answer",
+            "passed": true
+          },
+          {
+            "name": "complete_durable_commit",
+            "passed": true
+          },
+          {
+            "name": "expected_operation_cardinality",
+            "passed": true
+          }
+        ]
+      },
+      {
+        "case": "coaching",
+        "checks": [
+          {
+            "name": "exact_user_and_answer",
+            "passed": true
+          },
+          {
+            "name": "complete_durable_commit",
+            "passed": true
+          },
+          {
+            "name": "expected_operation_cardinality",
+            "passed": true
+          }
+        ]
+      },
+      {
+        "case": "profile_typo",
+        "checks": [
+          {
+            "name": "exact_user_and_answer",
+            "passed": true
+          },
+          {
+            "name": "complete_durable_commit",
+            "passed": true
+          },
+          {
+            "name": "expected_operation_cardinality",
+            "passed": true
+          },
+          {
+            "name": "exact_semantic_proposal_not_execution_authority",
+            "passed": true
+          },
+          {
+            "name": "one_proposer_projection_no_answer_generation",
+            "passed": true
+          },
+          {
+            "name": "exact_tool_args_and_permission_operation",
+            "passed": true
+          },
+          {
+            "name": "exact_transitions",
+            "passed": true
+          },
+          {
+            "name": "reviewed_effect_recorded",
+            "passed": true
+          },
+          {
+            "name": "fresh_completed_receipt",
+            "passed": true
+          },
+          {
+            "name": "wire_result_matches_exact_journal_envelope",
+            "passed": true
+          },
+          {
+            "name": "all_fixture_profile_fields",
+            "passed": true
+          },
+          {
+            "name": "exact_frozen_rust_render_no_extra_facts",
+            "passed": true
+          }
+        ],
+        "operationId": "465dfbad-0bca-491f-bee7-39b46e178ee8",
+        "turnId": "78b06a32-892d-4938-9c8b-d2dff44049b8",
+        "tool": "tutor/get_learner_context",
+        "arguments": {
+          "domain_id": "3dnVVLo4fO-aoux6UGaRAA"
+        },
+        "state": "completed",
+        "mutating": false,
+        "transitions": [
+          {
+            "from": null,
+            "to": "prepared"
+          },
+          {
+            "from": "prepared",
+            "to": "dispatched"
+          },
+          {
+            "from": "dispatched",
+            "to": "completed"
+          }
+        ],
+        "receiptSha256": "f4ca4cc9e9fd64d613204d93be7a7a2ca2fe9e9dcd67667c5c4eea9d686d0434",
+        "expectedAnswerSynthetic": "Informations de profil retournées par Tutor :\n- Objectif : Apprendre 0f97269d83\n- Langue : fr\n- Appareil : laptop\n\nFormation active : Formation Go 0f97269d83"
+      },
+      {
+        "case": "profile_paraphrase",
+        "checks": [
+          {
+            "name": "exact_user_and_answer",
+            "passed": true
+          },
+          {
+            "name": "complete_durable_commit",
+            "passed": true
+          },
+          {
+            "name": "expected_operation_cardinality",
+            "passed": true
+          },
+          {
+            "name": "exact_semantic_proposal_not_execution_authority",
+            "passed": true
+          },
+          {
+            "name": "one_proposer_projection_no_answer_generation",
+            "passed": true
+          },
+          {
+            "name": "exact_tool_args_and_permission_operation",
+            "passed": true
+          },
+          {
+            "name": "exact_transitions",
+            "passed": true
+          },
+          {
+            "name": "reviewed_effect_recorded",
+            "passed": true
+          },
+          {
+            "name": "fresh_completed_receipt",
+            "passed": true
+          },
+          {
+            "name": "wire_result_matches_exact_journal_envelope",
+            "passed": true
+          },
+          {
+            "name": "all_fixture_profile_fields",
+            "passed": true
+          },
+          {
+            "name": "exact_frozen_rust_render_no_extra_facts",
+            "passed": true
+          }
+        ],
+        "operationId": "300a7c73-06eb-41ee-b3cb-9f374a45a5d4",
+        "turnId": "c4b39bf5-f9ac-40a5-a6f2-e418bfbd3201",
+        "tool": "tutor/get_learner_context",
+        "arguments": {
+          "domain_id": "3dnVVLo4fO-aoux6UGaRAA"
+        },
+        "state": "completed",
+        "mutating": false,
+        "transitions": [
+          {
+            "from": null,
+            "to": "prepared"
+          },
+          {
+            "from": "prepared",
+            "to": "dispatched"
+          },
+          {
+            "from": "dispatched",
+            "to": "completed"
+          }
+        ],
+        "receiptSha256": "f4ca4cc9e9fd64d613204d93be7a7a2ca2fe9e9dcd67667c5c4eea9d686d0434",
+        "expectedAnswerSynthetic": "Informations de profil retournées par Tutor :\n- Objectif : Apprendre 0f97269d83\n- Langue : fr\n- Appareil : laptop\n\nFormation active : Formation Go 0f97269d83"
+      },
+      {
+        "case": "library_question",
+        "checks": [
+          {
+            "name": "exact_user_and_answer",
+            "passed": true
+          },
+          {
+            "name": "complete_durable_commit",
+            "passed": true
+          },
+          {
+            "name": "expected_operation_cardinality",
+            "passed": true
+          },
+          {
+            "name": "exact_semantic_proposal_not_execution_authority",
+            "passed": true
+          },
+          {
+            "name": "one_proposer_projection_no_answer_generation",
+            "passed": true
+          },
+          {
+            "name": "exact_tool_args_and_permission_operation",
+            "passed": true
+          },
+          {
+            "name": "exact_transitions",
+            "passed": true
+          },
+          {
+            "name": "reviewed_effect_recorded",
+            "passed": true
+          },
+          {
+            "name": "fresh_completed_receipt",
+            "passed": true
+          },
+          {
+            "name": "wire_result_matches_exact_journal_envelope",
+            "passed": true
+          },
+          {
+            "name": "exact_library_page",
+            "passed": true
+          },
+          {
+            "name": "exact_frozen_rust_render_no_extra_facts",
+            "passed": true
+          }
+        ],
+        "operationId": "75a35cf7-8df5-4bb5-89dd-a13ddabc445b",
+        "turnId": "f0dfba65-312a-497e-bbba-303e3ba84a05",
+        "tool": "tutor/list_training_library",
+        "arguments": {
+          "limit": 10
+        },
+        "state": "completed",
+        "mutating": true,
+        "transitions": [
+          {
+            "from": null,
+            "to": "prepared"
+          },
+          {
+            "from": "prepared",
+            "to": "dispatched"
+          },
+          {
+            "from": "dispatched",
+            "to": "completed"
+          }
+        ],
+        "receiptSha256": "7bf2c8265d1e5dfb9a3f98f21716c5cc0275e4493c17b860db8c7658dcf7e6e9",
+        "partialPaginationObserved": false,
+        "pageSynthetic": {
+          "items": [
+            {
+              "audience": "private",
+              "author_id": "n6PILWylGZ3ilgpY2Dwayw",
+              "can_archive": true,
+              "can_delete": true,
+              "can_edit": true,
+              "can_learn": true,
+              "can_publish": false,
+              "can_restore": false,
+              "can_review": false,
+              "can_share": false,
+              "can_withdraw": false,
+              "description": "",
+              "domain_id": "3dnVVLo4fO-aoux6UGaRAA",
+              "free_publication": false,
+              "id": "personal:3dnVVLo4fO-aoux6UGaRAA",
+              "kind": "personal",
+              "name": "Formation Go 0f97269d83",
+              "progress": [
+                {
+                  "concept": "sol",
+                  "mastery": 0.1
+                }
+              ],
+              "revision": "1",
+              "status": "active"
+            },
+            {
+              "audience": "private",
+              "author_id": "n6PILWylGZ3ilgpY2Dwayw",
+              "can_archive": true,
+              "can_delete": true,
+              "can_edit": true,
+              "can_learn": true,
+              "can_publish": false,
+              "can_restore": false,
+              "can_review": false,
+              "can_share": false,
+              "can_withdraw": false,
+              "description": "",
+              "domain_id": "uxk5nmQb48jPGFn4FGCKWg",
+              "free_publication": false,
+              "id": "personal:uxk5nmQb48jPGFn4FGCKWg",
+              "kind": "personal",
+              "name": "Formation Jardin 0f97269d83",
+              "progress": [
+                {
+                  "concept": "sol",
+                  "mastery": 0.1
+                }
+              ],
+              "revision": "1",
+              "status": "active"
+            }
+          ],
+          "next_after": "",
+          "partial": false
+        },
+        "expectedAnswerSynthetic": "Formations trouvées :\n\n1. Formation Go 0f97269d83\n2. Formation Jardin 0f97269d83"
+      },
+      {
+        "case": "library_paraphrase",
+        "checks": [
+          {
+            "name": "exact_user_and_answer",
+            "passed": true
+          },
+          {
+            "name": "complete_durable_commit",
+            "passed": true
+          },
+          {
+            "name": "expected_operation_cardinality",
+            "passed": true
+          },
+          {
+            "name": "exact_semantic_proposal_not_execution_authority",
+            "passed": true
+          },
+          {
+            "name": "one_proposer_projection_no_answer_generation",
+            "passed": true
+          },
+          {
+            "name": "exact_tool_args_and_permission_operation",
+            "passed": true
+          },
+          {
+            "name": "exact_transitions",
+            "passed": true
+          },
+          {
+            "name": "reviewed_effect_recorded",
+            "passed": true
+          },
+          {
+            "name": "fresh_completed_receipt",
+            "passed": true
+          },
+          {
+            "name": "wire_result_matches_exact_journal_envelope",
+            "passed": true
+          },
+          {
+            "name": "exact_library_page",
+            "passed": true
+          },
+          {
+            "name": "exact_frozen_rust_render_no_extra_facts",
+            "passed": true
+          }
+        ],
+        "operationId": "450cb04a-0835-496e-a6d8-81bdb853a2bc",
+        "turnId": "c0a76c1a-a461-49cd-8d22-c8dd87a509e1",
+        "tool": "tutor/list_training_library",
+        "arguments": {
+          "limit": 10
+        },
+        "state": "completed",
+        "mutating": true,
+        "transitions": [
+          {
+            "from": null,
+            "to": "prepared"
+          },
+          {
+            "from": "prepared",
+            "to": "dispatched"
+          },
+          {
+            "from": "dispatched",
+            "to": "completed"
+          }
+        ],
+        "receiptSha256": "7bf2c8265d1e5dfb9a3f98f21716c5cc0275e4493c17b860db8c7658dcf7e6e9",
+        "partialPaginationObserved": false,
+        "pageSynthetic": {
+          "items": [
+            {
+              "audience": "private",
+              "author_id": "n6PILWylGZ3ilgpY2Dwayw",
+              "can_archive": true,
+              "can_delete": true,
+              "can_edit": true,
+              "can_learn": true,
+              "can_publish": false,
+              "can_restore": false,
+              "can_review": false,
+              "can_share": false,
+              "can_withdraw": false,
+              "description": "",
+              "domain_id": "3dnVVLo4fO-aoux6UGaRAA",
+              "free_publication": false,
+              "id": "personal:3dnVVLo4fO-aoux6UGaRAA",
+              "kind": "personal",
+              "name": "Formation Go 0f97269d83",
+              "progress": [
+                {
+                  "concept": "sol",
+                  "mastery": 0.1
+                }
+              ],
+              "revision": "1",
+              "status": "active"
+            },
+            {
+              "audience": "private",
+              "author_id": "n6PILWylGZ3ilgpY2Dwayw",
+              "can_archive": true,
+              "can_delete": true,
+              "can_edit": true,
+              "can_learn": true,
+              "can_publish": false,
+              "can_restore": false,
+              "can_review": false,
+              "can_share": false,
+              "can_withdraw": false,
+              "description": "",
+              "domain_id": "uxk5nmQb48jPGFn4FGCKWg",
+              "free_publication": false,
+              "id": "personal:uxk5nmQb48jPGFn4FGCKWg",
+              "kind": "personal",
+              "name": "Formation Jardin 0f97269d83",
+              "progress": [
+                {
+                  "concept": "sol",
+                  "mastery": 0.1
+                }
+              ],
+              "revision": "1",
+              "status": "active"
+            }
+          ],
+          "next_after": "",
+          "partial": false
+        },
+        "expectedAnswerSynthetic": "Formations trouvées :\n\n1. Formation Go 0f97269d83\n2. Formation Jardin 0f97269d83"
+      },
+      {
+        "case": "profile_denied",
+        "checks": [
+          {
+            "name": "exact_user_and_answer",
+            "passed": true
+          },
+          {
+            "name": "complete_durable_commit",
+            "passed": true
+          },
+          {
+            "name": "expected_operation_cardinality",
+            "passed": true
+          },
+          {
+            "name": "exact_semantic_proposal_not_execution_authority",
+            "passed": true
+          },
+          {
+            "name": "one_proposer_projection_no_answer_generation",
+            "passed": true
+          },
+          {
+            "name": "exact_tool_args_and_permission_operation",
+            "passed": true
+          },
+          {
+            "name": "exact_transitions",
+            "passed": true
+          },
+          {
+            "name": "reviewed_effect_recorded",
+            "passed": true
+          },
+          {
+            "name": "denial_zero_receipt_zero_dispatch",
+            "passed": true
+          },
+          {
+            "name": "exact_denial_no_personal_fact",
+            "passed": true
+          }
+        ],
+        "operationId": "7d93dd52-d52b-408c-b4e9-7d559eed4e86",
+        "turnId": "bd4a4165-47f9-458a-a2f8-0f79c93b9f87",
+        "tool": "tutor/get_learner_context",
+        "arguments": {
+          "domain_id": "3dnVVLo4fO-aoux6UGaRAA"
+        },
+        "state": "rejected",
+        "mutating": false,
+        "transitions": [
+          {
+            "from": null,
+            "to": "prepared"
+          },
+          {
+            "from": "prepared",
+            "to": "rejected"
+          }
+        ]
+      }
+    ]
+  },
+  "wireEvents": [
+    {
+      "event": "request",
+      "method": "initialize"
+    },
+    {
+      "event": "reply",
+      "method": "initialize",
+      "rpcError": false
+    },
+    {
+      "direction": "to_server",
+      "event": "other_frame"
+    },
+    {
+      "event": "request",
+      "method": "tools/list"
+    },
+    {
+      "event": "reply",
+      "method": "tools/list",
+      "rpcError": false
+    },
+    {
+      "argumentsSha256": "85f2a1542300d3a71110ae6f37882d7eb9a0c031202628e76b73c591eb341ec6",
+      "event": "call_sent",
+      "tool": "get_learner_context"
+    },
+    {
+      "argumentsSha256": "85f2a1542300d3a71110ae6f37882d7eb9a0c031202628e76b73c591eb341ec6",
+      "event": "call_result",
+      "resultSha256": "f4ca4cc9e9fd64d613204d93be7a7a2ca2fe9e9dcd67667c5c4eea9d686d0434",
+      "rpcError": false,
+      "tool": "get_learner_context"
+    },
+    {
+      "argumentsSha256": "85f2a1542300d3a71110ae6f37882d7eb9a0c031202628e76b73c591eb341ec6",
+      "event": "call_sent",
+      "tool": "get_learner_context"
+    },
+    {
+      "argumentsSha256": "85f2a1542300d3a71110ae6f37882d7eb9a0c031202628e76b73c591eb341ec6",
+      "event": "call_result",
+      "resultSha256": "f4ca4cc9e9fd64d613204d93be7a7a2ca2fe9e9dcd67667c5c4eea9d686d0434",
+      "rpcError": false,
+      "tool": "get_learner_context"
+    },
+    {
+      "argumentsSha256": "ca502dec04523cdc33afece69a9b600d5b9bd022d453791cc693b6b372f808ad",
+      "event": "call_sent",
+      "tool": "list_training_library"
+    },
+    {
+      "argumentsSha256": "ca502dec04523cdc33afece69a9b600d5b9bd022d453791cc693b6b372f808ad",
+      "event": "call_result",
+      "resultSha256": "7bf2c8265d1e5dfb9a3f98f21716c5cc0275e4493c17b860db8c7658dcf7e6e9",
+      "rpcError": false,
+      "tool": "list_training_library"
+    },
+    {
+      "event": "request",
+      "method": "tools/list"
+    },
+    {
+      "event": "reply",
+      "method": "tools/list",
+      "rpcError": false
+    },
+    {
+      "argumentsSha256": "ca502dec04523cdc33afece69a9b600d5b9bd022d453791cc693b6b372f808ad",
+      "event": "call_sent",
+      "tool": "list_training_library"
+    },
+    {
+      "argumentsSha256": "ca502dec04523cdc33afece69a9b600d5b9bd022d453791cc693b6b372f808ad",
+      "event": "call_result",
+      "resultSha256": "7bf2c8265d1e5dfb9a3f98f21716c5cc0275e4493c17b860db8c7658dcf7e6e9",
+      "rpcError": false,
+      "tool": "list_training_library"
+    },
+    {
+      "event": "request",
+      "method": "tools/list"
+    },
+    {
+      "event": "reply",
+      "method": "tools/list",
+      "rpcError": false
+    }
+  ],
+  "partialPaginationObserved": false,
+  "artifactsAfter": {
+    "agent": {
+      "sha256": "5fc4348d7fd21fd98ee6aba8a0c3582889d60f176474a2bfdacac0e19bf6ddf8",
+      "bytes": 18474056
+    },
+    "server": {
+      "sha256": "9c36faebdb89f7a28fa057cb391f52f2a928d3d3f8d14751c4f7d8914410da63",
+      "bytes": 52117333
+    },
+    "model": {
+      "sha256": "b139949c5bd74937ad8ed8c8cf3d9ffb1e99c866c823204dc42c0d91fa181897",
+      "bytes": 1107409472
+    },
+    "contract": {
+      "sha256": "3bb6fe5cf82a4de9005481847da57885542f68f0b363d4930114e92308006903",
+      "bytes": 808
+    }
+  },
+  "missingCases": [],
+  "checksSummary": {
+    "observed": 131,
+    "passed": 130,
+    "failed": 1
+  },
+  "environmentAfter": {
+    "platform": "linux",
+    "logicalCpus": 4,
+    "loadavg": [
+      3.21142578125,
+      1.8212890625,
+      0.93212890625
+    ],
+    "cgroupCpu": {
+      "usage_usec": 58518180027,
+      "user_usec": 52735442163,
+      "system_usec": 5782737863,
+      "nr_throttled": 0,
+      "throttled_usec": 0
+    },
+    "cgroupCpuMax": "max 100000"
+  },
+  "completedAt": "2026-11-02T21:02:46.124472+00:00"
+}

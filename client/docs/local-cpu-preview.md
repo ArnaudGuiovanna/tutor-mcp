@@ -1,5 +1,9 @@
 # Préversion locale CPU : petit modèle et parcours fixes
 
+Ce document conserve les mesures initiales 0.0.7–0.0.8. Les changements de
+routage et de cache de 0.0.9 sont décrits dans
+[la préversion sémantique](local-semantic-preview.md).
+
 Depuis 0.0.7, le profil utilise **Qwen3-1.7B Q4_K_M**, fichier de 1 107 409 472
 octets, à la place du 4B Q4_K_M de 2 497 281 120 octets (environ 56 % de
 poids en moins). Révision, empreinte SHA-256 et licence Apache-2.0 sont épinglées

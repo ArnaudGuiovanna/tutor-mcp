@@ -189,6 +189,14 @@ impl Configuration {
                 self.threads.to_string(),
                 "--batch".into(),
                 self.batch.to_string(),
+                "--prefix-cache".into(),
+                "on".into(),
+                "--reuse-mcp".into(),
+                "on".into(),
+                "--catalog-cache".into(),
+                "on".into(),
+                "--semantic-router".into(),
+                "on".into(),
             ],
             env: vec![],
             cwd: Some(directory.to_path_buf()),
@@ -512,6 +520,14 @@ mod tests {
                 "6",
                 "--batch",
                 "128",
+                "--prefix-cache",
+                "on",
+                "--reuse-mcp",
+                "on",
+                "--catalog-cache",
+                "on",
+                "--semantic-router",
+                "on",
             ]
         );
         assert_eq!(spec.cwd.as_deref(), Some(fixture.root.path()));
@@ -717,7 +733,22 @@ mod tests {
             .unwrap();
         assert_eq!(
             &spec.args[6..],
-            ["--gpu-layers", "17", "--threads", "3", "--batch", "64"]
+            [
+                "--gpu-layers",
+                "17",
+                "--threads",
+                "3",
+                "--batch",
+                "64",
+                "--prefix-cache",
+                "on",
+                "--reuse-mcp",
+                "on",
+                "--catalog-cache",
+                "on",
+                "--semantic-router",
+                "on"
+            ]
         );
         assert!(spec.env.is_empty());
     }

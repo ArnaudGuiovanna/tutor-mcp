@@ -30,6 +30,7 @@ pub struct Options {
     pub prefix_cache: bool,
     pub reuse_mcp: bool,
     pub catalog_cache: bool,
+    pub semantic_router: bool,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -39,6 +40,7 @@ impl Default for Options {
             prefix_cache: false,
             reuse_mcp: false,
             catalog_cache: false,
+            semantic_router: false,
         }
     }
 }
@@ -475,6 +477,9 @@ where
 {
     if options.catalog_cache && !options.reuse_mcp {
         anyhow::bail!("catalog_cache_requires_mcp_reuse");
+    }
+    if options.semantic_router && !options.reuse_mcp {
+        anyhow::bail!("semantic_router_requires_mcp_reuse");
     }
     let cancel = Arc::new(AtomicBool::new(false));
     let _cancel_on_exit = CancelOnDrop(cancel.clone());
@@ -1231,6 +1236,7 @@ impl Server {
             _ => None,
         };
         let resident_manager = self.mcp.clone();
+        let semantic_router = self.options.semantic_router;
         if session.durable.is_some() {
             while !session.turns.is_empty()
                 && (session.turns.len() >= 24
@@ -1353,7 +1359,7 @@ impl Server {
                             }
                             _ => None,
                         };
-                        let mut stats = crate::fast_harness::run_with_connection(
+                        let mut stats = crate::fast_harness::run_with_options(
                             engine.as_mut(),
                             store,
                             crate::harness::Input {
@@ -1372,7 +1378,10 @@ impl Server {
                             &worker_cancel,
                             &runtime,
                             &mut output,
-                            resident,
+                            crate::fast_harness::RouteOptions {
+                                resident,
+                                semantic_router,
+                            },
                         )?;
                         stats.elapsed_ms = turn_started.elapsed().as_millis() as u64;
                         return Ok(stats);
@@ -1874,18 +1883,36 @@ mod tests {
                 cache_connection: uuid::Uuid::new_v4(),
                 ..Server::default()
             };
-            let created = server
-                .new_session(&json!({
-                    "cwd":root.path(),"mcpServers":[{"type":"http","name":"tutor",
-                        "url":"http://127.0.0.1:9/mcp","headers":[
-                    {"name":"Tutor-Conversation-ID","value":conversation.to_string()}]}],
-                    "_meta":{"tutorLocal":{"owner":{"profileId":"p","accountId":"a",
-                        "tenantId":"t","serverId":"s"}}}
-                }))
-                .await
-                .unwrap();
-            let session = created["sessionId"].as_str().unwrap();
-            let store = server.sessions[session].durable.clone().unwrap();
+            // This test exercises cache finalization against real journal
+            // commits. Prepare its journal synchronously so unrelated runner
+            // IO cannot expire session/new's production deadline during setup.
+            let owner = Owner {
+                profile_id: "p".into(),
+                account_id: "a".into(),
+                tenant_id: "t".into(),
+                server_id: "s".into(),
+            };
+            let journal =
+                SessionStore::create(root.path(), &owner, &server.options.model_sha256).unwrap();
+            let session = journal.id().to_owned();
+            let store = Arc::new(Mutex::new(journal));
+            server.sessions.insert(
+                session.clone(),
+                Session {
+                    _connection: ConnectionConfig {
+                        _cwd: root.path().to_string_lossy().into_owned(),
+                        _mcp_servers: vec![json!({"type":"http","name":"tutor",
+                            "url":"http://127.0.0.1:9/mcp","headers":[
+                        {"name":"Tutor-Conversation-ID","value":conversation.to_string()}]})],
+                    },
+                    turns: Vec::new(),
+                    history_bytes: 0,
+                    owner: Some(owner),
+                    durable: Some(store.clone()),
+                    conversation: None,
+                    config_epoch: 1,
+                },
+            );
             let probe = Arc::new(Mutex::new(CacheProbe::default()));
             let engine: Arc<Mutex<Box<dyn Engine>>> = Arc::new(Mutex::new(Box::new(CacheEngine {
                 store: store.clone(),
@@ -1893,7 +1920,7 @@ mod tests {
                 mode,
             })));
             let cancel = Arc::new(AtomicBool::new(false));
-            let message = task_prompt(7, session, conversation);
+            let message = task_prompt(7, &session, conversation);
             server
                 .start_prompt(
                     &json!(7),

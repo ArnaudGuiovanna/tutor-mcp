@@ -11,6 +11,11 @@ use crate::{
 use serde_json::Value;
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
 
+pub(crate) struct RouteOptions<'a> {
+    pub resident: Option<harness::ResidentMcp<'a>>,
+    pub semantic_router: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Route {
     Chat,
@@ -141,8 +146,95 @@ pub(crate) fn run_with_connection(
     ui: &mut dyn harness::Ui,
     resident: Option<harness::ResidentMcp<'_>>,
 ) -> Result<GenerationStats, String> {
+    run_with_options(
+        engine,
+        store,
+        input,
+        cancel,
+        handle,
+        ui,
+        RouteOptions {
+            resident,
+            semantic_router: false,
+        },
+    )
+}
+
+pub(crate) fn run_with_options(
+    engine: &mut dyn Engine,
+    store: &Arc<Mutex<SessionStore>>,
+    input: harness::Input<'_>,
+    cancel: &AtomicBool,
+    handle: &tokio::runtime::Handle,
+    ui: &mut dyn harness::Ui,
+    options: RouteOptions<'_>,
+) -> Result<GenerationStats, String> {
     harness::validate_input(store, &input)?;
-    match route(input.user) {
+    let resident = options.resident;
+    let mut selected = route(input.user);
+    let mut decision_stats = None;
+    let lookup_policy = crate::semantic_intent::LookupPolicy::for_request(input.user);
+    if options.semantic_router
+        && selected == Route::Chat
+        && resident.is_some()
+        && !lookup_policy.discussion_only()
+    {
+        let resident = resident.ok_or("harness_semantic_scope_required")?;
+        let decision =
+            crate::semantic_intent::propose(engine, store, &input, cancel, &lookup_policy)?;
+        use crate::semantic_intent::Proposal;
+        match decision.proposal {
+            Proposal::Profile => {
+                let stats = harness::run_capability(
+                    engine,
+                    store,
+                    input,
+                    cancel,
+                    handle,
+                    ui,
+                    harness::CapabilityRequest {
+                        resident,
+                        capability: harness::Capability::Profile,
+                    },
+                )?;
+                return Ok(combine(decision.stats, stats));
+            }
+            Proposal::TrainingSearch { query } => {
+                let request =
+                    crate::library::LibraryRequest::new(&query, crate::library::Filter::All, 10)
+                        .map_err(|error| error.to_string())?;
+                let stats = harness::run_capability(
+                    engine,
+                    store,
+                    input,
+                    cancel,
+                    handle,
+                    ui,
+                    harness::CapabilityRequest {
+                        resident,
+                        capability: harness::Capability::Library(request),
+                    },
+                )?;
+                return Ok(combine(decision.stats, stats));
+            }
+            Proposal::ActiveTraining => selected = Route::Training,
+            Proposal::Chat => (),
+            Proposal::Clarify => {
+                let stats = direct_text(
+                    ui,
+                    cancel,
+                    if input.language == Some("en") {
+                        "Would you like to view your Tutor profile, search available training, or work on a learning question? Please specify one request."
+                    } else {
+                        "Souhaitez-vous consulter votre profil Tutor, rechercher une formation ou travailler une question d’apprentissage ? Précisez une demande."
+                    },
+                )?;
+                return Ok(combine(decision.stats, stats));
+            }
+        }
+        decision_stats = Some(decision.stats);
+    }
+    let stats = match selected {
         Route::Alerts | Route::Context | Route::Profile => {
             if let Some(resident) = resident {
                 harness::run_fixed_with_connection(
@@ -213,7 +305,18 @@ pub(crate) fn run_with_connection(
                 "Je suis Tutor, votre coach d’apprentissage. Je peux vous aider à préciser un objectif, comprendre une notion et vous exercer étape par étape. Demandez « montre mon profil » ou « affiche ma formation » pour consulter vos informations Tutor confirmées. /alertes et /contexte lisent les alertes et le contexte pédagogique. Cette version locale ne crée pas encore de formation, n’enregistre pas la progression et ne réalise pas d’évaluation validée."
             },
         ),
-    }
+    }?;
+    Ok(match decision_stats {
+        Some(decision) => combine(decision, stats),
+        None => stats,
+    })
+}
+
+fn combine(decision: GenerationStats, mut answer: GenerationStats) -> GenerationStats {
+    answer.input_tokens = answer.input_tokens.saturating_add(decision.input_tokens);
+    answer.output_tokens = answer.output_tokens.saturating_add(decision.output_tokens);
+    answer.elapsed_ms = answer.elapsed_ms.saturating_add(decision.elapsed_ms);
+    answer
 }
 
 pub(crate) fn direct_text(

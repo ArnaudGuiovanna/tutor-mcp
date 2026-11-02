@@ -7,7 +7,7 @@ exécuté nativement ou dans une distribution **WSL2** choisie explicitement.
 
 ## Agent Qwen local en développement
 
-La préversion Windows CPU regroupe **Tutor 0.0.8 et l’agent local dans un seul
+La préversion Windows CPU regroupe **Tutor 0.0.9 et l’agent local dans un seul
 installateur**. Dans **Paramètres → Connexion et outils**, installer le modèle
 Qwen avec le bouton de téléchargement, ou sélectionner le GGUF déjà disponible
 sur l’ordinateur. L’application conserve le modèle dans son dossier de données
@@ -27,12 +27,14 @@ Elles ne prédisent pas la latence sur la machine Windows cible.
 Le composant `local-agent/` charge directement **Qwen3-1.7B Q4_K_M**, avec le
 raisonnement interne désactivé, et sert ACP sur son entrée/sortie standard.
 Il prend en charge la conversation texte, le streaming, l’arrêt et la reprise
-depuis un journal local. Toutes les mutations restent refusées dans ce pilote :
-préparation, soumission et évaluation pédagogiques doivent encore être intégrées.
+depuis un journal local. La préparation, la soumission et l’évaluation pédagogiques
+doivent encore être intégrées. Certaines consultations de bibliothèque peuvent
+initialiser une formation côté serveur ; elles gardent une permission explicite
+et ne sont jamais rejouées automatiquement.
 Le tuteur complet reste donc en développement ; voir
 [le backlog H00–H12](../docs/backlog-local-harness.yaml).
 
-La conversation libre utilise une seule génération. Le modèle reçoit le nom de
+Une question pédagogique clairement identifiée utilise une seule génération. Le modèle reçoit le nom de
 la formation active confirmé par le client et au plus les deux derniers tours ;
 le journal reste complet et toutes les omissions de contexte sont enregistrées.
 Le rôle est celui d’un coach d’apprentissage, pour tous les sujets.
@@ -49,9 +51,12 @@ par le client. Une formation absente ou non vérifiée est indiquée expliciteme
 seulement si `has_critical` et `needs_domain_setup` valent tous deux `false`.
 Ces deux commandes utilisent une génération finale. `/aide`, « Que peux-tu faire ? »
 et les salutations simples reçoivent une réponse déterministe, sans charger le
-modèle. Les autres formulations restent de la conversation ; la reconnaissance
-de demandes reste un ensemble de règles explicites, pas une découverte autonome
-de tous les outils.
+modèle. Depuis 0.0.9, les autres formulations peuvent passer par une classification
+JSON bornée : profil, liste/recherche de formations, formation active, discussion
+ou clarification. Le modèle propose une catégorie ; Rust conserve le choix
+d’outil, les arguments protégés, les permissions et le rendu des données.
+Ce premier routage ne couvre pas encore toutes les intentions pédagogiques.
+Voir [le périmètre de test 0.0.9](docs/local-semantic-preview.md).
 
 Rust choisit les outils, valide leurs contrats, injecte les identités vérifiées
 et conserve les permissions ACP. Le catalogue et les schémas restent hors du
@@ -65,10 +70,12 @@ expérimentations ; il n’est plus utilisé par le parcours ACP livré.
 Le moteur utilise le couple `llama-cpp-2`/`llama-cpp-sys-2` **0.1.146** épinglé
 par Goose. L’accès direct permet de compter le prompt avec le tokenizer exact
 du modèle. Les poids restent chargés entre les générations ; chaque génération
-dispose d’un nouveau KV cache limité par défaut à **2 048 tokens**. Le gestionnaire
+dispose d’un KV cache limité par défaut à **2 048 tokens**. Le gestionnaire
 de contexte réserve **192 tokens de sortie** et **256 de marge**, puis sélectionne
 des tours entiers. Les omissions sont journalisées ; aucune donnée indispensable
-n’est tronquée silencieusement. Il n’y a pas de réutilisation du KV entre tours.
+n’est tronquée silencieusement. Le client active la réutilisation du préfixe exact,
+la connexion MCP persistante et le cache de catalogue vérifié. Une modification
+de préfixe, d’identité ou de catalogue invalide la réutilisation concernée.
 
 Le client fournit un dossier privé `local-agent` dans les données du profil.
 Chaque session possède un journal SQLite lié au profil, au compte, à

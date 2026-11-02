@@ -86,6 +86,16 @@ pub(crate) struct ResidentMcp<'a> {
     pub scope: &'a Scope,
 }
 
+pub(crate) enum Capability {
+    Profile,
+    Library(crate::library::LibraryRequest),
+}
+
+pub(crate) struct CapabilityRequest<'a> {
+    pub resident: ResidentMcp<'a>,
+    pub capability: Capability,
+}
+
 pub struct Input<'a> {
     pub session_id: &'a str,
     pub turn_id: &'a str,
@@ -152,9 +162,36 @@ pub(crate) fn run_fixed_with_connection(
     )
 }
 
+pub(crate) fn run_capability(
+    engine: &mut dyn Engine,
+    store: &Arc<Mutex<SessionStore>>,
+    input: Input<'_>,
+    cancel: &AtomicBool,
+    handle: &Handle,
+    ui: &mut dyn Ui,
+    request: CapabilityRequest<'_>,
+) -> Result<GenerationStats, String> {
+    run_workflow(
+        engine,
+        store,
+        input,
+        cancel,
+        handle,
+        ui,
+        Workflow::Capability(request),
+    )
+}
+
 enum Workflow<'a> {
     Discovery,
     Fixed(Option<ResidentMcp<'a>>),
+    Capability(CapabilityRequest<'a>),
+}
+
+enum Selection {
+    Discovery,
+    Fixed(crate::fast_harness::Route),
+    Library(crate::library::LibraryRequest),
 }
 
 fn run_workflow(
@@ -168,10 +205,25 @@ fn run_workflow(
 ) -> Result<GenerationStats, String> {
     validate_input(store, &input)?;
     check_cancel(cancel)?;
-    let fixed = matches!(workflow, Workflow::Fixed(_));
-    let resident = match workflow {
-        Workflow::Discovery => None,
-        Workflow::Fixed(resident) => resident,
+    let (resident, selection) = match workflow {
+        Workflow::Discovery => (None, Selection::Discovery),
+        Workflow::Fixed(resident) => (
+            resident,
+            Selection::Fixed(crate::fast_harness::route(input.user)),
+        ),
+        Workflow::Capability(request) => (
+            Some(request.resident),
+            match request.capability {
+                Capability::Profile => Selection::Fixed(crate::fast_harness::Route::Profile),
+                Capability::Library(request) => Selection::Library(request),
+            },
+        ),
+    };
+    let turn = TurnContext {
+        store,
+        input: &input,
+        cancel,
+        handle,
     };
     let mut connection = McpConnectionObservation::default();
     if let Some(resident) = resident {
@@ -191,11 +243,14 @@ fn run_workflow(
         };
         // The lease selects a fresh or eligible exact schema snapshot.
         // Approval, post-approval freshness and dispatch remain in the executor.
-        let outcome = if fixed {
-            fixed_connected(engine, store, &input, cancel, handle, ui, &mut lease)
-        } else {
-            run_connected(engine, store, &input, cancel, handle, ui, &mut lease)
-        };
+        let outcome = dispatch_connected(
+            engine,
+            &turn,
+            ui,
+            &mut lease,
+            &selection,
+            Some(resident.scope),
+        );
         let policy = if outcome.is_ok() {
             ReleasePolicy::RetainIfHealthy
         } else {
@@ -245,11 +300,7 @@ fn run_workflow(
             return Err("harness_mcp_connection_failed".to_owned());
         }
     };
-    let outcome = if fixed {
-        fixed_connected(engine, store, &input, cancel, handle, ui, &mut client)
-    } else {
-        run_connected(engine, store, &input, cancel, handle, ui, &mut client)
-    };
+    let outcome = dispatch_connected(engine, &turn, ui, &mut client, &selection, None);
     let closed = handle.block_on(client.close());
     emit_mcp(ui, vec![client.take_observation()], connection);
     match (outcome, closed) {
@@ -408,6 +459,155 @@ fn aggregate_mcp_observations(observations: &[McpObservation]) -> McpObservation
     total
 }
 
+fn dispatch_connected<C: Connection>(
+    engine: &mut dyn Engine,
+    turn: &TurnContext<'_, '_>,
+    ui: &mut dyn Ui,
+    client: &mut C,
+    selected: &Selection,
+    scope: Option<&Scope>,
+) -> Result<GenerationStats, String> {
+    match selected {
+        Selection::Discovery => run_connected(
+            engine,
+            turn.store,
+            turn.input,
+            turn.cancel,
+            turn.handle,
+            ui,
+            client,
+        ),
+        Selection::Fixed(route) => run_fixed_connected(engine, turn, ui, client, *route),
+        Selection::Library(request) => library_connected(
+            turn,
+            ui,
+            client,
+            scope.ok_or("harness_semantic_scope_required")?,
+            request.clone(),
+        ),
+    }
+}
+
+fn library_connected<C: Connection>(
+    turn: &TurnContext<'_, '_>,
+    ui: &mut dyn Ui,
+    client: &mut C,
+    scope: &Scope,
+    request: crate::library::LibraryRequest,
+) -> Result<GenerationStats, String> {
+    use crate::consultation::{AdmittedConsultation, Error as ConsultationError};
+    let store = turn.store;
+    let input = turn.input;
+    let cancel = turn.cancel;
+    let handle = turn.handle;
+    check_cancel(cancel)?;
+    let mut state = initial_state(store, input)?;
+    state.refresh(client, handle, cancel)?;
+    let prepared = {
+        let mut store = lock(store)?;
+        AdmittedConsultation::admit_first_page(&mut store, scope, input.turn_id, request)
+            .and_then(|admitted| {
+                admitted.prepare(
+                    &mut store,
+                    scope,
+                    &state.catalog,
+                    &state.binding,
+                    Uuid::new_v4(),
+                )
+            })
+            .map_err(|error| error.to_string())?
+    };
+    let call_id = prepared.operation_id().to_owned();
+    let response = (|| -> Result<_, String> {
+        update(ui, &call_id, "list_training_library", "pending", true)?;
+        let response = ui
+            .approve(&call_id, prepared.permission_params(input.session_id))
+            .map_err(|_| "harness_permission_unavailable")?;
+        check_cancel(cancel)?;
+        let allowed = response.pointer("/outcome/outcome").and_then(Value::as_str)
+            == Some("selected")
+            && response
+                .pointer("/outcome/optionId")
+                .and_then(Value::as_str)
+                == Some("allow");
+        if allowed {
+            client.after_approval();
+        }
+        if client.changed() {
+            state.refresh(client, handle, cancel)?;
+        }
+        if allowed {
+            update(ui, &call_id, "list_training_library", "in_progress", false)?;
+        }
+        Ok(response)
+    })();
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            {
+                let mut store = lock(store)?;
+                prepared
+                    .revoke(&mut store)
+                    .map_err(|error| error.to_string())?;
+                store
+                    .journal_mut()
+                    .reject_prepared(&call_id)
+                    .map_err(|_| "harness_store_unavailable")?;
+            }
+            let _ = update(ui, &call_id, "list_training_library", "failed", false);
+            return Err(error);
+        }
+    };
+    let executed = {
+        let mut store = lock(store)?;
+        handle.block_on(prepared.execute(
+            &mut store,
+            scope,
+            &state.catalog,
+            &state.binding,
+            &response,
+            client,
+            cancel,
+        ))
+    };
+    let receipt = match executed {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            update(ui, &call_id, "list_training_library", "failed", false)?;
+            check_cancel(cancel)?;
+            if error == ConsultationError::Execution(executor::Error::Denied) {
+                return crate::fast_harness::direct_text(
+                    ui,
+                    cancel,
+                    if input.language == Some("en") {
+                        "The training library was not read because permission was not granted."
+                    } else {
+                        "Les formations n’ont pas été consultées car l’autorisation n’a pas été accordée."
+                    },
+                );
+            }
+            return Err(error.to_string());
+        }
+    };
+    let text = (|| -> Result<String, String> {
+        let store = lock(store)?;
+        let page = crate::library::LibraryPage::read(&store, scope, receipt)
+            .map_err(|error| error.to_string())?;
+        page.render_text(&store, scope, input.language)
+            .map_err(|error| error.to_string())
+    })();
+    let text = match text {
+        Ok(text) => text,
+        Err(error) => {
+            update(ui, &call_id, "list_training_library", "failed", false)?;
+            return Err(error);
+        }
+    };
+    update(ui, &call_id, "list_training_library", "completed", false)?;
+    crate::fast_harness::direct_text(ui, cancel, &text)
+}
+
+#[cfg(test)]
 fn fixed_connected<C: Connection>(
     engine: &mut dyn Engine,
     store: &Arc<Mutex<SessionStore>>,
@@ -417,9 +617,33 @@ fn fixed_connected<C: Connection>(
     ui: &mut dyn Ui,
     client: &mut C,
 ) -> Result<GenerationStats, String> {
-    use crate::fast_harness::{route, Route};
+    run_fixed_connected(
+        engine,
+        &TurnContext {
+            store,
+            input,
+            cancel,
+            handle,
+        },
+        ui,
+        client,
+        crate::fast_harness::route(input.user),
+    )
+}
+
+fn run_fixed_connected<C: Connection>(
+    engine: &mut dyn Engine,
+    turn: &TurnContext<'_, '_>,
+    ui: &mut dyn Ui,
+    client: &mut C,
+    selected: crate::fast_harness::Route,
+) -> Result<GenerationStats, String> {
+    use crate::fast_harness::Route;
+    let store = turn.store;
+    let input = turn.input;
+    let cancel = turn.cancel;
+    let handle = turn.handle;
     validate_input(store, input)?;
-    let selected = route(input.user);
     if !matches!(selected, Route::Alerts | Route::Context | Route::Profile) {
         return Err("harness_route_invalid".into());
     }
@@ -431,12 +655,6 @@ fn fixed_connected<C: Connection>(
         json!({"route":match selected { Route::Alerts => "alerts", Route::Profile => "profile", _ => "context" }}),
     )?;
     state.refresh(client, handle, cancel)?;
-    let turn = TurnContext {
-        store,
-        input,
-        cancel,
-        handle,
-    };
     let tools: &[&str] = if selected == Route::Profile {
         // Reading the explicitly requested profile does not start a learning
         // activity. It remains possible when no domain has been configured.
@@ -459,7 +677,7 @@ fn fixed_connected<C: Connection>(
                 arguments: json!({}),
             },
         ] {
-            match step(action, &mut state, &turn, ui, client)? {
+            match step(action, &mut state, turn, ui, client)? {
                 Step::Continue => (),
                 Step::Correction(code) | Step::Stop(code) => {
                     state.feedback(store, input.turn_id, &code)?;
@@ -519,7 +737,7 @@ fn fixed_connected<C: Connection>(
                     pointer: pointer.into(),
                 },
                 &mut state,
-                &turn,
+                turn,
                 ui,
                 client,
             )? {
@@ -1715,6 +1933,7 @@ mod tests {
     use super::*;
     use crate::{journal::OperationState, mcp_client, runtime::ChatMessage, session_store::Owner};
     use std::collections::VecDeque;
+    include!("harness_semantic_tests.rs");
 
     struct Fixture {
         root: tempfile::TempDir,

@@ -1,0 +1,520 @@
+{
+  "schemaVersion": 1,
+  "modelStage": "UNKNOWN_AFTER_AGENT_START",
+  "status": "failed_or_incomplete",
+  "scope": "Eight development cases, real local Tutor/ACP, synthetic fixture only; no general accuracy claim",
+  "heldout": false,
+  "windowsP2000Qualified": false,
+  "pedagogyQualified": false,
+  "uiQualified": false,
+  "usefulResponseMeasured": false,
+  "cases": [
+    {
+      "case": "no_read",
+      "prompt": "Sans consulter mon profil ni mes formations, explique ce qu’est un objectif d’apprentissage.",
+      "kind": "no_mcp",
+      "permissionAllowed": true,
+      "outcome": "failed",
+      "checks": [
+        {
+          "name": "completed_end_turn",
+          "passed": false
+        },
+        {
+          "name": "only_expected_dispatch",
+          "passed": true
+        },
+        {
+          "name": "matched_permission",
+          "passed": true
+        },
+        {
+          "name": "no_dispatch_before_permission",
+          "passed": true
+        },
+        {
+          "name": "explicit_no_read_zero_mcp_frames",
+          "passed": false
+        },
+        {
+          "name": "generated_general_answer_observed",
+          "passed": false
+        }
+      ],
+      "permissionOperationIds": [],
+      "permissionRpcIds": [],
+      "toolUpdates": [],
+      "observedDispatchesBeforePermission": [],
+      "firstTextMs": null,
+      "error": "semantic_unexpected_update",
+      "totalMs": 23810.184012982063,
+      "answerSynthetic": "",
+      "wireEvents": [
+        {
+          "event": "request",
+          "method": "initialize"
+        },
+        {
+          "event": "reply",
+          "method": "initialize",
+          "rpcError": false
+        },
+        {
+          "direction": "to_server",
+          "event": "other_frame"
+        },
+        {
+          "event": "request",
+          "method": "tools/list"
+        },
+        {
+          "event": "reply",
+          "method": "tools/list",
+          "rpcError": false
+        }
+      ]
+    }
+  ],
+  "errors": [
+    "prompt_incomplete_stop_without_retry"
+  ],
+  "checks": [
+    {
+      "name": "all_fixture_children_gracefully_reaped",
+      "passed": true
+    },
+    {
+      "name": "agent_gracefully_reaped",
+      "passed": true
+    },
+    {
+      "name": "no_observed_relay_error",
+      "passed": true
+    },
+    {
+      "name": "all_observed_tutor_children_gracefully_reaped",
+      "passed": false
+    },
+    {
+      "name": "artifacts_unchanged",
+      "passed": true
+    },
+    {
+      "name": "sources_unchanged",
+      "passed": true
+    },
+    {
+      "name": "eight_cases_in_order",
+      "passed": false
+    }
+  ],
+  "startedAt": "2026-11-02T20:29:39.265588+00:00",
+  "configuration": {
+    "semanticRouter": true,
+    "prefixCache": true,
+    "reuseMcp": true,
+    "catalogCache": true,
+    "context": 2048,
+    "maxOutput": 96,
+    "threads": 4,
+    "batch": 128,
+    "gpuLayers": 0,
+    "timeoutSeconds": 1800,
+    "turnTimeoutSeconds": 180
+  },
+  "limits": [
+    "Known development utterances, not held-out or a general understanding/accuracy benchmark.",
+    "Synthetic Owner/HostContext, not institution authentication or independent binary/source attestation.",
+    "First TEXT only; no first USEFUL response, UI, hardware, p95 or speedup claim.",
+    "Combined generation totals include the proposer. One observed proposer call plus its single journal projection tests absence of an extra answer generation.",
+    "Pagination oracle validates first-page items/order/next_after. Two seeded trainings with source limit=10 produce no real partial page; offline coverage is not server coverage. No continuation is admitted until the state/ChoiceSet path exists.",
+    "Renderer and proposer-call contract must be confirmed from source before the first run; failures are retained with no prompt or response repair."
+  ],
+  "contract": {
+    "version": 1,
+    "status": "CONFIRMED_BEFORE_FIRST_RUN",
+    "proposerCallsForDirectRead": 1,
+    "libraryLimit": 10,
+    "profile": {
+      "heading": "Informations de profil retournées par Tutor :",
+      "fieldLines": {
+        "objective": "- Objectif : {value}",
+        "language": "- Langue : {value}",
+        "device": "- Appareil : {value}",
+        "affect_baseline": "- Ressenti déclaré : {value}"
+      },
+      "trainingLine": "Formation active : {value}"
+    },
+    "library": {
+      "heading": "Formations trouvées :",
+      "itemLine": "{index}. {name}",
+      "partialLine": "Résultats partiels : cette page n’est pas exhaustive.",
+      "emptyLine": "Aucune formation trouvée pour cette recherche."
+    },
+    "deniedProfile": "Le profil n’a pas été consulté car l’autorisation n’a pas été accordée."
+  },
+  "artifactsBefore": {
+    "agent": {
+      "sha256": "49df91045af969237fc14a8288d6872c5f9f9069e40edb575a217fe7d205dede",
+      "bytes": 18452552
+    },
+    "server": {
+      "sha256": "9c36faebdb89f7a28fa057cb391f52f2a928d3d3f8d14751c4f7d8914410da63",
+      "bytes": 52117333
+    },
+    "model": {
+      "sha256": "b139949c5bd74937ad8ed8c8cf3d9ffb1e99c866c823204dc42c0d91fa181897",
+      "bytes": 1107409472
+    },
+    "contract": {
+      "sha256": "3bb6fe5cf82a4de9005481847da57885542f68f0b363d4930114e92308006903",
+      "bytes": 808
+    }
+  },
+  "sourceFiles": {
+    "client/local-agent/Cargo.lock": {
+      "sha256": "1ea6d39ec20f915ff10c4ef777fe9fd4f08e7646d603d6e8826fb0ba244f798c",
+      "bytes": 56288
+    },
+    "client/local-agent/Cargo.toml": {
+      "sha256": "079ad94fd212cf464ec09301b1db63b2bbceda992647a3dce92fbe1a621716fd",
+      "bytes": 1605
+    },
+    "client/local-agent/model-profile.json": {
+      "sha256": "9f02c9b26b2f9e7ac54e1a333886bcf55c7ab4df60689c1fdc7c5a577fb1dc36",
+      "bytes": 813
+    },
+    "client/local-agent/src/acp.rs": {
+      "sha256": "1254389737f3be5b464082a3db4fce36a3885e03e469dc85e0816f0c17e3872d",
+      "bytes": 125809
+    },
+    "client/local-agent/src/call_validation.rs": {
+      "sha256": "50c01b7847daaf850661f235df1f1187c2a0755b43b25af5c685aaad10920da7",
+      "bytes": 30278
+    },
+    "client/local-agent/src/catalog.rs": {
+      "sha256": "c9f5b8b3c43033f5477271ce86d96cc90c8575f9e017e28cc73964590988fc25",
+      "bytes": 53220
+    },
+    "client/local-agent/src/config.rs": {
+      "sha256": "0cfd464b273335232d2044c110885e4ba3d9b6e74b572296921cdf7b4b1aa7ac",
+      "bytes": 6726
+    },
+    "client/local-agent/src/consultation.rs": {
+      "sha256": "9b4c0abdb1aba0c4ac096c74f79c84252f31439962661cde8928d3db9c8555bb",
+      "bytes": 16498
+    },
+    "client/local-agent/src/consultation/tests.rs": {
+      "sha256": "0750b596a2324532b2f9f3f3e145b5db5a8f8c54c2ba86ac049a61394f5fde61",
+      "bytes": 41109
+    },
+    "client/local-agent/src/context.rs": {
+      "sha256": "4fbb5a657a216ee3659ba7e406c87ab93e3d55fee81be5de7d216b222eb23955",
+      "bytes": 34894
+    },
+    "client/local-agent/src/executor.rs": {
+      "sha256": "0f85128e579077ef93af0070b95ff11750a4944eff1d59a2886f9c73c4899002",
+      "bytes": 73629
+    },
+    "client/local-agent/src/fast_harness.rs": {
+      "sha256": "5d19d5efdddfe5aa1e899f314b786847e3037fd8f41a89b8f4626beb84d05e56",
+      "bytes": 18422
+    },
+    "client/local-agent/src/harness.rs": {
+      "sha256": "f7306f183cced3bd9faefb4e88dbd11a7e1b4f86b5d517256c7525afdadc2250",
+      "bytes": 142206
+    },
+    "client/local-agent/src/harness_semantic_tests.rs": {
+      "sha256": "4f132a0323c001d46c165257393d747eb26106ba1e21e80916537110dd46344f",
+      "bytes": 10816
+    },
+    "client/local-agent/src/host_context.rs": {
+      "sha256": "62b19a71fb8a07a61e36fb9347bd6481ee6156ff2019875e3fec43e50fe65baa",
+      "bytes": 5885
+    },
+    "client/local-agent/src/journal.rs": {
+      "sha256": "d228ef4d815cfbbacb2b2a051f440cd17db7e3412f0a04813801763c2522cf6d",
+      "bytes": 86723
+    },
+    "client/local-agent/src/lib.rs": {
+      "sha256": "b3e3f1892fd8027afa9441b10eef30aeed837a7436d7417d2e704edf7c5c1bc6",
+      "bytes": 439
+    },
+    "client/local-agent/src/library.rs": {
+      "sha256": "4543490bcb2ec359ae574af8513df2ed143a7211fa85c58afb37314411bc9d99",
+      "bytes": 17752
+    },
+    "client/local-agent/src/library/tests.rs": {
+      "sha256": "2602553f09cf09896287277bb4f8a4c036e4425651c71de75f6e279d8cd1af8c",
+      "bytes": 5828
+    },
+    "client/local-agent/src/main.rs": {
+      "sha256": "86f86551fae8b9db6bd9d92eca447fe91fd2808ff8d2849c867b56db313a285d",
+      "bytes": 1931
+    },
+    "client/local-agent/src/mcp.rs": {
+      "sha256": "67f0768fa6eb3135f41b06ddffbbb0e4bdbff3f619e937d61dd98d656ad3cd52",
+      "bytes": 42356
+    },
+    "client/local-agent/src/mcp_client.rs": {
+      "sha256": "3edc1477780e047a71afc9b973fd1d59b6569356b488ffb62f52fcde13624ed7",
+      "bytes": 24263
+    },
+    "client/local-agent/src/mcp_session.rs": {
+      "sha256": "29279acfbb5f4d488eef9ff703141226a8b328755527f751940dab6098e5c593",
+      "bytes": 116335
+    },
+    "client/local-agent/src/mcp_stdio.rs": {
+      "sha256": "566dad6f8efb8a8820aa41f75657e72ed3f2434e43115551816950f8107310c9",
+      "bytes": 54269
+    },
+    "client/local-agent/src/pedagogical.rs": {
+      "sha256": "6dd6831ccb588a9b5535bda12475c45f5aa77aa72815ef56de9fb4669dec456c",
+      "bytes": 33214
+    },
+    "client/local-agent/src/pedagogical_tests.rs": {
+      "sha256": "1b9ffc58b6b3491dfb99a9a135078b0332b58a106923bf5d8507e688b5b86cd3",
+      "bytes": 51288
+    },
+    "client/local-agent/src/runtime.rs": {
+      "sha256": "fd071e710b2bf871d3e36888450c0098250edae9cf0034b67220c2588dfc320f",
+      "bytes": 100711
+    },
+    "client/local-agent/src/semantic_intent.rs": {
+      "sha256": "59d32005e5020e450d0f95b8da2ff94e3fbd6c7a89696bca7b8dad04b35e5954",
+      "bytes": 8638
+    },
+    "client/local-agent/src/session_store.rs": {
+      "sha256": "ca74bc6dc9e5046f6b44dea7bffa1e39939405a89d1767923e385b34cd95aa72",
+      "bytes": 25220
+    },
+    "client/scripts/qualify-local-agent.py": {
+      "sha256": "846ca98153127d6576ea5b3770fb919d346c8366355f041245cd2c6c6a801da1",
+      "bytes": 27126
+    },
+    "client/scripts/qualify-local-catalog.py": {
+      "sha256": "d9f106b36db837131792bf2b4070c59329f6ff44a2bb955bd6ea1d34c6a8440e",
+      "bytes": 25925
+    },
+    "client/scripts/qualify-local-context.py": {
+      "sha256": "fcf38ca3d422e5f5807a1c8287c10f39ffdae3373f9541124577f0f33025db15",
+      "bytes": 9332
+    },
+    "client/scripts/qualify-local-resident.py": {
+      "sha256": "7ea98b057dcc1ca57ed3bae0bb75b6a148b63641c8094af9e0cb95119d6589f6",
+      "bytes": 50116
+    }
+  },
+  "environmentAllowlistNames": [
+    "LANG",
+    "PATH"
+  ],
+  "sidecar": {
+    "sha256": "4b7c740b16d94a8e7daa8ad8b1f2f2bc295567cc7abb741ee1823bc29b3128f8",
+    "bytes": 42890
+  },
+  "environmentBefore": {
+    "platform": "linux",
+    "logicalCpus": 4,
+    "loadavg": [
+      0.216796875,
+      0.06640625,
+      0.0693359375
+    ],
+    "cgroupCpu": {
+      "usage_usec": 57555369850,
+      "user_usec": 51860267198,
+      "system_usec": 5695102651,
+      "nr_throttled": 0,
+      "throttled_usec": 0
+    },
+    "cgroupCpuMax": "max 100000"
+  },
+  "fixtureShutdowns": [
+    {
+      "graceful_eof": true,
+      "forced": false,
+      "reaped": true,
+      "exit_code": 0
+    },
+    {
+      "graceful_eof": true,
+      "forced": false,
+      "reaped": true,
+      "exit_code": 0
+    },
+    {
+      "graceful_eof": true,
+      "forced": false,
+      "reaped": true,
+      "exit_code": 0
+    }
+  ],
+  "fixture": {
+    "profileSynthetic": {
+      "archived_domains": [],
+      "concepts_count": 2,
+      "day_number": 1,
+      "domains": [
+        {
+          "concept_count": 1,
+          "domain_id": "iiey-B8S-KEF7CdGVQVGjw",
+          "high_stakes": false,
+          "name": "Formation Jardin a3e9384d93",
+          "priority_rank": null
+        },
+        {
+          "concept_count": 1,
+          "domain_id": "VPXQBd7su9UdzZZM3u-Hyg",
+          "high_stakes": false,
+          "name": "Formation Go a3e9384d93",
+          "priority_rank": null
+        }
+      ],
+      "interactions_today": 0,
+      "last_session": "first session",
+      "learner_id": "aaM98q5B5zCsQ5rXP8R1Jw",
+      "needs_domain_setup": false,
+      "objective": "Apprendre a3e9384d93",
+      "opening_message": "Day 1 - Goal: Apprendre a3e9384d93 - first session",
+      "priority_concept": "",
+      "priority_retention": 1,
+      "profile": {
+        "device": "laptop",
+        "language": "fr"
+      },
+      "progress_narrative": null,
+      "_model_sha256": "b139949c5bd74937ad8ed8c8cf3d9ffb1e99c866c823204dc42c0d91fa181897"
+    },
+    "trainingNamesOrdered": [
+      "Formation Go a3e9384d93",
+      "Formation Jardin a3e9384d93"
+    ],
+    "twoRealTrainings": true
+  },
+  "agentProcessStarted": true,
+  "shutdown": {
+    "graceful_eof": true,
+    "forced": false,
+    "reaped": true,
+    "exit_code": 0
+  },
+  "journal": {
+    "checks": [
+      {
+        "name": "all_attempted_turns_present",
+        "passed": true
+      },
+      {
+        "name": "exact_conversation_binding",
+        "passed": true
+      },
+      {
+        "name": "pinned_model_binding",
+        "passed": true
+      },
+      {
+        "name": "no_unlinked_operations",
+        "passed": false
+      },
+      {
+        "name": "all_observed_projections_within_budget",
+        "passed": true
+      }
+    ],
+    "cases": [
+      {
+        "case": "no_read",
+        "checks": [
+          {
+            "name": "exact_user_and_answer",
+            "passed": true
+          },
+          {
+            "name": "complete_durable_commit",
+            "passed": false
+          },
+          {
+            "name": "expected_operation_cardinality",
+            "passed": false
+          }
+        ]
+      }
+    ]
+  },
+  "wireEvents": [
+    {
+      "event": "request",
+      "method": "initialize"
+    },
+    {
+      "event": "reply",
+      "method": "initialize",
+      "rpcError": false
+    },
+    {
+      "direction": "to_server",
+      "event": "other_frame"
+    },
+    {
+      "event": "request",
+      "method": "tools/list"
+    },
+    {
+      "event": "reply",
+      "method": "tools/list",
+      "rpcError": false
+    }
+  ],
+  "partialPaginationObserved": false,
+  "artifactsAfter": {
+    "agent": {
+      "sha256": "49df91045af969237fc14a8288d6872c5f9f9069e40edb575a217fe7d205dede",
+      "bytes": 18452552
+    },
+    "server": {
+      "sha256": "9c36faebdb89f7a28fa057cb391f52f2a928d3d3f8d14751c4f7d8914410da63",
+      "bytes": 52117333
+    },
+    "model": {
+      "sha256": "b139949c5bd74937ad8ed8c8cf3d9ffb1e99c866c823204dc42c0d91fa181897",
+      "bytes": 1107409472
+    },
+    "contract": {
+      "sha256": "3bb6fe5cf82a4de9005481847da57885542f68f0b363d4930114e92308006903",
+      "bytes": 808
+    }
+  },
+  "missingCases": [
+    "quoted_definition",
+    "coaching",
+    "profile_typo",
+    "profile_paraphrase",
+    "library_question",
+    "library_paraphrase",
+    "profile_denied"
+  ],
+  "checksSummary": {
+    "observed": 21,
+    "passed": 13,
+    "failed": 8
+  },
+  "environmentAfter": {
+    "platform": "linux",
+    "logicalCpus": 4,
+    "loadavg": [
+      1.3701171875,
+      0.36328125,
+      0.16943359375
+    ],
+    "cgroupCpu": {
+      "usage_usec": 57624053999,
+      "user_usec": 51923886981,
+      "system_usec": 5700167017,
+      "nr_throttled": 0,
+      "throttled_usec": 0
+    },
+    "cgroupCpuMax": "max 100000"
+  },
+  "completedAt": "2026-11-02T20:30:17.491668+00:00"
+}

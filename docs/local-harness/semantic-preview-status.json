@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "scope": "Development corpus; Linux CPU only; not held-out; no pedagogy or Windows/P2000 qualification",
+  "report": "semantic-development-r3.json",
+  "model": "Qwen3-1.7B Q4_K_M",
+  "functionalCasesCompleted": 8,
+  "reportChecks": {
+    "observed": 131,
+    "passed": 130,
+    "failed": 1
+  },
+  "knownFailure": "all_observed_tutor_children_gracefully_reaped: no relay_end receipt observed; agent itself closed gracefully. Child shutdown is not proven.",
+  "earlierFailuresPreserved": [
+    "semantic-development-r1.json",
+    "semantic-development-r2.json"
+  ],
+  "developmentChanges": "Uniform single-field JSON decisions, deterministic consultation exclusions and clear-teaching bypass; no repair of saved answers or changed render criteria.",
+  "sourceState": "Task worktree based on addc152f6e32bfada3eca439a3a1f977fc9ef2d2; exact native source and binary fingerprints are in each report.",
+  "windowsReleaseIntent": {
+    "desktop": "0.0.9",
+    "tag": "tutor-local-v0.1.0-alpha.5",
+    "backend": "CPU",
+    "gpuLayers": 0
+  },
+  "unqualified": [
+    "general semantic accuracy",
+    "institution authentication",
+    "Python query with real model",
+    "ordinal dialogue references",
+    "creation and selection workflows",
+    "pedagogical quality",
+    "Windows latency",
+    "P2000 acceleration"
+  ]
+}

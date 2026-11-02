@@ -240,7 +240,11 @@ fn effect(tool: &str) -> Result<Effect, Error> {
         "get_conversation_context"
         | "get_curriculum_snapshot"
         | "get_memory_state"
-        | "get_metacognitive_mirror" => Ok(Effect::MutationWithoutReplayContract),
+        | "get_metacognitive_mirror"
+        // Logical reads still initialize legacy curriculum baselines via
+        // trainingDocument/EnsureCurriculumBaseline; no replay contract.
+        | "list_training_library"
+        | "get_training" => Ok(Effect::MutationWithoutReplayContract),
         "start_learning_session"
         | "get_next_activity"
         | "prepare_assessment_attempt"

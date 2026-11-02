@@ -3,7 +3,8 @@
 
 //! Durable, serial dispatch boundary. No model proposal is an authorization.
 //! Writes additionally require a retained precondition receipt issued by the
-//! pedagogical state machine; ordinary discovery can only inspect read tools.
+//! pedagogical state machine or the separate reviewed consultation admission.
+//! Ordinary discovery can only inspect physically read-only tools.
 //! Unknown outcomes require explicit reconciliation, never a new automatic call.
 
 use crate::{
@@ -56,7 +57,34 @@ fn open_turn(journal: &Journal, turn: &str) -> Result<(), Error> {
     Ok(())
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AuthorityKind {
+    Pedagogical,
+    Consultation,
+}
+impl AuthorityKind {
+    fn anchor_kind(self) -> &'static str {
+        match self {
+            Self::Pedagogical => "pedagogical_workflow_started",
+            Self::Consultation => "capability_consultation_started",
+        }
+    }
+    fn claim_kind(self) -> &'static str {
+        match self {
+            Self::Pedagogical => "pedagogical_authority_created",
+            Self::Consultation => "consultation_authority_created",
+        }
+    }
+    fn revocation_kind(self) -> &'static str {
+        match self {
+            Self::Pedagogical => "pedagogical_authority_revoked",
+            Self::Consultation => "consultation_authority_revoked",
+        }
+    }
+}
+
 struct AuthorityState {
+    kind: AuthorityKind,
     instance: uuid::Uuid,
     turn: String,
     anchor: ContentRef,
@@ -113,6 +141,25 @@ impl WorkflowAuthority {
         turn: &str,
         anchor: &ContentRef,
     ) -> Result<Self, Error> {
+        Self::new_kind(journal, turn, anchor, AuthorityKind::Pedagogical)
+    }
+
+    /// A separate authority for reviewed business consultations which may
+    /// initialize a legacy baseline internally. Never grants teaching permits.
+    pub(crate) fn new_consultation(
+        journal: &mut Journal,
+        turn: &str,
+        anchor: &ContentRef,
+    ) -> Result<Self, Error> {
+        Self::new_kind(journal, turn, anchor, AuthorityKind::Consultation)
+    }
+
+    fn new_kind(
+        journal: &mut Journal,
+        turn: &str,
+        anchor: &ContentRef,
+        kind: AuthorityKind,
+    ) -> Result<Self, Error> {
         if anchor.kind() != ContentKind::Event {
             return Err(Error::Preconditions);
         }
@@ -120,7 +167,7 @@ impl WorkflowAuthority {
             .event(anchor.id())
             .map_err(|_| Error::Storage)?
             .ok_or(Error::Preconditions)?;
-        if event.kind != "pedagogical_workflow_started" || event.turn_id.as_deref() != Some(turn) {
+        if event.kind != kind.anchor_kind() || event.turn_id.as_deref() != Some(turn) {
             return Err(Error::Preconditions);
         }
         open_turn(journal, turn)?;
@@ -140,17 +187,13 @@ impl WorkflowAuthority {
             "anchor_id":anchor.id(),"anchor_sha256":anchor.sha256()}))
         .map_err(|_| Error::Storage)?;
         journal
-            .append_event(
-                &claim_id,
-                Some(turn),
-                "pedagogical_authority_created",
-                &claim_bytes,
-            )
+            .append_event(&claim_id, Some(turn), kind.claim_kind(), &claim_bytes)
             .map_err(|_| Error::Storage)?;
         let claim = journal
             .content_ref(ContentKind::Event, &claim_id)
             .map_err(|_| Error::Storage)?;
         let state = Arc::new(AuthorityState {
+            kind,
             instance: journal.instance_id(),
             turn: turn.into(),
             anchor: anchor.clone(),
@@ -180,7 +223,7 @@ impl WorkflowAuthority {
             .append_event(
                 &self.state.revocation_id(),
                 Some(&self.state.turn),
-                "pedagogical_authority_revoked",
+                self.state.kind.revocation_kind(),
                 &bytes,
             )
             .map_err(|_| Error::Storage)?;
@@ -212,6 +255,9 @@ impl WorkflowPermit {
         call: &ValidatedCall,
         authority: &WorkflowAuthority,
     ) -> Result<Self, Error> {
+        if authority.state.kind != AuthorityKind::Pedagogical {
+            return Err(Error::Preconditions);
+        }
         authority.state.check(journal, turn)?;
         call.check_journal(journal)
             .map_err(|_| Error::Preconditions)?;
@@ -247,6 +293,63 @@ impl WorkflowPermit {
             || value.get("fingerprint").and_then(Value::as_str) != Some(call.fingerprint())
             || value.get("tool_id").and_then(Value::as_str) != Some(call.tool_id())
             || value.get("phase").and_then(Value::as_str) != Some(expected_phase)
+            || value.get("authority_anchor_id").and_then(Value::as_str)
+                != Some(authority.state.anchor.id())
+            || value.get("authority_anchor_sha256") != Some(&json!(authority.state.anchor.sha256()))
+        {
+            return Err(Error::Preconditions);
+        }
+        Ok(Self {
+            journal_instance: journal.instance_id(),
+            operation: call.operation_id().into(),
+            fingerprint: call.fingerprint().into(),
+            turn: turn.into(),
+            precondition: reference.clone(),
+            authority: Arc::clone(&authority.state),
+        })
+    }
+
+    /// The capability layer validates the semantic request and writes this
+    /// receipt. A model reply or an annotation cannot construct this permit.
+    /// Fingerprints bind exact schema, arguments, binding and operation.
+    pub(crate) fn from_consultation_event(
+        journal: &Journal,
+        reference: &ContentRef,
+        turn: &str,
+        call: &ValidatedCall,
+        authority: &WorkflowAuthority,
+    ) -> Result<Self, Error> {
+        if authority.state.kind != AuthorityKind::Consultation
+            || call.effect() != Effect::MutationWithoutReplayContract
+            || !matches!(call.name(), "list_training_library" | "get_training")
+        {
+            return Err(Error::Preconditions);
+        }
+        authority.state.check(journal, turn)?;
+        call.check_journal(journal)
+            .map_err(|_| Error::Preconditions)?;
+        if reference.kind() != ContentKind::Event {
+            return Err(Error::Preconditions);
+        }
+        let event = journal
+            .event(reference.id())
+            .map_err(|_| Error::Storage)?
+            .ok_or(Error::Preconditions)?;
+        if event.kind != "capability_consultation_precondition"
+            || event.turn_id.as_deref() != Some(turn)
+        {
+            return Err(Error::Preconditions);
+        }
+        let value: Value = serde_json::from_slice(
+            &journal
+                .resolve_content(reference)
+                .map_err(|_| Error::Preconditions)?,
+        )
+        .map_err(|_| Error::Preconditions)?;
+        if value.get("version").and_then(Value::as_u64) != Some(1)
+            || value.get("operation_id").and_then(Value::as_str) != Some(call.operation_id())
+            || value.get("fingerprint").and_then(Value::as_str) != Some(call.fingerprint())
+            || value.get("tool_id").and_then(Value::as_str) != Some(call.tool_id())
             || value.get("authority_anchor_id").and_then(Value::as_str)
                 != Some(authority.state.anchor.id())
             || value.get("authority_anchor_sha256") != Some(&json!(authority.state.anchor.sha256()))
