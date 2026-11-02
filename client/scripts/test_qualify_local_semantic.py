@@ -22,7 +22,7 @@ b = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(b)
 REPO = HERE.parent.parent
 catalog, resident, context, probe = b.load_helpers(REPO)
-CONTRACT = json.loads((REPO / 'docs/local-harness/semantic-render-contract.json').read_text())
+CONTRACT = json.loads((REPO / 'docs/local-harness/semantic-render-contract.json').read_text(encoding="utf-8"))
 TRAINING = {'domain_id': 'domain-fixture', 'conversation_id': 'conversation-fixture', 'name': 'Formation Go alpha'}
 PROFILE = {'objective': 'Apprendre alpha', 'profile': {'language': 'fr', 'device': 'laptop'}, '_model_sha256': 'a' * 64}
 ENTRIES = [dict(id='personal:a', name='Formation Go alpha', kind='personal', revision=1, status='active', can_learn=True), dict(id='personal:b', name='Formation Jardin alpha', kind='personal', revision=2, status='active', can_learn=True)]
@@ -238,13 +238,13 @@ class CheckerTests(unittest.TestCase):
 
     def test_unknown_wire_fields_not_reported(self):
         path = self.root / 'wire.jsonl'
-        path.write_text(json.dumps({'event': 'request', 'method': 'tools/list', 'secret': 'must never serialize'}))
+        path.write_text(json.dumps({'event': 'request', 'method': 'tools/list', 'secret': 'must never serialize'}), encoding="utf-8")
         with self.assertRaises(b.Invalid):
             b.read_audit(path)
 
     def test_unknown_catalog_page_never_invented(self):
         path = self.root / 'wire.jsonl'
-        path.write_text(json.dumps({'event': 'request', 'method': 'tools/list'}))
+        path.write_text(json.dumps({'event': 'request', 'method': 'tools/list'}), encoding="utf-8")
         self.assertEqual(b.read_audit(path), [{'event': 'request', 'method': 'tools/list'}])
         self.assertNotIn('pages', b.read_audit(path)[0])
 
@@ -253,7 +253,7 @@ class CheckerTests(unittest.TestCase):
         catalog.publish_report(output, {'ok': True})
         with self.assertRaises((FileExistsError, probe.QualificationError)):
             catalog.publish_report(output, {'ok': False})
-        self.assertEqual(json.loads(output.read_text()), {'ok': True})
+        self.assertEqual(json.loads(output.read_text(encoding="utf-8")), {'ok': True})
         for path in (self.root, self.root / 'missing' / 'out.json', Path('/tmp/outside-sidecar.json')):
             with self.assertRaises(b.Invalid): b.new_output(path)
         bad = self.root / 'not-published.json'
@@ -264,7 +264,7 @@ class CheckerTests(unittest.TestCase):
         contract = self.root / 'unconfirmed.json'
         value = deepcopy(CONTRACT)
         value['status'] = 'PROPOSED'
-        contract.write_text(json.dumps(value))
+        contract.write_text(json.dumps(value), encoding="utf-8")
         options = SimpleNamespace(repo=REPO, timeout=60, turn_timeout=10, contract=contract)
         result = asyncio.run(b.run(options))
         self.assertEqual(result['modelStage'], 'NOT_RUN')

@@ -118,7 +118,7 @@ def read_audit(path):
     if not path.exists():
         return []
     require(path.stat().st_size <= MAX_AUDIT, 'wire_audit_too_large')
-    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
     require(len(rows) <= 4096, 'wire_audit_too_many_events')
     for item in rows:
         require(type(item) is dict, 'wire_audit_invalid')
@@ -467,7 +467,7 @@ async def run(options):
     report = {'schemaVersion': 1, 'modelStage': 'NOT_RUN', 'status': 'running', 'scope': 'Eight development cases, real local Tutor/ACP, synthetic fixture only; no general accuracy claim', 'heldout': False, 'windowsP2000Qualified': False, 'pedagogyQualified': False, 'uiQualified': False, 'usefulResponseMeasured': False, 'cases': [], 'errors': [], 'checks': [], 'startedAt': datetime.now(timezone.utc).isoformat(), '_deadline': time.monotonic() + options.timeout, 'configuration': {'semanticRouter': True, 'prefixCache': True, 'reuseMcp': True, 'catalogCache': True, 'context': 2048, 'maxOutput': 96, 'threads': 4, 'batch': 128, 'gpuLayers': 0, 'timeoutSeconds': options.timeout, 'turnTimeoutSeconds': options.turn_timeout}, 'limits': ['Known development utterances, not held-out or a general understanding/accuracy benchmark.', 'Synthetic Owner/HostContext, not institution authentication or independent binary/source attestation.', 'First TEXT only; no first USEFUL response, UI, hardware, p95 or speedup claim.', 'Combined generation totals include the proposer. One observed proposer call plus its single journal projection tests absence of an extra answer generation.', 'Pagination oracle validates first-page items/order/next_after. Two seeded trainings with source limit=10 produce no real partial page; offline coverage is not server coverage. No continuation is admitted until the state/ChoiceSet path exists.', 'Renderer and proposer-call contract must be confirmed from source before the first run; failures are retained with no prompt or response repair.']}
     process, session, active = None, None, None
     try:
-        contract = json.loads(options.contract.read_text())
+        contract = json.loads(options.contract.read_text(encoding="utf-8"))
         require(contract['version'] == 1 and contract['status'] == 'CONFIRMED_BEFORE_FIRST_RUN', 'render_and_counter_contract_not_confirmed')
         require(type(contract['proposerCallsForDirectRead']) is int and contract['proposerCallsForDirectRead'] >= 1 and type(contract['libraryLimit']) is int and 1 <= contract['libraryLimit'] <= 100, 'contract_limits_invalid')
         report['contract'] = contract
