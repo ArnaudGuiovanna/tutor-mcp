@@ -209,7 +209,7 @@ class AcpTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.env.stop)
 
     def acp(self, frames):
-        return resident.Acp(memory_process(frames), probe, Path('/tmp/unused-offline-audit'), time.monotonic() + 10)
+        return resident.Acp(memory_process(frames), probe, Path(tempfile.gettempdir()) / 'unused-offline-audit', time.monotonic() + 10)
 
     async def test_rpc_expected_id_is_accepted(self):
         acp = self.acp([{'jsonrpc': '2.0', 'id': 1, 'result': {}}])
@@ -326,7 +326,7 @@ class OutputTests(NoProcesses):
         return ['probe', '--repo', str(folder), '--server', str(server), '--agent', str(agent), '--model', str(model)]
 
     def test_parse_output_existing_directory_is_rejected_before_run(self):
-        with tempfile.TemporaryDirectory(prefix='resident-offline-tests-', dir='/tmp') as directory:
+        with tempfile.TemporaryDirectory(prefix='resident-offline-tests-') as directory:
             folder = Path(directory)
             args = self.fixture_paths(folder) + ['--output', str(folder)]
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
@@ -334,7 +334,7 @@ class OutputTests(NoProcesses):
             self.assertEqual(error.exception.code, 2)
 
     def test_parse_output_new_file_accepts_spaces_and_accents(self):
-        with tempfile.TemporaryDirectory(prefix='resident-offline-tests-', dir='/tmp') as directory:
+        with tempfile.TemporaryDirectory(prefix='resident-offline-tests-') as directory:
             folder = Path(directory)
             output = folder / 'rapport élève nouveau.json'
             options = resident.parse_options(self.fixture_paths(folder) + ['--output', str(output), '--welcome-turns', '100'])
@@ -343,7 +343,7 @@ class OutputTests(NoProcesses):
             self.assertFalse(output.exists())
 
     def test_main_exclusive_write_never_overwrites_a_racing_report(self):
-        with tempfile.TemporaryDirectory(prefix='resident-offline-tests-', dir='/tmp') as directory:
+        with tempfile.TemporaryDirectory(prefix='resident-offline-tests-') as directory:
             output = Path(directory) / 'new.json'
             options = SimpleNamespace(command='probe', output=output)
             async def simulated_run(_):
@@ -354,7 +354,7 @@ class OutputTests(NoProcesses):
             self.assertEqual(output.read_text(), 'existing report must remain')
 
     def test_main_directory_write_never_replaces_a_directory(self):
-        with tempfile.TemporaryDirectory(prefix='resident-offline-tests-', dir='/tmp') as directory:
+        with tempfile.TemporaryDirectory(prefix='resident-offline-tests-') as directory:
             output = Path(directory)
             options = SimpleNamespace(command='probe', output=output)
             report = {'status': 'observations_complete', 'checksSummary': {}}
@@ -363,7 +363,7 @@ class OutputTests(NoProcesses):
             self.assertTrue(output.is_dir())
 
     def test_main_new_json_and_failure_status_are_preserved(self):
-        with tempfile.TemporaryDirectory(prefix='resident-offline-tests-', dir='/tmp') as directory:
+        with tempfile.TemporaryDirectory(prefix='resident-offline-tests-') as directory:
             output = Path(directory) / 'report.json'
             options = SimpleNamespace(command='probe', output=output)
             report = {'status': 'checks_failed_or_incomplete', 'checksSummary': {'observed': 1, 'passed': 0, 'failed': 1}, 'developmentModelFailures': [{'case': 'name_warm_model', 'check': 'exact_name_only_without_repair'}]}
