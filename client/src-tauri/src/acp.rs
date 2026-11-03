@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -18,11 +18,13 @@ use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tokio::time::timeout;
 
 use crate::launch::LaunchSpec;
+use crate::timing::{local_id, millis, rpc_method, TimingJournal, TimingOutcome};
 
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PENDING: usize = 64;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+pub const REQUEST_CANCELLED_BEFORE_WRITE: &str = "Préparation annulée.";
 
 type RpcResponse = Result<Value, String>;
 type PendingRequests = HashMap<u64, oneshot::Sender<RpcResponse>>;
@@ -42,6 +44,9 @@ struct Inner {
     next_id: AtomicU64,
     closed: AtomicBool,
     events: mpsc::UnboundedSender<Value>,
+    connection_id: String,
+    started: Instant,
+    timings: TimingJournal,
 }
 
 impl Drop for Inner {
@@ -62,6 +67,7 @@ impl Drop for Inner {
 #[derive(Clone)]
 pub struct AcpClient {
     inner: Arc<Inner>,
+    operation_id: Option<String>,
 }
 
 impl AcpClient {
@@ -143,6 +149,9 @@ impl AcpClient {
             next_id: AtomicU64::new(1),
             closed: AtomicBool::new(false),
             events,
+            connection_id: uuid::Uuid::new_v4().to_string(),
+            started: Instant::now(),
+            timings: TimingJournal::default(),
         });
 
         let reader_inner = Arc::downgrade(&inner);
@@ -255,17 +264,54 @@ impl AcpClient {
             let _ = exit_tx.send(true);
         });
 
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            operation_id: None,
+        })
     }
 
     pub async fn request(&self, method: &str, params: Value) -> RpcResponse {
-        let deadline = match method {
-            "session/prompt" => Duration::from_secs(30 * 60),
-            "authenticate" | "auth/login" => Duration::from_secs(5 * 60),
-            "session/new" | "session/load" | "session/resume" => Duration::from_secs(90),
-            _ => Duration::from_secs(30),
-        };
-        self.request_with_deadline(method, params, deadline).await
+        self.request_with_deadline(method, params, request_deadline(method))
+            .await
+    }
+
+    /// Attribute diagnostics locally without changing any JSON-RPC parameters.
+    pub fn for_operation(&self, operation_id: &str) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            operation_id: Some(local_id(operation_id)),
+        }
+    }
+
+    pub async fn request_in_operation(
+        &self,
+        method: &str,
+        params: Value,
+        operation_id: &str,
+    ) -> RpcResponse {
+        self.for_operation(operation_id)
+            .request(method, params)
+            .await
+    }
+
+    /// Cancellation is checked again while holding the writer lock. If this
+    /// returns REQUEST_CANCELLED_BEFORE_WRITE no request bytes were written.
+    /// Cancellation after that boundary uses normal ACP session cancellation.
+    pub async fn request_in_operation_cancellable(
+        &self,
+        method: &str,
+        params: Value,
+        operation_id: &str,
+        cancelled: &AtomicBool,
+    ) -> RpcResponse {
+        self.for_operation(operation_id)
+            .request_with_gate(method, params, request_deadline(method), Some(cancelled))
+            .await
+    }
+
+    /// Bounded, content-free diagnostic records, including unattributed calls.
+    pub fn timings(&self) -> Vec<Value> {
+        self.inner.timings.snapshot()
     }
 
     async fn request_with_deadline(
@@ -274,56 +320,87 @@ impl AcpClient {
         params: Value,
         deadline: Duration,
     ) -> RpcResponse {
+        self.request_with_gate(method, params, deadline, None).await
+    }
+
+    async fn request_with_gate(
+        &self,
+        method: &str,
+        params: Value,
+        deadline: Duration,
+        cancelled: Option<&AtomicBool>,
+    ) -> RpcResponse {
         validate_method(method)?;
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
-        let (sender, receiver) = oneshot::channel();
-        {
-            let mut pending = self
-                .inner
-                .pending
-                .lock()
-                .map_err(|_| "Verrou ACP indisponible.")?;
-            if self.inner.closed.load(Ordering::Acquire) {
-                return Err("La connexion à l’agent est fermée.".into());
+        let mut timing = RpcTiming::new(self.inner.clone(), id, self.operation_id.clone(), method);
+        let mut forced_outcome = None;
+        let result: RpcResponse = async {
+            let (sender, receiver) = oneshot::channel();
+            {
+                let mut pending = self
+                    .inner
+                    .pending
+                    .lock()
+                    .map_err(|_| "Verrou ACP indisponible.")?;
+                if self.inner.closed.load(Ordering::Acquire) {
+                    return Err("La connexion à l’agent est fermée.".into());
+                }
+                if pending.len() >= MAX_PENDING {
+                    return Err("Trop de requêtes sont déjà en cours auprès de l’agent.".into());
+                }
+                pending.insert(id, sender);
             }
-            if pending.len() >= MAX_PENDING {
-                return Err("Trop de requêtes sont déjà en cours auprès de l’agent.".into());
-            }
-            pending.insert(id, sender);
-        }
-        let _guard = PendingGuard {
-            inner: Arc::downgrade(&self.inner),
-            id,
-        };
-        write_message(
-            &self.inner,
-            &json!({
-                "jsonrpc": "2.0", "id": id, "method": method, "params": params
-            }),
-        )
-        .await?;
-        match timeout(deadline, receiver).await {
-            Ok(Ok(response)) => response,
-            Ok(Err(_)) => Err("La connexion à l’agent a été interrompue.".into()),
-            Err(_) => {
-                // No automatic replay: a timed-out mutation may already have
-                // reached Tutor. The caller must reconcile persisted state.
-                if method == "session/prompt" {
-                    if let Some(session_id) = params.get("sessionId") {
+            let _guard = PendingGuard {
+                inner: Arc::downgrade(&self.inner),
+                id,
+            };
+            write_message_checked(
+                &self.inner,
+                &json!({
+                    "jsonrpc": "2.0", "id": id, "method": method, "params": params
+                }),
+                cancelled,
+            )
+            .await?;
+            match timeout(deadline, receiver).await {
+                Ok(Ok(response)) => response,
+                Ok(Err(_)) => Err("La connexion à l’agent a été interrompue.".into()),
+                Err(_) => {
+                    forced_outcome = Some(TimingOutcome::TimedOut);
+                    // No automatic replay: a timed-out mutation may already have
+                    // reached Tutor. The caller must reconcile persisted state.
+                    if method == "session/prompt" {
+                        if let Some(session_id) = params.get("sessionId") {
+                            let _ = self
+                                .notify("session/cancel", json!({"sessionId": session_id}))
+                                .await;
+                        }
+                    } else {
                         let _ = self
-                            .notify("session/cancel", json!({"sessionId": session_id}))
+                            .notify("$/cancel_request", json!({"requestId": id}))
                             .await;
                     }
-                } else {
-                    let _ = self
-                        .notify("$/cancel_request", json!({"requestId": id}))
-                        .await;
+                    Err(format!(
+                        "Le délai de réponse de l’agent est dépassé pour {method}."
+                    ))
                 }
-                Err(format!(
-                    "Le délai de réponse de l’agent est dépassé pour {method}."
-                ))
             }
         }
+        .await;
+        let outcome = forced_outcome.unwrap_or_else(|| match &result {
+            Ok(response)
+                if response.get("stopReason").and_then(Value::as_str) == Some("cancelled") =>
+            {
+                TimingOutcome::Cancelled
+            }
+            Ok(response) if response.get("isError").and_then(Value::as_bool) != Some(true) => {
+                TimingOutcome::Succeeded
+            }
+            Err(error) if error == REQUEST_CANCELLED_BEFORE_WRITE => TimingOutcome::Cancelled,
+            _ => TimingOutcome::Failed,
+        });
+        timing.finish(outcome);
+        result
     }
 
     pub async fn notify(&self, method: &str, params: Value) -> Result<(), String> {
@@ -428,6 +505,62 @@ impl AcpClient {
     }
 }
 
+/// Exactly one terminal diagnostic is recorded even when an awaiting task is
+/// aborted. No parameter, response body, error message or remote ID is copied.
+struct RpcTiming {
+    inner: Arc<Inner>,
+    request_id: u64,
+    operation_id: Option<String>,
+    method: &'static str,
+    started: Instant,
+    finished: bool,
+}
+
+impl RpcTiming {
+    fn new(inner: Arc<Inner>, request_id: u64, operation_id: Option<String>, method: &str) -> Self {
+        let timing = Self {
+            inner,
+            request_id,
+            operation_id,
+            method: rpc_method(method),
+            started: Instant::now(),
+            finished: false,
+        };
+        timing.record("started", None);
+        timing
+    }
+
+    fn record(&self, state: &str, outcome: Option<TimingOutcome>) {
+        let now = Instant::now();
+        let mut event = json!({"type":"rpc_timing","connectionId":self.inner.connection_id,
+            "requestId":self.request_id,"method":self.method,"state":state,
+            "elapsedMs":millis(self.started,now),"offsetMs":millis(self.inner.started,now)});
+        if let Some(operation_id) = &self.operation_id {
+            event["operationId"] = json!(operation_id);
+        }
+        if let Some(outcome) = outcome {
+            event["outcome"] = json!(outcome.as_str());
+        }
+        self.inner.timings.push(event.clone());
+        if self.operation_id.is_some() {
+            let _ = self.inner.events.send(event);
+        }
+    }
+
+    fn finish(&mut self, outcome: TimingOutcome) {
+        if !self.finished {
+            self.finished = true;
+            self.record("completed", Some(outcome));
+        }
+    }
+}
+
+impl Drop for RpcTiming {
+    fn drop(&mut self) {
+        self.finish(TimingOutcome::Cancelled);
+    }
+}
+
 struct PendingGuard {
     inner: Weak<Inner>,
     id: u64,
@@ -489,7 +622,27 @@ async fn read_frame<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Option<Ve
     }
 }
 
+fn request_deadline(method: &str) -> Duration {
+    match method {
+        "session/prompt" => Duration::from_secs(30 * 60),
+        "authenticate" | "auth/login" => Duration::from_secs(5 * 60),
+        "session/new" | "session/load" | "session/resume" => Duration::from_secs(90),
+        _ => Duration::from_secs(30),
+    }
+}
+
 async fn write_message(inner: &Inner, message: &Value) -> Result<(), String> {
+    write_message_checked(inner, message, None).await
+}
+
+async fn write_message_checked(
+    inner: &Inner,
+    message: &Value,
+    cancelled: Option<&AtomicBool>,
+) -> Result<(), String> {
+    if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        return Err(REQUEST_CANCELLED_BEFORE_WRITE.into());
+    }
     if inner.closed.load(Ordering::Acquire) {
         return Err("La connexion à l’agent est fermée.".into());
     }
@@ -500,6 +653,9 @@ async fn write_message(inner: &Inner, message: &Value) -> Result<(), String> {
     frame.push(b'\n');
     let operation = async {
         let mut stdin = inner.stdin.lock().await;
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return Err(REQUEST_CANCELLED_BEFORE_WRITE);
+        }
         let stdin = stdin.as_mut().ok_or("L’entrée de l’agent est fermée.")?;
         stdin
             .write_all(&frame)
@@ -513,6 +669,7 @@ async fn write_message(inner: &Inner, message: &Value) -> Result<(), String> {
     };
     match timeout(WRITE_TIMEOUT, operation).await {
         Ok(Ok(())) => Ok(()),
+        Ok(Err(REQUEST_CANCELLED_BEFORE_WRITE)) => Err(REQUEST_CANCELLED_BEFORE_WRITE.into()),
         Ok(Err(message)) => {
             fail(inner, "error", message);
             Err(message.into())
@@ -1016,6 +1173,113 @@ mod tests {
         let (first, second) = tokio::join!(first, second);
         assert_eq!(first.unwrap()["text"], "Été — 日本語");
         assert_eq!(second.unwrap()["order"], "second");
+        client.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn timing_records_correlate_concurrent_operations_without_request_content() {
+        let (client, mut events) = client().await;
+        let first = client.request_in_operation(
+            "test/first",
+            json!({"text":"private-prompt","Authorization":"Bearer private-token","sessionId":"private-session"}),
+            "local-operation-one",
+        );
+        let second = async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            client
+                .request_in_operation("test/second", json!({}), "local-operation-two")
+                .await
+        };
+        let (first, second) = tokio::join!(first, second);
+        assert_eq!(first.unwrap()["text"], "private-prompt");
+        second.unwrap();
+        let records = client.timings();
+        assert_eq!(records.len(), 4);
+        assert!(!serde_json::to_string(&records)
+            .unwrap()
+            .contains("private-"));
+        for operation in ["local-operation-one", "local-operation-two"] {
+            let pair: Vec<_> = records
+                .iter()
+                .filter(|r| r["operationId"] == operation)
+                .collect();
+            assert_eq!(pair.len(), 2);
+            assert_eq!(pair[0]["state"], "started");
+            assert_eq!(pair[1]["state"], "completed");
+            assert_eq!(pair[0]["requestId"], pair[1]["requestId"]);
+            assert_eq!(pair[0]["connectionId"], pair[1]["connectionId"]);
+            assert_eq!(pair[1]["outcome"], "succeeded");
+            assert!(pair[1]["offsetMs"].as_u64().unwrap() >= pair[0]["offsetMs"].as_u64().unwrap());
+        }
+        for _ in 0..4 {
+            assert_eq!(events.recv().await.unwrap()["type"], "rpc_timing");
+        }
+        client.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn timing_records_distinguish_timeout_failure_and_cancelled_future() {
+        let (client, mut events) = client().await;
+        let result = client
+            .request_with_deadline(
+                "test/ignore",
+                json!({"secret":"private"}),
+                Duration::from_millis(30),
+            )
+            .await;
+        assert!(result.is_err());
+        assert_eq!(client.timings().last().unwrap()["outcome"], "timed_out");
+        // Unattributed calls are journaled without changing protocol events.
+        assert!(events.try_recv().is_err());
+        let worker = client.for_operation("abort-operation");
+        let request = tokio::spawn(async move { worker.request("test/ignore", json!({})).await });
+        assert_eq!(events.recv().await.unwrap()["state"], "started");
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        assert_eq!(events.recv().await.unwrap()["outcome"], "cancelled");
+        assert!(client.inner.pending.lock().unwrap().is_empty());
+        client.stop().await.unwrap();
+        assert!(client
+            .request("session/load", json!({"sessionId":"private-session"}))
+            .await
+            .is_err());
+        assert_eq!(client.timings().last().unwrap()["outcome"], "failed");
+        assert!(!serde_json::to_string(&client.timings())
+            .unwrap()
+            .contains("private"));
+    }
+
+    #[tokio::test]
+    async fn cancellation_while_waiting_for_writer_prevents_request_and_preserves_connection() {
+        let (client, mut events) = client().await;
+        let writer = client.inner.stdin.lock().await;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let flag = cancelled.clone();
+        let worker = client.clone();
+        let pending = tokio::spawn(async move {
+            worker
+                .request_in_operation_cancellable(
+                    "test/ignore",
+                    json!({}),
+                    "cancel-before-write",
+                    &flag,
+                )
+                .await
+        });
+        assert_eq!(events.recv().await.unwrap()["state"], "started");
+        cancelled.store(true, Ordering::Release);
+        drop(writer);
+        assert_eq!(
+            pending.await.unwrap().unwrap_err(),
+            REQUEST_CANCELLED_BEFORE_WRITE
+        );
+        assert_eq!(events.recv().await.unwrap()["outcome"], "cancelled");
+        assert!(client.inner.pending.lock().unwrap().is_empty());
+        assert!(!client.inner.closed.load(Ordering::Acquire));
+        assert_eq!(
+            client.request("test/count", json!({})).await.unwrap()["ignored"],
+            0
+        );
         client.stop().await.unwrap();
     }
 

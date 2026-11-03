@@ -1,0 +1,803 @@
+{
+  "agent": {
+    "name": "@agentclientprotocol/codex-acp",
+    "version": "2.2.2"
+  },
+  "build": {
+    "architecture": "x86_64",
+    "clientVersion": "0.0.11",
+    "os": "linux",
+    "sources": {
+      "files": [
+        {
+          "name": "backend.rs",
+          "sha256": "8de2b5f90d4267509862d724eb95d90ac0bec9551cbe40dfed9f42997a4381b8"
+        },
+        {
+          "name": "backend_preparation.rs",
+          "sha256": "5b04690b795525c7b77a692dbfdd6f72c9cf1f253c8790132e2cc5dcd7d476c7"
+        },
+        {
+          "name": "acp.rs",
+          "sha256": "00950cb9f046990d10e83c2302bfb7cbdb4e5f9698d2da2eff9a59f0b90656c8"
+        },
+        {
+          "name": "timing.rs",
+          "sha256": "49974cbf84f96fc8cf01ff5912f6f305841596021bbf5f1449a8f4e3849951cc"
+        },
+        {
+          "name": "workspace.rs",
+          "sha256": "dadcd173044cd632b3c995f525bf2b353737b44a9cfed8ae87a7c22cbef397e7"
+        },
+        {
+          "name": "Cargo.lock",
+          "sha256": "28fc95b39ede23a32420497470e9c2b52c457215b4819ea330b98185f87f42af"
+        },
+        {
+          "name": "qualify-latency.rs",
+          "sha256": "f252d98fa06c63b473c151b94106c7d4c7ad83cfcd08541afbc783c884f71049"
+        }
+      ],
+      "sha256": "0abee4bd060da68cb42625b5cbe8ca2d3f608e35e3e128fb8b07c9a438f245f7"
+    }
+  },
+  "connectMs": 2863,
+  "contractVersion": 1,
+  "distribution": null,
+  "environment": "native",
+  "host": "linux",
+  "liveModel": true,
+  "scope": "Isolated real MCP read and actual harness prompts; provider time included; credentials unchanged",
+  "status": "passed",
+  "turns": [
+    {
+      "cold": true,
+      "contextToolCompleted": true,
+      "diagnosticsComplete": true,
+      "elapsedMs": 13871,
+      "events": [
+        {
+          "elapsedMs": 0,
+          "operationId": "a302903e-9d1d-4b64-a93e-4edf00aabd9f",
+          "phase": "preparing",
+          "phaseElapsedMs": 0,
+          "state": "started",
+          "type": "turn_phase"
+        },
+        {
+          "elapsedMs": 0,
+          "operationId": "a302903e-9d1d-4b64-a93e-4edf00aabd9f",
+          "phase": "preparing",
+          "phaseElapsedMs": 0,
+          "state": "completed",
+          "type": "turn_phase"
+        },
+        {
+          "elapsedMs": 0,
+          "operationId": "a302903e-9d1d-4b64-a93e-4edf00aabd9f",
+          "phase": "waiting_lock",
+          "phaseElapsedMs": 0,
+          "state": "started",
+          "type": "turn_phase"
+        },
+        {
+          "elapsedMs": 3,
+          "operationId": "a302903e-9d1d-4b64-a93e-4edf00aabd9f",
+          "outcome": "succeeded",
+          "phase": "waiting_lock",
+          "phaseElapsedMs": 3,
+          "state": "completed",
+          "type": "turn_phase"
+        },
+        {
+          "elapsedMs": 0,
+          "operationId": "650cfa48-51b9-43fe-9000-9b25f0b1802b",
+          "phase": "preparing",
+          "phaseElapsedMs": 0,
+          "state": "started",
+          "type": "turn_phase"
+        },
+        {
+          "elapsedMs": 0,
+          "operationId": "650cfa48-51b9-43fe-9000-9b25f0b1802b",
+          "phase": "preparing",
+          "phaseElapsedMs": 0,
+          "state": "completed",
+          "type": "turn_phase"
+        },
+        {
+          "elapsedMs": 0,
+          "operationId": "650cfa48-51b9-43fe-9000-9b25f0b1802b",
+          "phase": "waiting_lock",
+          "phaseElapsedMs": 0,
+          "state": "started",
+          "type": "turn_phase"
+        },
+        {
+          "elapsedMs": 0,
+          "operationId": "650cfa48-51b9-43fe-9000-9b25f0b1802b",
+          "phase": "waiting_lock",
+          "phaseElapsedMs": 0,
+          "state": "completed",
+          "type": "turn_phase"
+        },
+        {
+          "elapsedMs": 0,
+          "operationId": "650cfa48-51b9-43fe-9000-9b25f0b1802b",
+          "phase": "context",
+          "phaseElapsedMs": 0,
+          "state": "started",
+          "type": "turn_phase"
+        },
+        {
+          "elapsedMs": 0,
+          "operationId": "650cfa48-51b9-43fe-9000-9b25f0b1802b",
+          "phase": "context",
+          "phaseElapsedMs": 0,
+          "state": "completed",
+          "type": "turn_phase"
+        },
+        {
+          "elapsedMs": 0,
+          "operationId": "650cfa48-51b9-43fe-9000-9b25f0b1802b",
+          "phase": "loading_session",
+          "phaseElapsedMs": 0,
+          "state": "started",
+          "type": "turn_phase"
+        },
+        {
+          "connectionId": "c8a1a3d2-f6e1-4850-9609-cf6626440da3",
+          "elapsedMs": 0,
+          "method": "session/new",
+          "offsetMs": 2863,
+          "operationId": "650cfa48-51b9-43fe-9000-9b25f0b1802b",
+          "requestId": 2,
+          "state": "started",
+          "type": "rpc_timing"
+        },
+        {
+          "connectionId": "c8a1a3d2-f6e1-4850-9609-cf6626440da3",
+          "elapsedMs": 619,
+          "method": "session/new",
+          "offsetMs": 3482,
+          "operationId": "650cfa48-51b9-43fe-9000-9b25f0b1802b",
+          "outcome": "succeeded",
+          "requestId": 2,
+          "state": "completed",
+          "type": "rpc_timing"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 624,
+          "operationId": "650cfa48-51b9-43fe-9000-9b25f0b1802b",
+          "outcome": "succeeded",
+          "phase": "loading_session",
+          "phaseElapsedMs": 624,
+          "state": "completed",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 0,
+          "operationId": "5691273d-f273-4763-a14f-6621cd2c098f",
+          "phase": "preparing",
+          "phaseElapsedMs": 0,
+          "state": "started",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 0,
+          "operationId": "5691273d-f273-4763-a14f-6621cd2c098f",
+          "phase": "preparing",
+          "phaseElapsedMs": 0,
+          "state": "completed",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 0,
+          "operationId": "5691273d-f273-4763-a14f-6621cd2c098f",
+          "phase": "waiting_lock",
+          "phaseElapsedMs": 0,
+          "state": "started",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 0,
+          "operationId": "5691273d-f273-4763-a14f-6621cd2c098f",
+          "phase": "waiting_lock",
+          "phaseElapsedMs": 0,
+          "state": "completed",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 0,
+          "operationId": "5691273d-f273-4763-a14f-6621cd2c098f",
+          "phase": "context",
+          "phaseElapsedMs": 0,
+          "state": "started",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 70,
+          "operationId": "5691273d-f273-4763-a14f-6621cd2c098f",
+          "phase": "context",
+          "phaseElapsedMs": 70,
+          "state": "completed",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 70,
+          "operationId": "5691273d-f273-4763-a14f-6621cd2c098f",
+          "phase": "waiting_model",
+          "phaseElapsedMs": 0,
+          "state": "started",
+          "type": "turn_phase"
+        },
+        {
+          "connectionId": "c8a1a3d2-f6e1-4850-9609-cf6626440da3",
+          "elapsedMs": 0,
+          "method": "session/prompt",
+          "offsetMs": 3561,
+          "operationId": "5691273d-f273-4763-a14f-6621cd2c098f",
+          "requestId": 3,
+          "state": "started",
+          "type": "rpc_timing"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 192,
+          "marker": "first_event",
+          "operationId": "5691273d-f273-4763-a14f-6621cd2c098f",
+          "type": "turn_timing"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 4051,
+          "marker": "first_token",
+          "operationId": "5691273d-f273-4763-a14f-6621cd2c098f",
+          "type": "turn_timing"
+        },
+        {
+          "completed": false,
+          "elapsedMs": 9309,
+          "name": "get_learner_context",
+          "timingScope": "client_observed_including_transport",
+          "type": "observed_tool"
+        },
+        {
+          "completed": true,
+          "elapsedMs": 9324,
+          "name": "get_learner_context",
+          "observedDurationMs": 15,
+          "timingScope": "client_observed_including_transport",
+          "type": "observed_tool"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 13198,
+          "operationId": "5691273d-f273-4763-a14f-6621cd2c098f",
+          "phase": "waiting_model",
+          "phaseElapsedMs": 13127,
+          "state": "completed",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 13198,
+          "operationId": "5691273d-f273-4763-a14f-6621cd2c098f",
+          "phase": "finalizing",
+          "phaseElapsedMs": 0,
+          "state": "started",
+          "type": "turn_phase"
+        },
+        {
+          "connectionId": "c8a1a3d2-f6e1-4850-9609-cf6626440da3",
+          "elapsedMs": 13124,
+          "method": "session/prompt",
+          "offsetMs": 16685,
+          "operationId": "5691273d-f273-4763-a14f-6621cd2c098f",
+          "outcome": "succeeded",
+          "requestId": 3,
+          "state": "completed",
+          "type": "rpc_timing"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 13241,
+          "operationId": "5691273d-f273-4763-a14f-6621cd2c098f",
+          "outcome": "succeeded",
+          "phase": "finalizing",
+          "phaseElapsedMs": 43,
+          "state": "completed",
+          "type": "turn_phase"
+        }
+      ],
+      "index": 0,
+      "rpc": [
+        {
+          "connectionId": "c8a1a3d2-f6e1-4850-9609-cf6626440da3",
+          "elapsedMs": 0,
+          "method": "session/new",
+          "offsetMs": 2863,
+          "operationId": "650cfa48-51b9-43fe-9000-9b25f0b1802b",
+          "requestId": 2,
+          "state": "started",
+          "type": "rpc_timing"
+        },
+        {
+          "connectionId": "c8a1a3d2-f6e1-4850-9609-cf6626440da3",
+          "elapsedMs": 619,
+          "method": "session/new",
+          "offsetMs": 3482,
+          "operationId": "650cfa48-51b9-43fe-9000-9b25f0b1802b",
+          "outcome": "succeeded",
+          "requestId": 2,
+          "state": "completed",
+          "type": "rpc_timing"
+        },
+        {
+          "connectionId": "c8a1a3d2-f6e1-4850-9609-cf6626440da3",
+          "elapsedMs": 0,
+          "method": "session/prompt",
+          "offsetMs": 3561,
+          "operationId": "5691273d-f273-4763-a14f-6621cd2c098f",
+          "requestId": 3,
+          "state": "started",
+          "type": "rpc_timing"
+        },
+        {
+          "connectionId": "c8a1a3d2-f6e1-4850-9609-cf6626440da3",
+          "elapsedMs": 13124,
+          "method": "session/prompt",
+          "offsetMs": 16685,
+          "operationId": "5691273d-f273-4763-a14f-6621cd2c098f",
+          "outcome": "succeeded",
+          "requestId": 3,
+          "state": "completed",
+          "type": "rpc_timing"
+        }
+      ],
+      "sessionCreations": 1,
+      "sessionLoads": 0,
+      "sessionReused": true,
+      "stopReason": "end_turn",
+      "unexpectedToolCompleted": false
+    },
+    {
+      "cold": false,
+      "contextToolCompleted": true,
+      "diagnosticsComplete": true,
+      "elapsedMs": 9644,
+      "events": [
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 0,
+          "operationId": "cc87994a-8fd8-475d-b52c-a73a7d857989",
+          "phase": "preparing",
+          "phaseElapsedMs": 0,
+          "state": "started",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 0,
+          "operationId": "cc87994a-8fd8-475d-b52c-a73a7d857989",
+          "phase": "preparing",
+          "phaseElapsedMs": 0,
+          "state": "completed",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 0,
+          "operationId": "cc87994a-8fd8-475d-b52c-a73a7d857989",
+          "phase": "waiting_lock",
+          "phaseElapsedMs": 0,
+          "state": "started",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 11,
+          "operationId": "cc87994a-8fd8-475d-b52c-a73a7d857989",
+          "outcome": "succeeded",
+          "phase": "waiting_lock",
+          "phaseElapsedMs": 11,
+          "state": "completed",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 0,
+          "operationId": "52fc461b-da83-4e32-9e94-8a8709933702",
+          "phase": "preparing",
+          "phaseElapsedMs": 0,
+          "state": "started",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 0,
+          "operationId": "52fc461b-da83-4e32-9e94-8a8709933702",
+          "phase": "preparing",
+          "phaseElapsedMs": 0,
+          "state": "completed",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 0,
+          "operationId": "52fc461b-da83-4e32-9e94-8a8709933702",
+          "phase": "waiting_lock",
+          "phaseElapsedMs": 0,
+          "state": "started",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 0,
+          "operationId": "52fc461b-da83-4e32-9e94-8a8709933702",
+          "phase": "waiting_lock",
+          "phaseElapsedMs": 0,
+          "state": "completed",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 0,
+          "operationId": "52fc461b-da83-4e32-9e94-8a8709933702",
+          "phase": "context",
+          "phaseElapsedMs": 0,
+          "state": "started",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 21,
+          "operationId": "52fc461b-da83-4e32-9e94-8a8709933702",
+          "phase": "context",
+          "phaseElapsedMs": 21,
+          "state": "completed",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 21,
+          "operationId": "52fc461b-da83-4e32-9e94-8a8709933702",
+          "phase": "waiting_model",
+          "phaseElapsedMs": 0,
+          "state": "started",
+          "type": "turn_phase"
+        },
+        {
+          "connectionId": "c8a1a3d2-f6e1-4850-9609-cf6626440da3",
+          "elapsedMs": 0,
+          "method": "session/prompt",
+          "offsetMs": 16765,
+          "operationId": "52fc461b-da83-4e32-9e94-8a8709933702",
+          "requestId": 4,
+          "state": "started",
+          "type": "rpc_timing"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 142,
+          "marker": "first_event",
+          "operationId": "52fc461b-da83-4e32-9e94-8a8709933702",
+          "type": "turn_timing"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 3407,
+          "marker": "first_token",
+          "operationId": "52fc461b-da83-4e32-9e94-8a8709933702",
+          "type": "turn_timing"
+        },
+        {
+          "completed": false,
+          "elapsedMs": 7400,
+          "name": "get_learner_context",
+          "timingScope": "client_observed_including_transport",
+          "type": "observed_tool"
+        },
+        {
+          "completed": true,
+          "elapsedMs": 7409,
+          "name": "get_learner_context",
+          "observedDurationMs": 9,
+          "timingScope": "client_observed_including_transport",
+          "type": "observed_tool"
+        },
+        {
+          "connectionId": "c8a1a3d2-f6e1-4850-9609-cf6626440da3",
+          "elapsedMs": 9581,
+          "method": "session/prompt",
+          "offsetMs": 26346,
+          "operationId": "52fc461b-da83-4e32-9e94-8a8709933702",
+          "outcome": "succeeded",
+          "requestId": 4,
+          "state": "completed",
+          "type": "rpc_timing"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 9602,
+          "operationId": "52fc461b-da83-4e32-9e94-8a8709933702",
+          "phase": "waiting_model",
+          "phaseElapsedMs": 9581,
+          "state": "completed",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 9602,
+          "operationId": "52fc461b-da83-4e32-9e94-8a8709933702",
+          "phase": "finalizing",
+          "phaseElapsedMs": 0,
+          "state": "started",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 9630,
+          "operationId": "52fc461b-da83-4e32-9e94-8a8709933702",
+          "outcome": "succeeded",
+          "phase": "finalizing",
+          "phaseElapsedMs": 27,
+          "state": "completed",
+          "type": "turn_phase"
+        }
+      ],
+      "index": 1,
+      "rpc": [
+        {
+          "connectionId": "c8a1a3d2-f6e1-4850-9609-cf6626440da3",
+          "elapsedMs": 0,
+          "method": "session/prompt",
+          "offsetMs": 16765,
+          "operationId": "52fc461b-da83-4e32-9e94-8a8709933702",
+          "requestId": 4,
+          "state": "started",
+          "type": "rpc_timing"
+        },
+        {
+          "connectionId": "c8a1a3d2-f6e1-4850-9609-cf6626440da3",
+          "elapsedMs": 9581,
+          "method": "session/prompt",
+          "offsetMs": 26346,
+          "operationId": "52fc461b-da83-4e32-9e94-8a8709933702",
+          "outcome": "succeeded",
+          "requestId": 4,
+          "state": "completed",
+          "type": "rpc_timing"
+        }
+      ],
+      "sessionCreations": 0,
+      "sessionLoads": 0,
+      "sessionReused": true,
+      "stopReason": "end_turn",
+      "unexpectedToolCompleted": false
+    },
+    {
+      "cold": false,
+      "contextToolCompleted": true,
+      "diagnosticsComplete": true,
+      "elapsedMs": 8824,
+      "events": [
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 0,
+          "operationId": "209faf9b-7325-4df5-bf39-4fef651e77b7",
+          "phase": "preparing",
+          "phaseElapsedMs": 0,
+          "state": "started",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 0,
+          "operationId": "209faf9b-7325-4df5-bf39-4fef651e77b7",
+          "phase": "preparing",
+          "phaseElapsedMs": 0,
+          "state": "completed",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 0,
+          "operationId": "209faf9b-7325-4df5-bf39-4fef651e77b7",
+          "phase": "waiting_lock",
+          "phaseElapsedMs": 0,
+          "state": "started",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 5,
+          "operationId": "209faf9b-7325-4df5-bf39-4fef651e77b7",
+          "outcome": "succeeded",
+          "phase": "waiting_lock",
+          "phaseElapsedMs": 5,
+          "state": "completed",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 0,
+          "operationId": "82d1e501-a08d-4acc-8a36-2587f55916bf",
+          "phase": "preparing",
+          "phaseElapsedMs": 0,
+          "state": "started",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 0,
+          "operationId": "82d1e501-a08d-4acc-8a36-2587f55916bf",
+          "phase": "preparing",
+          "phaseElapsedMs": 0,
+          "state": "completed",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 0,
+          "operationId": "82d1e501-a08d-4acc-8a36-2587f55916bf",
+          "phase": "waiting_lock",
+          "phaseElapsedMs": 0,
+          "state": "started",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 0,
+          "operationId": "82d1e501-a08d-4acc-8a36-2587f55916bf",
+          "phase": "waiting_lock",
+          "phaseElapsedMs": 0,
+          "state": "completed",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 0,
+          "operationId": "82d1e501-a08d-4acc-8a36-2587f55916bf",
+          "phase": "context",
+          "phaseElapsedMs": 0,
+          "state": "started",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 9,
+          "operationId": "82d1e501-a08d-4acc-8a36-2587f55916bf",
+          "phase": "context",
+          "phaseElapsedMs": 9,
+          "state": "completed",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 9,
+          "operationId": "82d1e501-a08d-4acc-8a36-2587f55916bf",
+          "phase": "waiting_model",
+          "phaseElapsedMs": 0,
+          "state": "started",
+          "type": "turn_phase"
+        },
+        {
+          "connectionId": "c8a1a3d2-f6e1-4850-9609-cf6626440da3",
+          "elapsedMs": 0,
+          "method": "session/prompt",
+          "offsetMs": 26394,
+          "operationId": "82d1e501-a08d-4acc-8a36-2587f55916bf",
+          "requestId": 5,
+          "state": "started",
+          "type": "rpc_timing"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 118,
+          "marker": "first_event",
+          "operationId": "82d1e501-a08d-4acc-8a36-2587f55916bf",
+          "type": "turn_timing"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 2627,
+          "marker": "first_token",
+          "operationId": "82d1e501-a08d-4acc-8a36-2587f55916bf",
+          "type": "turn_timing"
+        },
+        {
+          "completed": false,
+          "elapsedMs": 5921,
+          "name": "get_learner_context",
+          "timingScope": "client_observed_including_transport",
+          "type": "observed_tool"
+        },
+        {
+          "completed": true,
+          "elapsedMs": 5939,
+          "name": "get_learner_context",
+          "observedDurationMs": 18,
+          "timingScope": "client_observed_including_transport",
+          "type": "observed_tool"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 8786,
+          "operationId": "82d1e501-a08d-4acc-8a36-2587f55916bf",
+          "phase": "waiting_model",
+          "phaseElapsedMs": 8776,
+          "state": "completed",
+          "type": "turn_phase"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 8786,
+          "operationId": "82d1e501-a08d-4acc-8a36-2587f55916bf",
+          "phase": "finalizing",
+          "phaseElapsedMs": 0,
+          "state": "started",
+          "type": "turn_phase"
+        },
+        {
+          "connectionId": "c8a1a3d2-f6e1-4850-9609-cf6626440da3",
+          "elapsedMs": 8773,
+          "method": "session/prompt",
+          "offsetMs": 35168,
+          "operationId": "82d1e501-a08d-4acc-8a36-2587f55916bf",
+          "outcome": "succeeded",
+          "requestId": 5,
+          "state": "completed",
+          "type": "rpc_timing"
+        },
+        {
+          "conversationId": "cdd59ecf-3f73-48cb-9805-a33252174063",
+          "elapsedMs": 8816,
+          "operationId": "82d1e501-a08d-4acc-8a36-2587f55916bf",
+          "outcome": "succeeded",
+          "phase": "finalizing",
+          "phaseElapsedMs": 30,
+          "state": "completed",
+          "type": "turn_phase"
+        }
+      ],
+      "index": 2,
+      "rpc": [
+        {
+          "connectionId": "c8a1a3d2-f6e1-4850-9609-cf6626440da3",
+          "elapsedMs": 0,
+          "method": "session/prompt",
+          "offsetMs": 26394,
+          "operationId": "82d1e501-a08d-4acc-8a36-2587f55916bf",
+          "requestId": 5,
+          "state": "started",
+          "type": "rpc_timing"
+        },
+        {
+          "connectionId": "c8a1a3d2-f6e1-4850-9609-cf6626440da3",
+          "elapsedMs": 8773,
+          "method": "session/prompt",
+          "offsetMs": 35168,
+          "operationId": "82d1e501-a08d-4acc-8a36-2587f55916bf",
+          "outcome": "succeeded",
+          "requestId": 5,
+          "state": "completed",
+          "type": "rpc_timing"
+        }
+      ],
+      "sessionCreations": 0,
+      "sessionLoads": 0,
+      "sessionReused": true,
+      "stopReason": "end_turn",
+      "unexpectedToolCompleted": false
+    }
+  ]
+}

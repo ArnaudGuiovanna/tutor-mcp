@@ -123,6 +123,15 @@ export function toolFromEvent(event: JsonRecord): ToolActivity | null {
   return { id: text(update.toolCallId), title: text(update.title), status: text(update.status) };
 }
 
+export function mergeToolActivity(previous: ToolActivity[], update: ToolActivity, at = performance.now()): ToolActivity[] {
+  const old = previous.find(item => item.id === update.id);
+  const status = old && ['completed', 'failed', 'cancelled'].includes(old.status) ? old.status : update.status || old?.status || 'pending';
+  const complete = ['completed', 'failed', 'cancelled'].includes(status);
+  const next = {...old, ...update, title:update.title || old?.title || '', status,
+    startedAt:old?.startedAt ?? at, completedAt:old?.completedAt ?? (complete ? at : undefined)};
+  return old ? previous.map(item => item.id === update.id ? next : item) : [...previous, next];
+}
+
 export function chunkFromEvent(event: JsonRecord): string {
   if (event.method !== 'session/update') return '';
   const update = record(record(event.params).update);

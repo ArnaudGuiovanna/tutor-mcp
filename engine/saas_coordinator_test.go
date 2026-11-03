@@ -84,6 +84,30 @@ func TestSaaSConsumerVisitsTenant101BeforeRevisitingPrefix(t *testing.T) {
 		seedSaaSConsumerTenant(t, raw, store, fmt.Sprintf("paged_%03d", i), jobs)
 	}
 	backend := &watchedSaaSStore{Store: store, claims: map[string]int{}}
+	lastTenantEntered := make(chan struct{})
+	var sweeps atomic.Int32
+	backend.beforeClaim = func(_ context.Context, scope models.TenantScope, count int) error {
+		if scope.TenantID == "paged_100" && count == 1 {
+			close(lastTenantEntered)
+		}
+		return nil
+	}
+	backend.beforeList = func(ctx context.Context, after string) error {
+		if after != "" || sweeps.Add(1) == 1 {
+			return nil
+		}
+		// Admission to the unbuffered work channel is ordered; entry into
+		// ClaimAsyncJob on four workers is not. Let the claim observer catch
+		// up with the admitted tail before enumerating the next sweep. If
+		// pagination skipped that tenant, no worker can release this gate.
+		select {
+		case <-lastTenantEntered:
+			return nil
+		case <-ctx.Done():
+			t.Errorf("tenant101 never reached its first claim before the next pagination sweep: %v", ctx.Err())
+			return ctx.Err()
+		}
+	}
 	s := NewTenantDistributedScheduler(backend, quietLogger(), "consumer-test")
 	s.integrationClient = &http.Client{Transport: webhookRoundTripFunc(func(*http.Request) (*http.Response, error) { return webhookResponse(204), nil })}
 	done := startSaaSTestCallback(t, s)

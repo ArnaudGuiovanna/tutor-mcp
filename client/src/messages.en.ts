@@ -1,6 +1,17 @@
 // Interface copy only. User messages, names, curriculum and assessment evidence
 // retain their original language and are never translated by this catalogue.
 export const english: Record<string, string> = {
+  'J’attends la réponse de l’agent…': 'Waiting for the agent’s response…',
+  'J’attends la fin de l’opération précédente…': 'Waiting for the previous operation to finish…',
+  'J’enregistre la réponse…': 'Saving the response…',
+  'Interruption…': 'Stopping…',
+  'Envoi interrompu. Le message conservé attend votre décision.': 'Sending stopped. Your saved message awaits your decision.',
+  'La connexion à l’agent continue en arrière-plan.': 'The agent connection is still starting in the background.',
+  'Total : {seconds} s': 'Total: {seconds} s',
+  'Outil : {seconds} s': 'Tool: {seconds} s',
+  'Étape : {seconds} s': 'Stage: {seconds} s',
+  'Durée observée : {seconds} s': 'Observed duration: {seconds} s',
+
   'Question {number}':'Question {number}',
   'Carte {number}':'Card {number}',
   "Message au tuteur": "Your message to the tutor",

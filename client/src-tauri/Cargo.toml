@@ -1,6 +1,6 @@
 [package]
 name = "tutor-client"
-version = "0.0.10"
+version = "0.0.11"
 description = "Tutor desktop client for Agent Client Protocol"
 authors = ["Arnaud Guiovanna"]
 license = "MIT"
@@ -25,6 +25,11 @@ required-features = ["qualification"]
 [[bin]]
 name = "tutor-client-smoke"
 path = "../scripts/smoke-learning.rs"
+required-features = ["qualification"]
+
+[[bin]]
+name = "tutor-client-latency"
+path = "../scripts/qualify-latency.rs"
 required-features = ["qualification"]
 
 [[bin]]

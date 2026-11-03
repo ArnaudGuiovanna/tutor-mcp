@@ -26,13 +26,16 @@ import type { LearningActivity, LearningResponse } from './learningActivityModel
 import { parseSlashCommand, parseStudyRequest, reviewScope, selectStudyTraining, studyRequestText, visibleStudyText } from './studyRequests';
 import type { StudyFormat } from './studyRequests';
 import type { Command } from './CommandPalette';
-import { chunkFromEvent, displayDate, errorMessage, permissionFromEvent, permissionLabel, record, text, toolFromEvent } from './model';
+import { chunkFromEvent, displayDate, errorMessage, mergeToolActivity, permissionFromEvent, permissionLabel, record, text, toolFromEvent } from './model';
 import type { AgentConnection, AgentTarget, Conversation, ConversationContext, PermissionRequest, Settings, Snapshot, ToolActivity, Training, TutorOverview } from './types';
 
 type Page = 'conversation' | 'formations' | 'planning' | 'account' | 'settings' | 'agents' | 'institution' | 'members' | 'ergonomics';
 const labels: Record<Page, string> = { conversation: 'Conversation', formations: 'Formations', planning: 'Planning', account: 'Mon compte', settings: 'Paramètres', agents: 'Connexion et outils', institution: 'Institution', members: 'Membres', ergonomics: 'Ergonomie' };
 const settingsPages: Page[] = ['settings', 'agents', 'institution', 'members', 'ergonomics'];
 const empty: Snapshot = { settings: { targetId: '', cwd: '', tutor: { mode: 'remote', activity: 'auto', url: '', command: 'tutor-mcp', args: ['--local'] } }, identity: { exists: false, backupConfirmed: false, needsBackup: false }, intents: [], conversations: [], tutorStatus: { connected: false, label: 'Tutor non connecté' }, agentConnected: false };
+type ActiveTurn = {cancelled:boolean; controller:AbortController; conversationId?:string; operationId?:string; completedOperations?:Set<string>};
+type PendingAgentLaunch = {scope:string; promise:Promise<AgentConnection>};
+const cancelledTurn = Symbol('cancelled turn');
 
 export default function App({ api = bridge }: { api?: ClientBridge }) {
   useTranslation();
@@ -47,6 +50,8 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   const discoveryRequest = useRef<Promise<AgentTarget[]> | null>(null);
   const [connection, setConnection] = useState<AgentConnection | null>(null);
   const [autoConnecting, setAutoConnecting] = useState(false);
+  const [launchPending,setLaunchPending] = useState(false);
+  const pendingLaunch = useRef<PendingAgentLaunch | undefined>(undefined);
   const [reconnectEpoch, setReconnectEpoch] = useState(0);
   const agentPaused = useRef(false);
   const launchAttempts = useRef(0);
@@ -61,8 +66,11 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   const [newConversation, setNewConversation] = useState(false);
   const [pending, setPending] = useState<string>();
   const sending = useRef(false);
+  const activeTurn = useRef<ActiveTurn | undefined>(undefined);
+  const [turnStartedAt,setTurnStartedAt] = useState<number>();
   const pendingRef = useRef<string | undefined>(undefined);
   const [stream, setStream] = useState('');
+  const [writing, setWriting] = useState(false);
   const [providerStatus, setProviderStatus] = useState('');
   const [permissions, setPermissions] = useState<PermissionRequest[]>([]);
   const [permissionBusy, setPermissionBusy] = useState(false);
@@ -93,9 +101,12 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   const structuredOutbox = !!state.pendingMessage && (!!parseStudyRequest(state.pendingMessage.text) || !!parseLearningResponse(state.pendingMessage.text));
 
   function applyProfile(next: Snapshot) {
+    if (activeTurn.current) {activeTurn.current.cancelled = true;activeTurn.current.controller.abort();}
+    activeTurn.current = undefined; setTurnStartedAt(undefined);
+    pendingLaunch.current=undefined;setLaunchPending(false);
     stateRef.current = next; setState(next); setActiveId(next.activeConversationId); setNewConversation(false);
     setOverview(null); setConnection(null); setDraft(''); setAttachments([]); setPending(undefined); pendingRef.current = undefined; sending.current = false;
-    setStream(''); setProviderStatus(''); setPermissions([]); setTools([]); toolEvents.current=[]; setTrainingId(undefined); setLibraryEpoch(value => value + 1);
+    setStream(''); setWriting(false); setProviderStatus(''); setPermissions([]); setTools([]); toolEvents.current=[]; setTrainingId(undefined); setLibraryEpoch(value => value + 1);
     setShareOpen(false); setResumeHidden(false); setTrainingPanel(false);
     setNotice(next.profileSwitchWarning || ''); setPreparing(''); setPage('conversation');
   }
@@ -110,7 +121,11 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
     void api.loadState().then(next => { if (live) { setState(next); setActiveId(next.activeConversationId); } }).catch(reason => { if (live) setError(errorMessage(reason)); }).finally(() => { if (live) setLoading(false); });
     register(api.listenState(next => {
       if (!live || (next.profileEpoch || 0) < (stateRef.current.profileEpoch || 0)) return;
-      if (next.profile?.id && stateRef.current.profile?.id && next.profile.id !== stateRef.current.profile.id) applyProfile(next); else setState(next);
+      if (next.profile?.id && stateRef.current.profile?.id && next.profile.id !== stateRef.current.profile.id) applyProfile(next);
+      else {
+        // ACP can emit its first chunk immediately after replacing the session.
+        stateRef.current = next; setState(next);
+      }
     }));
     register(api.listenTutor(status => { if (live) setState(previous => ({ ...previous, tutorStatus: status })); }));
     register(api.listenAgent(event => {
@@ -120,20 +135,36 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
         setState(previous => ({ ...previous, agentConnected: false })); setConnection(null); setPermissions([]); setProviderStatus('');
         if (text(event.message)) { connectionError.current=text(event.message); setError(connectionError.current); } return;
       }
+      if (event.type === 'turn_phase') {
+        const turn=activeTurn.current;
+        if (!turn || turn.cancelled || (event.conversationId && turn.conversationId && event.conversationId !== turn.conversationId)) return;
+        const operationId=text(event.operationId);
+        if (!operationId || turn.completedOperations?.has(operationId)) return;
+        if (!turn.operationId && event.state === 'started' && event.phase === 'preparing') turn.operationId=operationId;
+        if (turn.operationId !== operationId) return;
+        if (event.state === 'completed' && event.outcome) {
+          (turn.completedOperations ??= new Set()).add(operationId);turn.operationId=undefined;return;
+        }
+        if (event.state !== 'started') return;
+        const labels:Record<string,string>={preparing:'Je prépare votre séance…',waiting_lock:'J’attends la fin de l’opération précédente…',context:'Je consulte votre progression…',loading_session:'Je retrouve votre conversation…',waiting_model:'',finalizing:'J’enregistre la réponse…'};
+        if (Object.hasOwn(labels,text(event.phase))) {setPreparing(t(labels[text(event.phase)]));setWriting(false);}
+        return;
+      }
       const permission = permissionFromEvent(event,toolEvents.current);
-      if (permission) { setProviderStatus(''); setPage('conversation'); setPermissions(previous => previous.some(item => JSON.stringify(item.id) === JSON.stringify(permission.id)) ? previous : [...previous, permission]); return; }
+      if (permission) { setWriting(false); setProviderStatus(''); setPage('conversation'); setPermissions(previous => previous.some(item => JSON.stringify(item.id) === JSON.stringify(permission.id)) ? previous : [...previous, permission]); return; }
       if (!pendingRef.current) return;
       const expected = stateRef.current.conversations.find(item => item.id === pendingRef.current)?.agentSessionId;
       const received = text(record(event.params).sessionId); if (expected && received && expected !== received) return;
       if (event.type === 'provider_status') {
+        setWriting(false);
         setProviderStatus(event.severity === 'warning' ? text(event.message) : '');
         return;
       }
-      const delta = chunkFromEvent(event); if (delta) { setProviderStatus(''); setStream(previous => previous + delta); }
+      const delta = chunkFromEvent(event); if (delta) { setWriting(true); setProviderStatus(''); setStream(previous => previous + delta); }
       const tool = toolFromEvent(event); if (tool) {
+        setWriting(false);
         setProviderStatus('');
-        const previous=toolEvents.current;
-        const next=previous.some(item=>item.id===tool.id)?previous.map(item=>item.id===tool.id?{...item,title:tool.title||item.title,status:tool.status||item.status}:item):[...previous,tool];
+        const next=mergeToolActivity(toolEvents.current,tool);
         toolEvents.current=next;setTools(next);
       }
     }));
@@ -155,7 +186,7 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   // Initialization is independent of MCP and never authenticates or sends a
   // prompt. Bound retries to three launches; a manual disconnect stays stopped.
   useEffect(() => {
-    if (loading || state.agentConnected || agentPaused.current || busy || pending || !state.settings.targetId || launchAttempts.current >= 3) return;
+    if (loading || state.agentConnected || agentPaused.current || busy || pending || turnStartedAt !== undefined || launchPending || state.pendingMessage?.paused || !state.settings.targetId || launchAttempts.current >= 3) return;
     let live = true;
     const attempt = launchAttempts.current++;
     const settings = state.settings;
@@ -175,7 +206,7 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
       }).finally(() => { if (live) setAutoConnecting(false); });
     }, attempt === 0 ? 0 : 1000 * 2 ** (attempt - 1));
     return () => { live = false; clearTimeout(timer); setAutoConnecting(false); };
-  }, [api, loading, state.agentConnected, state.profile?.id, state.settings.targetId, state.settings.cwd, JSON.stringify(state.settings.manualTarget), busy, pending, reconnectEpoch]);
+  }, [api, loading, state.agentConnected, state.profile?.id, state.settings.targetId, state.settings.cwd, JSON.stringify(state.settings.manualTarget), busy, pending, turnStartedAt, launchPending, state.pendingMessage?.paused, reconnectEpoch]);
 
   useEffect(() => {
     setOverviewFailure(false);
@@ -190,69 +221,143 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
     try { return await action(); } catch (reason) { setError(errorMessage(reason)); return undefined; } finally { setBusy(''); }
   }
 
-  async function ensureConversation(resume?: Conversation, allowNewForStudy = false): Promise<Conversation> {
+  function checkTurn(turn: ActiveTurn) {
+    if (turn.cancelled || activeTurn.current !== turn) throw cancelledTurn;
+  }
+
+  function waitForTurn<T>(turn:ActiveTurn,request:Promise<T>):Promise<T> {
+    checkTurn(turn);
+    return new Promise((resolve,reject)=>{
+      const stop=()=>reject(cancelledTurn);
+      turn.controller.signal.addEventListener('abort',stop,{once:true});
+      request.then(value=>{
+        turn.controller.signal.removeEventListener('abort',stop);
+        try {checkTurn(turn);resolve(value);} catch(reason){reject(reason);}
+      },reason=>{turn.controller.signal.removeEventListener('abort',stop);reject(reason);});
+    });
+  }
+
+  function connectForTurn(turn:ActiveTurn,target:AgentTarget,current:Snapshot):Promise<AgentConnection> {
+    const scope=JSON.stringify([current.profile?.id,current.profileEpoch,target,current.settings.cwd]);
+    let launch=pendingLaunch.current;
+    if(!launch || launch.scope!==scope){
+      launch={scope,promise:api.connectAgent(target,current.settings.cwd)};
+      pendingLaunch.current=launch;setLaunchPending(true);
+      const request=launch;
+      const settled=()=>{if(pendingLaunch.current===request){pendingLaunch.current=undefined;setLaunchPending(false);}};
+      // Stop detaches this turn; another turn can still use the same launch.
+      void request.promise.then(settled,settled);
+    }
+    return waitForTurn(turn,launch.promise);
+  }
+
+  async function stopTurn() {
+    const turn = activeTurn.current;
+    if (!turn || turn.cancelled) return;
+    turn.cancelled = true;
+    turn.controller.abort();
+    setPreparing(t('Interruption…'));
+    try { await api.cancelPrompt(turn.conversationId || ''); }
+    catch (reason) { if (activeTurn.current === turn) setError(errorMessage(reason)); }
+  }
+
+  async function ensureConversation(turn: ActiveTurn, resume?: Conversation, allowNewForStudy = false): Promise<Conversation> {
     let current = stateRef.current;
     if (current.agentStatus?.authentication === 'none') { setPage('agents'); throw new Error('Connexion au harness requise'); }
     if (!current.tutorStatus.connected) throw new Error('Connectez Tutor pour envoyer votre message. Il reste enregistré « À envoyer ».');
-    setPreparing(t('Je consulte votre progression…'));
-    let info = await api.tutorOverview();
-    if (current.settings.tutor.mode === 'remote' && info.capabilities?.canEnableLearning) {
-      current = await api.enableLearning(); setState(current); stateRef.current = current; setConnection(null); info = await api.tutorOverview();
+    // An existing conversation needs no catalog read. The native send path
+    // validates its principal, training and live runtime before submitting.
+    let info = overviewBinding === reviewScope(current, null) ? overviewValue : null;
+    if (!resume || (current.settings.tutor.mode === 'remote' && info?.capabilities?.canEnableLearning === true)) {
+      setPreparing(t('Je consulte votre progression…'));
+      if (!info) { info = await api.tutorOverview(); checkTurn(turn); }
+      if (current.settings.tutor.mode === 'remote' && info.capabilities?.canEnableLearning === true) {
+        current = await api.enableLearning(); checkTurn(turn);
+        setState(current); stateRef.current = current; setConnection(null);
+        info = await api.tutorOverview(); checkTurn(turn);
+      }
+      setOverview(info); setOverviewBinding(reviewScope(current, null));
     }
     if (current.settings.tutor.mode === 'remote' && current.settings.tutor.activity !== 'auto') {
       const settings = {...current.settings,tutor:{...current.settings.tutor,activity:'auto' as const}};
-      await api.saveSettings(settings);current=await api.connectTutor(settings.tutor.url,false);setState(current);stateRef.current=current;setConnection(null);info=await api.tutorOverview();
+      await api.saveSettings(settings); checkTurn(turn);
+      current=await api.connectTutor(settings.tutor.url,false); checkTurn(turn);
+      setState(current);stateRef.current=current;setConnection(null);
     }
-    setOverview(info); setOverviewBinding(reviewScope(current, null));
-    // Sessions carry the applicable live capabilities together. No role switch.
     if (!current.agentConnected) {
       let selected = current.settings.manualTarget || targets.find(target => target.id === current.settings.targetId);
-      if (!selected) { const found = await api.discoverAgents(); setTargets(found); selected = found.find(target => target.id === current.settings.targetId); }
+      if (!selected) { const found = await waitForTurn(turn,api.discoverAgents()); checkTurn(turn); setTargets(found); selected = found.find(target => target.id === current.settings.targetId); }
       if (!selected) throw new Error('Choisissez votre agent pour envoyer le message conservé.');
       setPreparing(t('Je prépare votre agent…'));
-      setConnection(await api.connectAgent(selected, current.settings.cwd));
+      const connected=await connectForTurn(turn,selected,current); checkTurn(turn);setConnection(connected);
     }
+    if (resume && !allowNewForStudy) return resume;
     setPreparing(t('Je retrouve votre conversation…'));
     let next: Conversation;
     try { next = await api.startConversation(undefined, resume?.id); }
     catch (reason) {
-      // A planning launch may follow a deliberate institution change. Never
-      // carry the old server's history into the newly selected institution.
+      checkTurn(turn);
+      // An explicit study launch may follow an institution change. Its new
+      // conversation must not inherit another institution's messages.
       if (!allowNewForStudy || !resume || errorMessage(reason) !== 'Cette séance appartient à une autre connexion Tutor. Rétablissez le compte et l’institution d’origine.') throw reason;
+      turn.conversationId=undefined;
       next = await api.startConversation();
+      turn.conversationId=next.id; checkTurn(turn);
       const queued = stateRef.current.pendingMessage;
-      if (queued) await api.queuePrompt(queued.text, next.id);
+      if (queued) { await api.queuePrompt(queued.text, next.id); checkTurn(turn); }
     }
+    turn.conversationId=next.id; checkTurn(turn);
     setActiveId(next.id); setNewConversation(false);
-    const snapshot = await api.loadState(); setState(snapshot); stateRef.current = snapshot;
+    const snapshot = await api.loadState(); checkTurn(turn); setState(snapshot); stateRef.current = snapshot;
     return next;
   }
 
   async function dispatch(value: string, resume?: Conversation, alreadyQueued = false): Promise<boolean> {
     if (sending.current || !value.trim() || (stateRef.current.pendingMessage && !alreadyQueued)) return false;
+    const turn:ActiveTurn={cancelled:false,controller:new AbortController(),conversationId:resume?.id};
+    activeTurn.current=turn;setTurnStartedAt(performance.now());
     let accepted = alreadyQueued;
     sending.current = true; setError(''); setNotice(''); setProviderStatus(''); setPreparing(t('Je prépare votre séance…'));
+    setStream('');setWriting(false);setTools([]);toolEvents.current=[];setPage('conversation');
     try {
-      if (!alreadyQueued) { const next = await api.queuePrompt(value.trim(), resume?.id); setState(next); stateRef.current = next; accepted = true; }
-      setDraft(''); setAttachments([]);
+      if (!alreadyQueued) {
+        const next = await api.queuePrompt(value.trim(), resume?.id);
+        accepted = true; checkTurn(turn);setState(next);stateRef.current=next;
+      }
+      checkTurn(turn); setDraft(''); setAttachments([]);
       if (!stateRef.current.tutorStatus.connected) { setPage('agents'); setNotice(t('Votre message est conservé « À envoyer ». Terminez la connexion pour reprendre.')); return accepted; }
       const request = parseStudyRequest(value);
-      const next = await ensureConversation(resume, !!request);
+      const next = await ensureConversation(turn,resume, !!request); checkTurn(turn);
+      turn.conversationId=next.id;
       if (request?.trainingId) {
         setPreparing(t('Je retrouve votre formation…'));
-        const confirmed = await selectStudyTraining(api, next.id, request);
+        const confirmed = await selectStudyTraining(api, next.id, request, () => checkTurn(turn)); checkTurn(turn);
         const snapshot = {...stateRef.current, conversations: stateRef.current.conversations.map(item => item.id === next.id ? {...item, activeTraining: confirmed} : item)};
         stateRef.current = snapshot; setState(snapshot);
       }
-      pendingRef.current = next.id; setPending(next.id); setPreparing(''); setStream(''); setTools([]); toolEvents.current=[]; setPage('conversation');
+      checkTurn(turn);
+      pendingRef.current = next.id; setPending(next.id); setPreparing('');
       setState(previous => ({...previous,conversations:previous.conversations.map(item=>item.id===next.id?{...item,messages:[...item.messages,{id:crypto.randomUUID(),role:'user',text:value.trim(),status:'complete',createdAt:new Date().toISOString()}]}:item)}));
       const result = await api.sendPrompt(next.id, value.trim());
-      if (result.stopReason === 'cancelled') setNotice('Réponse interrompue. Vos échanges et votre progression sont conservés.');
-    } catch (reason) { setError(errorMessage(reason)); }
-    finally {
-      try { const next = await api.loadState(); setState(next); stateRef.current = next; } catch (reason) { setError(errorMessage(reason)); }
-      pendingRef.current = undefined; setPending(undefined); setStream(''); setProviderStatus(''); setPermissions([]); sending.current = false; setPreparing('');
-      setLibraryEpoch(value => value + 1);
+      if (activeTurn.current === turn && result.stopReason === 'cancelled') setNotice(t('Réponse interrompue. Vos échanges et votre progression sont conservés.'));
+    } catch (reason) {
+      if (activeTurn.current === turn) {
+        if (turn.cancelled || reason === cancelledTurn) {
+          // queue/start may have completed after Stop. Pause the durable outbox
+          // again so a future configuration transition cannot resend it.
+          try { await api.cancelPrompt(turn.conversationId || ''); } catch (error) {setError(errorMessage(error));}
+          setNotice(t('Envoi interrompu. Le message conservé attend votre décision.'));
+        } else setError(errorMessage(reason));
+      }
+    } finally {
+      if (activeTurn.current === turn) {
+        try { const next = await api.loadState(); if (activeTurn.current === turn) {setState(next);stateRef.current=next;} } catch (reason) { if(activeTurn.current===turn)setError(errorMessage(reason)); }
+        if (activeTurn.current === turn) {
+          activeTurn.current=undefined;setTurnStartedAt(undefined);
+          pendingRef.current = undefined; setPending(undefined); setStream(''); setWriting(false); setProviderStatus(''); setPermissions([]); sending.current = false; setPreparing('');
+          setLibraryEpoch(value => value + 1);
+        }
+      }
     }
     return accepted;
   }
@@ -303,7 +408,7 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   useEffect(() => {
     const ready = state.tutorStatus.connected && agentReady;
     const transitioned = ready && !previousReady.current; previousReady.current = ready;
-    if (transitioned && state.pendingMessage && !sending.current) {
+    if (transitioned && state.pendingMessage && !state.pendingMessage.paused && !sending.current) {
       const queued = state.pendingMessage;
       const resume = queued.conversationId ? state.conversations.find(item => item.id === queued.conversationId) : undefined;
       void dispatch(queued.text, resume, true);
@@ -342,12 +447,15 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   useEffect(() => {setTrainingPanel(false);sidebar.closeOverlay();},[page,activeId]);
   async function chooseTraining(training:Training) {
     if(locked || state.pendingMessage)return;
-    await perform('Sélection de la formation…',async()=>{
-      const current=await ensureConversation(conversation,true);
-      const selected=await selectStudyTraining(api,current.id,{version:1,format:'quiz',intent:'practice',trainingId:training.id,domainId:training.domain_id});
-      const next=await api.loadState();
-      setState({...next,conversations:next.conversations.map(item=>item.id===current.id?{...item,activeTraining:selected}:item)});
-    });
+    const turn:ActiveTurn={cancelled:false,controller:new AbortController(),conversationId:conversation?.id};activeTurn.current=turn;
+    try {
+      await perform('Sélection de la formation…',async()=>{
+        const current=await ensureConversation(turn,conversation,true);
+        const selected=await selectStudyTraining(api,current.id,{version:1,format:'quiz',intent:'practice',trainingId:training.id,domainId:training.domain_id},()=>checkTurn(turn));
+        const next=await api.loadState();checkTurn(turn);
+        setState({...next,conversations:next.conversations.map(item=>item.id===current.id?{...item,activeTraining:selected}:item)});
+      });
+    } finally {if(activeTurn.current===turn){activeTurn.current=undefined;setPreparing('');}}
   }
 
   async function openNewConversation(){await perform('Nouvelle conversation…', async () => { await api.selectConversation(); setNewConversation(true); setActiveId(undefined); setPage('conversation'); setTools([]); setDraft(''); setAttachments([]); });}
@@ -370,7 +478,7 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
       return [...refreshed.values()];
     });
   }, [api]);
-  function connections(section:'account'|'agents'|'institution',sectionBusy=locked){return <Connections key={`${state.profile?.id}:${section}`} section={section} settings={state.settings} targets={targets} connected={state.agentConnected} connecting={autoConnecting} agentStatus={state.agentStatus} tutorStatus={state.tutorStatus} connection={state.agentConnected ? state.agentConnection ?? connection : null} identity={state.identity} api={api} busy={sectionBusy}
+  function connections(section:'account'|'agents'|'institution',sectionBusy=locked){return <Connections key={`${state.profile?.id}:${section}`} section={section} settings={state.settings} targets={targets} connected={state.agentConnected} connecting={autoConnecting || launchPending} agentStatus={state.agentStatus} tutorStatus={state.tutorStatus} connection={state.agentConnected ? state.agentConnection ?? connection : null} identity={state.identity} api={api} busy={sectionBusy}
     onIdentityAction={(label,action)=>perform(label,async()=>{await action();saved(await api.loadState());return true;}).then(result=>result===true)}
     onDiscover={()=>void perform('Recherche des installations…',async()=>setTargets(await api.discoverAgents()))}
     onSave={settings=>void perform('Enregistrement des réglages…',async()=>saved(await api.saveSettings(settings)))}
@@ -403,13 +511,14 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
       {error && <Notice kind="error" onDismiss={() => setError('')}>{t(error)}</Notice>}
       {notice && <Notice kind="info" onDismiss={() => setNotice('')}>{t(notice)}</Notice>}
       {busy && <div className="notice" role="status"><span className="spinner" />{busy}</div>}
+      {launchPending && turnStartedAt===undefined && <div className="notice" role="status"><span className="spinner" />{t('La connexion à l’agent continue en arrière-plan.')}</div>}
       {state.pendingMessage && !pending && <section className="outbox" aria-label={t("Message à envoyer")}><div><strong>{t("À envoyer")}</strong><p>{visibleStudyText(state.pendingMessage.text)}</p></div><div className="button-row"><button className="button secondary" disabled={locked} onClick={() => void perform('Retrait du message…', async () => { if (!structuredOutbox) {setDraft(visibleStudyText(state.pendingMessage!.text));setAttachments(messageAttachments(state.pendingMessage!.text));} setState(await api.queuePrompt(null)); setPage('conversation'); })}>{structuredOutbox ? t("Retirer") : t("Modifier")}</button><button className="button primary" disabled={locked} onClick={() => { if (!state.tutorStatus.connected) setPage('agents'); else if (!agentReady) setPage('agents'); else void dispatch(state.pendingMessage!.text, state.conversations.find(item => item.id === state.pendingMessage!.conversationId), true); }}>{state.tutorStatus.connected && agentReady ? t("Envoyer le message conservé") : t("Terminer la connexion")}</button></div></section>}
       {page === 'conversation' && <section className="conversation-panel" aria-label={t("Conversation avec votre tuteur")}>
-        <ConversationMessages key={`${state.profile?.id}:${conversation?.id}`} conversation={conversation} streamText={stream} streaming={!!pending} toolActivity={tools} activity={(pending||preparing) ? <TutorActivity tools={tools} streaming={!!stream} permission={!!permissions.length} preparing={preparing} providerStatus={providerStatus}/> : undefined} disabled={locked || !!state.pendingMessage} pendingText={state.pendingMessage?.conversationId === conversation?.id ? state.pendingMessage?.text : undefined} openLink={api.openExternalLink} onRespond={respondToActivity} onContinue={continueActivity} onHint={activity=>void dispatch(t('Donne-moi un indice pour cette question, sans révéler la réponse : {question}',{question:activity.question}),conversation)} />
+        <ConversationMessages key={`${state.profile?.id}:${conversation?.id}`} conversation={conversation} streamText={stream} streaming={!!pending} toolActivity={tools} activity={turnStartedAt !== undefined ? <TutorActivity startedAt={turnStartedAt} tools={tools} streaming={writing} permission={!!permissions.length} preparing={preparing} providerStatus={providerStatus}/> : undefined} disabled={locked || !!state.pendingMessage} pendingText={state.pendingMessage?.conversationId === conversation?.id ? state.pendingMessage?.text : undefined} openLink={api.openExternalLink} onRespond={respondToActivity} onContinue={continueActivity} onHint={activity=>void dispatch(t('Donne-moi un indice pour cette question, sans révéler la réponse : {question}',{question:activity.question}),conversation)} />
         {permissions.map((permission,index) => <PermissionCard key={JSON.stringify(permission.id)} permission={permission} disabled={permissionBusy || index > 0} onAnswer={optionId => void (async () => { setPermissionBusy(true); try { await api.answerPermission(permission.id,optionId); setPermissions(previous => previous.filter(item => JSON.stringify(item.id) !== JSON.stringify(permission.id))); } catch (reason) { setError(errorMessage(reason)); } finally { setPermissionBusy(false); } })()} />)}
         <div className="conversation-compose">
         {home && !resumeHidden && resumeTraining && <ResumeTraining training={resumeTraining} disabled={locked || !!state.pendingMessage} onResume={()=>void learn(resumeTraining)} onDismiss={()=>setResumeHidden(true)}/>}
-        <StudyComposer key={`${state.profile?.id}:${newConversation?'new':conversation?.id}`} attachments={attachments} onAttachments={setAttachments} home={home} trainingName={activeTraining?.name} trainings={library.items} onChooseTraining={item=>void chooseTraining(item)} onOpenLibrary={()=>{setTrainingId(undefined);setPage('formations');}} mode={currentActivity?.type==='activity'?currentActivity.activity.kind:undefined} menuRequest={practiceMenu} draft={draft} onChange={setDraft} disabled={!!pending || !!state.pendingMessage} canSend={!locked && (!!draft.trim() || !!attachments.length) && !state.pendingMessage} pending={!!pending} onSend={sendDraft} onCancel={() => void api.cancelPrompt(pending!).catch(reason => setError(errorMessage(reason)))} />
+        <StudyComposer key={`${state.profile?.id}:${newConversation?'new':conversation?.id}`} attachments={attachments} onAttachments={setAttachments} home={home} trainingName={activeTraining?.name} trainings={library.items} onChooseTraining={item=>void chooseTraining(item)} onOpenLibrary={()=>{setTrainingId(undefined);setPage('formations');}} mode={currentActivity?.type==='activity'?currentActivity.activity.kind:undefined} menuRequest={practiceMenu} draft={draft} onChange={setDraft} disabled={turnStartedAt !== undefined || !!state.pendingMessage} canSend={!locked && (!!draft.trim() || !!attachments.length) && !state.pendingMessage} pending={turnStartedAt !== undefined} onSend={sendDraft} onCancel={() => void stopTurn()} />
         {home && <p className="composer-disclaimer">{t('L’IA peut se tromper. Vérifiez les points importants.')}</p>}
         </div>
       </section>}
@@ -491,16 +600,22 @@ function PermissionCard({ permission,disabled,onAnswer }: { permission:Permissio
   return <section className="permission-card" aria-label={t("Autorisation demandée")}><h2>{permission.title}</h2>{permission.description && <p>{permission.description}</p>}<p>{t("Cette action attend votre décision.")}</p><div className="button-row"><button className="button secondary" disabled={disabled} onClick={() => onAnswer(null)}>{t("Annuler la demande")}</button>{permission.options.map(option => <button className={`button ${option.kind.startsWith('allow') ? 'primary' : 'secondary'}`} key={option.optionId} disabled={disabled} onClick={() => onAnswer(option.optionId)}>{permissionLabel(option.kind,option.name)}</button>)}</div></section>;
 }
 
-export function TutorActivity({tools,streaming,permission,preparing,providerStatus=''}:{tools:ToolActivity[];streaming:boolean;permission:boolean;preparing:string;providerStatus?:string}){
- const [elapsed,setElapsed]=useState(0);
- useEffect(()=>{const started=Date.now();const timer=window.setInterval(()=>setElapsed(Math.floor((Date.now()-started)/1000)),1000);return()=>window.clearInterval(timer);},[]);
- const finished=tools.filter(tool=>['completed','failed','cancelled'].includes(tool.status)).length;const active=[...tools].reverse().find(tool=>!['completed','failed','cancelled'].includes(tool.status));const latest=tools.at(-1);const name=(active?.title||'').toLowerCase();
- let message=preparing||t('Je prépare la réponse…');
+export function TutorActivity({tools,streaming,permission,preparing,providerStatus='',startedAt}:{tools:ToolActivity[];streaming:boolean;permission:boolean;preparing:string;providerStatus?:string;startedAt?:number}){
+ const mountedAt=useRef(performance.now());const [now,setNow]=useState(performance.now());
+ useEffect(()=>{const timer=window.setInterval(()=>setNow(performance.now()),1000);return()=>window.clearInterval(timer);},[]);
+ const observedTools=useRef(new Map<string,number>());
+ for(const tool of tools)if(!observedTools.current.has(tool.id))observedTools.current.set(tool.id,tool.startedAt??performance.now());
+ const finished=tools.filter(tool=>['completed','failed','cancelled'].includes(tool.status)).length;
+ const active=[...tools].reverse().find(tool=>!['completed','failed','cancelled'].includes(tool.status));const latest=tools.at(-1);const name=(active?.title||'').toLowerCase();
+ let message=preparing||t('J’attends la réponse de l’agent…');
  if(permission)message=t('Votre autorisation est attendue.');
  else if(providerStatus)message=providerStatus;
- else if(active){message=/next_activity|assessment|curriculum/.test(name)?t('Je prépare la prochaine activité…'):/progress|interaction|mastery|learner_context/.test(name)?t('Je consulte votre progression…'):/training|domain|formation|library/.test(name)?t('Je retrouve votre formation…'):t('Je consulte le serveur Tutor…');}
- else if(streaming)message=t('Je rédige la réponse…');else if(latest?.status==='failed')message=t('Un outil a rencontré une erreur. Le tuteur examine le résultat…');
- return <div className="tutor-activity" role="status" aria-live="polite" aria-atomic="true"><span className={`activity-mark ${permission?'waiting':''}`} aria-hidden="true"></span><div><p key={message} className="activity-text">{message}</p><small className="activity-elapsed" aria-hidden="true">{t('{seconds} s écoulées',{seconds:elapsed})}</small>{finished>0&&<small>{t('{count} appel(s) terminé(s)',{count:finished})}</small>}</div></div>;
+ else if(!preparing&&active){message=/next_activity|assessment|curriculum/.test(name)?t('Je prépare la prochaine activité…'):/progress|interaction|mastery|learner_context/.test(name)?t('Je consulte votre progression…'):/training|domain|formation|library/.test(name)?t('Je retrouve votre formation…'):t('Je consulte le serveur Tutor…');}
+ else if(!preparing&&streaming)message=t('Je rédige la réponse…');else if(!preparing&&latest?.status==='failed')message=t('Un outil a rencontré une erreur. Le tuteur examine le résultat…');
+ const phase=useRef({message,startedAt:performance.now()});if(phase.current.message!==message)phase.current={message,startedAt:performance.now()};
+ const elapsed=(start:number)=>Math.max(0,Math.floor((now-start)/1000));
+ const detail=active&&!permission&&!providerStatus&&!preparing?t('Outil : {seconds} s',{seconds:elapsed(active.startedAt??observedTools.current.get(active.id)??now)}):t('Étape : {seconds} s',{seconds:elapsed(phase.current.startedAt)});
+ return <div className="tutor-activity" role="status" aria-live="polite" aria-atomic="true"><span className={`activity-mark ${permission?'waiting':''}`} aria-hidden="true"></span><div><p key={message} className="activity-text">{message}</p><small className="activity-elapsed" aria-hidden="true">{t('Total : {seconds} s',{seconds:elapsed(startedAt??mountedAt.current)})} · {detail}</small>{finished>0&&<small>{t('{count} appel(s) terminé(s)',{count:finished})}</small>}</div></div>;
 }
 
 function latestReview(training:Training) {return training.progress?.map(item=>item.last_review || '').sort().at(-1) || '';}
@@ -511,5 +626,6 @@ function ToolActivityLines({tools}:{tools:ToolActivity[]}) {
 function ToolActivityLine({tool}:{tool:ToolActivity}) {
   const [expanded,setExpanded]=useState(false);
   const label=/profile|learner_context/.test(tool.title)?'Profil chargé':/training|formation|library|curriculum/.test(tool.title)?'Formation consultée':'Outil MCP';
-  return <div className="tool-line"><button type="button" aria-expanded={expanded} onClick={()=>setExpanded(value=>!value)}><Icon name="chevron" size={12}/><span>{t(label)}</span><span className="tool-object">{tool.title}</span>{tool.status==='failed'&&<Icon name="close" size={14}/>}</button>{expanded&&<div className="tool-line-detail">{tool.title} · {t(tool.status==='completed'?'Terminé':tool.status==='failed'?'Échec':tool.status==='cancelled'?'Interrompu':'En cours')}</div>}</div>;
+  const duration=tool.startedAt!==undefined&&tool.completedAt!==undefined?Math.max(0,(tool.completedAt-tool.startedAt)/1000).toFixed(1):undefined;
+  return <div className="tool-line"><button type="button" aria-expanded={expanded} onClick={()=>setExpanded(value=>!value)}><Icon name="chevron" size={12}/><span>{t(label)}</span><span className="tool-object">{tool.title}</span>{tool.status==='failed'&&<Icon name="close" size={14}/>}</button>{expanded&&<div className="tool-line-detail">{tool.title} · {t(tool.status==='completed'?'Terminé':tool.status==='failed'?'Échec':tool.status==='cancelled'?'Interrompu':'En cours')}{duration!==undefined&&<> · {t('Durée observée : {seconds} s',{seconds:duration})}</>}</div>}</div>;
 }

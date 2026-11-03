@@ -26,9 +26,19 @@ const configOptions = (id) => configs[id] ||= sessions[id]?.fixtureConfig || (fi
 const send = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
 const result = (request, value) => send({jsonrpc:'2.0', id:request.id, result:value});
 const chunk = (sessionId, text) => send({jsonrpc:'2.0',method:'session/update',params:{sessionId,update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text}}}});
-readline.createInterface({input:process.stdin}).on('line', (line) => {
+readline.createInterface({input:process.stdin}).on('line', async (line) => {
   const request = JSON.parse(line);
   const params = request.params || {};
+  // Metadata only: qualifications can count work without retaining prompts,
+  // provider credentials or MCP headers. Each test owns its fresh cwd.
+  fs.appendFileSync(path.join(process.cwd(), 'fixture-rpc.jsonl'), JSON.stringify({
+    local, method:request.method, tool:params.name, sessionId:params.sessionId,
+    promptBytes:request.method==='session/prompt'?Buffer.byteLength(JSON.stringify(params.prompt)):undefined,
+  })+'\n');
+  const delayFile=path.join(process.cwd(),'fixture-delays.json');
+  const delays=fs.existsSync(delayFile)?JSON.parse(fs.readFileSync(delayFile,'utf8')):{};
+  const delay=request.method==='tools/call'?delays.toolMs:request.method==='session/load'?delays.loadMs:request.method==='session/new'?delays.newMs:request.method==='session/prompt'?delays.promptMs:0;
+  if(Number.isFinite(delay)&&delay>0) await new Promise(resolve=>setTimeout(resolve,Math.min(delay,10000)));
   if (request.method === 'initialize') {
     if (!local) {
       fs.writeFileSync(path.join(process.cwd(), 'fixture-agent-initialize.json'), JSON.stringify(params));
@@ -53,7 +63,10 @@ readline.createInterface({input:process.stdin}).on('line', (line) => {
     if (!sessions[params.sessionId]) return send({jsonrpc:'2.0',id:request.id,error:{code:-32602,message:'Unknown session'}});
     sessions[params.sessionId] = {...sessions[params.sessionId],...params};
     fs.writeFileSync(sessionFile, JSON.stringify(sessions));
-    if (request.method === 'session/load') chunk(params.sessionId,'ANCIEN TEXTE À NE PAS RÉAJOUTER');
+    if (request.method === 'session/load') {
+      const count=Number.isInteger(delays.replayChunks)?Math.max(0,Math.min(delays.replayChunks,10000)):1;
+      for(let i=0;i<count;i++) chunk(params.sessionId,'ANCIEN TEXTE À NE PAS RÉAJOUTER');
+    }
     result(request,{configOptions:configOptions(params.sessionId)});
   } else if (request.method === 'session/set_config_option') {
     const options=configOptions(params.sessionId);

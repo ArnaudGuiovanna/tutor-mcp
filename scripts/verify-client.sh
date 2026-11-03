@@ -37,6 +37,9 @@ python3 -B -m unittest discover -s client/scripts -p test_packaged_agents.py
 cargo fmt --manifest-path client/src-tauri/Cargo.toml --check
 cargo clippy --manifest-path client/src-tauri/Cargo.toml --locked --no-default-features --features qualification --all-targets -- -D warnings
 cargo test --manifest-path client/src-tauri/Cargo.toml --locked --no-default-features --features qualification
+# Run the controlled latency budget alone so unrelated tests cannot add load.
+cargo test --manifest-path client/src-tauri/Cargo.toml --locked --no-default-features --features qualification \
+    warm_turn_preparation_stays_under_500ms_p95_with_100ms_tools -- --ignored --nocapture --test-threads=1
 
 if [[ "$client_verify_real" == 1 ]]; then
     for client_verify_package in codex-acp claude-agent-acp; do

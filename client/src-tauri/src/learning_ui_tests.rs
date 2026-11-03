@@ -219,6 +219,7 @@ fn matches_renderer_fences_and_ignores_quoted_examples() {
 fn a_committed_outbox_response_cannot_be_replaced_by_another_click() {
     let message = fence("tutor-response", &response());
     let pending = PendingMessage {
+        paused: false,
         text: message.clone(),
         conversation_id: Some("go".into()),
     };
@@ -285,6 +286,7 @@ fn queued_and_answered_cards_survive_reload_without_duplicate_acceptance() {
         .transaction(|data| {
             data.conversations.push(conversation(card()));
             data.pending_message = Some(PendingMessage {
+                paused: false,
                 text: message.clone(),
                 conversation_id: Some("conversation-go".into()),
             });
@@ -380,6 +382,7 @@ fn withdrawn_receipt_uses_account_language_and_is_not_duplicated() {
     data.settings.language = "en".into();
     data.conversations.push(conversation(card()));
     data.pending_message = Some(PendingMessage {
+        paused: false,
         text: fence("tutor-response", &response()),
         conversation_id: Some("conversation-go".into()),
     });

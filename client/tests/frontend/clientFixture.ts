@@ -47,7 +47,7 @@ export function client(initial = initialState()) {
     authenticateAgent: vi.fn(async () => ({})),
     startConversation: vi.fn(async (_intentId, resumeId) => { const selected = state.conversations.find((item) => item.id === resumeId) || structuredClone(conversation); state.activeConversationId = selected.id; if (!state.conversations.some((item) => item.id === selected.id)) state.conversations.push(selected); return structuredClone(selected); }),
     sendPrompt: vi.fn(async (id, text) => {state.pendingMessage=null;const current=state.conversations.find(c=>c.id===id);if(current)current.messages.push({id:crypto.randomUUID(),role:'user',text,createdAt:'2026-10-24T11:00:00Z',status:'complete'});return { stopReason: 'end_turn' };}),
-    cancelPrompt: vi.fn(async () => {}),
+    cancelPrompt: vi.fn(async () => {if(state.pendingMessage)state.pendingMessage.paused=true;}),
     answerPermission: vi.fn(async () => {}),
     disconnectAgent: vi.fn(async () => { state.agentConnected = false; }),
     createIdentity: vi.fn(async () => { state.identity = { exists: true, npub: 'npub1test', recoveryNpub: 'npub1recovery', backupConfirmed: false, needsBackup: true }; return structuredClone(state.identity); }),

@@ -152,6 +152,8 @@ pub struct Conversation {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingMessage {
+    #[serde(default)]
+    pub paused: bool,
     pub text: String,
     pub conversation_id: Option<String>,
 }

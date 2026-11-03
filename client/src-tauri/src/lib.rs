@@ -14,6 +14,7 @@ pub mod native_auth;
 pub mod permissions;
 pub mod presentation;
 pub mod profiles;
+pub mod timing;
 pub mod vault;
 pub mod workspace;
 

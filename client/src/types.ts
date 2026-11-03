@@ -87,7 +87,7 @@ export interface TutorStatus {
 export interface Snapshot {
   agentStatus?: { phase: 'running' | 'stopped'; authentication: 'checking' | 'unknown' | 'none' | 'authenticated' | 'not_required'; targetId?: string; environment?: string; distribution?: string; wslUser?: string; lastFailure?: { source: 'adapter' | 'acp'; category: string; message: string } | null };
   agentConnection?: AgentConnection | null;
-  pendingMessage?: { text: string; conversationId?: string } | null;
+  pendingMessage?: { text: string; conversationId?: string; paused?: boolean } | null;
   profileEpoch?: number;
   profile?: { id: string; label: string; npub?: string };
   profiles?: { id: string; label: string; npub?: string }[];
@@ -127,6 +127,8 @@ export interface ToolActivity {
   id: string;
   title: string;
   status: string;
+  startedAt?: number;
+  completedAt?: number;
 }
 
 export interface PublicIdentity {

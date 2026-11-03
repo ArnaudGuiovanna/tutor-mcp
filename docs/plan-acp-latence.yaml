@@ -1,0 +1,113 @@
+version: 1
+title: Réduire la latence de Tutor-ACP avec Codex et Claude
+baseline: eaa9bd2822a01bd4e1adca5f5bf649679696c360
+status: en_cours
+client_version: 0.0.11
+scope:
+  - Réutilisation de session, préparation, annulation, contexte et mesures du client.
+  - Codex ACP 2.2.2 et Claude ACP 0.95.0, versions conservées pour la comparaison.
+  - Le harness conserve son authentification et la facturation du modèle.
+lots:
+  - id: LAT-01
+    description: Horloges monotoniques par opération et requête ACP, sans contenu privé.
+    status: implemente_et_verifie_localement
+  - id: LAT-02
+    description: Session vivante réutilisée, création ou restauration uniquement quand nécessaire.
+    status: implemente_et_verifie_localement
+  - id: LAT-03
+    description: Contexte protégé unique avant envoi ; catalogue hors chemin critique.
+    status: implemente_et_verifie_localement
+  - id: LAT-04
+    description: Annulation dès la préparation et pause durable du message avant envoi.
+    status: implemente_et_verifie_localement
+  - id: LAT-05
+    description: Historique reconstruit uniquement pour une nouvelle session de remplacement.
+    status: implemente_et_verifie_localement
+  - id: LAT-06
+    description: Compteurs du tour et des outils distincts ; étapes et attente humaine explicites.
+    status: implemente_et_verifie_localement
+  - id: LAT-07
+    description: Tests déterministes, mesures réelles, matrice Windows et publication vérifiée.
+    status: qualification_partielle
+acceptance:
+  - Un tour chaud ne provoque aucun session/new ni session/load.
+  - Une création n'est pas immédiatement suivie d'un chargement.
+  - Une rotation du jeton est appliquée une fois avant le prochain prompt.
+  - Le catalogue complet n'est pas chargé avant un message ordinaire.
+  - Stop pendant la préparation empêche le prompt et suspend la reprise automatique.
+  - Les outils conservent leurs propres débuts et fins ; le total est distinct.
+  - Aucun prompt, token, header MCP ou stderr brut dans les diagnostics.
+  - Aucun identifiant de trace variable ajouté aux paramètres statiques MCP.
+qualification:
+  deterministic:
+    fixture: client/tests/backend/fake-runtime.cjs
+    delays: fixture-delays.json
+    observations: fixture-rpc.jsonl
+    budget: P95 inférieur à 500 ms avant prompt sur banc à 100 ms par lecture MCP.
+    note: Un budget local ne garantit pas la latence du fournisseur ou du VPS.
+    continuous_check: scripts/verify-client.sh exécute le budget seul après les tests Rust.
+    observed:
+      samples: 50
+      preparation_p50_ms: 113.4
+      preparation_p95_ms: 136.6
+      preparation_max_ms: 144.3
+      session_new: 0
+      session_load: 0
+      catalog_reads: 0
+  live:
+    binary: tutor-client-latency
+    feature: qualification
+    consent_flag: --live-model
+    output: latency.json dans un dossier neuf
+    scenarios: [premier_tour, tours_chauds, outil_MCP_reel]
+    matrix: [codex_native_windows, claude_native_windows, codex_wsl2, claude_wsl2]
+    note: Les initialisations CI seules ne prouvent pas un échange modèle réel.
+    receipt:
+      - Succès uniquement si chaque tour finit avec end_turn et un outil MCP réel terminé.
+      - Un seul session/new au premier tour, aucun session/new ou session/load ensuite.
+      - Journal complet et borné, aucune opération inattendue terminée.
+      - Version du client et empreintes compilées des sources mesurées.
+      - Aucun contenu de modèle, identifiant fournisseur, credential ou chemin privé.
+    linux_codex_observed:
+      status: reussi
+      receipt: docs/qualification/acp-latency-codex-linux-0.0.11.json
+      adapter: 2.2.2
+      connect_ms: 2863
+      turns_ms: [13871, 9644, 8824]
+      context_read_ms: [70, 21, 9]
+      model_tool_observed_ms: [15, 9, 18]
+      stop_reason: [end_turn, end_turn, end_turn]
+      session_new: [1, 0, 0]
+      session_load: [0, 0, 0]
+      real_context_tool_completed: [true, true, true]
+      note: Trois échantillons, serveur Tutor local isolé ; aucune conclusion P95 fournisseur ou VPS.
+    pending:
+      - Trois appels Claude réels soumis à une demande d'autorisation spécifique.
+      - Quatre scénarios réels Windows natif et WSL ; aucun runner privé disponible dans ce dépôt.
+    windows_runner: client/tests/windows/qualify-latency.ps1
+    windows_usage:
+      prerequisites: Rust, adaptateur épinglé et harness déjà connecté dans l'environnement choisi.
+      native: >-
+        ./client/tests/windows/qualify-latency.ps1 -LiveModel -Environment native
+        -Adapter CHEMIN_ADAPTATEUR_WINDOWS -TutorBinary CHEMIN_TUTOR_EXE
+        -TestDirectory DOSSIER_WINDOWS_NEUF -Turns 3
+      wsl: >-
+        ./client/tests/windows/qualify-latency.ps1 -LiveModel -Environment wsl
+        -Distribution NOM_DISTRIBUTION -Adapter CHEMIN_ADAPTATEUR_LINUX
+        -TutorBinary CHEMIN_TUTOR_LINUX -AgentDirectory DOSSIER_LINUX_NEUF
+        -TestDirectory DOSSIER_WINDOWS_NEUF -Turns 3
+      note: Répéter pour Codex et Claude, avec un dossier neuf à chaque essai ; ne pas exporter les credentials.
+publication:
+  status: autorisee_avec_validation_github_ci
+  decision: Publication demandée par le mainteneur ; les essais modèle Windows/WSL restent complémentaires et non réalisés.
+  workflow: scripts/finish_task.py prepare puis publish
+  promotion: staging, contrôles CI sur SHA exact, main en avance rapide
+  release: Préversion Windows après succès des contrôles CI requis, avec les limites de qualification explicites.
+local_validation:
+  frontend_tests: 150
+  rust_tests: 190
+  notice_and_packaging_tests: 38
+  rust_default_ignored: 3
+  explicit_checks: [budget_50_tours, handshake_codex, handshake_claude]
+  other_checks: [typescript, frontend_build, rustfmt, clippy_all_targets, git_diff_check]
+  note: La qualification des agents empaquetés Windows et la CI distante restent à exécuter.

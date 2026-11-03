@@ -189,6 +189,29 @@ describe('Modalités visuelles et planning intégrés', () => {
     expect(fixture.getState().conversations.find(item => item.id === conversation.id)!.messages[0].text).toBe(activityText(quiz));
   });
 
+  it('interrompt la création sans identifiant après le refus de reprendre une autre institution', async () => {
+    const state = withActivity();
+    state.pendingMessage = {text:studyRequestText({version:1,format:'quiz',intent:'review',trainingId:'personal:go',domainId:'go'}),conversationId:conversation.id};
+    const fixture=client(state);let cancelCreation!:(reason:Error)=>void;
+    vi.mocked(fixture.api.startConversation).mockImplementation(async (_intentId,resumeId)=>{
+      if(resumeId)throw new Error('Cette séance appartient à une autre connexion Tutor. Rétablissez le compte et l’institution d’origine.');
+      return new Promise((_resolve,reject)=>{cancelCreation=reject;});
+    });
+    const cancel=fixture.api.cancelPrompt;
+    fixture.api.cancelPrompt=vi.fn(async id=>{
+      await cancel(id);
+      if(!id)cancelCreation(new Error('Préparation annulée.'));
+    });
+    render(<App api={fixture.api}/>);
+    await waitFor(()=>expect(fixture.api.startConversation).toHaveBeenCalledTimes(2));
+    await userEvent.click(screen.getByRole('button',{name:'Interrompre'}));
+    expect(fixture.api.cancelPrompt).toHaveBeenCalledWith('');
+    await screen.findByText('Envoi interrompu. Le message conservé attend votre décision.');
+    expect(fixture.api.sendPrompt).not.toHaveBeenCalled();
+    expect(fixture.getState().pendingMessage).toMatchObject({conversationId:conversation.id,paused:true});
+    expect(fixture.getState().conversations).toHaveLength(1);
+  });
+
   it('refuse visuellement une carte devenue ancienne après une révision du programme', async () => {
     const state = withActivity(); state.conversations[0].activeTraining = {...context,revision:'2'};
     const fixture = client(state); render(<App api={fixture.api}/>);
@@ -224,4 +247,19 @@ describe('Modalités visuelles et planning intégrés', () => {
     await screen.findByText('Votre planning se remplira avec vos apprentissages');
     expect(fixture.api.tutorOverview).toHaveBeenCalledTimes(2);
   });
+});
+
+it('annule une sélection de formation pendant la lecture du contexte sans exécuter la mutation suivante',async()=>{
+  const state=withActivity();
+  state.pendingMessage={text:studyRequestText({version:1,format:'quiz',intent:'review',trainingId:'personal:go',domainId:'go'}),conversationId:conversation.id};
+  const fixture=client(state);const original=fixture.api.trainingAction;
+  let release!:(value:ConversationContext)=>void;
+  fixture.api.trainingAction=vi.fn((action,input)=>action==='get_conversation_context'?new Promise(resolve=>{release=resolve;}):original(action,input));
+  render(<App api={fixture.api}/>);
+  await waitFor(()=>expect(fixture.api.trainingAction).toHaveBeenCalledWith('get_conversation_context',{conversation_id:conversation.id}));
+  await userEvent.click(screen.getByRole('button',{name:'Interrompre'}));
+  await act(async()=>release({...context,training_id:'personal:python',domain_id:'python'}));
+  await screen.findByText('Envoi interrompu. Le message conservé attend votre décision.');
+  expect(fixture.api.trainingAction).not.toHaveBeenCalledWith('select_conversation_training',expect.anything());
+  expect(fixture.api.sendPrompt).not.toHaveBeenCalled();expect(fixture.getState().pendingMessage?.paused).toBe(true);
 });

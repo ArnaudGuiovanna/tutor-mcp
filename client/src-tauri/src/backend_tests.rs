@@ -184,6 +184,449 @@ async fn intent(backend: &Backend, validated: bool) -> String {
     backend.store.lock().await.data.intents[0].id.clone()
 }
 
+fn latency_requests(directory: &Path) -> Vec<Value> {
+    std::fs::read_to_string(directory.join("fixture-rpc.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+async fn wait_for_latency_request(directory: &Path, method: &str) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !latency_requests(directory)
+            .iter()
+            .any(|row| row["method"] == method)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "Controlled 50-turn latency budget; run explicitly with --ignored --nocapture"]
+async fn warm_turn_preparation_stays_under_500ms_p95_with_100ms_tools() {
+    use std::time::{Duration, Instant};
+
+    let directory = tempfile::tempdir().unwrap();
+    let (backend, mut events) = connected(directory.path()).await;
+    let conversation = backend.start_conversation(None, None).await.unwrap();
+    backend
+        .send_prompt(conversation.id.clone(), "Warm the existing session".into())
+        .await
+        .unwrap();
+    std::fs::write(directory.path().join("fixture-rpc.jsonl"), "").unwrap();
+    std::fs::write(
+        directory.path().join("fixture-delays.json"),
+        json!({"toolMs":100}).to_string(),
+    )
+    .unwrap();
+    let mut preparation_times = Vec::new();
+    for turn in 0..50 {
+        while events.try_recv().is_ok() {}
+        let started = Instant::now();
+        let pending = backend.send_prompt(conversation.id.clone(), format!("Warm turn {turn}"));
+        tokio::pin!(pending);
+        let mut prompt_started = false;
+        let mut operation_id = None;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::select! {
+                    event = events.recv() => {
+                        let event = event.expect("backend events remain open");
+                        let value = &event["value"];
+                        if value["type"] == "turn_phase" && value["phase"] == "preparing"
+                            && value["state"] == "started"
+                        {
+                            operation_id = value["operationId"].as_str().map(str::to_owned);
+                        }
+                        if value["type"] == "rpc_timing" && value["method"] == "session/prompt"
+                            && value["state"] == "started"
+                        {
+                            assert!(!prompt_started, "only one prompt dispatch per turn");
+                            assert_eq!(value["operationId"].as_str(), operation_id.as_deref());
+                            preparation_times.push(started.elapsed().as_secs_f64() * 1000.0);
+                            prompt_started = true;
+                        }
+                    }
+                    result = &mut pending => {
+                        result.unwrap();
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(prompt_started, "missing prompt timing for turn {turn}");
+    }
+    let records = latency_requests(directory.path());
+    assert_eq!(
+        records
+            .iter()
+            .filter(|r| r["method"] == "session/prompt")
+            .count(),
+        50
+    );
+    assert!(!records
+        .iter()
+        .any(|r| r["method"] == "session/load" || r["method"] == "session/new"));
+    assert!(!records.iter().any(|r| [
+        "get_learner_context",
+        "get_my_formations",
+        "list_available_formations"
+    ]
+    .iter()
+    .any(|tool| r["tool"] == *tool)));
+    preparation_times.sort_by(f64::total_cmp);
+    let p95 = preparation_times[47];
+    println!(
+        "50 warm turns, tool delay 100ms: preparation P50={:.1}ms, P95={p95:.1}ms, max={:.1}ms; session/new=0, session/load=0",
+        preparation_times[24], preparation_times[49]
+    );
+    assert!(
+        p95 <= 500.0,
+        "warm preparation P95 {p95:.1}ms exceeds 500ms"
+    );
+    backend.shutdown().await;
+}
+
+#[tokio::test]
+async fn warm_turns_reuse_the_session_without_catalog_or_history_replay() {
+    for load_supported in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let (backend, _) = connected(directory.path()).await;
+        backend.agent.lock().await.as_mut().unwrap().capabilities["loadSession"] =
+            json!(load_supported);
+        let conversation = backend.start_conversation(None, None).await.unwrap();
+        backend
+            .send_prompt(conversation.id.clone(), "FIRST_UNIQUE_HISTORY".into())
+            .await
+            .unwrap();
+        std::fs::write(directory.path().join("fixture-rpc.jsonl"), "").unwrap();
+        // Explicit selection/resume is also idempotent for an already live session.
+        backend
+            .start_conversation(None, Some(conversation.id.clone()))
+            .await
+            .unwrap();
+        backend
+            .send_prompt(conversation.id.clone(), "SECOND_UNIQUE_CURRENT".into())
+            .await
+            .unwrap();
+        let records = latency_requests(directory.path());
+        assert_eq!(
+            records
+                .iter()
+                .filter(|r| r["method"] == "session/prompt")
+                .count(),
+            1
+        );
+        assert!(!records
+            .iter()
+            .any(|r| r["method"] == "session/load" || r["method"] == "session/new"));
+        assert!(!records.iter().any(|r| [
+            "get_learner_context",
+            "get_my_formations",
+            "list_available_formations"
+        ]
+        .iter()
+        .any(|tool| r["tool"] == *tool)));
+        let prompt_index = records
+            .iter()
+            .position(|r| r["method"] == "session/prompt")
+            .unwrap();
+        assert_eq!(
+            records[..prompt_index]
+                .iter()
+                .filter(|r| r["tool"] == "get_conversation_context")
+                .count(),
+            1
+        );
+        let sessions: Value = serde_json::from_slice(
+            &std::fs::read(directory.path().join("fixture-agent-sessions.json")).unwrap(),
+        )
+        .unwrap();
+        let prompt = sessions[conversation.agent_session_id.as_ref().unwrap()]["lastPrompt"]
+            .as_str()
+            .unwrap();
+        assert!(prompt.contains("SECOND_UNIQUE_CURRENT"));
+        assert!(!prompt.contains("FIRST_UNIQUE_HISTORY"));
+        backend.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn changed_transport_refreshes_once_and_keeps_claude_session_metadata_stable() {
+    let directory = tempfile::tempdir().unwrap();
+    let (backend, _) = connected(directory.path()).await;
+    let conversation = backend.start_conversation(None, None).await.unwrap();
+    let id = conversation.agent_session_id.as_ref().unwrap();
+    let before: Value = serde_json::from_slice(
+        &std::fs::read(directory.path().join("fixture-agent-sessions.json")).unwrap(),
+    )
+    .unwrap();
+    backend
+        .agent
+        .lock()
+        .await
+        .as_mut()
+        .unwrap()
+        .mcp_configurations
+        .insert(id.clone(), "expired-transport-fingerprint".into());
+    std::fs::write(directory.path().join("fixture-rpc.jsonl"), "").unwrap();
+    backend
+        .send_prompt(conversation.id.clone(), "Premier".into())
+        .await
+        .unwrap();
+    backend
+        .send_prompt(conversation.id.clone(), "Deuxième".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        latency_requests(directory.path())
+            .iter()
+            .filter(|r| r["method"] == "session/load")
+            .count(),
+        1
+    );
+    let after: Value = serde_json::from_slice(
+        &std::fs::read(directory.path().join("fixture-agent-sessions.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(before[id]["_meta"], after[id]["_meta"]);
+    assert_eq!(after[id]["_meta"]["disableBuiltInTools"], true);
+    backend.shutdown().await;
+}
+
+#[tokio::test]
+async fn restart_restores_once_without_reinjecting_the_restored_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let (backend, _) = connected(directory.path()).await;
+    let conversation = backend.start_conversation(None, None).await.unwrap();
+    backend
+        .send_prompt(conversation.id.clone(), "UNIQUE_OLD_TURN".into())
+        .await
+        .unwrap();
+    backend.stop_agent().await.unwrap();
+    backend
+        .connect_agent(
+            fixture_target(),
+            directory.path().to_string_lossy().into_owned(),
+        )
+        .await
+        .unwrap();
+    std::fs::write(directory.path().join("fixture-rpc.jsonl"), "").unwrap();
+    backend
+        .send_prompt(conversation.id.clone(), "UNIQUE_NEW_TURN".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        latency_requests(directory.path())
+            .iter()
+            .filter(|r| r["method"] == "session/load")
+            .count(),
+        1
+    );
+    let sessions: Value = serde_json::from_slice(
+        &std::fs::read(directory.path().join("fixture-agent-sessions.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !sessions[conversation.agent_session_id.unwrap()]["lastPrompt"]
+            .as_str()
+            .unwrap()
+            .contains("UNIQUE_OLD_TURN")
+    );
+    backend.shutdown().await;
+}
+
+#[tokio::test]
+async fn stop_during_context_or_load_keeps_a_paused_outbox_and_never_sends_prompt() {
+    for during_load in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let (backend, _) = connected(directory.path()).await;
+        let conversation = backend.start_conversation(None, None).await.unwrap();
+        if during_load {
+            backend
+                .agent
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .mcp_configurations
+                .clear();
+        }
+        backend
+            .queue_prompt(
+                Some("Message conservé".into()),
+                Some(conversation.id.clone()),
+            )
+            .await
+            .unwrap();
+        std::fs::write(directory.path().join("fixture-rpc.jsonl"), "").unwrap();
+        std::fs::write(
+            directory.path().join("fixture-delays.json"),
+            json!({"toolMs":if during_load {0}else{1500},"loadMs":1500}).to_string(),
+        )
+        .unwrap();
+        let worker = backend.clone();
+        let id = conversation.id.clone();
+        let running =
+            tokio::spawn(async move { worker.send_prompt(id, "Message conservé".into()).await });
+        wait_for_latency_request(
+            directory.path(),
+            if during_load {
+                "session/load"
+            } else {
+                "tools/call"
+            },
+        )
+        .await;
+        backend.cancel_prompt(conversation.id).await.unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(3), running)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(result["stopReason"], "cancelled");
+        assert!(!latency_requests(directory.path())
+            .iter()
+            .any(|r| r["method"] == "session/prompt"));
+        let stored = WorkspaceStore::load(directory.path()).unwrap();
+        let pending = stored.data.pending_message.unwrap();
+        assert!(pending.paused);
+        assert_eq!(pending.text, "Message conservé");
+        assert!(stored.data.conversations[0].messages.is_empty());
+        backend.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn stop_new_session_and_waiting_lock_are_cancellable_before_conversation_exists() {
+    for blocked_lock in [true, false] {
+        let directory = tempfile::tempdir().unwrap();
+        let (backend, _) = connected(directory.path()).await;
+        backend
+            .queue_prompt(Some("Nouvelle demande".into()), None)
+            .await
+            .unwrap();
+        std::fs::write(directory.path().join("fixture-rpc.jsonl"), "").unwrap();
+        std::fs::write(
+            directory.path().join("fixture-delays.json"),
+            r#"{"newMs":1500}"#,
+        )
+        .unwrap();
+        let held = if blocked_lock {
+            Some(backend.operation.lock().await)
+        } else {
+            None
+        };
+        let worker = backend.clone();
+        let running = tokio::spawn(async move { worker.start_conversation(None, None).await });
+        if blocked_lock {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while backend.preparing.lock().unwrap().is_none() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        } else {
+            wait_for_latency_request(directory.path(), "session/new").await;
+        }
+        backend.cancel_prompt(String::new()).await.unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(3), running)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.is_err());
+        assert!(
+            backend
+                .store
+                .lock()
+                .await
+                .data
+                .pending_message
+                .as_ref()
+                .unwrap()
+                .paused
+        );
+        assert!(!latency_requests(directory.path())
+            .iter()
+            .any(|r| r["method"] == "session/prompt"));
+        drop(held);
+        backend.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn stop_before_queued_outbox_gets_the_lock_stays_paused_after_reopening() {
+    for existing_conversation in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let (backend, _) = connected(directory.path()).await;
+        let conversation_id = if existing_conversation {
+            Some(backend.start_conversation(None, None).await.unwrap().id)
+        } else {
+            None
+        };
+        std::fs::write(directory.path().join("fixture-rpc.jsonl"), "").unwrap();
+        let held = backend.operation.lock().await;
+        let worker = backend.clone();
+        let id = conversation_id.clone();
+        let queued = tokio::spawn(async move {
+            worker
+                .queue_prompt(Some("Message encore en attente du verrou".into()), id)
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while backend.preparing.lock().unwrap().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        backend
+            .cancel_prompt(conversation_id.clone().unwrap_or_default())
+            .await
+            .unwrap();
+        assert!(backend.store.lock().await.data.pending_message.is_none());
+        drop(held);
+        let queued_state = queued.await.unwrap().unwrap();
+        assert_eq!(queued_state["pendingMessage"]["paused"], true);
+        assert!(backend.preparing.lock().unwrap().is_none());
+        backend.shutdown().await;
+        drop(backend);
+
+        // No second cancellation from the UI: disk state alone must prevent
+        // reconnect auto-resume after the window was closed.
+        let reopened = Backend::new(directory.path(), Arc::new(|_, _| {})).unwrap();
+        reopened
+            .connect_agent(
+                fixture_target(),
+                directory.path().to_string_lossy().into_owned(),
+            )
+            .await
+            .unwrap();
+        let state = reopened.snapshot().await;
+        assert_eq!(state["pendingMessage"]["paused"], true);
+        assert_eq!(
+            state["pendingMessage"]["text"],
+            "Message encore en attente du verrou"
+        );
+        assert!(!latency_requests(directory.path())
+            .iter()
+            .any(|row| row["method"] == "session/prompt"));
+        let explicit = reopened
+            .queue_prompt(Some("Nouvelle décision explicite".into()), conversation_id)
+            .await
+            .unwrap();
+        assert_eq!(explicit["pendingMessage"]["paused"], false);
+        reopened.shutdown().await;
+    }
+}
+
 #[tokio::test]
 async fn agent_options_and_language_survive_sessions_and_reject_unknown_choices() {
     let directory = tempfile::tempdir().unwrap();
@@ -1074,6 +1517,13 @@ impl Drop for ApiServer {
 }
 
 async fn api_server(handler: impl Fn(&str) -> Value + Send + Sync + 'static) -> ApiServer {
+    api_server_with_grant_gate(handler, None).await
+}
+
+async fn api_server_with_grant_gate(
+    handler: impl Fn(&str) -> Value + Send + Sync + 'static,
+    grant_gate: Option<Arc<tokio::sync::Notify>>,
+) -> ApiServer {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
@@ -1085,6 +1535,7 @@ async fn api_server(handler: impl Fn(&str) -> Value + Send + Sync + 'static) -> 
             let (mut stream, _) = listener.accept().await.unwrap();
             let captured = captured.clone();
             let handler = handler.clone();
+            let grant_gate = grant_gate.clone();
             tokio::spawn(async move {
                 let mut bytes = Vec::new();
                 let mut buffer = [0_u8; 1024];
@@ -1109,6 +1560,11 @@ async fn api_server(handler: impl Fn(&str) -> Value + Send + Sync + 'static) -> 
                     .unwrap();
                 captured.lock().unwrap().push(path.into());
                 let body = handler(path).to_string();
+                if path == "/api/client/v1/identity/session" {
+                    if let Some(gate) = grant_gate {
+                        gate.notified().await;
+                    }
+                }
                 let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
                 let _ = stream.write_all(response.as_bytes()).await;
             });
@@ -1610,94 +2066,174 @@ async fn mcp_permission_changes_reload_headers_and_never_replay_user_turns() {
 
 #[tokio::test]
 async fn expiring_native_session_signs_again_and_installs_new_mcp_headers_before_prompt() {
-    let directory = tempfile::tempdir().unwrap();
-    let (backend, _) = connected(directory.path()).await;
-    let pair = KeyPair::generate();
-    backend.identity.lock().await.install(&pair).unwrap();
-    let server_origin = Arc::new(std::sync::Mutex::new(String::new()));
-    let origin_copy = server_origin.clone();
-    let public = pair.primary.public_key().to_hex();
-    let recovery = pair.recovery.public_key().to_hex();
-    let server=api_server(move |path| {
-        let origin=origin_copy.lock().unwrap().clone();let mut session=api_credentials(&origin);session.identity.public_key=public.clone();session.identity.recovery_public_key=recovery.clone();
-        match path {
-            "/.well-known/tutor-institution"=>serde_json::to_value(session.institution).unwrap(),
-            "/api/client/v1/identity/challenge"=>{
-                let body=json!({"challenge":"B".repeat(43),"tenant_id":"tenant1","public_key":public,"action":"session","scope":"learner:read learner:write","key_version":1}).to_string();
-                json!({"challenge":"B".repeat(43),"expires_at":chrono::Utc::now().timestamp()+120,"key_version":1,"url":format!("{origin}/api/client/v1/identity/session"),"method":"POST","payload_hash":format!("{:x}",Sha256::digest(body.as_bytes())),"request_body":body,"tenant_id":"tenant1","public_key":public,"action":"session","scope":"learner:read learner:write"})
-            },
-            "/api/client/v1/identity/session"=>json!({"access_token":"new-native-session-token","token_type":"Bearer","expires_in":1800,"scope":session.scope,"session_id":session.session_id,"identity":session.identity,"principal":session.principal,"allowed_scopes":[]}),
-            _=>overview_page(),
-        }
-    }).await;
-    *server_origin.lock().unwrap() = server.origin.clone();
-    let mut settings = backend.store.lock().await.data.settings.clone();
-    settings.tutor.mode = "remote".into();
-    settings.tutor.url = server.origin.clone();
-    backend.save_settings(settings).await.unwrap();
-    backend
-        .connect_agent(
-            fixture_target(),
-            directory.path().to_string_lossy().into_owned(),
-        )
-        .await
-        .unwrap();
-    let mut session = api_credentials(&server.origin);
-    session.access_token = "initial-native-session-token".into();
-    session.identity.public_key = pair.primary.public_key().to_hex();
-    session.identity.recovery_public_key = pair.recovery.public_key().to_hex();
-    backend.tutor.lock().await.credentials = Some(session);
-    let conversation = backend.start_conversation(None, None).await.unwrap();
-    backend
-        .tutor
-        .lock()
-        .await
-        .credentials
-        .as_mut()
-        .unwrap()
-        .expires_at = 0;
-    backend
-        .send_prompt(conversation.id.clone(), "Continuer une seule fois".into())
-        .await
-        .unwrap();
-    let captured: Value = serde_json::from_slice(
-        &std::fs::read(directory.path().join("fixture-agent-sessions.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        captured[conversation.agent_session_id.unwrap()]["mcpServers"][0]["headers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|header| header["name"] == "Authorization")
-            .unwrap()["value"],
-        "Bearer new-native-session-token"
-    );
-    let state = backend.snapshot().await;
-    assert_eq!(
-        state["conversations"][0]["messages"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
-    assert!(!state.to_string().contains("native-session-token"));
-    assert_eq!(
-        server
-            .requests
+    for cancel_refresh in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let (backend, _) = connected(directory.path()).await;
+        let pair = KeyPair::generate();
+        backend.identity.lock().await.install(&pair).unwrap();
+        let server_origin = Arc::new(std::sync::Mutex::new(String::new()));
+        let origin_copy = server_origin.clone();
+        let public = pair.primary.public_key().to_hex();
+        let recovery = pair.recovery.public_key().to_hex();
+        let grant_gate = Arc::new(tokio::sync::Notify::new());
+        let server=api_server_with_grant_gate(move |path| {
+            let origin=origin_copy.lock().unwrap().clone();let mut session=api_credentials(&origin);session.identity.public_key=public.clone();session.identity.recovery_public_key=recovery.clone();
+            match path {
+                "/.well-known/tutor-institution"=>serde_json::to_value(session.institution).unwrap(),
+                "/api/client/v1/identity/challenge"=>{
+                    let body=json!({"challenge":"B".repeat(43),"tenant_id":"tenant1","public_key":public,"action":"session","scope":"learner:read learner:write","key_version":1}).to_string();
+                    json!({"challenge":"B".repeat(43),"expires_at":chrono::Utc::now().timestamp()+120,"key_version":1,"url":format!("{origin}/api/client/v1/identity/session"),"method":"POST","payload_hash":format!("{:x}",Sha256::digest(body.as_bytes())),"request_body":body,"tenant_id":"tenant1","public_key":public,"action":"session","scope":"learner:read learner:write"})
+                },
+                "/api/client/v1/identity/session"=>json!({"access_token":"new-native-session-token","token_type":"Bearer","expires_in":1800,"scope":session.scope,"session_id":session.session_id,"identity":session.identity,"principal":session.principal,"allowed_scopes":[]}),
+                _=>overview_page(),
+            }
+        }, cancel_refresh.then(|| grant_gate.clone())).await;
+        *server_origin.lock().unwrap() = server.origin.clone();
+        let mut settings = backend.store.lock().await.data.settings.clone();
+        settings.tutor.mode = "remote".into();
+        settings.tutor.url = server.origin.clone();
+        backend.save_settings(settings).await.unwrap();
+        backend
+            .connect_agent(
+                fixture_target(),
+                directory.path().to_string_lossy().into_owned(),
+            )
+            .await
+            .unwrap();
+        let mut session = api_credentials(&server.origin);
+        session.access_token = "initial-native-session-token".into();
+        session.identity.public_key = pair.primary.public_key().to_hex();
+        session.identity.recovery_public_key = pair.recovery.public_key().to_hex();
+        backend.tutor.lock().await.credentials = Some(session);
+        let conversation = backend.start_conversation(None, None).await.unwrap();
+        backend
+            .tutor
             .lock()
+            .await
+            .credentials
+            .as_mut()
             .unwrap()
-            .iter()
-            .filter(|path| *path == "/api/client/v1/identity/session")
-            .count(),
-        1
-    );
-    let credential: NativeCredential = crate::vault::load(directory.path(), "native-session.json")
-        .unwrap()
+            .expires_at = 0;
+        if cancel_refresh {
+            backend
+                .queue_prompt(
+                    Some("Continuer une seule fois".into()),
+                    Some(conversation.id.clone()),
+                )
+                .await
+                .unwrap();
+            std::fs::write(directory.path().join("fixture-rpc.jsonl"), "").unwrap();
+            let worker = backend.clone();
+            let id = conversation.id.clone();
+            let turn = tokio::spawn(async move {
+                worker
+                    .send_prompt(id, "Continuer une seule fois".into())
+                    .await
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !server
+                    .requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|path| path == "/api/client/v1/identity/session")
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                backend.cancel_prompt(conversation.id.clone()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_millis(500), turn)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap()["stopReason"],
+                "cancelled"
+            );
+            let snapshot =
+                tokio::time::timeout(std::time::Duration::from_millis(500), backend.snapshot())
+                    .await
+                    .unwrap();
+            assert_eq!(snapshot["pendingMessage"]["paused"], true);
+            assert!(!latency_requests(directory.path())
+                .iter()
+                .any(|row| row["method"] == "session/prompt"));
+            grant_gate.notify_one();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while backend
+                    .tutor
+                    .lock()
+                    .await
+                    .credentials
+                    .as_ref()
+                    .unwrap()
+                    .access_token
+                    != "new-native-session-token"
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let NativeCredential::NativeIdentity(saved) =
+                crate::vault::load(directory.path(), "native-session.json")
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(saved.access_token, "new-native-session-token");
+            // Only a later explicit send can use the renewed grant.
+        }
+        backend
+            .send_prompt(conversation.id.clone(), "Continuer une seule fois".into())
+            .await
+            .unwrap();
+        let captured: Value = serde_json::from_slice(
+            &std::fs::read(directory.path().join("fixture-agent-sessions.json")).unwrap(),
+        )
         .unwrap();
-    let NativeCredential::NativeIdentity(saved) = credential;
-    assert_eq!(saved.access_token, "new-native-session-token");
-    backend.shutdown().await;
+        assert_eq!(
+            captured[conversation.agent_session_id.unwrap()]["mcpServers"][0]["headers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|header| header["name"] == "Authorization")
+                .unwrap()["value"],
+            "Bearer new-native-session-token"
+        );
+        let state = backend.snapshot().await;
+        assert_eq!(
+            state["conversations"][0]["messages"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(!state.to_string().contains("native-session-token"));
+        assert_eq!(
+            server
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|path| *path == "/api/client/v1/identity/session")
+                .count(),
+            1
+        );
+        let credential: NativeCredential =
+            crate::vault::load(directory.path(), "native-session.json")
+                .unwrap()
+                .unwrap();
+        let NativeCredential::NativeIdentity(saved) = credential;
+        assert_eq!(saved.access_token, "new-native-session-token");
+        backend.shutdown().await;
+    }
 }
 
 #[tokio::test]

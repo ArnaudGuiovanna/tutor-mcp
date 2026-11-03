@@ -56,15 +56,18 @@ export function reviewScope(state: Pick<Snapshot, 'profile' | 'identity' | 'sett
 
 export function reviewPreferences(settings: Settings) { return settings.reviewPlans || {}; }
 
-export async function selectStudyTraining(api: ClientBridge, conversationId: string, request: StudyRequest): Promise<ConversationContext | undefined> {
+export async function selectStudyTraining(api: ClientBridge, conversationId: string, request: StudyRequest, checkActive: () => void = () => {}): Promise<ConversationContext | undefined> {
   if (!request.trainingId) return;
+  checkActive();
   const previous = await api.trainingAction('get_conversation_context', {conversation_id: conversationId}) as ConversationContext;
+  checkActive();
   if (!previous || !Number.isSafeInteger(previous.selection_version) || previous.selection_version < 0 || previous.conversation_id !== conversationId) {
     throw new Error('Impossible de confirmer la formation de cette conversation. Rechargez le planning.');
   }
   const selected = previous.training_id === request.trainingId ? previous : await api.trainingAction('select_conversation_training', {
     id: request.trainingId, conversation_id: conversationId, expected_selection: previous.selection_version, key: crypto.randomUUID(),
   }) as ConversationContext;
+  checkActive();
   if (selected?.conversation_id !== conversationId || selected?.training_id !== request.trainingId || !selected.domain_id ||
       (request.domainId && selected.domain_id !== request.domainId)) {
     throw new Error('La formation sélectionnée ne correspond pas à cette révision. Aucun exercice n’a été lancé.');
