@@ -70,8 +70,11 @@ function Save-WindowCapture([string]$Path) {
 function Exercise-WindowChrome {
     [void](Find-ReadyControl 'Réduire la fenêtre' $buttonType)
     $work = [System.Windows.Forms.Screen]::FromHandle([IntPtr]$NativeHandle).WorkingArea
-    if ($work.Width -lt 720 -or $work.Height -lt 560) { throw 'The Windows qualification desktop is smaller than the supported test viewport.' }
-    if (-not [TutorWindowNative]::SetWindowPos([IntPtr]$NativeHandle, [IntPtr]::Zero, ($work.Left+40), ($work.Top+40), [Math]::Min(1100,$work.Width-80), [Math]::Min(780,$work.Height-80), 4)) { throw 'Cannot position the isolated test window inside the working area.' }
+    $scale = [TutorWindowNative]::GetDpiForWindow([IntPtr]$NativeHandle) / 96.0
+    # Keep room above the 960 x 480 logical minimum for the native shrink test,
+    # and keep the right edge on screen after the 24-pixel title-bar drag.
+    if ($work.Width -lt (960 * $scale + 64) -or $work.Height -lt (480 * $scale + 120)) { throw 'The Windows qualification desktop cannot exercise resizing above the 960 x 480 minimum.' }
+    if (-not [TutorWindowNative]::SetWindowPos([IntPtr]$NativeHandle, [IntPtr]::Zero, ($work.Left+4), ($work.Top+40), [Math]::Min(1100 * $scale,$work.Width-32), [Math]::Min(780 * $scale,$work.Height-80), 4)) { throw 'Cannot position the isolated test window inside the working area.' }
     Start-Sleep -Milliseconds 300
     $minimize = Find-ReadyControl 'Réduire la fenêtre' $buttonType
     [void](Find-ReadyControl 'Agrandir la fenêtre' $buttonType)
@@ -79,7 +82,6 @@ function Exercise-WindowChrome {
     $before = Read-WindowRect
     $clientOrigin = New-Object TutorWindowNative+POINT
     if (-not [TutorWindowNative]::ClientToScreen([IntPtr]$NativeHandle, [ref]$clientOrigin)) { throw 'Cannot observe the native client origin.' }
-    $scale = [TutorWindowNative]::GetDpiForWindow([IntPtr]$NativeHandle) / 96.0
     $captionInset = $clientOrigin.Y - $before.Top
     # Tao retains some Win32 caption flags for resizing. Its real non-client
     # geometry is the evidence: only the shadow/border may precede the WebView.

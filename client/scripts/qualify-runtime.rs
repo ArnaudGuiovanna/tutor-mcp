@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tutor_client::acp::AcpClient;
-use tutor_client::discovery::{agent_cwd, discover_agents, launch_spec};
+use tutor_client::discovery::{agent_cwd, discover_agents, launch_spec, AgentTarget};
 use tutor_client::launch::LaunchSpec;
 
 #[derive(Debug, Default, PartialEq)]
@@ -117,12 +117,24 @@ async fn main() {
     }
 }
 
+fn select_codex_target(
+    targets: Vec<AgentTarget>,
+    options: &Options,
+) -> Result<AgentTarget, String> {
+    // Discovery also returns Claude (sorted before Codex in WSL) and bundled
+    // agents. This probe qualifies the external Codex installation explicitly.
+    let id = match options.distribution.as_deref() {
+        Some(distribution) => format!("wsl:{distribution}"),
+        None => "native".into(),
+    };
+    targets.into_iter().find(|target| {
+        target.id == id && target.environment == options.environment &&
+            target.distribution == options.distribution
+    }).ok_or("Aucune installation Codex ne correspond à cet environnement. Vérifiez la distribution et relancez la détection.".into())
+}
+
 async fn qualify(options: &Options) -> Result<Value, String> {
-    let targets = discover_agents().await;
-    let mut target = targets.into_iter().find(|target| {
-        target.environment == options.environment &&
-            options.distribution.as_ref().is_none_or(|name| target.distribution.as_ref() == Some(name))
-    }).ok_or("Aucune installation ne correspond à cet environnement. Vérifiez la distribution et relancez la détection.")?;
+    let mut target = select_codex_target(discover_agents().await, options)?;
     if let Some(adapter) = &options.adapter {
         target.adapter_path = Some(adapter.clone());
         target.available = true;
@@ -326,6 +338,58 @@ async fn qualify_tutor(binary: &Path, temporary: &Path) -> Result<Value, String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn target(id: &str, environment: &str, distribution: Option<&str>) -> AgentTarget {
+        serde_json::from_value(json!({
+            "id":id,"label":id,"environment":environment,"distribution":distribution,
+            "adapterPath":null,"codexPath":null,"adapterVersion":null,"codexVersion":null,
+            "available":false,"detail":"fixture"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn qualification_selects_codex_in_the_requested_distribution_regardless_of_sort_order() {
+        let options = Options::parse(
+            ["--environment", "wsl", "--distribution", "Ubuntu Dev"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .unwrap();
+        let targets = vec![
+            target("wsl:claude:Ubuntu Dev", "wsl", Some("Ubuntu Dev")),
+            target("wsl:Other", "wsl", Some("Other")),
+            target("wsl:Ubuntu Dev", "wsl", Some("Ubuntu Dev")),
+        ];
+        assert_eq!(
+            select_codex_target(targets, &options).unwrap().id,
+            "wsl:Ubuntu Dev"
+        );
+        assert!(select_codex_target(
+            vec![target("wsl:claude:Ubuntu Dev", "wsl", Some("Ubuntu Dev"))],
+            &options
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn native_qualification_uses_the_external_codex_target_even_with_a_manual_adapter() {
+        let options = Options::parse(
+            ["--adapter", "/fixture/codex-acp"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .unwrap();
+        let targets = vec![
+            target("bundled:codex", "native", None),
+            target("native:claude", "native", None),
+            target("native", "native", None),
+        ];
+        // The explicit adapter may fill an unavailable discovery target later.
+        let selected = select_codex_target(targets, &options).unwrap();
+        assert_eq!(selected.id, "native");
+        assert!(!selected.available);
+    }
 
     #[cfg(unix)]
     #[test]
