@@ -30,6 +30,14 @@ opts into cached-response retention, an expired response produces an explicit
 already-completed error; the durable key and request hash remain, so the tool
 handler is never executed again for that key.
 
+Decision-bound assessment rubric criterion IDs are opaque and case-sensitive.
+Copy a curriculum criterion ID exactly, including its upper-case letters,
+underscores and hyphens; do not convert it to a slug. The frozen rubric and
+each later score use the same exact ID. IDs contain letters, digits, underscores
+or hyphens, with at least one letter or digit. Duplicate IDs, unknown scoring
+criteria and scores contradicting the frozen rubric remain errors. The legacy
+normalizer for unbound assessments retains its historical behavior.
+
 ## Core learning loop (12)
 
 | Tool | Purpose |

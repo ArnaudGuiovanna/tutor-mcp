@@ -119,20 +119,20 @@ func rubricFinite(value float64) bool {
 	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
-func normalizeRubricID(raw string) (string, bool) {
-	var normalized strings.Builder
-	separator := false
-	for _, r := range strings.TrimSpace(raw) {
+func validCriterionID(id string) bool {
+	// Curriculum criteria use opaque base64url IDs. Lowercasing or replacing
+	// hyphens would both reject server-issued IDs and merge distinct identities.
+	// Keep legacy letter/digit/underscore IDs, and preserve exact case/hyphens.
+	// The enclosing rubric/score document provides the byte limit.
+	hasAlphanumeric := false
+	for _, r := range id {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			normalized.WriteRune(unicode.ToLower(r))
-			separator = false
-		} else if normalized.Len() > 0 && !separator {
-			normalized.WriteByte('_')
-			separator = true
+			hasAlphanumeric = true
+		} else if r != '_' && r != '-' {
+			return false
 		}
 	}
-	id := strings.Trim(normalized.String(), "_")
-	return id, id != ""
+	return hasAlphanumeric && utf8.ValidString(id)
 }
 
 func sortedRubricKeys(object map[string]any) []string {

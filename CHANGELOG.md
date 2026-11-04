@@ -173,6 +173,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Fixed
 
+- Decision-bound assessments now preserve the opaque criterion identifiers
+  issued by the curriculum, including case and hyphens. Valid criteria no
+  longer trigger repeated preparation failures; exact score matching,
+  idempotent preparation and host-evaluation trust boundaries are retained.
+
 - Tenant learner erasure revokes the affected membership before deleting data,
   preserves the shared account and its other institutions, and releases cohort
   seats transactionally. An additive migration repairs old reservation counters.

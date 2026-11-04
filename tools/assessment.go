@@ -60,7 +60,7 @@ func prepareAssessmentInputSchema() *jsonschema.Schema {
 			"criteria": {Type: "array", MinItems: &one, Items: &jsonschema.Schema{
 				Type: "object", Required: []string{"id", "description", "max_score"}, AdditionalProperties: &jsonschema.Schema{Not: &jsonschema.Schema{}},
 				Properties: map[string]*jsonschema.Schema{
-					"id": text(), "description": text(), "max_score": {Type: "number", ExclusiveMinimum: &positive},
+					"id": {Type: "string", MinLength: &one, Description: "Unique, case-sensitive criterion identity containing letters, digits, underscores or hyphens (at least one letter or digit). Preserve curriculum criterion IDs exactly; never lowercase or replace their hyphens."}, "description": text(), "max_score": {Type: "number", ExclusiveMinimum: &positive},
 					"anchors": {Type: "array", Items: &jsonschema.Schema{
 						Type: "object", Required: []string{"score", "description"}, AdditionalProperties: &jsonschema.Schema{Not: &jsonschema.Schema{}},
 						Properties: map[string]*jsonschema.Schema{"score": {Type: "number", Minimum: &zero}, "description": text()},

@@ -136,10 +136,10 @@ func ValidateRubric(rubric models.AssessmentRubric) error {
 	maxByID := make(map[string]float64, len(rubric.Criteria))
 	maxTotal := new(big.Rat)
 	for i, criterion := range rubric.Criteria {
-		id, ok := normalizeRubricID(criterion.ID)
+		id := criterion.ID
 		_, duplicate := maxByID[id]
-		if !ok || id != criterion.ID || duplicate {
-			return fmt.Errorf("rubric_json.criteria[%d].id must be a unique canonical criterion ID", i)
+		if !validCriterionID(id) || duplicate {
+			return fmt.Errorf("rubric_json.criteria[%d].id must be unique and contain only letters, digits, underscores or hyphens (at least one letter or digit); preserve the exact case of curriculum criterion IDs", i)
 		}
 		if strings.TrimSpace(criterion.Description) == "" {
 			return fmt.Errorf("rubric_json.criteria[%d].description must define the observable performance being scored", i)
