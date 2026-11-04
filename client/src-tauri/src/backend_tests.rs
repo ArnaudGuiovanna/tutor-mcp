@@ -2464,6 +2464,90 @@ async fn native_pedagogical_turn_keeps_generation_private_until_server_commit() 
 }
 
 #[tokio::test]
+async fn late_stop_keeps_a_durably_finalized_pedagogical_response_complete() {
+    let directory = tempfile::tempdir().unwrap();
+    let (backend, _) = connected(directory.path()).await;
+    let conversation = backend.start_conversation(None, None).await.unwrap();
+    let preparation = backend
+        .begin_preparation(Some(conversation.id.clone()))
+        .unwrap();
+    preparation.operation.sent.store(true, Ordering::Release);
+    let binding = backend.tutor.lock().await.binding.clone();
+    let prompt = Prompt {
+        conversation_id: conversation.id.clone(),
+        session_id: conversation.agent_session_id.clone().unwrap(),
+        assistant_message_id: "native-finalized".into(),
+        generation: backend
+            .agent
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .generation
+            .clone(),
+        cancelled: false,
+        failure: None,
+        provider_failure: false,
+        truncated: false,
+        context_changed: false,
+        catalog_changed: false,
+        private_output: true,
+    };
+    backend
+        .store
+        .lock()
+        .await
+        .transaction(|data| {
+            data.conversations[0].messages.push(Message {
+                pending_learning_commit: None,
+                learning_delivery: None,
+                private_output: true,
+                training_context: None,
+                id: prompt.assistant_message_id.clone(),
+                role: "assistant".into(),
+                text: "Contenu confirmé".into(),
+                created_at: now(),
+                status: "streaming".into(),
+            });
+            Ok(())
+        })
+        .unwrap();
+    *backend.prompt.lock().await = Some(prompt.clone());
+    let turn = crate::learning_ui::PreparedTurn::new(
+        &conversation,
+        "Explique",
+        json!({
+            "schema_version":"pedagogical-turn/v1", "mode":"context",
+            "permissions":{"read":true}, "conversation":{"conversation_id":conversation.id}
+        }),
+    )
+    .unwrap();
+    backend
+        .finalize_prepared(&turn, &prompt, &binding, &preparation.operation)
+        .await
+        .unwrap();
+    assert_eq!(
+        backend.snapshot().await["conversations"][0]["messages"][0]["status"],
+        "complete"
+    );
+    backend
+        .cancel_prompt(conversation.id.clone())
+        .await
+        .unwrap();
+    backend.finish_prompt("interrupted").await.unwrap();
+    let message = &backend.snapshot().await["conversations"][0]["messages"][0];
+    assert_eq!(message["status"], "complete");
+    assert_eq!(message["text"], "Contenu confirmé");
+    drop(preparation);
+    backend.shutdown().await;
+    let restored = WorkspaceStore::load(directory.path()).unwrap();
+    assert_eq!(
+        restored.data.conversations[0].messages[0].status,
+        "complete"
+    );
+}
+
+#[tokio::test]
 async fn background_memory_requires_consent_and_yields_to_a_foreground_turn() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("fixture-pedagogy.json"),json!({"packet":{"conversation":{}},"batch":{"status":"claimed","claim_token":"synthetic-maintenance-token","snapshots":[],"sessions":[]},"output":"PRIVATE_MAINTENANCE_SECRET"}).to_string()).unwrap();

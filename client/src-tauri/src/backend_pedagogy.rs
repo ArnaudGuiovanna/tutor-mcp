@@ -365,6 +365,9 @@ impl Backend {
             message.learning_delivery = output.delivery;
             message.private_output = false;
             message.pending_learning_commit = None;
+            // Publish the durable completion in the same local transaction as
+            // the confirmed content. A late Stop cannot undo the server commit.
+            message.status = "complete".into();
             Ok(())
         })?;
         if turn.private_output() {

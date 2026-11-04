@@ -3324,7 +3324,11 @@ impl Backend {
                     .iter_mut()
                     .find(|m| m.id == prompt.assistant_message_id)
                     .ok_or("Réponse introuvable.")?;
-                message.status = if prompt.truncated {
+                message.status = if message.status == "complete" && !message.private_output {
+                    // Native pedagogical finalization may already have
+                    // committed this entire response before a late cancellation.
+                    "complete"
+                } else if prompt.truncated {
                     "interrupted"
                 } else if prompt.failure.is_some() {
                     "error"
@@ -3367,6 +3371,7 @@ impl Backend {
                             .iter_mut()
                             .find(|message| message.id == prompt.assistant_message_id)
                     })
+                    .filter(|message| message.status != "complete")
                 {
                     message.status = "error".into();
                 }
