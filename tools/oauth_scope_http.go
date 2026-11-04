@@ -90,8 +90,9 @@ type oauthScopeHTTPCall struct {
 	ID      json.RawMessage `json:"id"`
 	Method  string          `json:"method"`
 	Params  struct {
-		Meta map[string]any `json:"_meta,omitempty"`
-		Name string         `json:"name"`
+		Meta      map[string]any  `json:"_meta,omitempty"`
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments,omitempty"`
 	} `json:"params"`
 }
 
@@ -157,8 +158,8 @@ func OAuthScopeHTTPMiddleware(baseURL string, maxBodyBytes int64, granular bool,
 			return
 		}
 
-		required, known := requiredOAuthScopesForTool(call.Params.Name)
-		if !known || !oauthToolAvailable(call.Params.Name) {
+		required, known, scopeErr := requiredOAuthScopesForCall(&mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: call.Params.Name, Arguments: call.Params.Arguments}})
+		if scopeErr != nil || !known || !oauthToolAvailable(call.Params.Name) {
 			next.ServeHTTP(w, r)
 			return
 		}

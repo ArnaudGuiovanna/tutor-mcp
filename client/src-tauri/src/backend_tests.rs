@@ -628,6 +628,81 @@ async fn stop_before_queued_outbox_gets_the_lock_stays_paused_after_reopening() 
 }
 
 #[tokio::test]
+async fn durable_completion_is_published_before_optional_context_refresh_finishes() {
+    let directory = tempfile::tempdir().unwrap();
+    let (backend, mut events) = connected(directory.path()).await;
+    let conversation = backend.start_conversation(None, None).await.unwrap();
+    while events.try_recv().is_ok() {}
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        backend.send_prompt(conversation.id.clone(), "CONTEXT_REFRESH".into()),
+    )
+    .await;
+    let held = directory.path().join("fixture-hold-context-refresh");
+    assert!(held.is_file());
+    std::fs::remove_file(held).unwrap();
+    assert_eq!(
+        result
+            .expect("completion must not await the context refresh")
+            .unwrap()["stopReason"],
+        "end_turn"
+    );
+    let mut completed = false;
+    let mut invalidated = false;
+    while let Ok(event) = events.try_recv() {
+        completed |= event["name"] == "client:state"
+            && event["value"]["conversations"][0]["messages"][1]["status"] == "complete";
+        invalidated |= event["value"]["type"] == "workspace_invalidated";
+    }
+    assert!(completed && invalidated);
+    backend.shutdown().await;
+}
+
+#[tokio::test]
+async fn changed_agent_preferences_apply_to_every_reused_session_without_reload() {
+    let directory = tempfile::tempdir().unwrap();
+    let (backend, _) = connected(directory.path()).await;
+    let first = backend.start_conversation(None, None).await.unwrap();
+    let second = backend.start_conversation(None, None).await.unwrap();
+    let wanted = crate::workspace::AgentSettings {
+        model: "fixture-fast".into(),
+        reasoning_effort: "high".into(),
+        speed: "balanced".into(),
+    };
+    backend
+        .set_agent_configuration(wanted.clone())
+        .await
+        .unwrap();
+    std::fs::write(directory.path().join("fixture-rpc.jsonl"), "").unwrap();
+    backend
+        .select_conversation(Some(first.id.clone()))
+        .await
+        .unwrap();
+    backend
+        .send_prompt(first.id.clone(), "Continue".into())
+        .await
+        .unwrap();
+    let records = latency_requests(directory.path());
+    assert!(!records.iter().any(|record| matches!(
+        record["method"].as_str(),
+        Some("session/new" | "session/load")
+    )));
+    let sessions: Value = serde_json::from_slice(
+        &std::fs::read(directory.path().join("fixture-agent-sessions.json")).unwrap(),
+    )
+    .unwrap();
+    for conversation in [first, second] {
+        let configuration =
+            &sessions[conversation.agent_session_id.as_deref().unwrap()]["fixtureConfig"];
+        assert_eq!(configuration[0]["currentValue"], "fixture-fast");
+        assert_eq!(configuration[1]["currentValue"], "high");
+        assert_eq!(configuration[2]["currentValue"], "off");
+    }
+    assert_eq!(backend.settings().await.agent.reasoning_effort, "high");
+    backend.shutdown().await;
+}
+
+#[tokio::test]
 async fn agent_options_and_language_survive_sessions_and_reject_unknown_choices() {
     let directory = tempfile::tempdir().unwrap();
     let (backend, _) = connected(directory.path()).await;
@@ -2085,6 +2160,7 @@ async fn expiring_native_session_signs_again_and_installs_new_mcp_headers_before
                     json!({"challenge":"B".repeat(43),"expires_at":chrono::Utc::now().timestamp()+120,"key_version":1,"url":format!("{origin}/api/client/v1/identity/session"),"method":"POST","payload_hash":format!("{:x}",Sha256::digest(body.as_bytes())),"request_body":body,"tenant_id":"tenant1","public_key":public,"action":"session","scope":"learner:read learner:write"})
                 },
                 "/api/client/v1/identity/session"=>json!({"access_token":"new-native-session-token","token_type":"Bearer","expires_in":1800,"scope":session.scope,"session_id":session.session_id,"identity":session.identity,"principal":session.principal,"allowed_scopes":[]}),
+                "/mcp"=>json!({"jsonrpc":"2.0","id":"tutor-tool-catalog-0","result":{"tools":[]}}),
                 _=>overview_page(),
             }
         }, cancel_refresh.then(|| grant_gate.clone())).await;
@@ -2234,6 +2310,232 @@ async fn expiring_native_session_signs_again_and_installs_new_mcp_headers_before
         assert_eq!(saved.access_token, "new-native-session-token");
         backend.shutdown().await;
     }
+}
+
+#[tokio::test]
+async fn native_pedagogical_turn_keeps_generation_private_until_server_commit() {
+    let directory = tempfile::tempdir().unwrap();
+    let rubric = json!({"criteria":[{"id":"correct","description":"The value is correct","max_score":1}],"passing_score":1,"answer_key":"5"});
+    let card = json!({"version":1,"id":"generated","kind":"quiz","trainingId":"personal:go","domainId":"go","concept":"variables","question":"What is 3 + 2?","sessionId":"session-go","decisionId":"decision-1","activityType":"RECALL_EXERCISE","rubricJson":rubric.to_string(),"options":[{"id":"a","text":"3"},{"id":"b","text":"5"}],"correctOptionId":"b","explanation":"PRIVATE_ANSWER"});
+    let packet = json!({"schema_version":"pedagogical-turn/v1","mode":"activity","permissions":{"read":true,"prepare_activity":true},"conversation":{"conversation_id":"unused","training_id":"personal:go","domain_id":"go","revision":"1","selection_version":1},"activity":{"activity":{"type":"RECALL_EXERCISE","concept":"variables"},"session_id":"session-go","decision_id":"decision-1","pedagogical_contract":{"competency":{"outcomes":[]}}},"attempt":{"id":"attempt-1","domain_id":"go","concept":"variables","status":"prepared","rubric":rubric}});
+    let fixture = directory.path().join("fixture-pedagogy.json");
+    std::fs::write(
+        &fixture,
+        json!({"packet":packet,"output":format!("```tutor-activity\n{card}\n```")}).to_string(),
+    )
+    .unwrap();
+    let (backend, mut events) = connected(directory.path()).await;
+    let conversation = backend.start_conversation(None, None).await.unwrap();
+    std::fs::write(directory.path().join("fixture-hold-generation"), b"hold").unwrap();
+    let sender = backend.clone();
+    let id = conversation.id.clone();
+    let send = tokio::spawn(async move {
+        sender.send_prompt(id,"```tutor-study-request\n{\"version\":1,\"format\":\"quiz\",\"intent\":\"review\",\"trainingId\":\"personal:go\",\"domainId\":\"go\"}\n```".into()).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5),async {
+        loop {
+            tokio::select! {
+                event=events.recv()=>{let event=event.unwrap();assert!(!event.to_string().contains("PRIVATE_ANSWER"));if event["value"]["type"]=="native_permission" {backend.answer_permission(event["value"]["id"].clone(),Some("allow_once".into())).await.unwrap();}}
+                _=tokio::time::sleep(std::time::Duration::from_millis(5))=>{
+                    let generated=backend.store.lock().await.data.conversations[0].messages.last().is_some_and(|m|m.text.contains("PRIVATE_ANSWER"));
+                    if generated {break;}
+                }
+            }
+        }
+    }).await.unwrap();
+    assert!(!backend
+        .snapshot()
+        .await
+        .to_string()
+        .contains("PRIVATE_ANSWER"));
+    assert!(!directory
+        .path()
+        .join("fixture-prepared-attempt.json")
+        .exists());
+    std::fs::remove_file(directory.path().join("fixture-hold-generation")).unwrap();
+    assert_eq!(send.await.unwrap().unwrap()["stopReason"], "end_turn");
+    let state = backend.snapshot().await;
+    let published = &state["conversations"][0]["messages"][1];
+    let activity: Value =
+        crate::learning_ui::payload(published["text"].as_str().unwrap(), "tutor-activity")
+            .unwrap()
+            .unwrap();
+    assert_eq!(activity["attemptId"], "attempt-1");
+    assert_eq!(published["status"], "complete");
+    assert!(directory
+        .path()
+        .join("fixture-prepared-attempt.json")
+        .exists());
+    let sessions: Value = serde_json::from_slice(
+        &std::fs::read(directory.path().join("fixture-agent-sessions.json")).unwrap(),
+    )
+    .unwrap();
+    let session = state["conversations"][0]["agentSessionId"]
+        .as_str()
+        .unwrap();
+    assert_eq!(sessions[session]["mcpServers"], json!([]));
+    let response = json!({"version":1,"activityId":activity["id"],"kind":"quiz","trainingId":"personal:go","domainId":"go","concept":"variables","attemptId":"attempt-1","selectedOptionId":"b","responseTimeSeconds":2});
+    let evaluation = json!({"version":1,"attempt_id":"attempt-1","rubric_score_json":json!({"criteria_scores":[{"id":"correct","score":1,"max_score":1,"evidence":"Selected 5"}],"total":1,"max_total":1,"confidence":0.9}).to_string(),"feedback":"SERVER_CONFIRMED_FEEDBACK"});
+    std::fs::write(directory.path().join("fixture-fail-commit"), b"fail").unwrap();
+    std::fs::write(
+        &fixture,
+        json!({"packet":packet,"output":format!("```tutor-evaluation\n{evaluation}\n```")})
+            .to_string(),
+    )
+    .unwrap();
+    let worker = backend.clone();
+    let id = conversation.id.clone();
+    let response_text = format!("```tutor-response\n{response}\n```");
+    let retry_text = response_text.clone();
+    let mut send = tokio::spawn(async move { worker.send_prompt(id, response_text).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5),async{
+        loop {tokio::select!{
+            result=&mut send=>{assert!(result.unwrap().is_err());break;}
+            event=events.recv()=>{let event=event.unwrap();if event["value"]["type"]=="native_permission"{backend.answer_permission(event["value"]["id"].clone(),Some("allow_once".into())).await.unwrap();}}
+        }}
+    }).await.unwrap();
+    let interrupted = backend.snapshot().await;
+    assert_eq!(
+        interrupted["conversations"][0]["messages"][3]["canRetryCommit"],
+        true
+    );
+    assert!(!interrupted
+        .to_string()
+        .contains("SERVER_CONFIRMED_FEEDBACK"));
+    let before = latency_requests(directory.path())
+        .iter()
+        .filter(|r| r["method"] == "session/prompt")
+        .count();
+    std::fs::remove_file(directory.path().join("fixture-fail-commit")).unwrap();
+    let worker = backend.clone();
+    let id = conversation.id.clone();
+    let mut retry = tokio::spawn(async move { worker.send_prompt(id, retry_text).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5),async{loop{tokio::select!{
+        result=&mut retry=>{assert_eq!(result.unwrap().unwrap()["recoveredCommit"],true);break;}
+        event=events.recv()=>{let event=event.unwrap();if event["value"]["type"]=="native_permission"{backend.answer_permission(event["value"]["id"].clone(),Some("allow_once".into())).await.unwrap();}}
+    }}}).await.unwrap();
+    assert_eq!(
+        latency_requests(directory.path())
+            .iter()
+            .filter(|r| r["method"] == "session/prompt")
+            .count(),
+        before
+    );
+    let state = backend.snapshot().await;
+    let feedback = &state["conversations"][0]["messages"][3];
+    assert_eq!(feedback["text"], "SERVER_CONFIRMED_FEEDBACK");
+    assert_eq!(feedback["learningDelivery"]["recorded"], false);
+    let calls: Vec<Value> =
+        std::fs::read_to_string(directory.path().join("fixture-pedagogy-log.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+    assert_eq!(
+        calls
+            .iter()
+            .map(|v| v["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            "prepare_pedagogical_turn",
+            "prepare_assessment_attempt",
+            "prepare_pedagogical_turn",
+            "submit_assessment_attempt",
+            "record_interaction",
+            "record_interaction"
+        ]
+    );
+    assert_eq!(calls[4]["arguments"], calls[5]["arguments"]);
+    backend
+        .acknowledge_learning_delivery(
+            conversation.id.clone(),
+            feedback["id"].as_str().unwrap().into(),
+        )
+        .await
+        .unwrap();
+    backend
+        .acknowledge_learning_delivery(conversation.id, feedback["id"].as_str().unwrap().into())
+        .await
+        .unwrap();
+    let calls =
+        std::fs::read_to_string(directory.path().join("fixture-pedagogy-log.jsonl")).unwrap();
+    assert_eq!(calls.matches("\"record_learning_event\"").count(), 1);
+    backend.shutdown().await;
+}
+
+#[tokio::test]
+async fn background_memory_requires_consent_and_yields_to_a_foreground_turn() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("fixture-pedagogy.json"),json!({"packet":{"conversation":{}},"batch":{"status":"claimed","claim_token":"synthetic-maintenance-token","snapshots":[],"sessions":[]},"output":"PRIVATE_MAINTENANCE_SECRET"}).to_string()).unwrap();
+    let (backend, mut events) = connected(directory.path()).await;
+    backend.start_conversation(None, None).await.unwrap();
+    backend.list_mcp_tools().await.unwrap();
+    assert!(
+        !backend.memory_maintenance_batch().await.unwrap(),
+        "ask must not start provider work"
+    );
+    let (origin, institution_id, agent_id) = backend.native_policy_binding().await.unwrap();
+    backend
+        .store
+        .lock()
+        .await
+        .transaction(|data| {
+            data.settings.permission_policy = Some(crate::permissions::PermissionPolicy {
+                origin,
+                institution_id,
+                agent_id,
+                default_decision: crate::permissions::PermissionDecision::Ask,
+                tools: [
+                    (
+                        "claim_memory_maintenance".into(),
+                        crate::permissions::PermissionDecision::Allow,
+                    ),
+                    (
+                        "commit_memory_maintenance".into(),
+                        crate::permissions::PermissionDecision::Allow,
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            });
+            Ok(())
+        })
+        .unwrap();
+    std::fs::write(directory.path().join("fixture-hold-generation"), b"hold").unwrap();
+    let worker = backend.clone();
+    let work = tokio::spawn(async move { worker.memory_maintenance_batch().await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if latency_requests(directory.path())
+                .iter()
+                .any(|r| r["method"] == "session/prompt")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let foreground = backend.begin_preparation(None).unwrap();
+    assert!(
+        !tokio::time::timeout(std::time::Duration::from_secs(1), work)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+    );
+    assert!(!directory
+        .path()
+        .join("fixture-maintenance-committed")
+        .exists());
+    std::fs::remove_file(directory.path().join("fixture-hold-generation")).unwrap();
+    backend.drain_agent_events(false).await.unwrap();
+    while let Ok(event) = events.try_recv() {
+        assert!(!event.to_string().contains("PRIVATE_MAINTENANCE_SECRET"));
+    }
+    drop(foreground);
+    backend.shutdown().await;
 }
 
 #[tokio::test]

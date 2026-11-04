@@ -60,7 +60,7 @@ func (s *Store) TrainingAction(ctx context.Context, p models.Principal, action s
 	// Reading a legacy personal document may establish its immutable baseline.
 	// Use a normal tenant transaction for this bounded compatibility operation.
 	transaction := s.WithTenantTx
-	if action == "get_training_groups" {
+	if action == "get_training_groups" || action == "get_conversation_context" {
 		transaction = s.WithTenantReadTx
 	}
 	err := transaction(ctx, p.TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {
@@ -243,6 +243,12 @@ func boolInt(b bool) int {
 }
 
 func (s *Store) trainingDocument(ctx context.Context, p models.Principal, id string) (*models.TrainingDocument, error) {
+	return s.trainingDocumentView(ctx, p, id, false)
+}
+
+// The conversation read reuses the same visibility/enrollment checks while
+// avoiding programme expansion, collective weights and progress presentation.
+func (s *Store) trainingDocumentView(ctx context.Context, p models.Principal, id string, contextOnly bool) (*models.TrainingDocument, error) {
 	doc := &models.TrainingDocument{Modules: []models.FormationModuleInput{}, Concepts: []models.FormationConceptInput{}}
 	t := &doc.Training
 	t.ID = id
@@ -255,15 +261,18 @@ func (s *Store) trainingDocument(ctx context.Context, p models.Principal, id str
 		if err != nil || domain.FormationEnrollmentID != "" {
 			return nil, storeport.ErrFormationUnavailable
 		}
-		doc.Curriculum, err = s.EnsureCurriculumBaseline(ctx, p.LearnerID, domainID)
-		if err != nil {
-			return nil, err
-		}
 		*t = models.Training{ID: id, Name: domain.Name, Description: domain.PersonalGoal, Kind: "personal", DomainID: domainID, Revision: strconv.Itoa(domain.GraphVersion), Status: "active", Audience: "private", AuthorID: p.UserID, CanEdit: true, CanLearn: true, CanShare: p.TenantID != models.LegacyTenantID, Progress: []models.TrainingProgress{}}
 		t.CanArchive, t.CanDelete = true, true
 		if domain.Archived {
 			t.Status = "archived"
 			t.CanArchive, t.CanEdit, t.CanLearn, t.CanShare, t.CanRestore = false, false, false, false, true
+		}
+		if contextOnly {
+			return doc, nil
+		}
+		doc.Curriculum, err = s.EnsureCurriculumBaseline(ctx, p.LearnerID, domainID)
+		if err != nil {
+			return nil, err
 		}
 	} else if formationID, ok := strings.CutPrefix(id, "formation:"); ok {
 		var versionID string
@@ -310,6 +319,10 @@ func (s *Store) trainingDocument(ctx context.Context, p models.Principal, id str
 			if err = s.queryRow(ctx, `SELECT id FROM formation_versions WHERE tenant_id=? AND formation_id=? ORDER BY version DESC LIMIT 1`, p.TenantID, formationID).Scan(&versionID); err != nil {
 				return nil, err
 			}
+		}
+		if contextOnly && domainID != "" {
+			t.Name, t.DomainID, t.VersionID = f.Name, domainID, versionID
+			return doc, nil
 		}
 		detail, err := s.loadFormationVersion(ctx, p.TenantID, versionID)
 		if err != nil {
@@ -460,7 +473,7 @@ func (s *Store) conversationContext(ctx context.Context, p models.Principal, id 
 	if err != nil {
 		return nil, err
 	}
-	doc, err := s.trainingDocument(ctx, p, c.TrainingID)
+	doc, err := s.trainingDocumentView(ctx, p, c.TrainingID, true)
 	if err != nil {
 		return nil, err
 	}

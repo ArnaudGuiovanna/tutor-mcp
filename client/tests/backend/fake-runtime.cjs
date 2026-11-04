@@ -50,8 +50,35 @@ readline.createInterface({input:process.stdin}).on('line', async (line) => {
       send({jsonrpc:'2.0',method:'_auth/status_update',params:{authStatus:JSON.parse(fs.readFileSync(path.join(process.cwd(),'fixture-auth-status.json'),'utf8'))}});
     }
   } else if (request.method === 'tools/list') {
+    if(fs.existsSync('fixture-pedagogy.json')) return result(request,{tools:['prepare_pedagogical_turn','prepare_assessment_attempt','submit_assessment_attempt','record_interaction','record_learning_event','claim_memory_maintenance','commit_memory_maintenance'].map(name=>({name,inputSchema:{type:'object'}}))});
     result(request,{tools:[{name:'get_next_activity',description:'Fixture next activity',inputSchema:{type:'object'}}]});
   } else if (request.method === 'tools/call') {
+    if(fs.existsSync('fixture-pedagogy.json')) {
+      const fixture=JSON.parse(fs.readFileSync('fixture-pedagogy.json','utf8'));
+      if(params.name==='claim_memory_maintenance') return result(request,{structuredContent:fixture.batch || {status:'idle'}});
+      if(params.name==='commit_memory_maintenance') {fs.writeFileSync('fixture-maintenance-committed',JSON.stringify(params));return result(request,{structuredContent:{ok:true,completed:true}});}
+      if(params.name==='get_conversation_context') return result(request,{structuredContent:{...fixture.packet.conversation,conversation_id:params.arguments.conversation_id}});
+      const native=['prepare_pedagogical_turn','prepare_assessment_attempt','submit_assessment_attempt','record_interaction','record_learning_event'];
+      if(native.includes(params.name)) {
+        fs.appendFileSync('fixture-pedagogy-log.jsonl',JSON.stringify(params)+'\n');
+        if(!params._meta?.['tutor/conversation_id']) return result(request,{isError:true,content:[{type:'text',text:'Missing native binding'}]});
+        const args=params.arguments;
+        let value;
+        if(params.name==='prepare_pedagogical_turn') value={...fixture.packet,mode:args.mode,conversation:{...fixture.packet.conversation,conversation_id:args.conversation_id}};
+        if(params.name==='prepare_assessment_attempt') {fs.writeFileSync('fixture-prepared-attempt.json',JSON.stringify(args));value={attempt_id:'attempt-1'};}
+        if(params.name==='submit_assessment_attempt') {fs.writeFileSync('fixture-submitted-attempt.json',JSON.stringify(args));value={attempt_id:args.attempt_id,status:'submitted'};}
+        if(params.name==='record_interaction') {
+          if(fs.existsSync('fixture-fail-commit')) return result(request,{isError:true});
+          if(args.attempt_id&&!fs.existsSync('fixture-submitted-attempt.json')) return result(request,{isError:true});
+          value={updated:true,assessment_attempt_id:args.attempt_id,assessment_status:'evaluated',derived_success:args.success};
+        }
+        if(params.name==='record_learning_event') value={event:{event_key:args.event_key},replayed:false,model_updated:false};
+        return result(request,{structuredContent:value});
+      }
+    }
+    if(params.name==='get_conversation_context') {
+      while(fs.existsSync(path.join(process.cwd(),'fixture-hold-context-refresh'))) await new Promise(resolve=>setTimeout(resolve,5));
+    }
     const value = params.name === 'get_learner_context' ? {learner_id:'learner-1',learner:{id:'learner-1'},domains:[{domain_id:'domain-1',name:'Astronomie',concept_count:1}]} : {items:[]};
     result(request,{content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value});
   } else if (request.method === 'session/new') {
@@ -80,6 +107,12 @@ readline.createInterface({input:process.stdin}).on('line', async (line) => {
     const text = params.prompt.map((part) => part.text || '').join('');
     sessions[params.sessionId].lastPrompt=text;sessions[params.sessionId].promptCount=(sessions[params.sessionId].promptCount||0)+1;fs.writeFileSync(sessionFile,JSON.stringify(sessions));
     waiting = request;
+    if(fs.existsSync('fixture-pedagogy.json')) {
+      const fixture=JSON.parse(fs.readFileSync('fixture-pedagogy.json','utf8'));
+      chunk(params.sessionId,fixture.output);
+      while(fs.existsSync('fixture-hold-generation')) await new Promise(resolve=>setTimeout(resolve,5));
+      result(request,{stopReason:fixture.stopReason || 'end_turn'});waiting=undefined;return;
+    }
     const experience=text.match(/EXPERIENCE_PERMISSION:([A-Z_]+)$/)?.[1];
     const typed=text.match(/EXPERIENCE_TYPED:([A-Z_]+)$/)?.[1];
     const rpcFailure=text.match(/EXPERIENCE_RPC:([A-Z_]+)$/)?.[1];
@@ -141,6 +174,11 @@ readline.createInterface({input:process.stdin}).on('line', async (line) => {
       send({jsonrpc:'2.0',id:'permission-experience',method:'session/request_permission',params:{sessionId:params.sessionId,toolCall,options,_meta:{is_mcp_tool_approval:experience!=='QUESTION'}}});
     } else if (text.endsWith('PERMISSION')) {
       send({jsonrpc:'2.0',id:'permission-1',method:'session/request_permission',params:{sessionId:params.sessionId,toolCall:{toolCallId:'t1',title:'Utiliser Tutor'},options:[{optionId:'allow',name:'Autoriser',kind:'allow_once'},{optionId:'reject',name:'Refuser',kind:'reject_once'}]}});
+    } else if (text.endsWith('CONTEXT_REFRESH')) {
+      fs.writeFileSync(path.join(process.cwd(),'fixture-hold-context-refresh'),'hold');
+      send({jsonrpc:'2.0',method:'session/update',params:{sessionId:params.sessionId,update:{sessionUpdate:'tool_call',toolCallId:'changed-training',status:'completed',rawInput:{server:'tutor',tool:'select_conversation_training',arguments:{}}}}});
+      chunk(params.sessionId,'Formation changée.');
+      result(request,{stopReason:'end_turn'});
     } else if (text.endsWith('WAIT')) {
       chunk(params.sessionId,'Réponse commencée.');
     } else if (text.endsWith('CRASH')) {

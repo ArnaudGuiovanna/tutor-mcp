@@ -548,6 +548,8 @@ type WebhookQueueStore interface {
 
 // ConsolidationStore manages periodic consolidation records.
 type ConsolidationStore interface {
+	ClaimMemoryMaintenance(ctx context.Context, scope models.TenantScope, requestKey string, now time.Time) (*models.MemoryMaintenanceBatch, error)
+	CommitMemoryMaintenance(ctx context.Context, scope models.TenantScope, claimToken, archiveSummary string, updates []models.MemoryMaintenanceItem, now time.Time) (models.MemoryMaintenanceResult, error)
 	UpsertPendingConsolidation(ctx context.Context, learnerID, periodType, periodKey string, now time.Time) error
 	ListLearnerIDsForConsolidationPage(ctx context.Context, afterLearnerID string, limit int) ([]string, error)
 	GetPendingConsolidations(ctx context.Context, learnerID string) ([]*models.PendingConsolidation, error)

@@ -44,7 +44,9 @@ fn valid_name(value: &str) -> bool {
 
 impl PermissionPolicy {
     pub fn validate(&self) -> Result<(), String> {
-        crate::native_auth::validate_origin(&self.origin)?;
+        if self.origin != "local://tutor" {
+            crate::native_auth::validate_origin(&self.origin)?;
+        }
         if self.institution_id.is_empty()
             || self.institution_id.len() > 256
             || self.agent_id.is_empty()
@@ -62,8 +64,12 @@ impl PermissionPolicy {
 
     pub fn matches(&self, origin: &str, institution: &str, agent: &str) -> bool {
         self.validate().is_ok()
-            && crate::native_auth::validate_origin(&self.origin).ok()
-                == crate::native_auth::validate_origin(origin).ok()
+            && if self.origin == "local://tutor" || origin == "local://tutor" {
+                self.origin == origin
+            } else {
+                crate::native_auth::validate_origin(&self.origin).ok()
+                    == crate::native_auth::validate_origin(origin).ok()
+            }
             && self.institution_id == institution
             && self.agent_id == agent
     }
@@ -235,6 +241,24 @@ mod tests {
         let mut registry = ToolCallRegistry::default();
         registry.observe(&json!({"method":"session/update","params":{"sessionId":"session1","update":{"sessionUpdate":"tool_call","toolCallId":"call1","title":"anything","rawInput":{"server":"tutor","tool":"get_next_activity","arguments":{"private":"not retained"}},"status":"pending"}}}));
         registry
+    }
+
+    #[test]
+    fn local_consent_cannot_authorize_another_installation_or_remote_server() {
+        let mut local = policy();
+        local.origin = "local://tutor".into();
+        local.institution_id = "installation-one".into();
+        assert!(local.validate().is_ok());
+        assert!(local.matches("local://tutor", "installation-one", &local.agent_id));
+        assert!(!local.matches("local://tutor", "installation-two", &local.agent_id));
+        assert!(!local.matches(
+            "https://school.example",
+            "installation-one",
+            &local.agent_id
+        ));
+        assert!(!local.matches("invalid", "installation-one", &local.agent_id));
+        assert!(!local.matches("local://tutor", "installation-one", "another-harness"));
+        assert!(!policy().matches("local://tutor", "institution1", "bundled:codex"));
     }
 
     #[test]

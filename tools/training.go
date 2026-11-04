@@ -6,7 +6,6 @@ package tools
 import (
 	"context"
 	"errors"
-	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"tutor-mcp/auth"
 	"tutor-mcp/models"
@@ -61,10 +60,7 @@ func registerTrainingTools(server *mcp.Server, deps *Deps) {
 		return
 	}
 	for name, description := range trainingTools {
-		schema, err := jsonschema.For[models.TrainingRequest](&jsonschema.ForOptions{})
-		if err != nil {
-			panic("cannot infer training input schema: " + err.Error())
-		}
+		schema := trainingInputSchema(name)
 		if !models.TrainingReadAction(name) {
 			schema.Required = append(schema.Required, "key")
 			minimum, maximum := 1, 128

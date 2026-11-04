@@ -129,11 +129,15 @@ describe('Apprendre depuis la conversation', () => {
   });
 
   it('reprend la conversation existante sans rejouer un ancien message', async () => {
-    const state=initialState(true);state.conversations=[conversation];state.activeConversationId=conversation.id;const {api}=client(state);render(<App api={api}/>);
+    const state=initialState(true);state.conversations=[conversation];state.activeConversationId=conversation.id;const fixture=client(state);const {api}=fixture;render(<App api={api}/>);
     await screen.findByText('Commençons par observer la Grande Ourse.');expect(api.sendPrompt).not.toHaveBeenCalled();
     await userEvent.type(screen.getByLabelText('Message au tuteur'),'Continuons');await userEvent.click(screen.getByRole('button',{name:'Envoyer (Ctrl Entrée)'}));
     await waitFor(()=>expect(api.sendPrompt).toHaveBeenCalledWith(conversation.id,'Continuons'));expect(api.startConversation).not.toHaveBeenCalled();expect(api.tutorOverview).toHaveBeenCalledTimes(1);
     expect(screen.getAllByText('Commençons par observer la Grande Ourse.')).toHaveLength(1);
+    await waitFor(()=>expect(screen.queryByRole('button',{name:'Interrompre'})).toBeNull());
+    expect(vi.mocked(api.trainingAction).mock.calls.filter(([action])=>action==='list_training_library')).toHaveLength(1);
+    act(()=>fixture.emit({type:'workspace_invalidated',scope:'training_catalog'}));
+    await waitFor(()=>expect(vi.mocked(api.trainingAction).mock.calls.filter(([action])=>action==='list_training_library')).toHaveLength(2));
   });
 
   it('accepte immédiatement les événements de la session recréée et ignore ceux de l’ancienne', async () => {

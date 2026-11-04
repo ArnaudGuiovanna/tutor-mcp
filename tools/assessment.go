@@ -16,6 +16,7 @@ import (
 
 	"tutor-mcp/assessment"
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -279,6 +280,17 @@ func registerSubmitAssessmentAttempt(server *mcp.Server, deps *Deps) {
 		if err != nil {
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
+		}
+		if storeport.ConversationID(ctx) != "" {
+			attempt, err := deps.Store.GetAssessmentAttempt(ctx, learnerID, params.AttemptID)
+			if err != nil {
+				r, _ := errorResult("assessment unavailable")
+				return r, nil, nil
+			}
+			if _, err := resolveDomain(ctx, deps.Store, learnerID, attempt.DomainID); err != nil {
+				r, _ := errorResult("assessment does not match the selected conversation training")
+				return r, nil, nil
+			}
 		}
 		if err := deps.Store.SubmitAssessmentAttempt(ctx, learnerID, params.AttemptID, params.LearnerResponse, responseHash, time.Now().UTC()); err != nil {
 			r, _ := safeErrorResult(deps.Logger, "assessment attempt cannot be submitted", err)

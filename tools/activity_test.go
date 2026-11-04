@@ -269,7 +269,7 @@ func TestGetNextActivity_InjectsStableLearnerMemoryInDomainContext(t *testing.T)
 	}
 }
 
-func TestGetNextActivity_AttachesClientInitiatedConsolidationRequest(t *testing.T) {
+func TestGetNextActivityLeavesConsolidationOutsideLearnerTurn(t *testing.T) {
 	t.Setenv("TUTOR_MCP_MEMORY_ROOT", t.TempDir())
 	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
 	t.Setenv("TUTOR_MCP_CONSOLIDATION_SEED", "7")
@@ -315,36 +315,15 @@ func TestGetNextActivity_AttachesClientInitiatedConsolidationRequest(t *testing.
 		t.Fatalf("get_next_activity failed: %s", resultText(res))
 	}
 	out := decodeResult(t, res)
-	req, ok := out["consolidation_request"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected consolidation_request, got %v", out)
-	}
-	if !strings.Contains(req["instruction"].(string), "pending consolidation jobs") {
-		t.Fatalf("unexpected instruction: %q", req["instruction"])
-	}
-	jobs, _ := req["pending_jobs"].([]any)
-	if len(jobs) != 1 {
-		t.Fatalf("pending_jobs = %v", req["pending_jobs"])
-	}
-	job := jobs[0].(map[string]any)
-	if job["period_type"] != "monthly" || job["period_key"] != "2026-04" {
-		t.Fatalf("unexpected job payload: %v", job)
-	}
-	if sessions, _ := job["sessions_in_period"].([]any); len(sessions) != 4 {
-		t.Fatalf("sessions_in_period = %v", job["sessions_in_period"])
-	}
-	if replay, _ := job["interleaved_replay_sessions"].([]any); len(replay) != 1 {
-		t.Fatalf("interleaved_replay_sessions = %v", job["interleaved_replay_sessions"])
-	}
-	if concepts, _ := job["touched_concepts"].([]any); len(concepts) != 1 {
-		t.Fatalf("touched_concepts = %v", job["touched_concepts"])
+	if _, ok := out["consolidation_request"]; ok {
+		t.Fatal("activity must not request background consolidation before answering")
 	}
 	item, err := store.GetConsolidation(context.Background(), "L_owner", "monthly", "2026-04")
 	if err != nil {
 		t.Fatalf("GetConsolidation delivered: %v", err)
 	}
-	if item.Status != "delivered" {
-		t.Fatalf("status after delivery = %q, want delivered", item.Status)
+	if item.Status != "pending" {
+		t.Fatalf("activity must leave queued maintenance untouched: %q", item.Status)
 	}
 
 	archive := callTool(t, deps, registerUpdateLearnerMemory, "L_owner", "update_learner_memory", map[string]any{
@@ -357,8 +336,8 @@ func TestGetNextActivity_AttachesClientInitiatedConsolidationRequest(t *testing.
 		t.Fatalf("archive write failed: %s", resultText(archive))
 	}
 	item, _ = store.GetConsolidation(context.Background(), "L_owner", "monthly", "2026-04")
-	if item.Status != "completed" {
-		t.Fatalf("status after archive = %q, want completed", item.Status)
+	if item.Status != "pending" {
+		t.Fatalf("archive alone must not complete queued maintenance: %q", item.Status)
 	}
 	second := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{"domain_id": d.ID})
 	if second.IsError {
@@ -366,7 +345,7 @@ func TestGetNextActivity_AttachesClientInitiatedConsolidationRequest(t *testing.
 	}
 	secondOut := decodeResult(t, second)
 	if _, ok := secondOut["consolidation_request"]; ok {
-		t.Fatalf("completed consolidation should not be requested again: %v", secondOut["consolidation_request"])
+		t.Fatalf("maintenance must stay outside the activity response: %v", secondOut["consolidation_request"])
 	}
 }
 

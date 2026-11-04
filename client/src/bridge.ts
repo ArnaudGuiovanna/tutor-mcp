@@ -41,6 +41,7 @@ export const bridge = {
   authenticateAgent: (methodId: string) => call<unknown>('authenticate_agent', { methodId }),
   startConversation: (intentId?: string, resumeId?: string) => call<Conversation>('start_conversation', { intentId, resumeId }),
   sendPrompt: (conversationId: string, text: string) => call<{ stopReason: string }>('send_prompt', { conversationId, text }),
+  acknowledgeLearningDelivery: (conversationId: string, messageId: string) => call<void>('acknowledge_learning_delivery', { conversationId, messageId }),
   cancelPrompt: (conversationId: string) => call<void>('cancel_prompt', { conversationId }),
   answerPermission: (requestId: unknown, optionId: string | null) => call<void>('answer_permission', { requestId, optionId }),
   disconnectAgent: () => call<void>('disconnect_agent'),

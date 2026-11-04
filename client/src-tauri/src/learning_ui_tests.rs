@@ -2,6 +2,137 @@ use super::*;
 use crate::workspace::{Message, PendingMessage, WorkspaceStore};
 use serde_json::json;
 
+fn turn_packet(mode: &str) -> Value {
+    json!({"schema_version":"pedagogical-turn/v1","mode":mode,"conversation":context(),"permissions":{"read":true,"prepare_activity":true},
+        "activity":{"activity":{"type":"RECALL_EXERCISE","concept":"Variables"},"session_id":"session-go","decision_id":"decision-1","pedagogical_contract":{"competency":{"outcomes":[]}}},
+        "attempt":{"id":"attempt-1","domain_id":"go","concept":"Variables","status":"prepared","rubric":serde_json::from_str::<Value>(card()["rubricJson"].as_str().unwrap()).unwrap()}})
+}
+
+#[test]
+fn prepared_turn_freezes_before_display_and_records_before_feedback() {
+    let conversation = conversation(card());
+    let (hint, permissions) =
+        PreparedTurn::request(&conversation, "Un indice, s’il vous plaît.").unwrap();
+    assert_eq!(hint["mode"], "context");
+    assert_eq!(hint["attempt_id"], "attempt-1");
+    assert_eq!(permissions, vec!["prepare_pedagogical_turn"]);
+    let study = fence(
+        "tutor-study-request",
+        &json!({"version":1,"format":"quiz","intent":"review","trainingId":"personal:go","domainId":"go"}),
+    );
+    let (request, permissions) = PreparedTurn::request(&conversation, &study).unwrap();
+    assert_eq!(request["mode"], "activity");
+    assert!(permissions.contains(&"prepare_assessment_attempt"));
+    let turn = PreparedTurn::new(&conversation, &study, turn_packet("activity")).unwrap();
+    let mut generated = card();
+    generated.as_object_mut().unwrap().remove("attemptId");
+    let mut output = turn.output(&fence("tutor-activity", &generated)).unwrap();
+    assert!(turn.private_output());
+    assert_eq!(
+        output.mutation.as_ref().unwrap().0,
+        "prepare_assessment_attempt"
+    );
+    assert_eq!(
+        output.mutation.as_ref().unwrap().1["decision_id"],
+        "decision-1"
+    );
+    assert!(output.commit(&json!({})).is_err());
+    output.commit(&json!({"attempt_id":"confirmed"})).unwrap();
+    assert_eq!(
+        payload::<Activity>(&output.text, "tutor-activity")
+            .unwrap()
+            .unwrap()
+            .attempt_id
+            .as_deref(),
+        Some("confirmed")
+    );
+    generated["concept"] = json!("foreign");
+    assert!(turn.output(&fence("tutor-activity", &generated)).is_err());
+
+    let response = fence("tutor-response", &response());
+    let turn = PreparedTurn::new(&conversation, &response, turn_packet("context")).unwrap();
+    assert_eq!(turn.submission().unwrap()["learner_response"], "b: 5");
+    let score = json!({"criteria_scores":[{"id":"correct","score":1,"max_score":1,"evidence":"The selected value is 5."}],"total":1,"max_total":1,"summary":"Correct","confidence":0.9});
+    let evaluation = json!({"version":1,"attempt_id":"attempt-1","rubric_score_json":score.to_string(),"feedback":"Vous avez retrouvé la valeur."});
+    let mut output = turn
+        .output(&fence("tutor-evaluation", &evaluation))
+        .unwrap();
+    assert_eq!(output.mutation.as_ref().unwrap().0, "record_interaction");
+    assert!(output.commit(&json!({"updated":true,"assessment_attempt_id":"foreign","assessment_status":"evaluated","derived_success":true})).is_err());
+    output.commit(&json!({"updated":true,"assessment_attempt_id":"attempt-1","assessment_status":"evaluated","derived_success":true})).unwrap();
+    assert_eq!(output.delivery.as_ref().unwrap().kind, "feedback");
+    assert!(!output.delivery.unwrap().recorded);
+}
+
+#[test]
+fn interrupted_generation_reuses_decision_and_submission_without_accepting_a_changed_answer() {
+    let mut conversation = conversation(card());
+    let study = fence(
+        "tutor-study-request",
+        &json!({"version":1,"format":"quiz","intent":"review","trainingId":"personal:go","domainId":"go"}),
+    );
+    let original = PreparedTurn::request(&conversation, &study).unwrap().0;
+    let append_failure = |conversation: &mut Conversation, text: &str| {
+        let template = conversation.messages[0].clone();
+        let mut user = template.clone();
+        user.role = "user".into();
+        user.text = text.into();
+        user.id = format!("user-{}", conversation.messages.len());
+        let mut reply = template;
+        reply.private_output = true;
+        reply.status = "interrupted".into();
+        reply.text = "partial".into();
+        reply.id = format!("reply-{}", conversation.messages.len());
+        conversation.messages.extend([user, reply]);
+    };
+    append_failure(&mut conversation, &study);
+    append_failure(&mut conversation, &study);
+    assert_eq!(
+        PreparedTurn::request(&conversation, &study).unwrap().0,
+        original
+    );
+    let mut completed = conversation.clone();
+    completed.messages.last_mut().unwrap().private_output = false;
+    completed.messages.last_mut().unwrap().status = "complete".into();
+    assert_ne!(
+        PreparedTurn::request(&completed, &study).unwrap().0["idempotency_key"],
+        original["idempotency_key"]
+    );
+    let answer = fence("tutor-response", &response());
+    let before = PreparedTurn::new(&conversation, &answer, turn_packet("context"))
+        .unwrap()
+        .submission();
+    append_failure(&mut conversation, &answer);
+    let restored: Conversation =
+        serde_json::from_str(&serde_json::to_string(&conversation).unwrap()).unwrap();
+    assert_eq!(
+        PreparedTurn::new(&restored, &answer, turn_packet("context"))
+            .unwrap()
+            .submission(),
+        before
+    );
+    let mut changed = response();
+    changed["selectedOptionId"] = json!("a");
+    assert!(PreparedTurn::request(&restored, &fence("tutor-response", &changed)).is_err());
+}
+
+#[test]
+fn prepared_turn_rejects_changed_rubric_and_false_score_or_prose_receipts() {
+    let conversation = conversation(card());
+    let response = fence("tutor-response", &response());
+    let mut packet = turn_packet("context");
+    packet["attempt"]["rubric"]["passing_score"] = json!(2);
+    assert!(PreparedTurn::new(&conversation, &response, packet).is_err());
+    let turn = PreparedTurn::new(&conversation, &response, turn_packet("context")).unwrap();
+    assert!(turn.output("Le résultat est enregistré.").is_err());
+    for score in [
+        json!({"criteria_scores":[],"total":1,"max_total":1,"confidence":0.9}),
+        json!({"criteria_scores":[{"id":"correct","score":2,"max_score":1,"evidence":"invented"}],"total":2,"max_total":1,"confidence":0.9}),
+    ] {
+        assert!(turn.output(&fence("tutor-evaluation",&json!({"version":1,"attempt_id":"attempt-1","rubric_score_json":score.to_string(),"feedback":"Good"}))).is_err());
+    }
+}
+
 fn context() -> Value {
     json!({"conversation_id":"conversation-go","training_id":"personal:go","domain_id":"go","revision":"2","selection_version":1})
 }
@@ -31,6 +162,9 @@ fn conversation(card: Value) -> Conversation {
         updated_at: String::new(),
         active_training: Some(context()),
         messages: vec![Message {
+            pending_learning_commit: None,
+            learning_delivery: None,
+            private_output: false,
             id: "assistant-1".into(),
             role: "assistant".into(),
             text: fence("tutor-activity", &card),
@@ -315,6 +449,9 @@ fn queued_and_answered_cards_survive_reload_without_duplicate_acceptance() {
         .transaction(|data| {
             data.pending_message = None;
             data.conversations[0].messages.push(Message {
+                pending_learning_commit: None,
+                learning_delivery: None,
+                private_output: false,
                 id: "response-1".into(),
                 role: "user".into(),
                 text: message.clone(),

@@ -53,6 +53,7 @@ impl Backend {
             wake: Notify::new(),
         });
         *active = Some(operation.clone());
+        self.cancel_memory_maintenance();
         Ok(PreparationGuard {
             operation,
             backend: self,
@@ -85,6 +86,7 @@ impl Backend {
         &self,
         operation: &Preparation,
     ) -> Result<(), String> {
+        self.close_native_permissions(&operation.id).await;
         // A cancelled session/new/load may still finish in the adapter. Retire
         // that process so no late replay/configuration can become reusable state.
         let stopped = if operation.loading.load(Ordering::Acquire) {

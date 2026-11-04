@@ -71,6 +71,9 @@ TOOLS (reference)
 - list_training_library(query?, filter?, after?, limit?): unified authorized, deduplicated server library
 - get_training(id): programme, personal progress, proposal and capabilities
 - get_conversation_context(conversation_id): confirmed training for this account and conversation
+- prepare_pedagogical_turn(conversation_id?, mode?, expected_selection?, expected_revision?, intent?, attempt_id?, idempotency_key?): one authorized packet with selected curriculum, useful concepts, difficulties, recent observations and active session/attempt. Context mode is read-only; activity mode freezes the canonical engine decision and requires a stable key. Use the supplied packet without redundant reads; the server retains authority over progression. Native clients can prepare/submit/record deterministically around a single model generation.
+- claim_memory_maintenance(idempotency_key): background-only bounded memory batch, never a prerequisite for a learner response. Claim at most eight sessions, sixteen concept notes and 128 KiB under a five-minute lease. Use a fresh key for a new poll; reuse only for a retry. Idle, busy and expired contain no usable work.
+- commit_memory_maintenance(claim_token, archive_summary, updates, idempotency_key?): atomically apply every claimed snapshot and cumulative summary; preserve stable notes and unsupported observations. A partial batch leaves the archive unpublished and job pending. Only the final batch publishes the archive and completes maintenance. Stop background work for a new learner turn; never infer mastery from narrative summaries.
 - select_conversation_training(id, conversation_id, expected_selection, key): explicit selection
 - preview_training_edit(id, expected_revision, document): validate and compute learning consequences
 - propose_training_edit(id, expected_revision, document, key): examinable proposal in the common editor

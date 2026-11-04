@@ -1,0 +1,209 @@
+version: 1
+title: Contexte pédagogique serveur et réponse ACP en une à cinq secondes
+baseline: 666fee4d0cf3c13bb2006adbc277f3de30a0431e
+status: implementation_realisee_qualification_reelle_en_attente
+objective:
+  user_visible: Réponse complète, correcte et utilisable entre une et cinq secondes après Envoyer.
+  maximum_target_ms: 5000
+  scope: Codex et Claude, Windows natif et WSL, serveur MCP local et distant.
+  reference_configuration: Codex, GPT-6.1 sol, réflexion élevée, vitesse équilibrée.
+  measurement: Un premier fragment ou un message d'attente ne constitue pas une réponse complète.
+  evidence_rule: Ne pas présenter un budget synthétique ou la CI de protocole comme une qualification du modèle réel.
+authority:
+  server:
+    - Identité, autorisations et formation sélectionnée.
+    - Curriculum versionné, notions pertinentes et prérequis.
+    - Difficultés observées, preuves et observations récentes.
+    - Séance active, tentative en cours et décision pédagogique.
+    - Progression, échéances, évaluation des preuves et conservation durable.
+  harness:
+    - Authentification et facturation du fournisseur inchangées.
+    - Formulation de l'explication, de l'exercice ou de l'évaluation suivant le contrat reçu.
+    - Aucune autorité pour inventer une progression ou modifier le contrat d'une tentative.
+  client:
+    - Acheminement ACP et préparation déterministe du tour à partir de l'action demandée.
+    - Validation des sorties structurées et appels déterministes de persistance.
+    - Affichage de la réponse validée, annulation et reprise durable sans doublons.
+design:
+  turn_context:
+    operation: prepare_pedagogical_turn
+    schema_version: pedagogical-turn/v1
+    modes:
+      context: Lecture cohérente sans création de décision ni mise à jour de progression.
+      activity: Lecture et décision du moteur existant, mutation autorisée avec clé stable.
+    input:
+      - conversation_id, lié à la conversation authentifiée.
+      - mode et intention explicite auto ou review pour une activité.
+      - Versions attendues de sélection et curriculum lorsque connues.
+      - attempt_id optionnel, vérifié contre cette séance et cette formation.
+      - idempotency_key obligatoire pour la préparation d'activité.
+    output:
+      - Identité utile, langue, objectif et contraintes d'accessibilité.
+      - Formation sélectionnée, droits, version et provenance.
+      - Notions utiles, prérequis et critères opérationnels.
+      - Difficultés, observations récentes et preuves associées.
+      - Séance et tentative courantes, si présentes.
+      - Mémoire narrative pertinente et bornée.
+      - Activité et décision canoniques uniquement quand demandées.
+      - Informations manquantes et réductions de contexte explicites.
+    bounds:
+      - Budget explicite d'objets et d'octets ; ne pas injecter le catalogue ou tout l'historique.
+      - Ne jamais tronquer silencieusement un barème, une contrainte ou une preuve obligatoire.
+      - Informations optionnelles dégradées signalées ; refus si un contrat indispensable manque.
+    freshness:
+      - Vérification des droits et de la sélection dans la transaction du serveur.
+      - Invalidation après changement de formation, de curriculum, de compte ou observation enregistrée.
+      - Aucun cache client ne remplace les contrôles de révocation serveur.
+  generation:
+    - Conserver la session ACP et appliquer les réglages effectifs par session.
+    - Fournir le contexte regroupé avant la génération sur les parcours connus du client.
+    - Retirer les instructions imposant des lectures déjà satisfaites par le paquet serveur.
+    - Préserver une clarification ou un appel complémentaire lorsque la demande ne permet pas de choisir une activité autorisée.
+    - Ne pas convertir arbitrairement une demande libre en exercice ni choisir le dernier domaine global.
+  assessment:
+    - Le modèle produit une tâche et un barème structurés suivant la décision serveur.
+    - Le client prépare la tentative avant tout affichage de l'exercice et conserve les identifiants confirmés.
+    - La réponse de l'apprenant est soumise durablement avant la demande d'évaluation.
+    - Le serveur valide et enregistre l'évaluation avant qu'elle soit annoncée comme enregistrée.
+    - Le feedback effectivement livré possède son propre événement idempotent.
+    - Une flashcard autoévaluée reste une observation non vérifiée, jamais une preuve de maîtrise.
+  maintenance:
+    - La consolidation narrative ne précède plus la génération d'une activité.
+    - Les faits récents et récits bruts restent consultables pendant un retard de maintenance.
+    - File durable, lots et contenu bornés, bail avec reprise et vérification des versions.
+    - Finalisation uniquement après toutes les mises à jour du lot, pas après la seule archive.
+    - Traitement hors tour via le harness existant ; priorité à un nouveau message et à Stop.
+    - Aucun nouveau fournisseur ni modèle hébergé par le serveur.
+lots:
+  - id: INT-01
+    owner: root
+    description: Contrats d'outils ciblés, registre de sécurité, plan et orchestration.
+    status: implemente_tests_cibles_reussis
+    acceptance:
+      - Les schémas des outils de formation n'exposent que leurs paramètres utiles.
+      - Les champs requis et les contrôles d'autorisation restent cohérents avec les handlers.
+      - Les deux modes du contexte respectent leurs scopes, transactions et règles d'idempotence.
+  - id: INT-02
+    owner: session_backend
+    description: Projection légère et contexte pédagogique regroupé utilisant le moteur existant.
+    status: implemente_tests_cibles_reussis
+    acceptance:
+      - Une requête prépare tous les éléments nécessaires pour le tour sélectionné.
+      - Aucun document complet ou calcul collectif par concept pour vérifier la liaison de conversation.
+      - Aucune décision nouvelle ni progression lors d'une lecture simple.
+      - Une préparation d'activité rejouée rend la même décision et la même séance.
+  - id: INT-03
+    owner: client_ui
+    description: Intégration du contexte et génération structurée avec persistance déterministe.
+    status: implemente_tests_cibles_reussis
+    acceptance:
+      - Explication, indice et activité connue exploitent directement le paquet versionné.
+      - La préparation d'un quiz et la soumission de sa réponse n'exigent pas un cycle de raisonnement supplémentaire.
+      - Une sortie invalide ou une version devenue obsolète ne peut pas avancer la progression.
+      - Arrêt et redémarrage préservent les mutations déjà effectuées sans rejouer l'observation.
+  - id: INT-04
+    owner: client_ui
+    description: Fin de réponse immédiate, rafraîchissements ciblés et réglages par session.
+    status: implemente_tests_cibles_reussis
+    acceptance:
+      - Une réponse durablement terminée est publiée sans attendre une lecture secondaire du contexte.
+      - Les cartes restent validées avant activation.
+      - Les réglages appliqués correspondent à la conversation active.
+      - Aucun abaissement silencieux du modèle ou du raisonnement choisi par l'utilisateur.
+  - id: INT-05
+    owner: metrics
+    description: Consolidation mémoire bornée et reprise sûre hors du tour interactif.
+    status: implemente_tests_cibles_reussis
+    acceptance:
+      - Les activités ne réclament ni ne joignent le backlog de consolidation.
+      - Un arrêt avant finalisation laisse le lot récupérable.
+      - Deux clients concurrents ne peuvent pas écraser la mémoire avec une version périmée.
+      - La maintenance ne bloque ni un message ni l'arrêt du client.
+  - id: INT-06
+    owner: root
+    description: Mesures de bout en bout et qualification pédagogique.
+    status: partiel_mesure_serveur_et_instrumentation
+    acceptance:
+      - Mesure depuis Envoyer jusqu'à la réponse complète validée et utilisable.
+      - Modèle, effort et vitesse effectifs enregistrés sans contenu privé.
+      - Dépassements de cinq secondes, erreurs et annulations conservés dans le rapport.
+      - Vérification de la formation, des décisions, des tentatives et de la progression durable.
+      - Temps réseau, outils serveur, échange ACP et finalisation distingués sans double comptage.
+  - id: INT-07
+    owner: root
+    description: Revue croisée, compatibilité, CI et publication.
+    status: verification_complete_et_publication_en_cours
+    acceptance:
+      - Tests de contrats et scénarios d'interruption/concurrence réussis.
+      - Anciens outils conservés et limites de compatibilité du nouveau client explicites.
+      - Publication des seuls fichiers du chantier via finish_task.py.
+      - Contrôles GitHub requis réussis sur le commit exact avant promotion main.
+qualification:
+  target_budget_ms:
+    context: 500
+    generation: 3500
+    validation_persistence_render: 500
+    margin: 500
+  budget_status: cout_serveur_local_mesure_parcours_modele_et_interface_non_qualifies
+  scenarios:
+    - Explication personnalisée dans une formation sélectionnée.
+    - Indice sur une tentative active sans avancement artificiel.
+    - Reprise de formation et activité exploitable.
+    - Génération d'un quiz dont le barème est figé avant présentation.
+    - Soumission et correction d'une réponse avec effets pédagogiques durables.
+    - Flashcard autoévaluée sans promotion en preuve vérifiée.
+  robustness:
+    - Session froide et session chaude, historique court et long.
+    - Formation institutionnelle volumineuse et backlog de consolidation.
+    - Changement de compte, de formation, de droits et de curriculum.
+    - Arrêt pendant préparation, génération, préparation du quiz, évaluation et maintenance.
+    - Réponse perdue après commit, redémarrage et reprise de la même clé.
+    - Requêtes concurrentes et versions obsolètes.
+  real_model_matrix:
+    - Codex Windows natif, GPT-6.1 sol high balanced comme référence utilisateur.
+    - Codex WSL avec la même configuration.
+    - Claude Windows natif avec modèle et réglages effectivement disponibles.
+    - Claude WSL avec la même configuration que le scénario natif.
+  comparison:
+    - Mesurer d'abord à modèle, effort et vitesse constants.
+    - Comparer ensuite les efforts seulement si la cible échoue, avec évaluation de qualité.
+    - Conserver séparément chaque configuration et chaque scénario.
+    - Un percentile inférieur à cinq secondes n'est pas une preuve de maximum inférieur à cinq secondes.
+    - Aucun plafond universel du fournisseur déduit d'un échantillon fini.
+publication:
+  procedure: scripts/finish_task.py prepare puis publish avec fichiers explicites.
+  branches: staging puis main en avance rapide après CI.
+  deployment: Aucun déploiement du serveur de production n'est impliqué par la publication Git.
+  completion: Ne déclarer la cible atteinte qu'avec les preuves du parcours complet et du suivi pédagogique.
+
+implementation_notes:
+  compatibility:
+    - Le nouveau parcours est activé quand tools/list annonce prepare_pedagogical_turn.
+    - Un ancien serveur conserve le parcours historique ; le nouvel outil doit être déployé côté serveur pour bénéficier du contexte regroupé.
+    - Les changements de schéma SQLite et PostgreSQL sont additifs.
+    - L’agent local reste présent et conserve son parcours antérieur ; ce chantier ne le retire pas.
+    - Le nouveau worker de consolidation exige le stockage narratif partagé et une autorisation persistante des deux outils de maintenance.
+    - Les serveurs utilisant uniquement les anciens fichiers mémoire ne sont pas consolidés par ce worker.
+  generation_and_recovery:
+    - Les quiz et flashcards structurés utilisent une session sans outils ; les écritures sont effectuées par le client natif.
+    - Une réponse libre conserve les outils pour les demandes explicites non couvertes par le paquet.
+    - Changer entre un tour structuré et un tour libre peut nécessiter une mise à jour ou restauration de session ACP.
+    - Les clés de décision et soumission sont conservées lors de la reprise d’une génération interrompue.
+    - Un enregistrement interrompu reprend le contenu validé et la même clé sans relancer le modèle.
+    - La consolidation conserve une archive déjà présente et recommence si elle change entre deux lots.
+  measurement_evidence:
+    server: docs/qualification/pedagogical-context-linux.json
+    command: python3 -B scripts/measure-pedagogical-context.py --server .tmp/tutor-mcp-interactive --samples 50
+    scope: Processus MCP réel, stdio, SQLite, données synthétiques isolées ; aucun appel fournisseur.
+    limits:
+      - Le petit programme de mesure utilise une seule notion et ne représente pas un curriculum volumineux ni un VPS distant.
+      - Les temps du modèle, du réseau distant et du rendu desktop ne sont pas inclus.
+      - Le binaire qualify-latency enregistre les réglages effectifs et refuse les tours de plus de cinq secondes.
+      - Son scénario de consultation de profil impose encore get_learner_context pour la comparaison historique ; ce n’est pas une qualification complète des nouveaux parcours pédagogiques.
+      - Les tests à harness simulé vérifient les contrats, pas la qualité pédagogique des formulations réelles.
+      - Aucun résultat nouveau ne qualifie Codex ou Claude sur Windows natif ou WSL.
+  remaining_qualification:
+    - Exécuter la matrice réelle avec les réglages de référence, après disponibilité du quota fournisseur.
+    - Mesurer jusqu’à la réponse complète et son rendu utilisable, pas seulement jusqu’au premier fragment.
+    - Examiner la fidélité des exercices et évaluations aux critères, ainsi que les écritures durables du serveur.
+    - Ajuster le budget de génération seulement avec une comparaison de qualité explicite ; aucun réglage silencieux.

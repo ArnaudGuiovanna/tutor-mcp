@@ -207,7 +207,7 @@ func TestUpdateLearnerMemory_WriteFailureIsSafeAndQuotaIsStable(t *testing.T) {
 	}
 }
 
-func TestUpdateLearnerMemory_ArchiveMarksConsolidationCompleted(t *testing.T) {
+func TestUpdateLearnerMemory_ArchiveDoesNotCompleteUnfinishedConsolidation(t *testing.T) {
 	t.Setenv("TUTOR_MCP_MEMORY_ROOT", t.TempDir())
 	t.Setenv("TUTOR_MCP_MEMORY_ENABLED", "true")
 	store, deps := setupToolsTest(t)
@@ -229,8 +229,12 @@ func TestUpdateLearnerMemory_ArchiveMarksConsolidationCompleted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetConsolidation: %v", err)
 	}
-	if item.Status != "completed" || item.CompletedAt == nil {
-		t.Fatalf("archive write should complete consolidation, got %#v", item)
+	if item.Status != "pending" || item.CompletedAt != nil {
+		t.Fatalf("archive alone must not complete consolidation, got %#v", item)
+	}
+	payload := decodeResult(t, res)
+	if payload["consolidation_completion_recorded"] != false || payload["maintenance_required"] != true {
+		t.Fatalf("legacy writer must receive explicit maintenance status: %v", payload)
 	}
 }
 

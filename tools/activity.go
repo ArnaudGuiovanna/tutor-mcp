@@ -50,543 +50,547 @@ func registerGetNextActivity(server *mcp.Server, deps *Deps) {
 			"When to call: this is the main tool of the learning cycle; it already includes alert-aware routing, metacognitive_mirror, tutor_mode and motivation_brief. " +
 			"When NOT to call: if another tool just returned needs_domain_setup=true (follow the returned setup guidance first); do not call get_pending_alerts or get_metacognitive_mirror in the same turn unless the learner explicitly asks for those raw views. " +
 			"Precondition: a domain must exist; otherwise needs_domain_setup=true is returned with a setup_domain activity. " +
-			"Returns: {needs_domain_setup, session_id, domain_id, domain_name, intent, intent_status, activity, pedagogical_contract, consolidation_request, goal_relevance_status, session_concepts_done, metacognitive_mirror, tutor_mode, active_misconceptions, known_misconception_types, motivation_brief, mastery_evidence, mastery_uncertainty, transfer_profile, degraded_components?}.",
-	}, func(ctx context.Context, req *mcp.CallToolRequest, params GetNextActivityParams) (*mcp.CallToolResult, any, error) {
-		totalStart := time.Now()
-		learnerID, err := getLearnerID(ctx)
-		if err != nil {
-			logAuthFailure(deps, "get_next_activity", err)
+			"Returns: {needs_domain_setup, session_id, domain_id, domain_name, intent, intent_status, activity, pedagogical_contract, goal_relevance_status, session_concepts_done, metacognitive_mirror, tutor_mode, active_misconceptions, known_misconception_types, motivation_brief, mastery_evidence, mastery_uncertainty, transfer_profile, degraded_components?}.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, params GetNextActivityParams) (*mcp.CallToolResult, any, error) {
+		return nextActivityResult(ctx, deps, params)
+	})
+}
+
+// nextActivityResult is the single canonical activity pipeline for both the
+// standalone MCP tool and the prepared pedagogical turn. Narrative maintenance
+// is deliberately excluded: it cannot delay the learner's next activity.
+func nextActivityResult(ctx context.Context, deps *Deps, params GetNextActivityParams) (*mcp.CallToolResult, any, error) {
+	totalStart := time.Now()
+	learnerID, err := getLearnerID(ctx)
+	if err != nil {
+		logAuthFailure(deps, "get_next_activity", err)
+		r, _ := errorResult(err.Error())
+		return r, nil, nil
+	}
+
+	for _, f := range []struct {
+		name  string
+		value string
+	}{
+		{"domain_id", params.DomainID},
+		{"domain_name", params.DomainName},
+		{"intent", params.Intent},
+	} {
+		if err := validateString(f.name, f.value, maxShortLabelLen); err != nil {
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
 		}
+	}
+	intent, err := normalizeActivityIntent(params.Intent)
+	if err != nil {
+		r, _ := errorResult(err.Error())
+		return r, nil, nil
+	}
 
-		for _, f := range []struct {
-			name  string
-			value string
-		}{
-			{"domain_id", params.DomainID},
-			{"domain_name", params.DomainName},
-			{"intent", params.Intent},
-		} {
-			if err := validateString(f.name, f.value, maxShortLabelLen); err != nil {
-				r, _ := errorResult(err.Error())
-				return r, nil, nil
-			}
-		}
-		intent, err := normalizeActivityIntent(params.Intent)
-		if err != nil {
-			r, _ := errorResult(err.Error())
+	// Check if domain exists
+	domainStart := time.Now()
+	domain, err := resolveActivityDomain(ctx, deps.Store, learnerID, params.DomainID, params.DomainName)
+	domainMs := time.Since(domainStart).Milliseconds()
+	var selectionErr *activityDomainSelectionError
+	if errors.As(err, &selectionErr) {
+		r, _ := errorResult(selectionErr.Error())
+		return r, nil, nil
+	}
+	if err != nil && !errors.Is(err, storeport.ErrNotFound) {
+		r, _ := safeErrorResult(deps.Logger, "failed to resolve activity domain", err)
+		return r, nil, nil
+	}
+	if err != nil || domain == nil {
+		if params.DomainName != "" {
+			r, _ := errorResult("domain not found")
 			return r, nil, nil
 		}
-
-		// Check if domain exists
-		domainStart := time.Now()
-		domain, err := resolveActivityDomain(ctx, deps.Store, learnerID, params.DomainID, params.DomainName)
-		domainMs := time.Since(domainStart).Milliseconds()
-		var selectionErr *activityDomainSelectionError
-		if errors.As(err, &selectionErr) {
-			r, _ := errorResult(selectionErr.Error())
-			return r, nil, nil
+		setupPrompt := "The learner has no domain yet. Analyse their objective, break it down into concepts, and call init_domain()."
+		if deps.Institution {
+			setupPrompt = domainSetupInstruction(deps)
 		}
-		if err != nil && !errors.Is(err, storeport.ErrNotFound) {
-			r, _ := safeErrorResult(deps.Logger, "failed to resolve activity domain", err)
-			return r, nil, nil
-		}
-		if err != nil || domain == nil {
-			if params.DomainName != "" {
-				r, _ := errorResult("domain not found")
-				return r, nil, nil
-			}
-			setupPrompt := "The learner has no domain yet. Analyse their objective, break it down into concepts, and call init_domain()."
-			if deps.Institution {
-				setupPrompt = domainSetupInstruction(deps)
-			}
-			r, _ := jsonResult(map[string]interface{}{
-				"needs_domain_setup": true,
-				"activity": models.Activity{
-					Type:         models.ActivitySetupDomain,
-					Rationale:    "no domain configured",
-					PromptForLLM: setupPrompt,
-				},
-			})
-			return r, nil, nil
-		}
-
-		prefetchStart := time.Now()
-		now := time.Now().UTC()
-		learningSession, err := deps.Store.OpenLearningSession(ctx, learnerID, domain.ID, "", now)
-		if err != nil {
-			r, _ := safeErrorResult(deps.Logger, "failed to open learning session", err)
-			return r, nil, nil
-		}
-		states, err := deps.Store.GetConceptStatesByDomain(ctx, learnerID, domain.ID)
-		if err != nil {
-			r, _ := safeErrorResult(deps.Logger, "failed to load concept states", err)
-			return r, nil, nil
-		}
-		interactions, err := deps.Store.GetRecentInteractionsByDomain(
-			ctx, learnerID, domain.ID, engine.DefaultRecentInteractionsWindow,
-		)
-		if err != nil {
-			r, _ := safeErrorResult(deps.Logger, "failed to load recent interactions", err)
-			return r, nil, nil
-		}
-		sessionStart, err := deps.Store.GetSessionStart(ctx, learnerID)
-		if err != nil {
-			r, _ := safeErrorResult(deps.Logger, "failed to load session state", err)
-			return r, nil, nil
-		}
-
-		// Get session interactions to track what was already practiced
-		sessionInteractions, err := deps.Store.GetInteractionsBySessionInDomain(ctx, learnerID, learningSession.ID, domain.ID)
-		if err != nil {
-			r, _ := safeErrorResult(deps.Logger, "failed to load session interactions", err)
-			return r, nil, nil
-		}
-
-		// Filter states to only those in the current domain
-		domainConcepts := make(map[string]bool)
-		for _, c := range domain.Graph.Concepts {
-			domainConcepts[c] = true
-		}
-		var domainStates []*models.ConceptState
-		for _, cs := range states {
-			if domainConcepts[cs.Concept] {
-				domainStates = append(domainStates, cs)
-			}
-		}
-
-		// Filter interactions to domain concepts
-		var domainInteractions []*models.Interaction
-		for _, i := range interactions {
-			if domainConcepts[i.Concept] {
-				domainInteractions = append(domainInteractions, i)
-			}
-		}
-
-		// Compute alerts from the same attempt-linked retention and trusted
-		// transfer evidence used by check_mastery.
-		evidenceSnapshot, err := engine.LoadEvidenceSnapshot(
-			ctx, deps.Store, learnerID, domain.ID, domain.Graph.Concepts,
-		)
-		if err != nil {
-			r, _ := safeErrorResult(deps.Logger, "failed to load mastery alert evidence", err)
-			return r, nil, nil
-		}
-		alertEvidence := evidenceSnapshot.ForMasteryAlerts(domainStates)
-		alerts := engine.ComputeAlertsWithEvidenceAt(domainStates, domainInteractions, alertEvidence, sessionStart, now)
-
-		// Build set of concepts already practiced in this session
-		sessionConcepts := make(map[string]int)
-		for _, i := range sessionInteractions {
-			if domainConcepts[i.Concept] {
-				sessionConcepts[i.Concept]++
-			}
-		}
-		prefetchMs := time.Since(prefetchStart).Milliseconds()
-		extra := map[string]any{}
-		var degradedComponents []string
-		markDegraded := func(component string, err error) {
-			degradedComponents = append(degradedComponents, component)
-			deps.Logger.Warn("get_next_activity: optional component degraded",
-				"component", component, "err", err, "learner", learnerID, "domain", domain.ID)
-		}
-
-		// Route to next activity through the regulation pipeline, or through
-		// the explicit review override when the learner asks to revise.
-		orchestratorStart := time.Now()
-		var activity models.Activity
-		var orchPhase models.Phase
-		var orchErr error
-		intentStatus := "auto"
-		route := "orchestrator"
-		input := engine.OrchestratorInput{
-			LearnerID:        learnerID,
-			DomainID:         domain.ID,
-			Now:              now,
-			SessionStart:     sessionStart,
-			Config:           engine.NewDefaultPhaseConfig(),
-			Logger:           deps.Logger,
-			EvidenceSnapshot: evidenceSnapshot,
-		}
-		if intent == activityIntentReview {
-			input.ReviewOnly = true
-			intentStatus = "applied"
-			route = "orchestrator_review"
-		}
-		// OrchestrateWithPhase returns the post-orchestrate phase so we
-		// can audit-log it without re-reading the domain row (perf #91).
-		activity, orchPhase, orchErr = engine.OrchestrateWithPhase(ctx, deps.Store, input)
-		if input.ReviewOnly && strings.Contains(activity.Rationale, "no_reviewable_concept") {
-			intentStatus = "no_reviewable_concept"
-		}
-		orchestratorMs := time.Since(orchestratorStart).Milliseconds()
-		if orchErr != nil {
-			deps.Logger.Error("orchestrator failed", "err", orchErr, "learner", learnerID, "domain", domain.ID)
-			r, _ := errorResult("could not compute next activity")
-			return r, nil, nil
-		}
-		pushSince := now.Add(-7 * 24 * time.Hour)
-		activeWebhookNudge, err := deps.Store.GetLatestOpenWebhookPush(ctx, learnerID, domain.ID, pushSince)
-		if err != nil {
-			markDegraded("active_webhook_nudge", err)
-		}
-		if err := deps.Store.MarkWebhookPushSessionOpened(ctx, learnerID, now, pushSince); err != nil {
-			markDegraded("webhook_session_tracking", err)
-		}
-		if activeWebhookNudge != nil {
-			extra["active_webhook_nudge"] = activeWebhookNudge
-			if activeWebhookNudge.OpenLoop != "" || activeWebhookNudge.NextAction != "" {
-				activity.PromptForLLM += fmt.Sprintf(
-					"\nThe learner may be returning from a Discord nudge. Start by reconnecting to this learner-facing open loop without naming internal tools: %s %s",
-					activeWebhookNudge.OpenLoop,
-					activeWebhookNudge.NextAction,
-				)
-			}
-		}
-		overrideResult := LearningNegotiationOverrideConsumeResult{Status: LearningNegotiationOverrideConsumeNone}
-		if overrideActivity, consumed, err := ConsumeLearningNegotiationOverride(ctx, deps.Store, learnerID, domain, activity, alerts, now); err != nil {
-			markDegraded("learning_negotiation_override", err)
-		} else {
-			overrideResult = consumed
-			if consumed.Status == LearningNegotiationOverrideConsumeConsumed {
-				activity = overrideActivity
-				route = "negotiation_override"
-			}
-		}
-
-		// Pipeline decision audit — one line per get_next_activity call.
-		// Phase comes straight from the orchestrator (any FSM transition
-		// or NoFringe fallback already applied and persisted). The
-		// orchestrator now fails the tool call if a transition cannot be
-		// stored, so this audit line cannot describe a phase that diverges
-		// from the database.
-		loggedPhase := "INSTRUCTION" // orchestrator's NULL fallback
-		if orchPhase != "" {
-			loggedPhase = string(orchPhase)
-		}
-		deps.Logger.Debug("pipeline decision",
-			"learner", learnerID,
-			"session", learningSession.ID,
-			"domain", domain.ID,
-			"route", route,
-			"phase", loggedPhase,
-			"intent_status", intentStatus,
-			"negotiation_override_status", overrideResult.Status,
-			"activity_type", activity.Type,
-			"concept", activity.Concept,
-		)
-
-		// Metacognitive mirror
-		mirrorStart := time.Now()
-		since := time.Now().UTC().Add(-7 * 24 * time.Hour)
-		allInteractions, err := deps.Store.GetInteractionsSinceInDomain(ctx, learnerID, domain.ID, since)
-		if err != nil {
-			// The orchestrator may already have persisted a phase transition and
-			// the one-shot negotiation override may already have been consumed.
-			// Enrichment reads after those effects must not turn the whole call
-			// into an MCP error: the idempotency middleware would release the key
-			// and a retry could no longer reproduce the selected activity.
-			markDegraded("metacognitive_interactions", err)
-			allInteractions = nil
-		}
-		calibBias, err := deps.Store.GetCalibrationBiasInDomain(ctx, learnerID, domain.ID, 20)
-		if err != nil {
-			markDegraded("calibration_state", err)
-			calibBias = 0
-		}
-		calibHistory, err := deps.Store.GetCalibrationBiasHistoryInDomain(ctx, learnerID, domain.ID, 20)
-		if err != nil {
-			markDegraded("calibration_evidence", err)
-			calibHistory = nil
-		}
-		affects, err := deps.Store.GetRecentAffectStates(ctx, learnerID, 10)
-		if err != nil {
-			markDegraded("affect_state", err)
-			affects = nil
-		}
-
-		var autonomyScores []float64
-		for _, a := range affects {
-			autonomyScores = append(autonomyScores, a.AutonomyScore)
-		}
-		mirrorSessionCount := len(engine.GroupIntoSessionsExported(allInteractions, 2*time.Hour))
-
-		mirror := engine.DetectMirrorPattern(engine.MirrorInput{
-			Interactions:       allInteractions,
-			ConceptStates:      domainStates,
-			AutonomyScores:     autonomyScores,
-			CalibrationBias:    calibBias,
-			CalibrationSamples: len(calibHistory),
-			SessionCount:       mirrorSessionCount,
+		r, _ := jsonResult(map[string]interface{}{
+			"needs_domain_setup": true,
+			"activity": models.Activity{
+				Type:         models.ActivitySetupDomain,
+				Rationale:    "no domain configured",
+				PromptForLLM: setupPrompt,
+			},
 		})
+		return r, nil, nil
+	}
 
-		// Persist & enqueue the mirror so it can be pushed proactively via
-		// the webhook queue (#59). Per-day dedup lives in EnqueueMirrorWebhook
-		// so a learner who hits get_next_activity multiple times in a day
-		// only sees one queued nudge.
-		if mirror != nil {
-			if _, _, err := engine.EnqueueMirrorWebhook(ctx, deps.Store, learnerID, mirror, time.Now().UTC()); err != nil {
-				deps.Logger.Warn("get_next_activity: mirror enqueue failed", "err", err, "learner", learnerID)
-			}
+	prefetchStart := time.Now()
+	now := time.Now().UTC()
+	learningSession, err := deps.Store.OpenLearningSession(ctx, learnerID, domain.ID, "", now)
+	if err != nil {
+		r, _ := safeErrorResult(deps.Logger, "failed to open learning session", err)
+		return r, nil, nil
+	}
+	states, err := deps.Store.GetConceptStatesByDomain(ctx, learnerID, domain.ID)
+	if err != nil {
+		r, _ := safeErrorResult(deps.Logger, "failed to load concept states", err)
+		return r, nil, nil
+	}
+	interactions, err := deps.Store.GetRecentInteractionsByDomain(
+		ctx, learnerID, domain.ID, engine.DefaultRecentInteractionsWindow,
+	)
+	if err != nil {
+		r, _ := safeErrorResult(deps.Logger, "failed to load recent interactions", err)
+		return r, nil, nil
+	}
+	sessionStart, err := deps.Store.GetSessionStart(ctx, learnerID)
+	if err != nil {
+		r, _ := safeErrorResult(deps.Logger, "failed to load session state", err)
+		return r, nil, nil
+	}
+
+	// Get session interactions to track what was already practiced
+	sessionInteractions, err := deps.Store.GetInteractionsBySessionInDomain(ctx, learnerID, learningSession.ID, domain.ID)
+	if err != nil {
+		r, _ := safeErrorResult(deps.Logger, "failed to load session interactions", err)
+		return r, nil, nil
+	}
+
+	// Filter states to only those in the current domain
+	domainConcepts := make(map[string]bool)
+	for _, c := range domain.Graph.Concepts {
+		domainConcepts[c] = true
+	}
+	var domainStates []*models.ConceptState
+	for _, cs := range states {
+		if domainConcepts[cs.Concept] {
+			domainStates = append(domainStates, cs)
 		}
-		mirrorMs := time.Since(mirrorStart).Milliseconds()
+	}
 
-		// Tutor mode
-		var currentAffect *models.AffectState
-		if len(affects) > 0 {
-			currentAffect = affects[0]
+	// Filter interactions to domain concepts
+	var domainInteractions []*models.Interaction
+	for _, i := range interactions {
+		if domainConcepts[i.Concept] {
+			domainInteractions = append(domainInteractions, i)
 		}
-		tutorMode := engine.ComputeTutorMode(currentAffect, alerts)
+	}
 
-		// Apply tutor_mode adjustments to activity difficulty
-		switch tutorMode {
-		case "lighter":
-			activity.DifficultyTarget *= 0.7
-			activity.EstimatedMinutes = int(float64(activity.EstimatedMinutes) * 0.6)
-			if activity.EstimatedMinutes < 5 {
-				activity.EstimatedMinutes = 5
-			}
-		case "scaffolding":
-			activity.DifficultyTarget *= 0.75
+	// Compute alerts from the same attempt-linked retention and trusted
+	// transfer evidence used by check_mastery.
+	evidenceSnapshot, err := engine.LoadEvidenceSnapshot(
+		ctx, deps.Store, learnerID, domain.ID, domain.Graph.Concepts,
+	)
+	if err != nil {
+		r, _ := safeErrorResult(deps.Logger, "failed to load mastery alert evidence", err)
+		return r, nil, nil
+	}
+	alertEvidence := evidenceSnapshot.ForMasteryAlerts(domainStates)
+	alerts := engine.ComputeAlertsWithEvidenceAt(domainStates, domainInteractions, alertEvidence, sessionStart, now)
+
+	// Build set of concepts already practiced in this session
+	sessionConcepts := make(map[string]int)
+	for _, i := range sessionInteractions {
+		if domainConcepts[i.Concept] {
+			sessionConcepts[i.Concept]++
 		}
+	}
+	prefetchMs := time.Since(prefetchStart).Milliseconds()
+	extra := map[string]any{}
+	var degradedComponents []string
+	markDegraded := func(component string, err error) {
+		degradedComponents = append(degradedComponents, component)
+		deps.Logger.Warn("get_next_activity: optional component degraded",
+			"component", component, "err", err, "learner", learnerID, "domain", domain.ID)
+	}
 
-		// Apply calibration bias adjustment
-		// Positive bias = over-estimates → increase difficulty
-		// Negative bias = under-estimates → decrease difficulty
-		if calibBias != 0 {
-			activity.DifficultyTarget += calibBias * 0.1
-			if activity.DifficultyTarget < 0.3 {
-				activity.DifficultyTarget = 0.3
-			}
-			if activity.DifficultyTarget > 0.85 {
-				activity.DifficultyTarget = 0.85
-			}
+	// Route to next activity through the regulation pipeline, or through
+	// the explicit review override when the learner asks to revise.
+	orchestratorStart := time.Now()
+	var activity models.Activity
+	var orchPhase models.Phase
+	var orchErr error
+	intentStatus := "auto"
+	route := "orchestrator"
+	input := engine.OrchestratorInput{
+		LearnerID:        learnerID,
+		DomainID:         domain.ID,
+		Now:              now,
+		SessionStart:     sessionStart,
+		Config:           engine.NewDefaultPhaseConfig(),
+		Logger:           deps.Logger,
+		EvidenceSnapshot: evidenceSnapshot,
+	}
+	if intent == activityIntentReview {
+		input.ReviewOnly = true
+		intentStatus = "applied"
+		route = "orchestrator_review"
+	}
+	// OrchestrateWithPhase returns the post-orchestrate phase so we
+	// can audit-log it without re-reading the domain row (perf #91).
+	activity, orchPhase, orchErr = engine.OrchestrateWithPhase(ctx, deps.Store, input)
+	if input.ReviewOnly && strings.Contains(activity.Rationale, "no_reviewable_concept") {
+		intentStatus = "no_reviewable_concept"
+	}
+	orchestratorMs := time.Since(orchestratorStart).Milliseconds()
+	if orchErr != nil {
+		deps.Logger.Error("orchestrator failed", "err", orchErr, "learner", learnerID, "domain", domain.ID)
+		r, _ := errorResult("could not compute next activity")
+		return r, nil, nil
+	}
+	pushSince := now.Add(-7 * 24 * time.Hour)
+	activeWebhookNudge, err := deps.Store.GetLatestOpenWebhookPush(ctx, learnerID, domain.ID, pushSince)
+	if err != nil {
+		markDegraded("active_webhook_nudge", err)
+	}
+	if err := deps.Store.MarkWebhookPushSessionOpened(ctx, learnerID, now, pushSince); err != nil {
+		markDegraded("webhook_session_tracking", err)
+	}
+	if activeWebhookNudge != nil {
+		extra["active_webhook_nudge"] = activeWebhookNudge
+		if activeWebhookNudge.OpenLoop != "" || activeWebhookNudge.NextAction != "" {
+			activity.PromptForLLM += fmt.Sprintf(
+				"\nThe learner may be returning from a Discord nudge. Start by reconnecting to this learner-facing open loop without naming internal tools: %s %s",
+				activeWebhookNudge.OpenLoop,
+				activeWebhookNudge.NextAction,
+			)
 		}
+	}
+	overrideResult := LearningNegotiationOverrideConsumeResult{Status: LearningNegotiationOverrideConsumeNone}
+	if overrideActivity, consumed, err := ConsumeLearningNegotiationOverride(ctx, deps.Store, learnerID, domain, activity, alerts, now); err != nil {
+		markDegraded("learning_negotiation_override", err)
+	} else {
+		overrideResult = consumed
+		if consumed.Status == LearningNegotiationOverrideConsumeConsumed {
+			activity = overrideActivity
+			route = "negotiation_override"
+		}
+	}
 
-		// Misconception enrichment for selected concept
-		enrichmentStart := time.Now()
-		var activeMisconceptions any = []any{}
-		var knownMisconceptionTypes any = []string{}
-		activeMisconceptionCount := 0
+	// Pipeline decision audit — one line per get_next_activity call.
+	// Phase comes straight from the orchestrator (any FSM transition
+	// or NoFringe fallback already applied and persisted). The
+	// orchestrator now fails the tool call if a transition cannot be
+	// stored, so this audit line cannot describe a phase that diverges
+	// from the database.
+	loggedPhase := "INSTRUCTION" // orchestrator's NULL fallback
+	if orchPhase != "" {
+		loggedPhase = string(orchPhase)
+	}
+	deps.Logger.Debug("pipeline decision",
+		"learner", learnerID,
+		"session", learningSession.ID,
+		"domain", domain.ID,
+		"route", route,
+		"phase", loggedPhase,
+		"intent_status", intentStatus,
+		"negotiation_override_status", overrideResult.Status,
+		"activity_type", activity.Type,
+		"concept", activity.Concept,
+	)
 
-		if activity.Concept != "" {
-			if active, err := deps.Store.GetActiveMisconceptionsInDomain(ctx, learnerID, domain.ID, activity.Concept); err != nil {
-				markDegraded("active_misconceptions", err)
-			} else if len(active) > 0 {
-				activeMisconceptions = active
-				activeMisconceptionCount = len(active)
+	// Metacognitive mirror
+	mirrorStart := time.Now()
+	since := time.Now().UTC().Add(-7 * 24 * time.Hour)
+	allInteractions, err := deps.Store.GetInteractionsSinceInDomain(ctx, learnerID, domain.ID, since)
+	if err != nil {
+		// The orchestrator may already have persisted a phase transition and
+		// the one-shot negotiation override may already have been consumed.
+		// Enrichment reads after those effects must not turn the whole call
+		// into an MCP error: the idempotency middleware would release the key
+		// and a retry could no longer reproduce the selected activity.
+		markDegraded("metacognitive_interactions", err)
+		allInteractions = nil
+	}
+	calibBias, err := deps.Store.GetCalibrationBiasInDomain(ctx, learnerID, domain.ID, 20)
+	if err != nil {
+		markDegraded("calibration_state", err)
+		calibBias = 0
+	}
+	calibHistory, err := deps.Store.GetCalibrationBiasHistoryInDomain(ctx, learnerID, domain.ID, 20)
+	if err != nil {
+		markDegraded("calibration_evidence", err)
+		calibHistory = nil
+	}
+	affects, err := deps.Store.GetRecentAffectStates(ctx, learnerID, 10)
+	if err != nil {
+		markDegraded("affect_state", err)
+		affects = nil
+	}
 
-				// Inject misconceptions into prompt
-				misconceptionPrompt := fmt.Sprintf("\nWARNING: the learner has %d active misconception(s): ", len(active))
-				for i, m := range active {
-					if i > 0 {
-						misconceptionPrompt += " ; "
-					}
-					misconceptionPrompt += m.MisconceptionType
-					if m.LastErrorDetail != "" {
-						misconceptionPrompt += " - " + m.LastErrorDetail
-					}
+	var autonomyScores []float64
+	for _, a := range affects {
+		autonomyScores = append(autonomyScores, a.AutonomyScore)
+	}
+	mirrorSessionCount := len(engine.GroupIntoSessionsExported(allInteractions, 2*time.Hour))
+
+	mirror := engine.DetectMirrorPattern(engine.MirrorInput{
+		Interactions:       allInteractions,
+		ConceptStates:      domainStates,
+		AutonomyScores:     autonomyScores,
+		CalibrationBias:    calibBias,
+		CalibrationSamples: len(calibHistory),
+		SessionCount:       mirrorSessionCount,
+	})
+
+	// Persist & enqueue the mirror so it can be pushed proactively via
+	// the webhook queue (#59). Per-day dedup lives in EnqueueMirrorWebhook
+	// so a learner who hits get_next_activity multiple times in a day
+	// only sees one queued nudge.
+	if mirror != nil {
+		if _, _, err := engine.EnqueueMirrorWebhook(ctx, deps.Store, learnerID, mirror, time.Now().UTC()); err != nil {
+			deps.Logger.Warn("get_next_activity: mirror enqueue failed", "err", err, "learner", learnerID)
+		}
+	}
+	mirrorMs := time.Since(mirrorStart).Milliseconds()
+
+	// Tutor mode
+	var currentAffect *models.AffectState
+	if len(affects) > 0 {
+		currentAffect = affects[0]
+	}
+	tutorMode := engine.ComputeTutorMode(currentAffect, alerts)
+
+	// Apply tutor_mode adjustments to activity difficulty
+	switch tutorMode {
+	case "lighter":
+		activity.DifficultyTarget *= 0.7
+		activity.EstimatedMinutes = int(float64(activity.EstimatedMinutes) * 0.6)
+		if activity.EstimatedMinutes < 5 {
+			activity.EstimatedMinutes = 5
+		}
+	case "scaffolding":
+		activity.DifficultyTarget *= 0.75
+	}
+
+	// Apply calibration bias adjustment
+	// Positive bias = over-estimates → increase difficulty
+	// Negative bias = under-estimates → decrease difficulty
+	if calibBias != 0 {
+		activity.DifficultyTarget += calibBias * 0.1
+		if activity.DifficultyTarget < 0.3 {
+			activity.DifficultyTarget = 0.3
+		}
+		if activity.DifficultyTarget > 0.85 {
+			activity.DifficultyTarget = 0.85
+		}
+	}
+
+	// Misconception enrichment for selected concept
+	enrichmentStart := time.Now()
+	var activeMisconceptions any = []any{}
+	var knownMisconceptionTypes any = []string{}
+	activeMisconceptionCount := 0
+
+	if activity.Concept != "" {
+		if active, err := deps.Store.GetActiveMisconceptionsInDomain(ctx, learnerID, domain.ID, activity.Concept); err != nil {
+			markDegraded("active_misconceptions", err)
+		} else if len(active) > 0 {
+			activeMisconceptions = active
+			activeMisconceptionCount = len(active)
+
+			// Inject misconceptions into prompt
+			misconceptionPrompt := fmt.Sprintf("\nWARNING: the learner has %d active misconception(s): ", len(active))
+			for i, m := range active {
+				if i > 0 {
+					misconceptionPrompt += " ; "
 				}
-				misconceptionPrompt += ". Target these confusions in your explanation and exercise. Do not explicitly mention the misconceptions - design the exercise so the learner confronts them naturally."
-				activity.PromptForLLM += misconceptionPrompt
+				misconceptionPrompt += m.MisconceptionType
+				if m.LastErrorDetail != "" {
+					misconceptionPrompt += " - " + m.LastErrorDetail
+				}
 			}
-
-			if types, err := deps.Store.GetDistinctMisconceptionTypesInDomain(ctx, learnerID, domain.ID, activity.Concept); err != nil {
-				markDegraded("known_misconception_types", err)
-			} else if len(types) > 0 {
-				knownMisconceptionTypes = types
-			}
+			misconceptionPrompt += ". Target these confusions in your explanation and exercise. Do not explicitly mention the misconceptions - design the exercise so the learner confronts them naturally."
+			activity.PromptForLLM += misconceptionPrompt
 		}
-		enrichmentMs := time.Since(enrichmentStart).Milliseconds()
 
-		// Motivation layer — compose a context-adaptive brief for this activity.
-		// Detect plateau active on the chosen concept from the alerts list.
-		motivationStart := time.Now()
-		plateauActive := false
-		for _, a := range alerts {
-			if a.Type == models.AlertPlateau && a.Concept == activity.Concept {
-				plateauActive = true
+		if types, err := deps.Store.GetDistinctMisconceptionTypesInDomain(ctx, learnerID, domain.ID, activity.Concept); err != nil {
+			markDegraded("known_misconception_types", err)
+		} else if len(types) > 0 {
+			knownMisconceptionTypes = types
+		}
+	}
+	enrichmentMs := time.Since(enrichmentStart).Milliseconds()
+
+	// Motivation layer — compose a context-adaptive brief for this activity.
+	// Detect plateau active on the chosen concept from the alerts list.
+	motivationStart := time.Now()
+	plateauActive := false
+	for _, a := range alerts {
+		if a.Type == models.AlertPlateau && a.Concept == activity.Concept {
+			plateauActive = true
+			break
+		}
+	}
+	motivationEngine := engine.NewMotivationEngine(deps.Store)
+	motivationBrief, motivationErr := motivationEngine.Build(
+		ctx, learnerID, domain, activity.Concept, activity.Type,
+		plateauActive, len(sessionConcepts),
+	)
+	if motivationErr != nil {
+		markDegraded("motivation_brief", motivationErr)
+		for _, component := range motivationDegradedComponentNames(motivationErr) {
+			degradedComponents = append(degradedComponents, component)
+			deps.Logger.Warn("get_next_activity: motivation component degraded",
+				"component", component, "learner", learnerID, "domain", domain.ID)
+		}
+	}
+	motivationMs := time.Since(motivationStart).Milliseconds()
+
+	// Keep the legacy opt-in's descriptive metrics visible, but do not
+	// remove help based on an unvalidated aggregate or changing coverage.
+	// A future fading policy must use task-specific independence evidence.
+	if regulationFadeEnabled() {
+		autonomyMetrics := engine.ComputeAutonomyMetrics(engine.AutonomyInput{
+			Interactions:      allInteractions,
+			ConceptStates:     domainStates,
+			CalibrationDeltas: calibHistory,
+			SessionGap:        2 * time.Hour,
+		})
+		autonomyMetrics.Trend = engine.ComputeAutonomyTrendExported(autonomyScores)
+		extra["fade_status"] = "disabled_unvalidated_autonomy_score"
+		extra["autonomy_score"] = autonomyMetrics.Score
+		extra["autonomy_trend"] = autonomyMetrics.Trend
+		extra["autonomy_components"] = autonomyMetrics
+	}
+
+	diagnosticsStart := time.Now()
+	var masteryEvidence any = map[string]any{}
+	var masteryUncertainty any = map[string]any{}
+	var transferProfile any = map[string]any{}
+	var selectedState *models.ConceptState
+	var evidenceQuality engine.EvidenceQualityAssessment
+	var uncertainty engine.MasteryUncertainty
+	var typedTransferProfile engine.TransferProfile
+	if activity.Concept != "" {
+		for _, cs := range domainStates {
+			if cs.Concept == activity.Concept {
+				selectedState = cs
 				break
 			}
 		}
-		motivationEngine := engine.NewMotivationEngine(deps.Store)
-		motivationBrief, motivationErr := motivationEngine.Build(
-			ctx, learnerID, domain, activity.Concept, activity.Type,
-			plateauActive, len(sessionConcepts),
+		conceptInteractions, err := deps.Store.GetRecentInteractionsInDomain(ctx, learnerID, domain.ID, activity.Concept, 50)
+		if err != nil {
+			markDegraded("mastery_diagnostics", err)
+		} else {
+			now := time.Now().UTC()
+			profile := engine.BuildEvidenceProfile(learnerID, activity.Concept, conceptInteractions, now)
+			evidenceQuality = engine.MasteryEvidenceQuality(profile)
+			masteryEvidence = map[string]any{
+				"profile": profile,
+				"quality": evidenceQuality,
+			}
+			uncertainty = engine.ComputeMasteryUncertainty(selectedState, conceptInteractions, engine.MasteryEvidenceProfile{Now: now})
+			masteryUncertainty = uncertainty
+		}
+		conceptEvidence := evidenceSnapshot.ForConcept(activity.Concept)
+		// The same trusted read model as check_mastery and MASTERY_READY:
+		// only attempt-linked transfer evidence with temporal failure
+		// repair, so the controller and the alerts never disagree.
+		typedTransferProfile = engine.BuildTrustedTransferProfileFromEvidence(
+			activity.Concept, conceptEvidence.Transfers, conceptEvidence.Assessments, now,
 		)
-		if motivationErr != nil {
-			markDegraded("motivation_brief", motivationErr)
-			for _, component := range motivationDegradedComponentNames(motivationErr) {
-				degradedComponents = append(degradedComponents, component)
-				deps.Logger.Warn("get_next_activity: motivation component degraded",
-					"component", component, "learner", learnerID, "domain", domain.ID)
-			}
-		}
-		motivationMs := time.Since(motivationStart).Milliseconds()
-
-		// Keep the legacy opt-in's descriptive metrics visible, but do not
-		// remove help based on an unvalidated aggregate or changing coverage.
-		// A future fading policy must use task-specific independence evidence.
-		if regulationFadeEnabled() {
-			autonomyMetrics := engine.ComputeAutonomyMetrics(engine.AutonomyInput{
-				Interactions:      allInteractions,
-				ConceptStates:     domainStates,
-				CalibrationDeltas: calibHistory,
-				SessionGap:        2 * time.Hour,
-			})
-			autonomyMetrics.Trend = engine.ComputeAutonomyTrendExported(autonomyScores)
-			extra["fade_status"] = "disabled_unvalidated_autonomy_score"
-			extra["autonomy_score"] = autonomyMetrics.Score
-			extra["autonomy_trend"] = autonomyMetrics.Trend
-			extra["autonomy_components"] = autonomyMetrics
-		}
-
-		diagnosticsStart := time.Now()
-		var masteryEvidence any = map[string]any{}
-		var masteryUncertainty any = map[string]any{}
-		var transferProfile any = map[string]any{}
-		var selectedState *models.ConceptState
-		var evidenceQuality engine.EvidenceQualityAssessment
-		var uncertainty engine.MasteryUncertainty
-		var typedTransferProfile engine.TransferProfile
-		if activity.Concept != "" {
-			for _, cs := range domainStates {
-				if cs.Concept == activity.Concept {
-					selectedState = cs
-					break
+		transferProfile = typedTransferProfile
+	}
+	if decision := engine.ApplyEvidenceController(engine.EvidenceControllerInput{
+		Activity:           activity,
+		ConceptState:       selectedState,
+		EvidenceQuality:    evidenceQuality,
+		MasteryUncertainty: uncertainty,
+		TransferProfile:    typedTransferProfile,
+	}); decision.Adjusted {
+		extra["evidence_adjustment"] = fmt.Sprintf("%s (replaced %s)", decision.Rationale, activity.Type)
+		activity = decision.Activity
+		if active, err := deps.Store.GetActiveMisconceptionsInDomain(ctx, learnerID, domain.ID, activity.Concept); err != nil {
+			markDegraded("adjusted_activity_misconceptions", err)
+		} else if len(active) > 0 {
+			activeMisconceptions = active
+			activeMisconceptionCount = len(active)
+			misconceptionPrompt := fmt.Sprintf("\nWARNING: the learner has %d active misconception(s): ", len(active))
+			for i, m := range active {
+				if i > 0 {
+					misconceptionPrompt += " ; "
+				}
+				misconceptionPrompt += m.MisconceptionType
+				if m.LastErrorDetail != "" {
+					misconceptionPrompt += " - " + m.LastErrorDetail
 				}
 			}
-			conceptInteractions, err := deps.Store.GetRecentInteractionsInDomain(ctx, learnerID, domain.ID, activity.Concept, 50)
-			if err != nil {
-				markDegraded("mastery_diagnostics", err)
-			} else {
-				now := time.Now().UTC()
-				profile := engine.BuildEvidenceProfile(learnerID, activity.Concept, conceptInteractions, now)
-				evidenceQuality = engine.MasteryEvidenceQuality(profile)
-				masteryEvidence = map[string]any{
-					"profile": profile,
-					"quality": evidenceQuality,
-				}
-				uncertainty = engine.ComputeMasteryUncertainty(selectedState, conceptInteractions, engine.MasteryEvidenceProfile{Now: now})
-				masteryUncertainty = uncertainty
-			}
-			conceptEvidence := evidenceSnapshot.ForConcept(activity.Concept)
-			// The same trusted read model as check_mastery and MASTERY_READY:
-			// only attempt-linked transfer evidence with temporal failure
-			// repair, so the controller and the alerts never disagree.
-			typedTransferProfile = engine.BuildTrustedTransferProfileFromEvidence(
-				activity.Concept, conceptEvidence.Transfers, conceptEvidence.Assessments, now,
-			)
-			transferProfile = typedTransferProfile
+			misconceptionPrompt += ". Target these confusions in your explanation and exercise. Do not explicitly mention the misconceptions - design the exercise so the learner confronts them naturally."
+			activity.PromptForLLM += misconceptionPrompt
 		}
-		if decision := engine.ApplyEvidenceController(engine.EvidenceControllerInput{
-			Activity:           activity,
-			ConceptState:       selectedState,
-			EvidenceQuality:    evidenceQuality,
-			MasteryUncertainty: uncertainty,
-			TransferProfile:    typedTransferProfile,
-		}); decision.Adjusted {
-			extra["evidence_adjustment"] = fmt.Sprintf("%s (replaced %s)", decision.Rationale, activity.Type)
-			activity = decision.Activity
-			if active, err := deps.Store.GetActiveMisconceptionsInDomain(ctx, learnerID, domain.ID, activity.Concept); err != nil {
-				markDegraded("adjusted_activity_misconceptions", err)
-			} else if len(active) > 0 {
-				activeMisconceptions = active
-				activeMisconceptionCount = len(active)
-				misconceptionPrompt := fmt.Sprintf("\nWARNING: the learner has %d active misconception(s): ", len(active))
-				for i, m := range active {
-					if i > 0 {
-						misconceptionPrompt += " ; "
-					}
-					misconceptionPrompt += m.MisconceptionType
-					if m.LastErrorDetail != "" {
-						misconceptionPrompt += " - " + m.LastErrorDetail
-					}
-				}
-				misconceptionPrompt += ". Target these confusions in your explanation and exercise. Do not explicitly mention the misconceptions - design the exercise so the learner confronts them naturally."
-				activity.PromptForLLM += misconceptionPrompt
-			}
+	}
+	diagnosticsMs := time.Since(diagnosticsStart).Milliseconds()
+	goalRelevanceStatus := buildGoalRelevanceStatus(domain)
+	episodicContext, olmSnapshot, narrativeErr := loadEpisodicContextForActivity(
+		ctx, deps, learnerID, domain, domainStates, activity.Concept, alerts, now, evidenceSnapshot,
+	)
+	if narrativeErr != nil {
+		component := "narrative_context"
+		if errors.Is(narrativeErr, memory.ErrSessionIndexIncomplete) {
+			component = "session_narrative_index"
 		}
-		diagnosticsMs := time.Since(diagnosticsStart).Milliseconds()
-		goalRelevanceStatus := buildGoalRelevanceStatus(domain)
-		episodicContext, olmSnapshot, narrativeErr := loadEpisodicContextForActivity(
-			ctx, deps, learnerID, domain, domainStates, activity.Concept, alerts, now, evidenceSnapshot,
-		)
-		if narrativeErr != nil {
-			component := "narrative_context"
-			if errors.Is(narrativeErr, memory.ErrSessionIndexIncomplete) {
-				component = "session_narrative_index"
-			}
-			markDegraded(component, narrativeErr)
-		}
-		if len(degradedComponents) > 0 {
-			extra["degraded_components"] = degradedComponents
-		}
-		contract := buildPedagogicalContract(activity, intent, evidenceQuality, uncertainty, typedTransferProfile, goalRelevanceStatus, episodicContext, activeMisconceptionCount, olmSnapshot)
-		if err := freezePedagogicalDecision(ctx, deps, learnerID, learningSession.ID, domain, &contract, activity, now,
-			map[string]any{"concept_state": selectedState, "evidence_quality": evidenceQuality, "uncertainty": uncertainty, "intent": intent}); err != nil {
-			r, _ := safeErrorResult(deps.Logger, "failed to freeze pedagogical decision", err)
-			return r, nil, nil
-		}
-
-		out := map[string]any{
-			"needs_domain_setup":        false,
-			"session_id":                learningSession.ID,
-			"domain_id":                 domain.ID,
-			"domain_name":               domain.Name,
-			"intent":                    intent,
-			"intent_status":             intentStatus,
-			"activity":                  activity,
-			"session_concepts_done":     len(sessionConcepts),
-			"metacognitive_mirror":      mirror,
-			"tutor_mode":                tutorMode,
-			"active_misconceptions":     activeMisconceptions,
-			"known_misconception_types": knownMisconceptionTypes,
-			"motivation_brief":          motivationBrief,
-			"mastery_evidence":          masteryEvidence,
-			"mastery_uncertainty":       masteryUncertainty,
-			"transfer_profile":          transferProfile,
-			"goal_relevance_status":     goalRelevanceStatus,
-			"pedagogical_contract":      contract,
-			"decision_id":               contract.DecisionID,
-			"audit_rationale":           contract.AuditRationale,
-			"llm_instruction":           contract.LLMInstruction,
-			"learner_explanation":       contract.LearnerExplanation,
-		}
-		if episodicContextVisible(episodicContext) {
-			out["episodic_context"] = episodicContext
-		}
-		if consolidationRequest := maybeBuildConsolidationRequest(ctx, deps, learnerID, now); consolidationRequest != nil {
-			out["consolidation_request"] = consolidationRequest
-		}
-		if overrideResult.Status != LearningNegotiationOverrideConsumeNone {
-			out["learning_negotiation_override"] = overrideResult
-		}
-		for k, v := range extra {
-			out[k] = v
-		}
-		jsonStart := time.Now()
-		r, _ := jsonResult(out)
-		jsonMs := time.Since(jsonStart).Milliseconds()
-		if deps.Logger.Enabled(ctx, slog.LevelDebug) {
-			deps.Logger.Debug("get_next_activity timings",
-				"learner", learnerID,
-				"domain", domain.ID,
-				"concepts", len(domain.Graph.Concepts),
-				"domain_ms", domainMs,
-				"prefetch_ms", prefetchMs,
-				"orchestrator_ms", orchestratorMs,
-				"mirror_ms", mirrorMs,
-				"enrichment_ms", enrichmentMs,
-				"motivation_ms", motivationMs,
-				"diagnostics_ms", diagnosticsMs,
-				"json_ms", jsonMs,
-				"total_ms", time.Since(totalStart).Milliseconds(),
-			)
-		}
+		markDegraded(component, narrativeErr)
+	}
+	if len(degradedComponents) > 0 {
+		extra["degraded_components"] = degradedComponents
+	}
+	contract := buildPedagogicalContract(activity, intent, evidenceQuality, uncertainty, typedTransferProfile, goalRelevanceStatus, episodicContext, activeMisconceptionCount, olmSnapshot)
+	if err := freezePedagogicalDecision(ctx, deps, learnerID, learningSession.ID, domain, &contract, activity, now,
+		map[string]any{"concept_state": selectedState, "evidence_quality": evidenceQuality, "uncertainty": uncertainty, "intent": intent}); err != nil {
+		r, _ := safeErrorResult(deps.Logger, "failed to freeze pedagogical decision", err)
 		return r, nil, nil
-	})
+	}
+
+	out := map[string]any{
+		"needs_domain_setup":        false,
+		"session_id":                learningSession.ID,
+		"domain_id":                 domain.ID,
+		"domain_name":               domain.Name,
+		"intent":                    intent,
+		"intent_status":             intentStatus,
+		"activity":                  activity,
+		"session_concepts_done":     len(sessionConcepts),
+		"metacognitive_mirror":      mirror,
+		"tutor_mode":                tutorMode,
+		"active_misconceptions":     activeMisconceptions,
+		"known_misconception_types": knownMisconceptionTypes,
+		"motivation_brief":          motivationBrief,
+		"mastery_evidence":          masteryEvidence,
+		"mastery_uncertainty":       masteryUncertainty,
+		"transfer_profile":          transferProfile,
+		"goal_relevance_status":     goalRelevanceStatus,
+		"pedagogical_contract":      contract,
+		"decision_id":               contract.DecisionID,
+		"audit_rationale":           contract.AuditRationale,
+		"llm_instruction":           contract.LLMInstruction,
+		"learner_explanation":       contract.LearnerExplanation,
+	}
+	if episodicContextVisible(episodicContext) {
+		out["episodic_context"] = episodicContext
+	}
+	if overrideResult.Status != LearningNegotiationOverrideConsumeNone {
+		out["learning_negotiation_override"] = overrideResult
+	}
+	for k, v := range extra {
+		out[k] = v
+	}
+	jsonStart := time.Now()
+	r, _ := jsonResult(out)
+	jsonMs := time.Since(jsonStart).Milliseconds()
+	if deps.Logger.Enabled(ctx, slog.LevelDebug) {
+		deps.Logger.Debug("get_next_activity timings",
+			"learner", learnerID,
+			"domain", domain.ID,
+			"concepts", len(domain.Graph.Concepts),
+			"domain_ms", domainMs,
+			"prefetch_ms", prefetchMs,
+			"orchestrator_ms", orchestratorMs,
+			"mirror_ms", mirrorMs,
+			"enrichment_ms", enrichmentMs,
+			"motivation_ms", motivationMs,
+			"diagnostics_ms", diagnosticsMs,
+			"json_ms", jsonMs,
+			"total_ms", time.Since(totalStart).Milliseconds(),
+		)
+	}
+	return r, nil, nil
 }
 
 func loadEpisodicContextForActivity(

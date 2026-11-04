@@ -40,6 +40,8 @@ var validIdempotencyKey = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}
 // metadata, while every tool here can otherwise duplicate a durable side
 // effect when an MCP transport retries after an ambiguous disconnect.
 var idempotentWriteTools = map[string]bool{
+	"commit_memory_maintenance":       true,
+	"prepare_pedagogical_turn":        true, // activity mode only; context never reserves a key
 	"start_learning_session":          true,
 	"get_next_activity":               true, // opens/touches a session and may enqueue a mirror
 	"record_interaction":              true,
@@ -82,6 +84,16 @@ func idempotencyMiddleware(deps *Deps) mcp.Middleware {
 			if !ok || call.Params == nil || !idempotentWriteTools[call.Params.Name] {
 				return next(ctx, method, req)
 			}
+			if call.Params.Name == "prepare_pedagogical_turn" {
+				mode, err := pedagogicalTurnModeFromRequest(call)
+				if err != nil {
+					result, _ := errorResult(err.Error())
+					return result, nil
+				}
+				if mode == "context" {
+					return next(ctx, method, req)
+				}
+			}
 			key, exists, keyErr := requestIdempotencyKey(call.Params)
 			if !exists {
 				return next(ctx, method, req)
@@ -96,6 +108,12 @@ func idempotencyMiddleware(deps *Deps) mcp.Middleware {
 				return next(ctx, method, req)
 			}
 			requestHash := canonicalToolRequestHash(call.Params.Name, call.Params.Arguments)
+			// Explicit per-call binding is part of the operation identity. Keep
+			// legacy hashes unchanged for transports without this metadata.
+			if binding, ok := call.Params.GetMeta()[conversationMetaKey].(string); ok {
+				sum := sha256.Sum256([]byte(requestHash + "\x00conversation\x00" + binding))
+				requestHash = hex.EncodeToString(sum[:])
+			}
 			cached, execute, err := deps.Store.ClaimIdempotencyKey(
 				ctx, learnerID, call.Params.Name, key, requestHash, time.Now().UTC())
 			switch {

@@ -39,6 +39,7 @@ func TestTenantToolReadRoutesAreExplicitAndEnforced(t *testing.T) {
 	// This reviewed list is deliberately independent of readOnlyTools, so a
 	// new getter cannot inherit read-only routing through a name heuristic.
 	readers := []string{
+		"get_conversation_context",
 		"list_formations", "list_formation_versions", "review_formation_version",
 		"get_training_groups", "get_my_badges", "get_learner_badges", "list_trainer_cohorts", "get_cohort_insights", "get_cohort_statistics", "get_learner_progress",
 		"list_available_formations", "get_my_formations", "get_learner_formation", "get_formation_version",

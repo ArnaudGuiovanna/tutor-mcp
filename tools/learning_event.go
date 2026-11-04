@@ -27,6 +27,10 @@ func registerRecordLearningEvent(server *mcp.Server, deps *Deps) {
 			r, _ := errorResult("authenticated principal required")
 			return r, nil, nil
 		}
+		if _, err := resolveDomain(ctx, deps.Store, actor.LearnerID, p.DomainID); err != nil {
+			r, _ := errorResult("learning event does not match an active conversation domain")
+			return r, nil, nil
+		}
 		event, replayed, err := deps.Store.RecordLearningEvent(ctx, actor, models.LearningEventRequest{EventKey: p.EventKey, DomainID: p.DomainID, ConceptID: p.Concept, AttemptID: p.AttemptID, Kind: p.Kind})
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "learning event rejected; check the active domain, concept, attempt and event key", err)

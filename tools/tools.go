@@ -40,6 +40,7 @@ var toolRegistrationOAuthModes sync.Map // map[*mcp.Server]bool; populated only 
 var toolRegistrationNames sync.Map // map[*mcp.Server]map[string]struct{}; registration only
 
 var readOnlyTools = map[string]bool{
+	"get_conversation_context":       true,
 	"get_training_groups":            true,
 	"list_formations":                true,
 	"list_formation_versions":        true,
@@ -77,8 +78,11 @@ var readOnlyTools = map[string]bool{
 // their primary read payload, while a read-only grant must not authorize their
 // side effects, so these tools require both granular capabilities.
 var readWriteTools = map[string]bool{
+	"claim_memory_maintenance":   true,
+	"commit_memory_maintenance":  true,
+	"prepare_pedagogical_turn":   true,
 	"preview_training_lifecycle": true,
-	"list_training_library":      true, "get_training": true, "get_conversation_context": true, "preview_training_edit": true, "get_training_policy": true, "find_training_members": true,
+	"list_training_library":      true, "get_training": true, "preview_training_edit": true, "get_training_policy": true, "find_training_members": true,
 	"get_curriculum_snapshot":  true,
 	"get_memory_state":         true,
 	"get_next_activity":        true,
@@ -127,6 +131,7 @@ var writeTools = map[string]bool{
 // destructive conservatively so hosts can put an approval boundary around
 // overwrites, lifecycle transitions, and deletions.
 var additiveWriteTools = map[string]bool{
+	"prepare_pedagogical_turn":   true,
 	"draft_formation":            true,
 	"start_learning_session":     true,
 	"get_next_activity":          true,
@@ -149,6 +154,7 @@ var additiveWriteTools = map[string]bool{
 // external webhook destination, even when the network dispatch itself happens
 // asynchronously in the scheduler.
 var openWorldTools = map[string]bool{
+	"prepare_pedagogical_turn": true,
 	"get_next_activity":        true,
 	"get_metacognitive_mirror": true,
 	"queue_webhook_message":    true,
@@ -157,6 +163,11 @@ var openWorldTools = map[string]bool{
 func boolHint(v bool) *bool { return &v }
 
 func requiredOAuthScopesForTool(name string) ([]string, bool) {
+	if name == "prepare_pedagogical_turn" {
+		// Discovery advertises the minimum capability. Activity-mode requests
+		// additionally require write at both HTTP and MCP invocation boundaries.
+		return []string{models.OAuthScopeLearnerRead}, true
+	}
 	if name == "get_training_groups" {
 		return []string{models.OAuthScopeProgressRead}, true
 	}
@@ -222,7 +233,8 @@ func hasToolOAuthScopes(ctx context.Context, name string, required []string) boo
 // four times while the description named the two real kinds. Listing them in
 // the schema makes the same constraint part of what the client validates.
 var toolInputEnums = map[string]map[string][]any{
-	"record_learning_event": {"kind": {"feedback", "instruction"}},
+	"record_learning_event":    {"kind": {"feedback", "instruction"}},
+	"prepare_pedagogical_turn": {"mode": {"context", "activity"}, "intent": {"auto", "review"}},
 }
 
 // toolInputStringForms names inputs declared as an object that also accept a
@@ -307,13 +319,18 @@ func addTool[In, Out any](server *mcp.Server, tool *mcp.Tool, handler mcp.ToolHa
 	}
 	scopedHandler := func(ctx context.Context, req *mcp.CallToolRequest, input In) (*mcp.CallToolResult, Out, error) {
 		var zero Out
+		requestScopes, _, scopeErr := requiredOAuthScopesForCall(req)
+		if scopeErr != nil {
+			result, _ := errorResult(scopeErr.Error())
+			return result, zero, nil
+		}
 		principal, _ := auth.GetPrincipal(ctx)
 		// Leave missing authentication to the handler's existing canonical path,
 		// but fail closed when a principal exists without the capability required
 		// by this exact tool. The bounded legacy learner grant is accepted by
 		// OAuthScopeAllows and cannot silently cover future scope families.
-		if (principal.UserID != "" || auth.GetLearnerID(ctx) != "") && !hasToolOAuthScopes(ctx, tool.Name, requiredScopes) {
-			result := insufficientOAuthScopeResult(ctx, "", requiredScopes, granular)
+		if (principal.UserID != "" || auth.GetLearnerID(ctx) != "") && !hasToolOAuthScopes(ctx, tool.Name, requestScopes) {
+			result := insufficientOAuthScopeResult(ctx, "", requestScopes, granular)
 			markToolCallDenied(ctx, result)
 			return result, zero, nil
 		}
@@ -352,7 +369,11 @@ func toolOAuthScopeMiddleware(baseURL string, granular bool) mcp.Middleware {
 			if !ok || call.Params == nil {
 				return next(ctx, method, req)
 			}
-			requiredScopes, known := requiredOAuthScopesForTool(call.Params.Name)
+			requiredScopes, known, scopeErr := requiredOAuthScopesForCall(call)
+			if scopeErr != nil {
+				result, _ := errorResult(scopeErr.Error())
+				return result, nil
+			}
 			if !known || !oauthToolAvailable(call.Params.Name) {
 				return next(ctx, method, req)
 			}
@@ -546,6 +567,7 @@ func RegisterTools(server *mcp.Server, deps *Deps) {
 	registerStartLearningSession(server, deps)
 	registerGetPendingAlerts(server, deps)
 	registerGetNextActivity(server, deps)
+	registerPreparePedagogicalTurn(server, deps)
 	registerRecordInteraction(server, deps)
 	registerRecordLearningEvent(server, deps)
 	registerPrepareAssessmentAttempt(server, deps)
@@ -578,6 +600,8 @@ func RegisterTools(server *mcp.Server, deps *Deps) {
 	registerUpdateLearnerMemory(server, deps)
 	registerReadRawSession(server, deps)
 	registerGetMemoryState(server, deps)
+	registerClaimMemoryMaintenance(server, deps)
+	registerCommitMemoryMaintenance(server, deps)
 	registerArchiveDomain(server, deps)
 	registerUnarchiveDomain(server, deps)
 	registerDeleteDomain(server, deps)
@@ -598,6 +622,7 @@ func RegisterTools(server *mcp.Server, deps *Deps) {
 		baseURL = deps.BaseURL
 	}
 	server.AddReceivingMiddleware(
+		conversationBindingMiddleware(),
 		toolOAuthScopeMiddleware(baseURL, granularScopes),
 		toolTenantTransactionMiddleware(deps),
 	)
@@ -643,8 +668,13 @@ func toolTenantTransactionMiddleware(deps *Deps) mcp.Middleware {
 			}
 			var result mcp.Result
 			var callErr error
+			readOnly, modeErr := readOnlyToolCall(req)
+			if modeErr != nil {
+				failure, _ := errorResult(modeErr.Error())
+				return failure, nil
+			}
 			transaction := deps.Store.WithTenantTx
-			if readOnlyTools[toolNameFromRequest(req)] {
+			if readOnly {
 				transaction = deps.Store.WithTenantReadTx
 			}
 			err := transaction(ctx, principal.TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {

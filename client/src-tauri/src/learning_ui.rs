@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+#[path = "learning_ui_prepared.rs"]
+mod prepared;
+pub(crate) use prepared::{PreparedOutput, PreparedTurn};
 
 const MAX_BLOCK: usize = 48 * 1024;
 const INVALID: &str =
@@ -310,13 +313,22 @@ fn accepted_response(
         return Err(INVALID.into());
     }
     let mut matched = None;
-    for turn in &conversation.messages {
+    for (index, turn) in conversation.messages.iter().enumerate() {
         if turn.role == "user"
             && payload::<Response>(&turn.text, "tutor-response")
                 .ok()
                 .flatten()
                 .is_some_and(|previous| previous.activity_id == response.activity_id)
         {
+            if turn.text == message
+                && conversation.messages.get(index + 1).is_some_and(|m| {
+                    m.private_output
+                        && (m.pending_learning_commit.is_some()
+                            || matches!(m.status.as_str(), "interrupted" | "error"))
+                })
+            {
+                continue;
+            }
             return Err("Une réponse a déjà été enregistrée pour cette activité.".into());
         }
         if turn.role != "assistant" || turn.status != "complete" {
@@ -490,6 +502,9 @@ pub fn archive_withdrawn_response(data: &mut Workspace) -> Result<(), String> {
         .and_then(|message| message.training_context.clone());
     let at = now();
     conversation.messages.push(Message {
+        pending_learning_commit: None,
+        learning_delivery: None,
+        private_output: false,
         id: uuid::Uuid::new_v4().to_string(),
         role: "user".into(),
         text: format!("{notice}\n\n{}", pending.text),

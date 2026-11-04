@@ -46,6 +46,7 @@ func TestRegisterTools_Smoke(t *testing.T) {
 		"start_learning_session",
 		"get_pending_alerts",
 		"get_next_activity",
+		"prepare_pedagogical_turn",
 		"record_interaction",
 		"record_learning_event",
 		"prepare_assessment_attempt",
@@ -78,6 +79,8 @@ func TestRegisterTools_Smoke(t *testing.T) {
 		"update_learner_memory",
 		"read_raw_session",
 		"get_memory_state",
+		"claim_memory_maintenance",
+		"commit_memory_maintenance",
 		"archive_domain",
 		"unarchive_domain",
 		"delete_domain",
@@ -229,8 +232,8 @@ func TestRegisterTools_LegacyRolloutAdvertisesOnlyBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(listed.Tools) != 46+len(trainingTools) {
-		t.Fatalf("listed tools=%d, want %d", len(listed.Tools), 46+len(trainingTools))
+	if len(listed.Tools) != 49+len(trainingTools) {
+		t.Fatalf("listed tools=%d, want %d", len(listed.Tools), 49+len(trainingTools))
 	}
 	for _, tool := range listed.Tools {
 		encoded, err := json.Marshal(tool.Meta["securitySchemes"])

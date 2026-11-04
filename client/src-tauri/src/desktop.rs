@@ -281,6 +281,19 @@ async fn send_prompt(
 }
 
 #[tauri::command]
+async fn acknowledge_learning_delivery(
+    backend: AppBackend<'_>,
+    conversation_id: String,
+    message_id: String,
+) -> Result<(), String> {
+    backend
+        .current()
+        .await
+        .acknowledge_learning_delivery(conversation_id, message_id)
+        .await
+}
+
+#[tauri::command]
 async fn cancel_prompt(backend: AppBackend<'_>, conversation_id: String) -> Result<(), String> {
     let backend = backend.current().await;
     backend.cancel_prompt(conversation_id).await
@@ -505,6 +518,7 @@ fn command_handler<R: tauri::Runtime>(
         authenticate_agent,
         start_conversation,
         send_prompt,
+        acknowledge_learning_delivery,
         cancel_prompt,
         answer_permission,
         disconnect_agent,

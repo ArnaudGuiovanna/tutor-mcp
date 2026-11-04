@@ -62,7 +62,7 @@ type UpdateLearnerMemoryParams struct {
 	ConceptSlug string `json:"concept_slug,omitempty" jsonschema:"required when scope=concept; must match an active concept"`
 	DomainID    string `json:"domain_id,omitempty" jsonschema:"domain owning a concept note or session; required for new domain-scoped concept memory"`
 	Period      string `json:"period,omitempty" jsonschema:"archive period key alias, for example 2026-05 or 2026-Q2"`
-	PeriodType  string `json:"period_type,omitempty" jsonschema:"required with period_key when scope=archive consolidation completion: monthly, quarterly, or annual"`
+	PeriodType  string `json:"period_type,omitempty" jsonschema:"archive period type: monthly, quarterly, or annual; saving an archive does not complete maintenance"`
 	PeriodKey   string `json:"period_key,omitempty" jsonschema:"required when scope=archive; for example 2026-05, 2026-Q2, or 2026"`
 	Timestamp   string `json:"timestamp,omitempty" jsonschema:"required when scope=session, ISO 8601 timestamp"`
 	SessionID   string `json:"session_id,omitempty" jsonschema:"durable learning session ID for a session summary; omit only when importing legacy summaries"`
@@ -135,15 +135,6 @@ func registerUpdateLearnerMemory(server *mcp.Server, deps *Deps) {
 			degradedComponents = append(degradedComponents, "memory_directory_sync")
 			deps.Logger.Warn("update_learner_memory: file committed with degraded directory sync", "err", err, "learner", learnerID, "scope", params.Scope)
 		}
-		consolidationCompletionRecorded := false
-		if scope == memory.ScopeArchive && params.PeriodType != "" && periodKey != "" {
-			if err := deps.Store.MarkConsolidationCompleted(ctx, learnerID, params.PeriodType, periodKey, time.Now().UTC()); err != nil {
-				deps.Logger.Warn("update_learner_memory: mark consolidation completed failed", "err", err, "learner", learnerID, "period_type", params.PeriodType, "period_key", periodKey)
-				degradedComponents = append(degradedComponents, "consolidation_completion_marker")
-			} else {
-				consolidationCompletionRecorded = true
-			}
-		}
 		key := memoryReadKey(scope, params.ConceptSlug, periodKey, ts)
 		payload := map[string]any{
 			"ok":            true,
@@ -156,10 +147,9 @@ func registerUpdateLearnerMemory(server *mcp.Server, deps *Deps) {
 		}
 		if scope == memory.ScopeArchive && params.PeriodType != "" && periodKey != "" {
 			payload["archive_saved"] = true
-			payload["consolidation_completion_recorded"] = consolidationCompletionRecorded
-			if !consolidationCompletionRecorded {
-				payload["warning"] = "archive saved, but consolidation completion could not be recorded; reconcile the consolidation marker without rewriting the archive"
-			}
+			payload["consolidation_completion_recorded"] = false
+			payload["maintenance_required"] = true
+			payload["warning"] = "archive saved; complete all memory updates through claim_memory_maintenance and commit_memory_maintenance before the consolidation is finished"
 		}
 		if len(degradedComponents) > 0 {
 			payload["degraded_components"] = degradedComponents

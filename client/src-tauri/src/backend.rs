@@ -18,6 +18,10 @@ use std::sync::{
 };
 use tokio::sync::{mpsc, oneshot, Mutex};
 
+#[path = "backend_maintenance.rs"]
+mod maintenance;
+#[path = "backend_pedagogy.rs"]
+mod pedagogy;
 #[path = "backend_preparation.rs"]
 mod preparation;
 use crate::timing::{TimingMarker, TimingOutcome, TurnPhase};
@@ -53,6 +57,8 @@ struct Agent {
     restore_history: HashSet<String>,
     configuration_session: Option<String>,
     configuration: Value,
+    session_configurations: HashMap<String, (Value, String)>,
+    background_sessions: HashSet<String>,
     tool_calls: ToolCallRegistry,
 }
 
@@ -66,6 +72,9 @@ struct Prompt {
     failure: Option<String>,
     provider_failure: bool,
     truncated: bool,
+    context_changed: bool,
+    catalog_changed: bool,
+    private_output: bool,
 }
 
 struct ProviderFailure {
@@ -152,6 +161,9 @@ pub struct Backend {
     prompt: Mutex<Option<Prompt>>,
     operation: Mutex<()>,
     preparing: std::sync::Mutex<Option<Arc<Preparation>>>,
+    native_permissions: Mutex<HashMap<String, pedagogy::NativePermission>>,
+    maintenance: std::sync::Mutex<Option<Arc<maintenance::Maintenance>>>,
+    maintenance_scheduled: AtomicBool,
     provider_login: Mutex<Option<tokio::process::Child>>,
     emit: EventSink,
     profile: Option<crate::profiles::ProfileContext>,
@@ -210,6 +222,9 @@ impl Backend {
             prompt: Mutex::new(None),
             operation: Mutex::new(()),
             preparing: std::sync::Mutex::new(None),
+            native_permissions: Mutex::new(HashMap::new()),
+            maintenance: std::sync::Mutex::new(None),
+            maintenance_scheduled: AtomicBool::new(false),
             provider_login: Mutex::new(None),
             emit,
             profile,
@@ -221,6 +236,24 @@ impl Backend {
     pub async fn snapshot(&self) -> Value {
         let store = self.store.lock().await;
         let mut value = serde_json::to_value(&store.data).expect("workspace serialization");
+        // Unvalidated activities and evaluations never cross the native/UI boundary.
+        if let Some(conversations) = value["conversations"].as_array_mut() {
+            for conversation in conversations {
+                if let Some(messages) = conversation["messages"].as_array_mut() {
+                    for message in messages {
+                        if message
+                            .as_object_mut()
+                            .is_some_and(|m| m.remove("pendingLearningCommit").is_some())
+                        {
+                            message["canRetryCommit"] = json!(true);
+                        }
+                        if message["privateOutput"] == true {
+                            message["text"] = json!("");
+                        }
+                    }
+                }
+            }
+        }
         drop(store);
         value["tutorStatus"] = serde_json::to_value(&self.tutor.lock().await.status).unwrap();
         value["identity"] = serde_json::to_value(self.identity.lock().await.public()).unwrap();
@@ -497,6 +530,8 @@ impl Backend {
             restore_history: HashSet::new(),
             configuration_session: None,
             configuration: json!({}),
+            session_configurations: HashMap::new(),
+            background_sessions: HashSet::new(),
             tool_calls: ToolCallRegistry::default(),
         });
         drop(guard);
@@ -546,6 +581,17 @@ impl Backend {
     }
     async fn read_agent_configuration(&self) -> Result<Value, String> {
         let settings = self.settings().await.agent;
+        let selected_session = {
+            let store = self.store.lock().await;
+            store
+                .data
+                .conversations
+                .iter()
+                .find(|conversation| {
+                    Some(&conversation.id) == store.data.active_conversation_id.as_ref()
+                })
+                .and_then(|conversation| conversation.agent_session_id.clone())
+        };
         let (rpc, cwd, existing) = {
             let guard = self.agent.lock().await;
             let Some(agent) = guard.as_ref() else {
@@ -554,7 +600,9 @@ impl Backend {
             (
                 agent.rpc.clone(),
                 agent.cwd.clone(),
-                agent.configuration_session.clone(),
+                selected_session
+                    .filter(|session| agent.session_configurations.contains_key(session))
+                    .or_else(|| agent.configuration_session.clone()),
             )
         };
         if existing.is_none() {
@@ -563,9 +611,15 @@ impl Backend {
             let settings = self.session_agent_settings(&response).await?;
             let response = apply_agent_settings(&rpc, &session, response, &settings).await?;
             if let Some(agent) = self.agent.lock().await.as_mut() {
+                agent.session_configurations.insert(
+                    session.clone(),
+                    (response.clone(), digest(&json!(settings))),
+                );
                 agent.configuration_session = Some(session);
                 agent.configuration = response;
             }
+        } else if let Some(session) = existing {
+            self.ensure_session_settings(&rpc, &session).await?;
         }
         let settings = self.settings().await.agent;
         let guard = self.agent.lock().await;
@@ -660,6 +714,9 @@ impl Backend {
             return Err(error);
         }
         if let Some(agent) = self.agent.lock().await.as_mut() {
+            agent
+                .session_configurations
+                .insert(session, (response.clone(), digest(&json!(configuration))));
             agent.configuration = response.clone();
         }
         self.state_changed().await;
@@ -674,6 +731,37 @@ impl Backend {
         let settings = self.session_agent_settings(&response).await?;
         let response = apply_agent_settings(rpc, session, response, &settings).await?;
         if let Some(agent) = self.agent.lock().await.as_mut() {
+            agent
+                .session_configurations
+                .insert(session.into(), (response.clone(), digest(&json!(settings))));
+            agent.configuration_session = Some(session.into());
+            agent.configuration = response;
+        }
+        Ok(())
+    }
+
+    async fn ensure_session_settings(&self, rpc: &AcpClient, session: &str) -> Result<(), String> {
+        let settings = self.settings().await.agent;
+        let fingerprint = digest(&json!(settings));
+        let (response, applied) = self
+            .agent
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|agent| agent.session_configurations.get(session))
+            .cloned()
+            .ok_or(
+                "Les réglages de cette session ne sont plus disponibles. Reconnectez l’agent.",
+            )?;
+        let response = if applied == fingerprint {
+            response
+        } else {
+            apply_agent_settings(rpc, session, response, &settings).await?
+        };
+        if let Some(agent) = self.agent.lock().await.as_mut() {
+            agent
+                .session_configurations
+                .insert(session.into(), (response.clone(), fingerprint));
             agent.configuration_session = Some(session.into());
             agent.configuration = response;
         }
@@ -799,6 +887,7 @@ impl Backend {
     }
 
     async fn stop_agent(&self) -> Result<(), String> {
+        self.cancel_memory_maintenance();
         if let Some(mut login) = self.provider_login.lock().await.take() {
             let _ = login.kill().await;
         }
@@ -2201,13 +2290,34 @@ impl Backend {
             &text,
             Some(&conversation_id),
         )?;
-        let training_context = self
-            .training_action(
-                "get_conversation_context".into(),
-                json!({"conversation_id":conversation_id}),
-            )
+        let (mut servers, binding, owner) = self.mcp_servers(&conversation_id).await?;
+        if self
+            .retry_learning_commit(&conversation_id, &text, &binding, operation)
+            .await?
+        {
+            return Ok(json!({"stopReason":"end_turn","recoveredCommit":true}));
+        }
+        let prepared_turn = self
+            .prepared_turn(&conversation_id, &text, &binding, operation)
             .await?;
-        let (servers, binding, owner) = self.mcp_servers(&conversation_id).await?;
+        let training_context = match &prepared_turn {
+            Some(turn) => turn.packet["conversation"].clone(),
+            None => {
+                self.training_action(
+                    "get_conversation_context".into(),
+                    json!({"conversation_id":conversation_id}),
+                )
+                .await?
+            }
+        };
+        let private_output = prepared_turn
+            .as_ref()
+            .is_some_and(|turn| turn.private_output());
+        // The native client owns these writes. Structured generation receives
+        // no MCP server, so a model cannot race the deterministic commit.
+        if private_output {
+            servers = json!([]);
+        }
         let (rpc, generation, cwd, can_load, runtime_binding, target_id) = {
             let agent = self.agent.lock().await;
             let agent = agent.as_ref().ok_or("Reconnectez Codex.")?;
@@ -2300,6 +2410,8 @@ impl Backend {
             })?;
         }
         operation.check()?;
+        self.ensure_session_settings(&rpc, &session).await?;
+        operation.check()?;
         if let Some(agent) = self.agent.lock().await.as_mut() {
             agent
                 .mcp_configurations
@@ -2323,16 +2435,25 @@ impl Backend {
                 .intent_id
                 .as_ref()
                 .and_then(|id| store.data.intents.iter().find(|item| &item.id == id));
-            learning_turn_params(
-                &target_id,
-                &store.data.settings.language,
-                conversation,
-                intent,
-                &text,
-                &training_context,
-                tutor_context.as_ref(),
-                restore_history,
-            )
+            if let Some(turn) = &prepared_turn {
+                turn.prompt(
+                    &store.data.settings.language,
+                    conversation,
+                    &text,
+                    restore_history,
+                )
+            } else {
+                learning_turn_params(
+                    &target_id,
+                    &store.data.settings.language,
+                    conversation,
+                    intent,
+                    &text,
+                    &training_context,
+                    tutor_context.as_ref(),
+                    restore_history,
+                )
+            }
         };
         prompt_params["sessionId"] = json!(session);
         operation.check()?;
@@ -2353,6 +2474,9 @@ impl Backend {
                     conversation.title = text.chars().take(64).collect();
                 }
                 conversation.messages.push(Message {
+                    pending_learning_commit: None,
+                    learning_delivery: None,
+                    private_output: false,
                     training_context: Some(training_context.clone()),
                     id: uuid::Uuid::new_v4().to_string(),
                     role: "user".into(),
@@ -2361,6 +2485,9 @@ impl Backend {
                     status: "complete".into(),
                 });
                 conversation.messages.push(Message {
+                    pending_learning_commit: None,
+                    learning_delivery: None,
+                    private_output,
                     training_context: Some(training_context.clone()),
                     id: assistant_message_id.clone(),
                     role: "assistant".into(),
@@ -2386,6 +2513,9 @@ impl Backend {
             failure: None,
             provider_failure: false,
             truncated: false,
+            context_changed: false,
+            catalog_changed: false,
+            private_output,
         });
         drop(store);
         drop(prompt_guard);
@@ -2458,6 +2588,23 @@ impl Backend {
         } else {
             None
         };
+        let prepared_result = if !cancelled
+            && stop_reason == "end_turn"
+            && drained.is_ok()
+            && prompt
+                .as_ref()
+                .is_some_and(|p| !p.truncated && p.failure.is_none())
+        {
+            if let (Some(turn), Some(prompt)) = (&prepared_turn, &prompt) {
+                self.finalize_prepared(turn, prompt, &binding, operation)
+                    .await
+            } else {
+                Ok(())
+            }
+        } else {
+            Ok(())
+        };
+        let cancelled = cancelled || operation.cancelled.load(Ordering::Acquire);
         let finished = self
             .finish_prompt(
                 if cancelled
@@ -2469,6 +2616,7 @@ impl Backend {
                 } else if result.is_err()
                     || drained.is_err()
                     || protocol_error.is_some()
+                    || prepared_result.is_err()
                     || prompt.as_ref().is_some_and(|p| p.failure.is_some())
                 {
                     "error"
@@ -2477,32 +2625,25 @@ impl Backend {
                 },
             )
             .await;
-        if let Ok(selected) = self
-            .training_action(
-                "get_conversation_context".into(),
-                json!({"conversation_id":conversation_id}),
-            )
-            .await
-        {
-            self.store.lock().await.transaction(|data| {
-                if let Some(conversation) = data
-                    .conversations
-                    .iter_mut()
-                    .find(|c| c.id == conversation_id)
-                {
-                    conversation.active_training = Some(selected.clone());
-                    for message in conversation.messages.iter_mut().rev().take(2) {
-                        message.training_context = Some(selected.clone());
-                    }
-                }
-                Ok(())
-            })?;
-            self.state_changed().await;
+        // Publish durable completion before any optional remote refresh.
+        self.state_changed().await;
+        self.schedule_memory_maintenance();
+        if let Some(prompt) = prompt.as_ref() {
+            if prompt.context_changed {
+                self.refresh_turn_context_later(prompt.clone(), binding.clone());
+            }
+            if prompt.catalog_changed {
+                (self.emit)(
+                    "acp:event",
+                    json!({"type":"workspace_invalidated","scope":"training_catalog"}),
+                );
+            }
         }
         let provider_failure = prompt.as_ref().is_some_and(|p| p.provider_failure);
         let unsafe_session = finished.is_err() || drained.is_err() || protocol_error.is_some();
         let failure = prompt
             .and_then(|p| p.failure)
+            .or_else(|| prepared_result.err())
             .or_else(|| finished.err())
             .or_else(|| drained.err())
             .or(protocol_error);
@@ -2523,7 +2664,72 @@ impl Backend {
         result.map(|_| json!({"stopReason":stop_reason}))
     }
 
+    fn refresh_turn_context_later(&self, prompt: Prompt, binding: String) {
+        let backend = self.weak_self.clone();
+        tokio::spawn(async move {
+            let Some(backend) = backend.upgrade() else {
+                return;
+            };
+            let owns_runtime = || async {
+                backend
+                    .agent
+                    .lock()
+                    .await
+                    .as_ref()
+                    .is_some_and(|agent| agent.generation == prompt.generation)
+                    && backend.tutor.lock().await.binding == binding
+            };
+            if !owns_runtime().await {
+                return;
+            }
+            let Ok(selected) = backend
+                .training_action(
+                    "get_conversation_context".into(),
+                    json!({"conversation_id":prompt.conversation_id}),
+                )
+                .await
+            else {
+                return;
+            };
+            if !owns_runtime().await {
+                return;
+            }
+            let mut store = backend.store.lock().await;
+            let current = store.data.conversations.iter().any(|conversation| {
+                conversation.id == prompt.conversation_id
+                    && conversation.tutor_binding == binding
+                    && conversation.agent_session_id.as_deref() == Some(&prompt.session_id)
+                    && conversation
+                        .messages
+                        .last()
+                        .is_some_and(|message| message.id == prompt.assistant_message_id)
+            });
+            if !current {
+                return;
+            }
+            let updated = store
+                .transaction(|data| {
+                    let conversation = data
+                        .conversations
+                        .iter_mut()
+                        .find(|item| item.id == prompt.conversation_id)
+                        .unwrap();
+                    conversation.active_training = Some(selected.clone());
+                    for message in conversation.messages.iter_mut().rev().take(2) {
+                        message.training_context = Some(selected.clone());
+                    }
+                    Ok(())
+                })
+                .is_ok();
+            drop(store);
+            if updated {
+                backend.state_changed().await;
+            }
+        });
+    }
+
     pub async fn cancel_prompt(self: &Arc<Self>, conversation_id: String) -> Result<(), String> {
+        self.cancel_memory_maintenance();
         let preparation = self.preparing.lock().unwrap().clone().filter(|operation| {
             conversation_id.is_empty()
                 || operation.conversation_id.as_deref() == Some(conversation_id.as_str())
@@ -2581,6 +2787,9 @@ impl Backend {
         request_id: Value,
         option_id: Option<String>,
     ) -> Result<(), String> {
+        if let Some(id) = request_id.as_str().filter(|id| id.starts_with("native:")) {
+            return self.answer_native_permission(id, option_id).await;
+        }
         let prompt = self
             .prompt
             .lock()
@@ -2765,15 +2974,22 @@ impl Backend {
                 self.state_changed().await;
                 return; // Do not forward email, account labels or arbitrary metadata.
             }
-            if event.pointer("/params/sessionId").and_then(Value::as_str)
-                == agent.configuration_session.as_deref()
-                && event
-                    .pointer("/params/update/sessionUpdate")
-                    .and_then(Value::as_str)
-                    == Some("config_option_update")
+            if event
+                .pointer("/params/update/sessionUpdate")
+                .and_then(Value::as_str)
+                == Some("config_option_update")
             {
                 if let Some(options) = event.pointer("/params/update/configOptions") {
-                    agent.configuration["configOptions"] = options.clone();
+                    let session = event
+                        .pointer("/params/sessionId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    if Some(session) == agent.configuration_session.as_deref() {
+                        agent.configuration["configOptions"] = options.clone();
+                    }
+                    if let Some((response, _)) = agent.session_configurations.get_mut(session) {
+                        response["configOptions"] = options.clone();
+                    }
                 }
             }
             if let Some(id) = event.get("_tutorBarrier").and_then(Value::as_str) {
@@ -2791,6 +3007,9 @@ impl Backend {
                 return;
             }
             agent.tool_calls.observe(&event);
+        }
+        if self.maintenance_event(generation, &event).await {
+            return;
         }
         let timed_operation = self.preparing.lock().unwrap().clone();
         if let Some(operation) =
@@ -2870,6 +3089,7 @@ impl Backend {
             let valid = self.prompt.lock().await.as_ref().is_some_and(|prompt| {
                 prompt.generation == generation
                     && prompt.session_id == session
+                    && !prompt.private_output
                     && !prompt.cancelled
                     && prompt.failure.is_none()
             });
@@ -2939,9 +3159,55 @@ impl Backend {
             }
         }
         let mut failure = None;
+        let mut hide_chunk = false;
         {
             let mut prompt_guard = self.prompt.lock().await;
             if let Some(prompt) = prompt_guard.as_mut().filter(|p| p.generation == generation) {
+                if event.pointer("/params/sessionId").and_then(Value::as_str)
+                    == Some(&prompt.session_id)
+                    && event
+                        .pointer("/params/update/sessionUpdate")
+                        .and_then(Value::as_str)
+                        == Some("tool_call")
+                {
+                    let tool = event
+                        .pointer("/params/update")
+                        .and_then(crate::permissions::canonical_tool);
+                    let context_changed = tool.is_none_or(|name| {
+                        matches!(
+                            name,
+                            "init_domain"
+                                | "select_conversation_training"
+                                | "join_training"
+                                | "join_formation"
+                                | "save_training_edit"
+                                | "publish_curriculum_revision"
+                                | "publish_training"
+                                | "archive_training"
+                                | "delete_training"
+                                | "archive_domain"
+                                | "delete_domain"
+                        )
+                    });
+                    let catalog_changed = context_changed
+                        || tool.is_some_and(|name| {
+                            matches!(
+                                name,
+                                "record_interaction"
+                                    | "record_learning_event"
+                                    | "share_training"
+                                    | "submit_training"
+                                    | "decide_training"
+                                    | "restore_training"
+                                    | "withdraw_training"
+                                    | "add_concepts"
+                                    | "propose_training_edit"
+                                    | "set_training_access"
+                            )
+                        });
+                    prompt.context_changed |= context_changed;
+                    prompt.catalog_changed |= catalog_changed;
+                }
                 if event.get("method").and_then(Value::as_str) == Some("session/update")
                     && event.pointer("/params/sessionId").and_then(Value::as_str)
                         == Some(&prompt.session_id)
@@ -2954,6 +3220,7 @@ impl Backend {
                         .and_then(Value::as_str)
                         == Some("text")
                 {
+                    hide_chunk = prompt.private_output;
                     if prompt.failure.is_some() {
                         return;
                     }
@@ -2997,7 +3264,9 @@ impl Backend {
         let is_closed = event.get("type").and_then(Value::as_str) == Some("connection")
             && [Some("closed"), Some("error")]
                 .contains(&event.get("status").and_then(Value::as_str));
-        (self.emit)("acp:event", event);
+        if !hide_chunk {
+            (self.emit)("acp:event", event);
+        }
         if is_closed {
             let mut agent = self.agent.lock().await;
             if agent.as_ref().is_some_and(|a| a.generation == generation) {
@@ -3624,6 +3893,10 @@ async fn mcp_tool(rpc: &AcpClient, name: &str, args: Value) -> Result<Value, Str
     let result = rpc
         .request("tools/call", json!({"name":name,"arguments":args}))
         .await?;
+    unwrap_mcp_tool(result, name)
+}
+
+fn unwrap_mcp_tool(result: Value, name: &str) -> Result<Value, String> {
     if result.get("isError").and_then(Value::as_bool) == Some(true) {
         return Err(format!("Tutor n’a pas pu exécuter l’opération {name}."));
     }
@@ -3870,6 +4143,9 @@ mod local_journal_tests {
             created_at: now(),
             updated_at: now(),
             messages: vec![Message {
+                pending_learning_commit: None,
+                learning_delivery: None,
+                private_output: false,
                 training_context: None,
                 id: "previous".into(),
                 role: "assistant".into(),
@@ -4101,6 +4377,7 @@ readline.createInterface({input:process.stdin}).on('line', line => {
   const reply = result => send({jsonrpc:'2.0',id:request.id,result});
   const fail = () => send({jsonrpc:'2.0',id:request.id,error:{code:-32602,message:'Fixture rejected request'}});
   if (request.method === 'initialize') reply(local ? {protocolVersion:p.protocolVersion,capabilities:{tools:{}}} : {protocolVersion:1,authMethods:[],agentCapabilities:{loadSession:true,mcpCapabilities:{http:true}}});
+  else if (request.method === 'tools/list') reply({tools:[]});
   else if (request.method === 'tools/call') {
     let value = {};
     if (p.name === 'get_learner_context') value = {learner_id:'local-learner'};

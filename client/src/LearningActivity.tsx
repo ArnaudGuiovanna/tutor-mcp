@@ -17,6 +17,7 @@ export interface LearningActivityCardProps {
   openLink?: ClientBridge['openExternalLink'];
   onContinue?: () => void;
   onHint?: () => void;
+  onReveal?: () => void;
   questionNumber?: number;
 }
 
@@ -32,12 +33,11 @@ export function LearningActivityCard(props: LearningActivityCardProps) {
   return <ActivityContent key={JSON.stringify([activity.trainingId, activity.domainId, activity.id])} {...props} />;
 }
 
-function ActivityContent({ activity, response, disabled = false, onRespond, openLink, onContinue, onHint, questionNumber=1 }: LearningActivityCardProps) {
+function ActivityContent({ activity, response, disabled = false, onRespond, openLink, onContinue, onHint, onReveal, questionNumber=1 }: LearningActivityCardProps) {
   const inputName = useId();
   const titleId = useId();
   const [selected, setSelected] = useState('');
   const [revealed, setRevealed] = useState(false);
-  const [accepted, setAccepted] = useState<LearningResponse>();
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const startedAt = useRef(Date.now());
@@ -45,15 +45,16 @@ function ActivityContent({ activity, response, disabled = false, onRespond, open
   const submissionLock = useRef(false);
   const feedback = useRef<HTMLDivElement>(null);
   const flashcardAnswer = useRef<HTMLDivElement>(null);
-  const committed = responseMatchesActivity(activity, response) ? response : accepted;
+  const committed = responseMatchesActivity(activity, response) ? response : undefined;
   const locked = disabled || submitting || !!committed;
   const answerShown = revealed || !!committed;
   const quizCorrect = activity.kind === 'quiz' && committed?.kind === 'quiz' && activity.correctOptionId === committed.selectedOptionId;
   const selectedId = committed?.kind === 'quiz' ? committed.selectedOptionId : selected;
   const elapsed = () => Math.min(86400, Math.max(0, (Date.now() - startedAt.current) / 1000));
 
-  useEffect(() => { if (accepted) feedback.current?.focus(); }, [accepted]);
+  useEffect(() => { if (committed) feedback.current?.focus(); }, [committed]);
   useEffect(() => { if (revealed) flashcardAnswer.current?.focus(); }, [revealed]);
+  useEffect(() => { if (revealed && document.visibilityState === 'visible') onReveal?.(); }, [revealed,onReveal]);
 
   async function respond(rating?: RecallRating) {
     if (locked || submissionLock.current || (activity.kind === 'quiz' && !selected) || (activity.kind === 'flashcard' && (!revealed || !rating))) return;
@@ -64,8 +65,7 @@ function ActivityContent({ activity, response, disabled = false, onRespond, open
       : { ...base, kind: 'flashcard', rating: rating! };
     submissionLock.current = true; setSubmitting(true); setError('');
     try {
-      if (await onRespond(answer)) setAccepted(answer);
-      else setError(t('Votre réponse n’a pas pu être envoyée. Réessayez.'));
+      if (!await onRespond(answer)) setError(t('Votre réponse n’a pas pu être envoyée. Réessayez.'));
     } catch {
       setError(t('Votre réponse n’a pas pu être envoyée. Réessayez.'));
     } finally { submissionLock.current = false; setSubmitting(false); }

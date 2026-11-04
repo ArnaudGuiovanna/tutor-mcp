@@ -105,7 +105,7 @@ export function validateIntent(intent: Intent): string | undefined {
 }
 
 export function permissionFromEvent(event: JsonRecord, activities: ToolActivity[] = []): PermissionRequest | null {
-  if (event.method !== 'session/request_permission') return null;
+  if (event.method !== 'session/request_permission' && event.type !== 'native_permission') return null;
   const params = record(event.params);
   const tool = record(params.toolCall);
   const correlated = activities.find(activity => activity.id === text(tool.toolCallId));

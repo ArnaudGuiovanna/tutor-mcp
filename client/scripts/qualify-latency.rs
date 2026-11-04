@@ -31,6 +31,9 @@ struct Options {
     agent_directory: Option<String>,
     live: bool,
     turns: usize,
+    model: String,
+    effort: String,
+    speed: String,
 }
 impl Options {
     fn parse(args: impl Iterator<Item = String>) -> Result<Self, String> {
@@ -38,6 +41,7 @@ impl Options {
         let mut out = Self {
             environment: "native".into(),
             turns: 3,
+            speed: "balanced".into(),
             ..Default::default()
         };
         while let Some(key) = args.next() {
@@ -55,6 +59,9 @@ impl Options {
                 "--wsl-user" => out.wsl_user = Some(value),
                 "--agent-directory" => out.agent_directory = Some(value),
                 "--turns" => out.turns = value.parse().map_err(|_| "Invalid turn count")?,
+                "--model" => out.model = value,
+                "--effort" => out.effort = value,
+                "--speed" => out.speed = value,
                 _ => return Err("Unknown qualification argument".into()),
             }
         }
@@ -63,6 +70,9 @@ impl Options {
             || out.tutor.is_empty()
             || out.directory.as_os_str().is_empty()
             || !(2..=30).contains(&out.turns)
+            || out.model.len() > 256
+            || out.effort.len() > 64
+            || !["balanced", "fast", "deep"].contains(&out.speed.as_str())
         {
             return Err("Usage: --live-model --adapter PATH --tutor PATH --directory NEW_DIRECTORY [--turns 3] [--environment wsl --distribution NAME --agent-directory NEW_LINUX_DIRECTORY]".into());
         }
@@ -99,6 +109,18 @@ const EXPECTED_TOOL: &str = "get_learner_context";
 // not change the provenance of an already-built native or Windows executable.
 const BUILD_SOURCES: &[(&str, &[u8])] = &[
     ("backend.rs", include_bytes!("../src-tauri/src/backend.rs")),
+    (
+        "backend_pedagogy.rs",
+        include_bytes!("../src-tauri/src/backend_pedagogy.rs"),
+    ),
+    (
+        "backend_maintenance.rs",
+        include_bytes!("../src-tauri/src/backend_maintenance.rs"),
+    ),
+    (
+        "learning_ui_prepared.rs",
+        include_bytes!("../src-tauri/src/learning_ui_prepared.rs"),
+    ),
     (
         "backend_preparation.rs",
         include_bytes!("../src-tauri/src/backend_preparation.rs"),
@@ -309,6 +331,7 @@ fn metric_record(event: &Value) -> Option<Value> {
                     | "context"
                     | "loading_session"
                     | "waiting_model"
+                    | "waiting_permission"
                     | "finalizing"
             ) {
                 return None;
@@ -450,6 +473,7 @@ fn stop_reason(response: &Value) -> &'static str {
 
 fn passed_turn(turn: &Value) -> bool {
     turn["stopReason"] == "end_turn"
+        && turn["elapsedMs"].as_u64().is_some_and(|ms| ms <= 5000)
         && turn["contextToolCompleted"] == true
         && turn["sessionReused"] == true
         && turn["diagnosticsComplete"] == true
@@ -521,6 +545,11 @@ async fn qualify(options: Options) -> Result<(), String> {
         target_id: target.id.clone(),
         manual_target: Some(target.clone()),
         cwd: cwd.clone(),
+        agent: tutor_client::workspace::AgentSettings {
+            model: options.model.clone(),
+            reasoning_effort: options.effort.clone(),
+            speed: options.speed.clone(),
+        },
         tutor: TutorSettings {
             mode: "local".into(),
             activity: "auto".into(),
@@ -558,6 +587,13 @@ async fn qualify(options: Options) -> Result<(), String> {
                 }
             };
             registry.observe(&event);
+            if event["type"] == "native_permission" {
+                // This disposable benchmark authorizes only the context packet.
+                let allowed = event["params"]["operations"] == json!(["prepare_pedagogical_turn"]);
+                let _ = owner
+                    .answer_permission(event["id"].clone(), allowed.then(|| "allow_once".into()))
+                    .await;
+            }
             if event["method"] == "session/request_permission" {
                 // This benchmark authorizes one read-only tool on its disposable
                 // server. Every unrecognized operation is explicitly denied.
@@ -608,13 +644,19 @@ async fn qualify(options: Options) -> Result<(), String> {
             // drains our diagnostic collector before a snapshot or the next turn.
             flush_observations(&tx).await?;
             let after = backend.agent_timings().await;
-            turns.push(turn_report(index, start.elapsed().as_millis(), &response, &records.lock().unwrap(), &previous, &after));
+            let elapsed_ms=start.elapsed().as_millis();
+            let mut turn=turn_report(index, elapsed_ms, &response, &records.lock().unwrap(), &previous, &after);
+            let configuration=backend.agent_configuration().await?;
+            turn["effectiveConfiguration"]=json!(configuration["configOptions"].as_array().map(|options|options.iter().filter(|o|matches!(o["category"].as_str(),Some("model"|"thought_level"|"model_config"))).map(|o|json!({"category":bounded_text(&o["category"],64),"id":bounded_text(&o["id"],128),"value":bounded_text(&o["currentValue"],256)})).collect::<Vec<_>>()).unwrap_or_default());
+            turns.push(turn);
         }
         Ok::<Value, String>(json!({
             "contractVersion":1,"host":std::env::consts::OS,"environment":options.environment,
             "distribution":options.distribution,"liveModel":true,
             "agent":{"name":bounded_text(&agent["agentInfo"]["name"],128),"version":bounded_text(&agent["agentInfo"]["version"],64)},
             "connectMs":connect_ms,"turns":turns,
+            "latencyTargetMs":5000,"uiRenderMeasured":false,"pedagogyQualified":false,
+            "requestedConfiguration":{"model":options.model,"effort":options.effort,"speed":options.speed},
             "scope":"Isolated real MCP read and actual harness prompts; provider time included; credentials unchanged"
         }))
     }.await;
@@ -864,6 +906,25 @@ mod tests {
     }
 
     #[test]
+    fn complete_response_over_five_seconds_fails_the_latency_target() {
+        let before = pair(1, "initialize");
+        let after = [pair(2, "session/new"), pair(3, "session/prompt")].concat();
+        let mut capture = Capture::default();
+        capture.observe(&tool("call", "completed", Some(EXPECTED_TOOL)));
+        for (elapsed, accepted) in [(5000, true), (5001, false), (60000, false)] {
+            let report = turn_report(
+                0,
+                elapsed,
+                &json!({"stopReason":"end_turn"}),
+                &capture,
+                &before,
+                &after,
+            );
+            assert_eq!(passed_turn(&report), accepted);
+        }
+    }
+
+    #[test]
     fn completed_tool_does_not_qualify_an_interrupted_response() {
         let before = pair(1, "initialize");
         let after = [pair(2, "session/new"), pair(3, "session/prompt")].concat();
@@ -912,6 +973,9 @@ mod tests {
             names,
             [
                 "backend.rs",
+                "backend_pedagogy.rs",
+                "backend_maintenance.rs",
+                "learning_ui_prepared.rs",
                 "backend_preparation.rs",
                 "acp.rs",
                 "timing.rs",

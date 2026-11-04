@@ -66,6 +66,10 @@ it('propose seulement les options de modèle, réflexion et vitesse réellement 
  vi.mocked(fixture.api.agentConfiguration).mockResolvedValue(config);vi.mocked(fixture.api.setAgentConfiguration).mockImplementation(async configuration=>({...config,current:configuration}));await settings(fixture.api);
  await userEvent.click(screen.getAllByText('Modèle et rapidité')[0]);const select=await screen.findByLabelText('Modèle');await userEvent.selectOptions(select,'model-b');await waitFor(()=>expect(fixture.api.setAgentConfiguration).toHaveBeenCalledWith({model:'model-b',reasoningEffort:'low',speed:'balanced'}));
  expect([...screen.getByLabelText('Préférence de réponse').querySelectorAll('option')].map(option=>(option as HTMLOptionElement).value)).toEqual(['balanced','fast']);
+ expect(screen.getByText('Un niveau de réflexion explicite est prioritaire sur la préférence de réponse.')).toBeTruthy();
+ await userEvent.selectOptions(screen.getByLabelText('Niveau de réflexion'),'high');
+ await userEvent.selectOptions(screen.getByLabelText('Préférence de réponse'),'fast');
+ expect(fixture.api.setAgentConfiguration).toHaveBeenLastCalledWith({model:'model-b',reasoningEffort:'high',speed:'fast'});
 });
 
 it('présente en anglais les statuts de membre et garde la représentation technique de sa clé dans les détails',async()=>{

@@ -57,6 +57,9 @@ export interface Intent {
 }
 
 export interface Message {
+  canRetryCommit?: boolean;
+  privateOutput?: boolean;
+  learningDelivery?: {activityId:string;domainId:string;concept:string;attemptId?:string;kind:string;eventKey:string;recorded:boolean;success?:boolean};
   id: string;
   role: 'user' | 'assistant' | 'system';
   text: string;

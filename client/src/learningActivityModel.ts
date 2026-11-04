@@ -149,8 +149,8 @@ export function learningProtocolFences(source: string): Fence[] {
     if (!opening) continue;
     const tag = opening[2].trim().toLowerCase();
     // A partially streamed tag is kept out of the Markdown/code renderer too.
-    const reserved = /^tutor-(activity|response|study-request|attachments|conversation-title)/.test(tag)
-      || (!!tag && ['tutor-activity', 'tutor-response', 'tutor-study-request', 'tutor-attachments', 'tutor-conversation-title'].some(known => known.startsWith(tag)));
+    const reserved = /^tutor-(activity|evaluation|response|study-request|attachments|conversation-title)/.test(tag)
+      || (!!tag && ['tutor-activity', 'tutor-evaluation', 'tutor-response', 'tutor-study-request', 'tutor-attachments', 'tutor-conversation-title'].some(known => known.startsWith(tag)));
     open = { start: line.index, bodyStart: line.index + line[0].length, delimiter: opening[1][0],
       length: opening[1].length, tag, reserved };
   }

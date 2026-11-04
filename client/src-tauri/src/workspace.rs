@@ -123,12 +123,41 @@ pub struct LearningIntent {
 #[serde(rename_all = "camelCase")]
 pub struct Message {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_learning_commit: Option<PendingLearningCommit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub learning_delivery: Option<LearningDelivery>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub private_output: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub training_context: Option<serde_json::Value>,
     pub id: String,
     pub role: String,
     pub text: String,
     pub created_at: String,
     pub status: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingLearningCommit {
+    pub tool: String,
+    pub arguments: serde_json::Value,
+    pub text: String,
+    pub delivery: Option<LearningDelivery>,
+}
+
+// Written only by the native client after the server committed the result.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearningDelivery {
+    pub activity_id: String,
+    pub domain_id: String,
+    pub concept: String,
+    pub attempt_id: Option<String>,
+    pub kind: String,
+    pub event_key: String,
+    pub recorded: bool,
+    pub success: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -587,6 +616,9 @@ mod tests {
             updated_at: now(),
             active_training: None,
             messages: vec![Message {
+                pending_learning_commit: None,
+                learning_delivery: None,
+                private_output: false,
                 id: "assistant".into(),
                 role: "assistant".into(),
                 text: String::new(),
@@ -643,6 +675,9 @@ mod tests {
             updated_at: now(),
             active_training: None,
             messages: vec![Message {
+                pending_learning_commit: None,
+                learning_delivery: None,
+                private_output: false,
                 id: "a".into(),
                 role: "assistant".into(),
                 text: String::new(),
@@ -691,6 +726,9 @@ mod tests {
             updated_at: now(),
             active_training: None,
             messages: vec![Message {
+                pending_learning_commit: None,
+                learning_delivery: None,
+                private_output: false,
                 id: "a".into(),
                 role: "assistant".into(),
                 text: String::new(),
@@ -739,6 +777,9 @@ mod tests {
             updated_at: now(),
             active_training: None,
             messages: vec![Message {
+                pending_learning_commit: None,
+                learning_delivery: None,
+                private_output: false,
                 id: "a".into(),
                 role: "assistant".into(),
                 text: String::new(),
@@ -750,6 +791,9 @@ mod tests {
         store.data.conversations[0].messages.insert(
             0,
             Message {
+                pending_learning_commit: None,
+                learning_delivery: None,
+                private_output: false,
                 id: "large-history".into(),
                 role: "user".into(),
                 text: "x".repeat(32 * 1024 * 1024 - 3000),
