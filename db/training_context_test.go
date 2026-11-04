@@ -19,11 +19,11 @@ func TestTrainingConversationProjectionDoesNotCreateLegacyBaseline(t *testing.T)
 	// Simulate a legacy personal domain and its selection, without creating
 	// an immutable baseline through today's mutation path.
 	domain := &models.Domain{ID: "legacy-context", LearnerID: principal.LearnerID, Name: "Read only", GraphVersion: 1}
-	if _, err := s.RawDB().Exec("INSERT INTO domains(id,learner_id,tenant_id,name,personal_goal,graph_json,graph_version,created_at) VALUES(?,?,?,?,?,?,1,?)", domain.ID, principal.LearnerID, tenant, domain.Name, "", `{"concepts":["premise"],"prerequisites":{}}`, time.Now().UTC()); err != nil {
+	if _, err := s.RawDB().Exec(rb(s, "INSERT INTO domains(id,learner_id,tenant_id,name,personal_goal,graph_json,graph_version,created_at) VALUES(?,?,?,?,?,?,1,?)"), domain.ID, principal.LearnerID, tenant, domain.Name, "", `{"concepts":["premise"],"prerequisites":{}}`, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	selected := models.ConversationContext{ConversationID: "context", TrainingID: "personal:" + domain.ID, DomainID: domain.ID, Revision: "1", SelectionVersion: 1, Name: domain.Name}
-	if _, err := s.RawDB().Exec("INSERT INTO conversation_contexts(tenant_id,membership_id,learner_id,conversation_id,training_id,domain_id,revision,selection_version) VALUES(?,?,?,?,?,?,?,1)", tenant, principal.MembershipID, principal.LearnerID, selected.ConversationID, selected.TrainingID, selected.DomainID, selected.Revision); err != nil {
+	if _, err := s.RawDB().Exec(rb(s, "INSERT INTO conversation_contexts(tenant_id,membership_id,learner_id,conversation_id,training_id,domain_id,revision,selection_version) VALUES(?,?,?,?,?,?,?,1)"), tenant, principal.MembershipID, principal.LearnerID, selected.ConversationID, selected.TrainingID, selected.DomainID, selected.Revision); err != nil {
 		t.Fatal(err)
 	}
 	var got *models.ConversationContext
@@ -39,7 +39,7 @@ func TestTrainingConversationProjectionDoesNotCreateLegacyBaseline(t *testing.T)
 		t.Fatalf("context=%#v err=%v", got, err)
 	}
 	var count int
-	if err := s.RawDB().QueryRow("SELECT COUNT(*) FROM curriculum_versions WHERE learner_id=? AND domain_id=?", principal.LearnerID, domain.ID).Scan(&count); err != nil || count != 0 {
+	if err := s.RawDB().QueryRow(rb(s, "SELECT COUNT(*) FROM curriculum_versions WHERE learner_id=? AND domain_id=?"), principal.LearnerID, domain.ID).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("read created baseline count=%d err=%v", count, err)
 	}
 }
@@ -80,7 +80,7 @@ func TestTrainingConversationProjectionKeepsEnrolledVersionAndRights(t *testing.
 		t.Fatal(err)
 	}
 	// Even a forged local selection row cannot grant access to a private course.
-	if _, err := s.RawDB().Exec("INSERT INTO conversation_contexts(tenant_id,membership_id,learner_id,conversation_id,training_id,domain_id,revision,selection_version) VALUES(?,?,?,?,?,?,?,1)", tenant, stranger.MembershipID, stranger.LearnerID, "forged", published.Training.ID, selected.DomainID, selected.Revision); err != nil {
+	if _, err := s.RawDB().Exec(rb(s, "INSERT INTO conversation_contexts(tenant_id,membership_id,learner_id,conversation_id,training_id,domain_id,revision,selection_version) VALUES(?,?,?,?,?,?,?,1)"), tenant, stranger.MembershipID, stranger.LearnerID, "forged", published.Training.ID, selected.DomainID, selected.Revision); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.TrainingAction(t.Context(), stranger, "get_conversation_context", models.TrainingRequest{ConversationID: "forged"}); err == nil {

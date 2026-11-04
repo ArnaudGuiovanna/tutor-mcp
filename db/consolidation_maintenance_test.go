@@ -62,7 +62,7 @@ func TestMemoryMaintenanceBoundedAtomicResume(t *testing.T) {
 		t.Fatal("partial archive became canonical", err)
 	}
 	var state, manifest string
-	if err := s.RawDB().QueryRow("SELECT maintenance_state,maintenance_manifest FROM pending_consolidations WHERE id=?", first.JobID).Scan(&state, &manifest); err != nil {
+	if err := s.RawDB().QueryRow(rb(s, "SELECT maintenance_state,maintenance_manifest FROM pending_consolidations WHERE id=?"), first.JobID).Scan(&state, &manifest); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(state, "Partial private") || strings.Contains(manifest, "Partial private") {
