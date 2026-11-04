@@ -55,7 +55,7 @@ on an unseen debugging scenario, and the outcome is recorded against the frozen 
 
 ## Installation
 
-**For an institution or learning community, start with [Tutor ACP 0.0.4 for Windows x64](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.3/Tutor_ACP_0.0.4_windows_x64-setup.exe).** Codex and Claude adapters and their Node.js runtime are included. In **Connection and tools**, connect to your institution’s Tutor service, choose your AI agent and configure its MCP permissions. The [desktop client guide](client/README.md) covers setup, identities and backups, native Windows and WSL2.
+**For an institution or learning community, start with [Tutor ACP 0.0.12 for Windows x64](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.4/Tutor_ACP_0.0.12_windows_x64-setup.exe).** Codex and Claude adapters and their Node.js runtime are included. In **Connection and tools**, connect to your institution’s Tutor service, choose your AI agent and configure its MCP permissions. The [desktop client guide](client/README.md) covers setup, identities and backups, native Windows and WSL2.
 
 The client offers French/English, light/dark/system themes and adjustable reading settings saved per account. MCP tool permissions can be remembered across conversations and restarts for the selected account, server and agent, and changed in Settings. The server controls access and progress; published programmes retain their versions for enrolled learners until an explicit migration.
 
@@ -69,7 +69,7 @@ Choose where your learning data lives. Every profile uses the same learning engi
 | **Local** | Learning on your own computer | One binary + `--local`. Your MCP client starts it; SQLite stores your history. No account or server setup. [Local setup](docs/installation.md#local-client-configuration) |
 | **Hobby** | A personal VPS or a small group using MCP clients | `--profile hobby`, SQLite and an HTTPS proxy. Invite users over SSH; they sign in with a username and password. [Native installation](docs/installation.md#native-hobby-vps-binary-systemd-and-caddy) · [Docker Compose](docs/installation.md#hobby-vps-with-docker-compose) |
 
-Binaries target **Linux, macOS and Windows**, on amd64 and arm64. Profiles require **v0.6.0+**; install [v0.7.3](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/v0.7.3) for the current server and the ACP client 0.0.4. See [installation details](docs/installation.md) for installers, service configuration and backups.
+Binaries target **Linux, macOS and Windows**, on amd64 and arm64. Profiles require **v0.6.0+**; install [v0.7.4](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/v0.7.4) for the current server and the ACP client 0.0.12. See [installation details](docs/installation.md) for installers, service configuration and backups.
 
 ## Quickstart
 
