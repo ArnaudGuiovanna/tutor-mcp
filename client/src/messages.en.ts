@@ -1,6 +1,18 @@
 // Interface copy only. User messages, names, curriculum and assessment evidence
 // retain their original language and are never translated by this catalogue.
 export const english: Record<string, string> = {
+  'Reprendre {name}.': 'Resume {name}.',
+  'Demande de reprise invalide.': 'Invalid resume request.',
+  'EXERCICE': 'EXERCISE',
+  'Exercice': 'Exercise',
+  'Flashcard': 'Flashcard',
+  'Mode exercice': 'Exercise mode',
+  'Votre réponse à l’exercice': 'Your exercise answer',
+  'Validez ici votre réponse. Pour demander de l’aide, utilisez « Un indice » ou le message au tuteur.': 'Submit your answer here. For help, use “A hint” or message the tutor.',
+  'Réponse enregistrée. Le retour du tuteur apparaît dans la conversation.': 'Answer saved. The tutor’s feedback appears in the conversation.',
+  'Activité suivante': 'Next activity',
+  'Choisissez la formation à reprendre.': 'Choose the course to resume.',
+  'D’autres formations correspondent. Précisez le nom dans votre message si nécessaire.': 'Other courses also match. Specify the name in your message if needed.',
   'Réessayer l’enregistrement': 'Retry saving',
   'Réessayer la réponse': 'Retry the response',
   'J’attends la réponse de l’agent…': 'Waiting for the agent’s response…',

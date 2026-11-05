@@ -69,7 +69,7 @@ Choose where your learning data lives. Every profile uses the same learning engi
 | **Local** | Learning on your own computer | One binary + `--local`. Your MCP client starts it; SQLite stores your history. No account or server setup. [Local setup](docs/installation.md#local-client-configuration) |
 | **Hobby** | A personal VPS or a small group using MCP clients | `--profile hobby`, SQLite and an HTTPS proxy. Invite users over SSH; they sign in with a username and password. [Native installation](docs/installation.md#native-hobby-vps-binary-systemd-and-caddy) · [Docker Compose](docs/installation.md#hobby-vps-with-docker-compose) |
 
-Binaries target **Linux, macOS and Windows**, on amd64 and arm64. Profiles require **v0.6.0+**; install [v0.7.4](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/v0.7.4) for the current server and the ACP client 0.0.12. See [installation details](docs/installation.md) for installers, service configuration and backups.
+New server distributions target **Linux and Windows**, on amd64 and arm64; the ACP desktop client targets **Windows amd64**, with native or WSL harnesses. See the [platform policy](docs/supported-platforms.md); historical releases retain their original artifacts. Profiles require **v0.6.0+**; install [v0.7.4](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/v0.7.4) for the current server and the ACP client 0.0.12. See [installation details](docs/installation.md) for installers, service configuration and backups.
 
 ## Quickstart
 
@@ -154,7 +154,7 @@ BKT estimates knowledge, FSRS schedules reviews, and prerequisite checks keep th
 |---|---|
 | Set up a learning community with the Windows client | [Tutor ACP](client/README.md) · [Institutional setup](docs/installation.md#institutional-deployment) |
 | Connect Claude, ChatGPT, Hermes, Pi or another client | [Client guide](docs/clients.md) |
-| Install on Linux, macOS or Windows | [Installation](docs/installation.md) |
+| Install on Linux or Windows | [Installation](docs/installation.md) |
 | Choose a profile or manage hobby accounts | [Profiles and accounts](docs/profiles.md) |
 | Configure ports, storage, OAuth, memory or feature flags | [Configuration reference](docs/configuration.md) |
 | Deploy a VPS with systemd/Caddy or Docker Compose | [Native VPS](docs/installation.md#native-hobby-vps-binary-systemd-and-caddy) · [Compose](docs/installation.md#hobby-vps-with-docker-compose) |

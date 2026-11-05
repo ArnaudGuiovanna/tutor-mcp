@@ -12,6 +12,9 @@ use std::collections::HashSet;
 #[path = "learning_ui_prepared.rs"]
 mod prepared;
 pub(crate) use prepared::{PreparedOutput, PreparedTurn};
+#[path = "learning_resume.rs"]
+mod resume;
+use resume::{resume_request, ResumeRequest};
 
 const MAX_BLOCK: usize = 48 * 1024;
 const INVALID: &str =
@@ -22,6 +25,7 @@ const INVALID: &str =
 pub enum LearningFormat {
     Quiz,
     Flashcard,
+    Exercise,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -85,6 +89,8 @@ struct Response {
     selected_option_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     rating: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    answer: Option<String>,
     response_time_seconds: f64,
 }
 
@@ -264,6 +270,38 @@ fn valid_activity(card: &Activity) -> bool {
                 && card.rubric_json.is_none()
                 && card.transfer_dimension.is_none()
         }
+        LearningFormat::Exercise => {
+            card.options.is_none()
+                && card.correct_option_id.is_none()
+                && card.explanation.is_none()
+                && card.answer.is_none()
+                && card.session_id.is_some()
+                && card.decision_id.is_some()
+                && card.activity_type.as_deref().is_some_and(|kind| {
+                    [
+                        "DIAGNOSTIC_ASSESSMENT",
+                        "RECALL_EXERCISE",
+                        "MASTERY_CHALLENGE",
+                        "DEBUGGING_CASE",
+                        "PRACTICE",
+                        "DEBUG_MISCONCEPTION",
+                        "FEYNMAN_PROMPT",
+                        "TRANSFER_PROBE",
+                    ]
+                    .contains(&kind)
+                })
+                && card.rubric_json.as_ref().is_some_and(|rubric| {
+                    bounded(rubric, 16 * 1024)
+                        && serde_json::from_str::<Value>(rubric).is_ok_and(|v| v.is_object())
+                })
+                && if card.activity_type.as_deref() == Some("TRANSFER_PROBE") {
+                    card.transfer_dimension.as_deref().is_some_and(|d| {
+                        ["near", "far", "debugging", "teaching", "creative"].contains(&d)
+                    })
+                } else {
+                    card.transfer_dimension.is_none()
+                }
+        }
     }
 }
 
@@ -272,6 +310,7 @@ fn request(message: &str) -> Result<Option<StudyRequest>, String> {
         return Ok(None);
     };
     if request.version != 1
+        || request.format == LearningFormat::Exercise
         || !["review", "practice"].contains(&request.intent.as_str())
         || !optional_bounded(&request.training_id, 256)
         || !optional_bounded(&request.training_name, 1000)
@@ -371,6 +410,7 @@ fn accepted_response(
         let valid_choice = match response.kind {
             LearningFormat::Quiz => {
                 response.rating.is_none()
+                    && response.answer.is_none()
                     && card.options.as_ref().is_some_and(|options| {
                         response
                             .selected_option_id
@@ -382,11 +422,21 @@ fn accepted_response(
             }
             LearningFormat::Flashcard => {
                 response.selected_option_id.is_none()
+                    && response.answer.is_none()
                     && response.attempt_id.is_none()
                     && response
                         .rating
                         .as_deref()
                         .is_some_and(|rating| ["again", "hard", "easy"].contains(&rating))
+            }
+            LearningFormat::Exercise => {
+                response.selected_option_id.is_none()
+                    && response.rating.is_none()
+                    && response.attempt_id.is_some()
+                    && response
+                        .answer
+                        .as_ref()
+                        .is_some_and(|answer| bounded(answer, 12_000))
             }
         };
         if !valid_choice {
@@ -405,8 +455,14 @@ pub fn validate_message(
     confirmed: Option<&Value>,
 ) -> Result<(), String> {
     let request = request(message)?;
+    let resume = resume_request(message)?;
     let response = payload::<Response>(message, "tutor-response")?;
-    if request.is_some() && response.is_some() {
+    if [request.is_some(), resume.is_some(), response.is_some()]
+        .into_iter()
+        .filter(|v| *v)
+        .count()
+        > 1
+    {
         return Err(INVALID.into());
     }
     if response.is_some() {
@@ -429,6 +485,19 @@ pub fn validate_message(
             return Err(
                 "La formation demandée n’est pas sélectionnée dans cette conversation.".into(),
             );
+        }
+    }
+    if let (Some(request), Some(current)) = (resume, confirmed) {
+        if request
+            .training_id
+            .as_ref()
+            .is_some_and(|id| current["training_id"] != *id)
+            || request
+                .domain_id
+                .as_ref()
+                .is_some_and(|id| current["domain_id"] != *id)
+        {
+            return Err("La formation de reprise confirmée ne correspond pas à la demande.".into());
         }
     }
     Ok(())

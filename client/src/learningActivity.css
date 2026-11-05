@@ -36,6 +36,11 @@
 .recall-easy { color:var(--ok-text); border-color:var(--ok); background:var(--ok-soft); }
 .recall-again { color:var(--error-text); border-color:var(--error); background:var(--error-soft); }
 .learning-card-error { color:var(--error-text); font-size:14px; margin-bottom:0; }
+.learning-exercise-answer { display:block; width:100%; box-sizing:border-box; min-height:112px; padding:12px; margin-top:8px; resize:vertical; border:1px solid var(--border-strong); border-radius:10px; background:var(--bg-inset); color:var(--text-body); font:inherit; line-height:1.65; }
+.learning-exercise-answer:disabled { opacity:1; }
+.learning-training-choice { padding:16px; border:1px solid var(--border-card); border-radius:14px; background:var(--bg-card-alt); }
+.learning-training-choices { display:flex; flex-direction:column; gap:8px; }
+.learning-training-choices button { min-height:44px; text-align:left; overflow-wrap:anywhere; }
 @keyframes learning-reveal { from { opacity:.4; transform:translateY(4px); } to { opacity:1; transform:none; } }
 @media(prefers-reduced-motion:reduce) { .learning-flashcard-back { animation:none; } }
 @container workspace (max-width:560px) { .learning-quiz-options { grid-template-columns:1fr; } }

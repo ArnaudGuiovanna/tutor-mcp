@@ -9,7 +9,11 @@ or institution for the existing PostgreSQL deployment model. See
 is available with binaries and checksums for all supported platforms. Use the
 installers below or the [source quickstart](../README.md#quickstart).
 
-## Linux and macOS
+New releases target Linux and Windows; the desktop ACP client targets Windows
+with native or WSL harnesses. See the [platform policy](supported-platforms.md).
+Historical release artifacts retain their original platform scope.
+
+## Linux
 
 Download the shell installer from the release's source, inspect it, and run it:
 
@@ -19,7 +23,7 @@ TUTOR_MCP_VERSION=v0.7.3 TUTOR_MCP_INSTALL_DIR="$HOME/.local/bin" sh install-tut
 ```
 
 Add `$HOME/.local/bin` to your PATH and restart your MCP client. The installer
-selects Linux or macOS and amd64 or arm64, and verifies the archive against
+selects Linux amd64 or arm64, and verifies the archive against
 `SHA256SUMS`. Without `TUTOR_MCP_INSTALL_DIR`, it uses `/usr/local/bin` and may
 request sudo. To build from source, use the Go version in `go.mod` and run
 `go build -o tutor-mcp .`.

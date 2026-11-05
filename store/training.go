@@ -12,6 +12,13 @@ type TrainingStore interface {
 	TrainingAction(context.Context, models.Principal, string, models.TrainingRequest) (any, error)
 }
 
+// ResumeTrainingStore resolves existing learning domains without enrolling a
+// learner or interpreting natural language. An empty target lists candidates;
+// a name is an exact, case-insensitive match, never a paginated search guess.
+type ResumeTrainingStore interface {
+	ResolveResumeTrainings(context.Context, models.Principal, string, string) (models.ResumeTrainingChoices, error)
+}
+
 type conversationKey struct{}
 
 func WithConversation(ctx context.Context, id string) context.Context {

@@ -8,6 +8,168 @@ fn turn_packet(mode: &str) -> Value {
         "attempt":{"id":"attempt-1","domain_id":"go","concept":"Variables","status":"prepared","rubric":serde_json::from_str::<Value>(card()["rubricJson"].as_str().unwrap()).unwrap()}})
 }
 
+fn resume_packet(activity_type: &str, presentation: &str) -> Value {
+    let mut packet = turn_packet("activity");
+    packet["activity"]["activity"]["type"] = json!(activity_type);
+    packet["needs_selection"] = json!(false);
+    packet["presentation"] = json!(presentation);
+    packet["training"] = json!({"id":"personal:go","domain_id":"go","name":"Go"});
+    packet
+}
+
+#[test]
+fn resume_requires_server_selection_capability_and_canonical_presentation() {
+    let conversation = conversation(card());
+    for message in ["Reprendre la formation Go.", "```tutor-resume-request\n{\"version\":1,\"trainingId\":\"personal:go\",\"domainId\":\"go\"}\n```"] {
+        let (args, tools) = PreparedTurn::request(&conversation, message).unwrap();
+        assert_eq!(args["mode"], "activity");
+        assert_eq!(args["intent"], "auto");
+        assert_eq!(args["expected_selection"], 1);
+        assert!(tools.contains(&"select_conversation_training"));
+        assert!(tools.contains(&"get_next_activity"));
+        let packet = resume_packet("NEW_CONCEPT", "instruction");
+        assert!(PreparedTurn::new(&conversation, message, packet.clone()).unwrap().private_output());
+        let mut wrong = packet.clone();
+        wrong["presentation"] = json!("assessment");
+        assert!(PreparedTurn::new(&conversation, message, wrong).is_err());
+        let mut wrong = packet;
+        wrong["training"]["domain_id"] = json!("another");
+        assert!(PreparedTurn::new(&conversation, message, wrong).is_err());
+        assert!(PreparedTurn::new(&conversation, message, turn_packet("activity")).is_err());
+    }
+    let tool = json!({"name":"prepare_pedagogical_turn","inputSchema":{"properties":{"training_id":{},"training_name":{},"expected_selection":{},"expected_revision":{}}}});
+    assert!(PreparedTurn::supports_resume(&tool));
+    let mut old = tool;
+    old["inputSchema"]["properties"]
+        .as_object_mut()
+        .unwrap()
+        .remove("training_name");
+    assert!(!PreparedTurn::supports_resume(&old));
+}
+
+#[test]
+fn introduction_is_only_instruction_and_guidance_never_awards_progress() {
+    let conversation = conversation(card());
+    let turn = PreparedTurn::new(
+        &conversation,
+        "Reprendre",
+        resume_packet("NEW_CONCEPT", "instruction"),
+    )
+    .unwrap();
+    let mut intro = json!({"version":1,"trainingId":"personal:go","domainId":"go","concept":"Variables","sessionId":"session-go","decisionId":"decision-1","body":"Une variable conserve une valeur. Par exemple, x vaut 5."});
+    let output = turn.output(&fence("tutor-introduction", &intro)).unwrap();
+    assert_eq!(output.text, intro["body"]);
+    assert!(output.mutation.is_none());
+    let delivery = output.delivery.unwrap();
+    assert_eq!(delivery.kind, "instruction");
+    assert!(delivery.success.is_none() && !delivery.recorded && delivery.attempt_id.is_none());
+    assert!(turn.output("Une variable conserve une valeur.").is_err());
+    assert!(turn.output(&fence("tutor-activity", &card())).is_err());
+    intro["decisionId"] = json!("foreign");
+    assert!(turn.output(&fence("tutor-introduction", &intro)).is_err());
+    intro["decisionId"] = json!("decision-1");
+    let guidance = PreparedTurn::new(
+        &conversation,
+        "Reprendre",
+        resume_packet("REST", "guidance"),
+    )
+    .unwrap();
+    let result = guidance.output(&fence("tutor-guidance", &intro)).unwrap();
+    assert!(result.mutation.is_none() && result.delivery.is_none());
+}
+
+#[test]
+fn resume_choices_are_bounded_and_require_no_generation_or_learning_mutation() {
+    let conversation = conversation(card());
+    let mut packet = turn_packet("activity");
+    packet.as_object_mut().unwrap().remove("activity");
+    packet["needs_selection"] = json!(true);
+    packet["selection_reason"] = json!("ambiguous");
+    packet["training_choices_has_more"] = json!(false);
+    packet["training_choices"] = json!([
+        {"id":"a","domain_id":"a","name":"Python"},
+        {"id":"b","domain_id":"b","name":"Python"}
+    ]);
+    let turn = PreparedTurn::new(
+        &conversation,
+        "Reprendre la formation Python",
+        packet.clone(),
+    )
+    .unwrap();
+    let choice: Value = payload(
+        &turn
+            .immediate_text("fr", "Reprendre la formation Python")
+            .unwrap()
+            .unwrap(),
+        "tutor-training-choice",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(choice["choices"].as_array().unwrap().len(), 2);
+    assert_eq!(choice["choices"][1]["trainingId"], "b");
+    assert!(turn.submission().is_none());
+    assert!(turn.output("J'ai sélectionné Python.").is_err());
+    packet["training_choices"][1]["id"] = json!("a");
+    assert!(
+        PreparedTurn::new(&conversation, "Reprendre", packet.clone())
+            .unwrap()
+            .immediate_text("fr", "Reprendre")
+            .is_err()
+    );
+    packet.as_object_mut().unwrap().remove("training_choices");
+    let empty = PreparedTurn::new(&conversation, "Reprendre", packet)
+        .unwrap()
+        .immediate_text("fr", "Reprendre")
+        .unwrap()
+        .unwrap();
+    assert!(!empty.contains("tutor-training-choice"));
+}
+
+#[test]
+fn open_exercise_is_frozen_before_display_and_only_explicit_answer_is_submitted() {
+    let mut exercise = card();
+    exercise["kind"] = json!("exercise");
+    for key in ["options", "correctOptionId", "explanation", "attemptId"] {
+        exercise.as_object_mut().unwrap().remove(key);
+    }
+    let previous = conversation(card());
+    let turn = PreparedTurn::new(
+        &previous,
+        "Reprendre",
+        resume_packet("RECALL_EXERCISE", "assessment"),
+    )
+    .unwrap();
+    let mut output = turn.output(&fence("tutor-activity", &exercise)).unwrap();
+    assert_eq!(
+        output.mutation.as_ref().unwrap().0,
+        "prepare_assessment_attempt"
+    );
+    assert!(output.delivery.is_none());
+    output.commit(&json!({"attempt_id":"attempt-1"})).unwrap();
+    exercise = payload::<Value>(&output.text, "tutor-activity")
+        .unwrap()
+        .unwrap();
+    let conversation = conversation(exercise.clone());
+    let answer = json!({"version":1,"activityId":exercise["id"],"kind":"exercise","trainingId":"personal:go","domainId":"go","concept":"Variables","attemptId":"attempt-1","answer":"x = 5, car on ajoute 2 à 3.","responseTimeSeconds":15});
+    let response_text = fence("tutor-response", &answer);
+    let turn = PreparedTurn::new(&conversation, &response_text, turn_packet("context")).unwrap();
+    assert_eq!(
+        turn.submission().unwrap()["learner_response"],
+        answer["answer"]
+    );
+    for text in ["Un indice, s'il vous plaît.", "x = 5"] {
+        let help = PreparedTurn::new(&conversation, text, turn_packet("context")).unwrap();
+        assert!(help.submission().is_none());
+        assert!(!help.private_output());
+    }
+    let mut wrong = answer;
+    wrong["attemptId"] = json!("foreign");
+    assert!(PreparedTurn::request(&conversation, &fence("tutor-response", &wrong)).is_err());
+    wrong["attemptId"] = json!("attempt-1");
+    wrong["selectedOptionId"] = json!("a");
+    assert!(PreparedTurn::request(&conversation, &fence("tutor-response", &wrong)).is_err());
+}
+
 #[test]
 fn prepared_turn_freezes_before_display_and_records_before_feedback() {
     let conversation = conversation(card());
@@ -128,6 +290,7 @@ fn prepared_turn_rejects_changed_rubric_and_false_score_or_prose_receipts() {
     for score in [
         json!({"criteria_scores":[],"total":1,"max_total":1,"confidence":0.9}),
         json!({"criteria_scores":[{"id":"correct","score":2,"max_score":1,"evidence":"invented"}],"total":2,"max_total":1,"confidence":0.9}),
+        json!({"criteria_scores":[{"id":"correct","score":1,"max_score":1,"evidence":"Observed value"}],"total":1,"max_total":1,"confidence":"medium"}),
     ] {
         assert!(turn.output(&fence("tutor-evaluation",&json!({"version":1,"attempt_id":"attempt-1","rubric_score_json":score.to_string(),"feedback":"Good"}))).is_err());
     }

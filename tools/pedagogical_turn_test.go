@@ -7,6 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -21,7 +24,20 @@ import (
 
 func pedagogicalTurnFixture(t *testing.T) (*db.Store, *Deps, context.Context, models.Principal, *models.Domain, *models.ConversationContext) {
 	t.Helper()
-	s, deps := setupToolsTest(t)
+	var s *db.Store
+	var deps *Deps
+	if dsn := os.Getenv("TUTOR_TEST_PG_DSN"); dsn != "" {
+		t.Setenv("TUTOR_MCP_MEMORY_ROOT", t.TempDir())
+		s = postgresToolsTestStore(t, dsn)
+		deps = &Deps{Store: s, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+		for _, id := range []string{"L_owner", "L_attacker"} {
+			if _, err := s.RawDB().Exec(`INSERT INTO learners (id,email,password_hash,objective,created_at,email_verified_at) VALUES ($1,$2,'hash','test',$3,$3)`, id, id+"@test.com", time.Now().UTC()); err != nil {
+				t.Fatal(err)
+			}
+		}
+	} else {
+		s, deps = setupToolsTest(t)
+	}
 	p, err := s.GetPrincipalForLearner(t.Context(), "L_owner", []string{models.OAuthScopeLearner})
 	if err != nil {
 		t.Fatal(err)
@@ -111,7 +127,7 @@ func TestPedagogicalTurnSelectionAndPrincipalIsolation(t *testing.T) {
 		{"other learner", models.LegacyPrincipal("L_attacker"), PreparePedagogicalTurnParams{ConversationID: selected.ConversationID}, false},
 		{"missing conversation", p, PreparePedagogicalTurnParams{}, true},
 		{"activity missing key", p, PreparePedagogicalTurnParams{ConversationID: selected.ConversationID, Mode: "activity"}, true},
-		{"unselected activity", p, PreparePedagogicalTurnParams{ConversationID: "unselected", Mode: "activity", IdempotentMutationParams: IdempotentMutationParams{IdempotencyKey: "one"}}, true},
+		{"unselected activity", p, PreparePedagogicalTurnParams{ConversationID: "unselected", Mode: "activity", IdempotentMutationParams: IdempotentMutationParams{IdempotencyKey: "one"}}, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			other, err := auth.WithPrincipal(ctx, test.principal)
@@ -124,6 +140,9 @@ func TestPedagogicalTurnSelectionAndPrincipalIsolation(t *testing.T) {
 			}
 			if test.name == "other learner" && (!out.NeedsSelection || out.Curriculum != nil || out.Conversation.DomainID != "") {
 				t.Fatal("another learner borrowed selection")
+			}
+			if test.name == "unselected activity" && (!out.NeedsSelection || out.SelectionReason != "missing" || out.Activity != nil || out.Session != nil) {
+				t.Fatal("unselected activity guessed a training or opened a session")
 			}
 			if test.name == "read-only" && out.Permissions.PrepareActivity {
 				t.Fatal("write grant invented")
@@ -163,7 +182,7 @@ func TestPedagogicalTurnCanonicalActivityIsIdempotent(t *testing.T) {
 		t.Fatal("foreground maintenance returned")
 	}
 	var count int
-	if err := s.RawDB().QueryRow("SELECT COUNT(*) FROM pedagogical_decisions WHERE learner_id=?", p.LearnerID).Scan(&count); err != nil || count != 1 {
+	if err := s.RawDB().QueryRow("SELECT COUNT(*) FROM pedagogical_decisions WHERE learner_id=$1", p.LearnerID).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("decisions=%d err=%v", count, err)
 	}
 	after, _ := s.GetConceptStatesByDomain(ctx, p.LearnerID, domain.ID)

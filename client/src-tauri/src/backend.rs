@@ -146,6 +146,7 @@ struct Tutor {
     local_binding: String,
     login_generation: String,
     tool_catalog: BTreeSet<String>,
+    native_resume_supported: bool,
     tool_catalog_binding: String,
     tool_catalog_refreshed: Option<std::time::Instant>,
 }
@@ -318,6 +319,10 @@ impl Backend {
             policy.validate()?;
         }
         if settings.review_plans.len() > 2000
+            || settings
+                .review_plans
+                .values()
+                .any(|plan| plan.format == crate::learning_ui::LearningFormat::Exercise)
             || settings
                 .review_plans
                 .keys()
@@ -1792,6 +1797,7 @@ impl Backend {
         };
         let mut tools = Vec::<Value>::new();
         let mut names = BTreeSet::new();
+        let mut native_resume_supported = false;
         let mut cursor = None::<String>;
         let mut cursors = HashSet::new();
         for page in 0..100 {
@@ -1840,6 +1846,7 @@ impl Backend {
                 if !names.insert(name.to_string()) || names.len() > 4096 {
                     return Err("La liste des outils MCP est invalide.".into());
                 }
+                native_resume_supported |= crate::learning_ui::PreparedTurn::supports_resume(item);
                 tools.push(json!({"name":name,"description":item.get("description"),"annotations":item.get("annotations")}));
             }
             cursor = match value.get("nextCursor") {
@@ -1863,6 +1870,7 @@ impl Backend {
                     return Err("Le compte Tutor a changé pendant la lecture des outils.".into());
                 }
                 tutor.tool_catalog = names;
+                tutor.native_resume_supported = native_resume_supported;
                 tutor.tool_catalog_binding = binding;
                 tutor.tool_catalog_refreshed = Some(std::time::Instant::now());
                 return Ok(json!({"tools":tools}));
@@ -2050,7 +2058,7 @@ impl Backend {
         let conversation_id = resume_id
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let (servers, tutor_binding, owner) = self.mcp_servers(&conversation_id).await?;
+        let (mut servers, tutor_binding, owner) = self.mcp_servers(&conversation_id).await?;
         let (rpc, target_id, cwd, capabilities, runtime_binding) = {
             let agent = self.agent.lock().await;
             let agent = agent
@@ -2110,6 +2118,25 @@ impl Backend {
             };
             (existing, intent)
         };
+        // The UI queues the first message before opening its conversation.
+        // A known native formulation needs no MCP grants in the harness. Start
+        // that new session correctly once, instead of loading it again just
+        // after creating it. send_prompt still confirms capabilities, consent,
+        // selection and the actual server decision before any generation.
+        if existing.is_none() && target_id != crate::local_agent::TARGET_ID {
+            let pending = self.store.lock().await.data.pending_message.clone();
+            if let Some(pending) = pending.filter(|pending| {
+                !pending.paused
+                    && pending
+                        .conversation_id
+                        .as_deref()
+                        .is_none_or(|id| id == conversation_id)
+            }) {
+                if crate::learning_ui::PreparedTurn::anticipates_private_output(&pending.text)? {
+                    servers = json!([]);
+                }
+            }
+        }
         let can_load = capabilities.get("loadSession").and_then(Value::as_bool) == Some(true);
         let known_fingerprint = self.agent.lock().await.as_ref().and_then(|agent| {
             existing
@@ -2310,6 +2337,20 @@ impl Backend {
                 .await?
             }
         };
+        if let Some(turn) = &prepared_turn {
+            if let Some(reply) = turn.immediate_text(&self.settings().await.language, &text)? {
+                self.finish_native_clarification(
+                    &conversation_id,
+                    &text,
+                    &reply,
+                    &training_context,
+                    &binding,
+                    operation,
+                )
+                .await?;
+                return Ok(json!({"stopReason":"end_turn","nativeOnly":true}));
+            }
+        }
         let private_output = prepared_turn
             .as_ref()
             .is_some_and(|turn| turn.private_output());
@@ -2471,7 +2512,10 @@ impl Backend {
                     .ok_or("Séance introuvable.")?;
                 conversation.active_training = Some(training_context.clone());
                 if conversation.messages.is_empty() {
-                    conversation.title = text.chars().take(64).collect();
+                    conversation.title = prepared_turn
+                        .as_ref()
+                        .and_then(|turn| turn.suggested_title(&data.settings.language))
+                        .unwrap_or_else(|| text.chars().take(64).collect());
                 }
                 conversation.messages.push(Message {
                     pending_learning_commit: None,

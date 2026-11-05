@@ -2,7 +2,7 @@ import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { LearningActivityCard } from '../../src/LearningActivity';
-import type { FlashcardActivity, LearningResponse, QuizActivity } from '../../src/learningActivityModel';
+import type { ExerciseActivity, FlashcardActivity, LearningResponse, QuizActivity } from '../../src/learningActivityModel';
 
 const quiz: QuizActivity = { version: 1, id: 'quiz-1', kind: 'quiz', trainingId: 'personal:go', domainId: 'go', concept: 'variables',
   question: 'Quelle valeur contient x ?', options: [{ id: 'a', text: '3' }, { id: 'b', text: '5' }], correctOptionId: 'b', explanation: 'On ajoute deux à trois.', attemptId: 'attempt-1', activityType: 'PRACTICE', rubricJson: '{"criteria":[{"id":"value","max_score":1}],"passing_score":1}' };
@@ -10,6 +10,22 @@ const flashcard: FlashcardActivity = { version: 1, id: 'flashcard-1', kind: 'fla
   question: 'Comment dit-on « hier » en anglais ?', answer: '**Yesterday**' };
 
 describe('activités visuelles dans la conversation', () => {
+  it('sépare l’aide et la réponse d’exercice, puis verrouille la réponse enregistrée sans inventer de correction', async () => {
+    const exercise: ExerciseActivity = { version: 1, id: 'exercise-1', kind: 'exercise', trainingId: 'personal:go', domainId: 'go', concept: 'variables', question: 'Écrivez une addition.', attemptId: 'attempt-1', activityType: 'PRACTICE', rubricJson: '{}' };
+    const user = userEvent.setup(); const submit = vi.fn(async (_response:LearningResponse) => true); const hint = vi.fn();
+    const view = render(<LearningActivityCard activity={exercise} onRespond={submit} onHint={hint}/>);
+    expect(screen.getByRole('button', { name: 'Valider' }).matches(':disabled')).toBe(true);
+    await user.click(screen.getByRole('button', { name: 'Un indice' }));
+    expect(hint).toHaveBeenCalledTimes(1); expect(submit).not.toHaveBeenCalled();
+    await user.type(screen.getByLabelText('Votre réponse à l’exercice'), 'x := 3\nx += 2');
+    await user.click(screen.getByRole('button', { name: 'Valider' }));
+    expect(submit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({kind:'exercise',attemptId:'attempt-1',answer:'x := 3\nx += 2'}));
+    expect(submit.mock.calls[0][0]).not.toHaveProperty('success');
+    expect(screen.queryByText('Bonne réponse')).toBeNull();
+    view.rerender(<LearningActivityCard activity={exercise} onRespond={submit} response={submit.mock.calls[0][0]}/>);
+    expect(screen.getByLabelText('Votre réponse à l’exercice').matches(':disabled')).toBe(true);
+    expect(screen.getByRole('status').textContent).toContain('Réponse enregistrée');
+  });
   it('attend une réponse validée pour montrer la correction, puis conserve une sélection en lecture seule', async () => {
     const user = userEvent.setup(); const submit = vi.fn(async (_response:LearningResponse) => true); const next = vi.fn();
     const view = render(<LearningActivityCard activity={quiz} onRespond={submit} onContinue={next} />);

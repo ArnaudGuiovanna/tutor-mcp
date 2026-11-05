@@ -3,6 +3,9 @@
 
 use super::*;
 
+#[path = "backend_resume_tests.rs"]
+mod resume_tests;
+
 #[tokio::test]
 async fn switching_from_wsl_home_to_packaged_agent_uses_the_accounts_private_directory() {
     let directory = tempfile::tempdir().unwrap();

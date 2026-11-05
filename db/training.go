@@ -307,7 +307,7 @@ func (s *Store) trainingDocumentView(ctx context.Context, p models.Principal, id
  LEFT JOIN domains d ON d.tenant_id=e.tenant_id AND d.formation_enrollment_id=e.id AND d.learner_id=? AND d.deleted_at IS NULL
  WHERE c.tenant_id=? AND v.formation_id=? AND v.status='published' AND (
  (?=1 AND c.status='open' AND (c.ends_at IS NULL OR c.ends_at>CURRENT_TIMESTAMP)) OR EXISTS(SELECT 1 FROM formation_admissions a WHERE a.tenant_id=c.tenant_id AND a.cohort_id=c.id AND a.membership_id=? AND a.status IN ('invited','approved')) OR e.status IN ('active','completed') OR ?=1)
- ORDER BY CASE WHEN ?=1 OR e.status IN ('active','completed') THEN 0 ELSE 1 END,v.version DESC,c.id LIMIT 1`, p.MembershipID, learnerDataID, p.TenantID, formationID, boolInt(f.EnrollmentPolicy != "invitation" && f.Status == "active"), p.MembershipID, boolInt(designAccess || assigned > 0), boolInt(designAccess)).Scan(&cohortID, &versionID, &domainID)
+ ORDER BY CASE WHEN ?=1 OR e.status IN ('active','completed') THEN 0 ELSE 1 END,v.version DESC,c.id LIMIT 1`, p.MembershipID, learnerDataID, p.TenantID, formationID, boolInt(f.EnrollmentPolicy != "invitation" && f.Status == "active"), p.MembershipID, boolInt(designAccess || assigned > 0), boolInt(designAccess && !contextOnly)).Scan(&cohortID, &versionID, &domainID)
 		// The policy predicate is bound separately below (no client SQL enters here).
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return nil, err
@@ -321,7 +321,19 @@ func (s *Store) trainingDocumentView(ctx context.Context, p models.Principal, id
 			}
 		}
 		if contextOnly && domainID != "" {
-			t.Name, t.DomainID, t.VersionID = f.Name, domainID, versionID
+			learning, err := s.GetLearnerDomainByID(ctx, p.LearnerID, domainID)
+			if err != nil {
+				return nil, err
+			}
+			t.Name, t.Description, t.DomainID = f.Name, f.Description, domainID
+			t.Kind, t.FormationID, t.CohortID = "institutional", formationID, cohortID
+			t.VersionID, t.LearningVersionID = learning.FormationVersionID, learning.FormationVersionID
+			var kind string
+			if err := s.queryRow(ctx, `SELECT kind FROM training_workflows WHERE tenant_id=? AND formation_id=?`, p.TenantID, formationID).Scan(&kind); err == nil {
+				t.Kind = kind
+			} else if !errors.Is(err, sql.ErrNoRows) {
+				return nil, err
+			}
 			return doc, nil
 		}
 		detail, err := s.loadFormationVersion(ctx, p.TenantID, versionID)
@@ -486,6 +498,7 @@ func (s *Store) conversationContext(ctx context.Context, p models.Principal, id 
 			return nil, err
 		}
 		c.Revision = strconv.Itoa(domain.GraphVersion)
+		c.Training = trainingContext(doc.Training, domain)
 	}
 	return c, nil
 }

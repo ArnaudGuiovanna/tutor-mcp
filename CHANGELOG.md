@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
+- Native ACP course resume: resolve an authorized selection and freeze the
+  pedagogical decision before one harness formulation, with introductions,
+  open exercises, explicit answers and native clarification for ambiguous names.
+  Exercise contracts are frozen before display and course revisions rechecked
+  before finalization. Actual-model and UI-render diagnostics distinguish
+  complete responses from intermediate fragments; the five-second goal remains
+  unqualified. New distribution targets are Windows desktop, Linux server and
+  Windows local server, with matching CI, installers and release artifacts.
+
 - Tutor desktop client in `client/`: a Windows Tauri application with a Rust
   ACP runtime, native/WSL2 Codex discovery, browser OAuth and a DPAPI credential
   vault, validated learning intentions, real learner views, streamed sessions,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build six portable archives and SHA256SUMS using the selected Go toolchain."""
+"""Build supported portable archives and SHA256SUMS using the selected Go toolchain."""
 
 import argparse
 import hashlib
@@ -14,6 +14,17 @@ import zipfile
 from datetime import datetime, timezone
 
 from third_party_notices import collect, verify_archive, verify_contents
+
+
+def release_targets():
+    """The distribution policy is shared with CI's consistency gate."""
+    policy = json.loads(Path(__file__).with_name('release-platforms.json').read_text(encoding='utf-8'))
+    targets = [(target['goos'], target['goarch']) for target in policy['server']]
+    if policy['policy_version'] != 1 or not targets or len(set(targets)) != len(targets):
+        raise ValueError('invalid release platform policy')
+    if any(goos not in ('linux', 'windows') or arch not in ('amd64', 'arm64') for goos, arch in targets):
+        raise ValueError('unsupported release target')
+    return targets
 
 
 def archive_files(binary, root, notices):
@@ -73,46 +84,47 @@ def main():
     root = Path(__file__).resolve().parent.parent
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=True)
+    if any(output.iterdir()):
+        raise ValueError('release output must be empty; do not mix historical or stale platform assets into a new release')
     commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
     epoch = int(os.environ.get('SOURCE_DATE_EPOCH') or subprocess.check_output(
         ['git', 'show', '-s', '--format=%ct', 'HEAD'], cwd=root, text=True).strip())
     build_date = datetime.fromtimestamp(epoch, timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     go = os.environ.get('TUTOR_GO_BIN', 'go')
     checksums, notice_checksums, provenance = [], [], []
-    for goos in ('linux', 'darwin', 'windows'):
-        for goarch in ('amd64', 'arm64'):
-            with tempfile.TemporaryDirectory(prefix='tutor-release-') as temp:
-                binary_name = 'tutor-mcp.exe' if goos == 'windows' else 'tutor-mcp'
-                binary = Path(temp) / binary_name
-                env = dict(os.environ, GOOS=goos, GOARCH=goarch, CGO_ENABLED='0')
-                subprocess.run([go, 'build', '-trimpath', '-buildvcs=false', '-ldflags',
-                                f'-s -w -X main.version={args.version} -X main.commit={commit} -X main.buildDate={build_date}',
-                                '-o', str(binary), '.'], cwd=root, env=env, check=True)
-                notices = Path(temp) / 'THIRD_PARTY_NOTICES'
-                inventory = collect(binary, notices, root, go)
-                inventory.update(release_version=args.version, source_commit=commit)
-                (notices / 'inventory.json').write_text(json.dumps(inventory, indent=2, sort_keys=True) + '\n', encoding='utf-8')
-                files = archive_files(binary, root, notices)
-                suffix = 'zip' if goos == 'windows' else 'tar.gz'
-                asset = output / f'tutor-mcp_{goos}_{goarch}.{suffix}'
-                write_archive(asset, files, epoch, binary)
-                verify_archive(asset)
-                archive_hash = hashlib.sha256(asset.read_bytes()).hexdigest()
-                checksums.append(f'{archive_hash}  {asset.name}\n')
-                supplement = output / f'tutor-mcp_{goos}_{goarch}_notices.{suffix}'
-                write_notice_supplement(supplement, binary, root, notices, epoch)
-                supplement_hash = hashlib.sha256(supplement.read_bytes()).hexdigest()
-                line = f'{supplement_hash}  {supplement.name}\n'
-                checksums.append(line)
-                notice_checksums.append(line)
-                provenance.append({'version': args.version, 'source_commit': commit, 'build_date': build_date,
-                                   'original_archive': asset.name, 'original_archive_sha256': archive_hash,
-                                   'supplement': supplement.name, 'supplement_sha256': supplement_hash,
-                                   'binary_sha256': inventory['binary_sha256'],
-                                   'go_version': inventory['build_info']['GoVersion'],
-                                   'notice_source': 'same verified notice payload as the binary archive'})
-                print(asset.name, flush=True)
-                print(supplement.name, flush=True)
+    for goos, goarch in release_targets():
+        with tempfile.TemporaryDirectory(prefix='tutor-release-') as temp:
+            binary_name = 'tutor-mcp.exe' if goos == 'windows' else 'tutor-mcp'
+            binary = Path(temp) / binary_name
+            env = dict(os.environ, GOOS=goos, GOARCH=goarch, CGO_ENABLED='0')
+            subprocess.run([go, 'build', '-trimpath', '-buildvcs=false', '-ldflags',
+                            f'-s -w -X main.version={args.version} -X main.commit={commit} -X main.buildDate={build_date}',
+                            '-o', str(binary), '.'], cwd=root, env=env, check=True)
+            notices = Path(temp) / 'THIRD_PARTY_NOTICES'
+            inventory = collect(binary, notices, root, go)
+            inventory.update(release_version=args.version, source_commit=commit)
+            (notices / 'inventory.json').write_text(json.dumps(inventory, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+            files = archive_files(binary, root, notices)
+            suffix = 'zip' if goos == 'windows' else 'tar.gz'
+            asset = output / f'tutor-mcp_{goos}_{goarch}.{suffix}'
+            write_archive(asset, files, epoch, binary)
+            verify_archive(asset)
+            archive_hash = hashlib.sha256(asset.read_bytes()).hexdigest()
+            checksums.append(f'{archive_hash}  {asset.name}\n')
+            supplement = output / f'tutor-mcp_{goos}_{goarch}_notices.{suffix}'
+            write_notice_supplement(supplement, binary, root, notices, epoch)
+            supplement_hash = hashlib.sha256(supplement.read_bytes()).hexdigest()
+            line = f'{supplement_hash}  {supplement.name}\n'
+            checksums.append(line)
+            notice_checksums.append(line)
+            provenance.append({'version': args.version, 'source_commit': commit, 'build_date': build_date,
+                               'original_archive': asset.name, 'original_archive_sha256': archive_hash,
+                               'supplement': supplement.name, 'supplement_sha256': supplement_hash,
+                               'binary_sha256': inventory['binary_sha256'],
+                               'go_version': inventory['build_info']['GoVersion'],
+                               'notice_source': 'same verified notice payload as the binary archive'})
+            print(asset.name, flush=True)
+            print(supplement.name, flush=True)
     for name, content in [('THIRD_PARTY_NOTICES_SHA256SUMS', ''.join(sorted(notice_checksums))),
                           ('THIRD_PARTY_NOTICES_PROVENANCE.json', json.dumps(provenance, indent=2, sort_keys=True) + '\n')]:
         path = output / name

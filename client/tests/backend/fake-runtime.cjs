@@ -50,7 +50,21 @@ readline.createInterface({input:process.stdin}).on('line', async (line) => {
       send({jsonrpc:'2.0',method:'_auth/status_update',params:{authStatus:JSON.parse(fs.readFileSync(path.join(process.cwd(),'fixture-auth-status.json'),'utf8'))}});
     }
   } else if (request.method === 'tools/list') {
-    if(fs.existsSync('fixture-pedagogy.json')) return result(request,{tools:['prepare_pedagogical_turn','prepare_assessment_attempt','submit_assessment_attempt','record_interaction','record_learning_event','claim_memory_maintenance','commit_memory_maintenance'].map(name=>({name,inputSchema:{type:'object'}}))});
+    if(fs.existsSync('fixture-pedagogy.json')) {
+      const fixture=JSON.parse(fs.readFileSync('fixture-pedagogy.json','utf8'));
+      const tools=['prepare_pedagogical_turn','get_conversation_context','select_conversation_training','get_next_activity',
+        'prepare_assessment_attempt','submit_assessment_attempt','record_interaction','record_learning_event',
+        'claim_memory_maintenance','commit_memory_maintenance'].map(name=>{
+        const inputSchema={type:'object'};
+        if(name==='prepare_pedagogical_turn'&&fixture.resumeSchema) {
+          inputSchema.properties=Object.fromEntries(['training_id','training_name','expected_selection','expected_revision']
+            .filter(field=>!fixture.omittedResumeFields?.includes(field))
+            .map(field=>[field,{type:field==='expected_selection'?'integer':'string'}]));
+        }
+        return {name,inputSchema};
+      });
+      return result(request,{tools});
+    }
     result(request,{tools:[{name:'get_next_activity',description:'Fixture next activity',inputSchema:{type:'object'}}]});
   } else if (request.method === 'tools/call') {
     if(fs.existsSync('fixture-pedagogy.json')) {

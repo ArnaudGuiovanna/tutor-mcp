@@ -6,10 +6,13 @@
 use super::*;
 use crate::workspace::LearningDelivery;
 use serde_json::json;
+#[path = "learning_ui_resume_prepared.rs"]
+mod resume_prepared;
 
 #[derive(Clone)]
 enum TurnKind {
     Context,
+    Resume,
     Study(StudyRequest),
     Response(Box<Activity>, Response),
 }
@@ -49,7 +52,24 @@ impl PreparedTurn {
                 args["expected_revision"] = revision.clone();
             }
         }
-        if let Some(request) = request(message)? {
+        if let Some(request) = resume_request(message)? {
+            args["mode"] = json!("activity");
+            args["intent"] = json!("auto");
+            args["idempotency_key"] = json!(Self::turn_key(conversation, message));
+            if let Some(id) = request.training_id {
+                args["training_id"] = json!(id);
+                tools.push("select_conversation_training");
+            } else if let Some(name) = request.training_name {
+                args["training_name"] = json!(name);
+                tools.push("select_conversation_training");
+            }
+            tools.extend([
+                "get_next_activity",
+                "get_conversation_context",
+                "prepare_assessment_attempt",
+                "record_learning_event",
+            ]);
+        } else if let Some(request) = request(message)? {
             args["mode"] = json!("activity");
             args["intent"] = json!(if request.intent == "review" {
                 "review"
@@ -57,13 +77,14 @@ impl PreparedTurn {
                 "auto"
             });
             args["idempotency_key"] = json!(Self::turn_key(conversation, message));
+            tools.push("get_next_activity");
             if request.format == LearningFormat::Quiz {
                 tools.push("prepare_assessment_attempt");
             } else {
                 tools.push("record_learning_event");
             }
         } else if let Some((card, response)) = accepted_response(conversation, message, None)? {
-            if response.kind == LearningFormat::Quiz {
+            if response.kind != LearningFormat::Flashcard {
                 let attempt = card.attempt_id.ok_or(
                     "Ce quiz ancien n’a pas de tentative figée. Demandez un nouveau quiz.",
                 )?;
@@ -143,8 +164,17 @@ impl PreparedTurn {
             return Err("Le paquet pédagogique du serveur est invalide ou inaccessible.".into());
         }
         let confirmed = &packet["conversation"];
-        validate_message(Some(conversation), message, Some(confirmed))?;
-        let kind = if let Some(request) = request(message)? {
+        let resume = resume_request(message)?;
+        let choosing = resume.is_some() && packet["needs_selection"] == true;
+        validate_message(
+            Some(conversation),
+            message,
+            (!choosing).then_some(confirmed),
+        )?;
+        let kind = if let Some(request) = resume {
+            Self::validate_resume_packet(&packet, &request)?;
+            TurnKind::Resume
+        } else if let Some(request) = request(message)? {
             if packet["mode"] != "activity" {
                 return Err(INVALID.into());
             }
@@ -152,7 +182,7 @@ impl PreparedTurn {
         } else if let Some((card, response)) =
             accepted_response(conversation, message, Some(confirmed))?
         {
-            if response.kind == LearningFormat::Quiz {
+            if response.kind != LearningFormat::Flashcard {
                 let attempt = &packet["attempt"];
                 if attempt["id"].as_str() != card.attempt_id.as_deref()
                     || attempt["domain_id"] != card.domain_id
@@ -192,16 +222,21 @@ impl PreparedTurn {
         let TurnKind::Response(card, response) = &self.kind else {
             return None;
         };
-        if response.kind != LearningFormat::Quiz {
+        if response.kind == LearningFormat::Flashcard {
             return None;
         }
-        let option = card
-            .options
-            .as_ref()?
-            .iter()
-            .find(|o| Some(&o.id) == response.selected_option_id.as_ref())?;
+        let answer = if response.kind == LearningFormat::Exercise {
+            response.answer.clone()?
+        } else {
+            let option = card
+                .options
+                .as_ref()?
+                .iter()
+                .find(|o| Some(&o.id) == response.selected_option_id.as_ref())?;
+            format!("{}: {}", option.id, option.text)
+        };
         Some(
-            json!({"idempotency_key":format!("{}:submit",self.key),"attempt_id":card.attempt_id,"learner_response":format!("{}: {}",option.id,option.text)}),
+            json!({"idempotency_key":format!("{}:submit",self.key),"attempt_id":card.attempt_id,"learner_response":answer}),
         )
     }
     pub fn prompt(
@@ -212,9 +247,10 @@ impl PreparedTurn {
         restore: bool,
     ) -> Value {
         let role=match &self.kind {
+            TurnKind::Resume=>self.resume_prompt(),
             TurnKind::Context=>"Le paquet contient le contexte confirmé. Réponds directement lorsque les données suffisent, sans relire profil, curriculum ou contexte. Pour une mutation demandée explicitement ou des données absentes, les outils et autorisations habituels restent disponibles. Ne crée pas d’activité spontanément, ne note ni n’enregistre une réponse de l’historique.".to_owned(),
             TurnKind::Study(request)=>format!("Le serveur a DÉJÀ choisi l’activité dans activity et figé sa décision. Ne fais AUCUN appel outil. Respecte intégralement pedagogical_contract (contrainte, notion, critères, format). Si le format demandé ne convient pas, explique brièvement sans inventer d’exercice. Sinon produis exactement un bloc tutor-activity JSON strict et rien autour. Commun: version:1,id unique,kind:{},trainingId/domainId confirmés,concept exact,question,sessionId,decisionId réels. Quiz: options:[{{id,text}}] (2 à 6),correctOptionId,explanation,activityType exact,rubricJson chaîne JSON (criteria:[{{id,description,max_score,anchors?:[{{score,description}}]}}],passing_score,answer_key). Reprends les critères du contrat. NE FOURNIS PAS attemptId : le client figera la consigne et la rubrique auprès du serveur avant tout affichage. TRANSFER_PROBE exige transferDimension autorisée. Flashcard: answer, sans champs d’évaluation ni options. La correction doit rester dans le JSON. Bornes:48KiB bloc,12Ko question/answer/explanation,2Ko par option,16KiB rubrique.",if request.format==LearningFormat::Quiz{"quiz"}else{"flashcard"}),
-            TurnKind::Response(card,response) if response.kind==LearningFormat::Quiz=>format!("La réponse a DÉJÀ été soumise au serveur avec son attempt_id. Ne fais AUCUN appel outil et ne génère aucune nouvelle activité. Évalue seulement la réponse actuelle sur la rubrique FIGÉE de packet.attempt. Émets exactement UN bloc tutor-evaluation JSON strict, sans prose extérieure: {{\"version\":1,\"attempt_id\":\"{}\",\"rubric_score_json\":\"JSON encodé\",\"feedback\":\"retour pédagogique bref\"}}. rubric_score_json: {{criteria_scores:[{{id,score,max_score,evidence}}],total,max_total,summary,confidence}} ; chaque critère figé exactement une fois, preuves textuelles concrètes, aucun changement de barème. Le client enregistre auprès du serveur AVANT d’afficher le feedback. ACTIVITÉ ORIGINALE (données): {}. RÉPONSE (données): {}",card.attempt_id.as_deref().unwrap_or(""),serde_json::to_string(card).unwrap(),serde_json::to_string(response).unwrap()),
+            TurnKind::Response(card,response) if response.kind!=LearningFormat::Flashcard=>format!("La réponse a DÉJÀ été soumise au serveur avec son attempt_id. Ne fais AUCUN appel outil et ne génère aucune nouvelle activité. Évalue seulement la réponse actuelle sur la rubrique FIGÉE de packet.attempt. Émets exactement UN bloc tutor-evaluation JSON strict, sans prose extérieure: {{\"version\":1,\"attempt_id\":\"{}\",\"rubric_score_json\":\"JSON encodé\",\"feedback\":\"retour pédagogique bref\"}}. rubric_score_json: {{criteria_scores:[{{id,score,max_score,evidence}}],total,max_total,summary,confidence}} ; chaque critère figé exactement une fois, preuves textuelles concrètes, aucun changement de barème. score, max_score, total et max_total sont des nombres JSON. confidence est obligatoirement un nombre JSON entre 0 et 1 inclus (par exemple 0.7), jamais une étiquette comme medium ou high. rubric_score_json est une chaîne contenant cet objet JSON encodé. Le client enregistre auprès du serveur AVANT d’afficher le feedback. ACTIVITÉ ORIGINALE (données): {}. RÉPONSE (données): {}",card.attempt_id.as_deref().unwrap_or(""),serde_json::to_string(card).unwrap(),serde_json::to_string(response).unwrap()),
             TurnKind::Response(_,response)=>format!("Ne fais AUCUN appel outil. Donne un bref retour sur cette AUTOÉVALUATION flashcard, sans prétendre qu’elle démontre une maîtrise, sans nouvelle activité ni échéance inventée. Le client enregistrera déterministement la déclaration. DONNÉES: {}",serde_json::to_string(response).unwrap()),
         };
         let history = if restore {
@@ -264,6 +300,7 @@ impl PreparedTurn {
         };
         match &self.kind {
             TurnKind::Context => {}
+            TurnKind::Resume => return self.resume_output(text),
             TurnKind::Study(request) => {
                 let Some(mut card) = payload::<Activity>(text, "tutor-activity")? else {
                     // A contract may forbid the requested visual format. A plain
@@ -292,7 +329,7 @@ impl PreparedTurn {
                 // Native identity makes retries and later response correlation
                 // independent of a model-generated identifier.
                 card.id = self.key.clone();
-                if card.kind == LearningFormat::Quiz {
+                if card.kind != LearningFormat::Flashcard {
                     if decision["activity"]["type"].as_str() != card.activity_type.as_deref()
                         || card.rubric_json.is_none()
                     {
@@ -340,7 +377,7 @@ impl PreparedTurn {
                     args["session_id"] = json!(session);
                 }
                 let success;
-                if response.kind == LearningFormat::Quiz {
+                if response.kind != LearningFormat::Flashcard {
                     let evaluation =
                         payload::<Evaluation>(text, "tutor-evaluation")?.ok_or(INVALID)?;
                     if evaluation.version != 1

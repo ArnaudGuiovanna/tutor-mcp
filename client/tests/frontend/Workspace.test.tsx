@@ -90,6 +90,18 @@ describe('Workspace Tutor',()=>{
     for(const privateText of ['PRIVATE_CONNECTION','PRIVATE_ATTACHMENT','HIDDEN_ANSWER','tutor-conversation-title','trainingId'])expect(exported).not.toContain(privateText);
   });
 
+  it('exporte l’exercice ouvert et les choix visibles sans barème, identité de transport ni évaluation privée',()=>{
+    const block=(tag:string,payload:unknown)=>'```'+tag+'\n'+JSON.stringify(payload)+'\n```';
+    const value={...conversation,messages:[
+      {id:'exercise',role:'assistant' as const,createdAt:'now',status:'complete' as const,text:block('tutor-activity',{version:1,id:'exercise',kind:'exercise',trainingId:'PRIVATE_TRAINING',domainId:'PRIVATE_DOMAIN',concept:'c',question:'Écrivez une addition.',attemptId:'PRIVATE_ATTEMPT',activityType:'PRACTICE',rubricJson:'{"answer_key":"PRIVATE_ANSWER"}'})},
+      {id:'choice',role:'assistant' as const,createdAt:'now',status:'complete' as const,text:block('tutor-training-choice',{version:1,requestText:'PRIVATE_REQUEST',choices:[{trainingId:'PRIVATE_ID',trainingName:'Algèbre'}],hasMore:false})},
+      {id:'grade',role:'assistant' as const,createdAt:'now',status:'complete' as const,privateOutput:true,text:'PRIVATE_UNCOMMITTED_GRADE'},
+    ]};
+    const exported=conversationMarkdown(value);
+    expect(exported).toContain('Exercice — Écrivez une addition.');expect(exported).toContain('Algèbre');
+    expect(exported).not.toContain('PRIVATE_');expect(exported).not.toContain('tutor-activity');expect(exported).not.toContain('tutor-training-choice');
+  });
+
   it('ouvre un aperçu de partage et copie uniquement son contenu',async()=>{
     const previous=Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype,'showModal');
     Object.defineProperty(HTMLDialogElement.prototype,'showModal',{configurable:true,value:function(this:HTMLDialogElement){this.open=true;}});

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 /** A presentation contract, not a client-side model of pedagogical mastery. */
-export type LearningFormat = 'quiz' | 'flashcard';
+export type LearningFormat = 'quiz' | 'flashcard' | 'exercise';
 export type RecallRating = 'again' | 'hard' | 'easy';
 
 interface ActivityBase {
@@ -30,7 +30,14 @@ export interface FlashcardActivity extends ActivityBase {
   kind: 'flashcard';
   answer: string;
 }
-export type LearningActivity = QuizActivity | FlashcardActivity;
+export interface ExerciseActivity extends ActivityBase {
+  kind: 'exercise';
+  attemptId: string;
+  activityType: string;
+  rubricJson: string;
+  transferDimension?: QuizActivity['transferDimension'];
+}
+export type LearningActivity = QuizActivity | FlashcardActivity | ExerciseActivity;
 
 interface ResponseBase {
   version: 1;
@@ -50,11 +57,24 @@ export interface FlashcardResponse extends ResponseBase {
   kind: 'flashcard';
   rating: RecallRating;
 }
-export type LearningResponse = QuizResponse | FlashcardResponse;
+export interface ExerciseResponse extends ResponseBase {
+  kind: 'exercise';
+  attemptId: string;
+  answer: string;
+}
+export type LearningResponse = QuizResponse | FlashcardResponse | ExerciseResponse;
+
+export interface TrainingChoice {
+  version: 1;
+  requestText: string;
+  choices: { trainingId: string; trainingName: string; domainId?: string }[];
+  hasMore: boolean;
+}
 
 export type LearningContentSegment =
   | { type: 'text'; text: string }
   | { type: 'activity'; activity: LearningActivity }
+  | { type: 'training-choice'; choice: TrainingChoice }
   | { type: 'invalid' }
   | { type: 'pending' };
 
@@ -106,6 +126,16 @@ export function validateLearningActivity(value: unknown): LearningActivity | und
   if (value.kind === 'flashcard' && onlyKeys(value, [...activityKeys, 'answer']) && bounded(value.answer, 12000)) {
     return { ...base, kind: 'flashcard', answer: value.answer };
   }
+  if (value.kind === 'exercise') {
+    if (!onlyKeys(value, [...activityKeys, 'attemptId', 'activityType', 'rubricJson', 'transferDimension'])
+      || !bounded(value.attemptId) || typeof value.activityType !== 'string' || !assessmentActivityTypes.includes(value.activityType)
+      || !bounded(value.rubricJson, 16 * 1024) || !record(parseJson(value.rubricJson))) return;
+    if (value.activityType === 'TRANSFER_PROBE') {
+      if (typeof value.transferDimension !== 'string' || !['near', 'far', 'debugging', 'teaching', 'creative'].includes(value.transferDimension)) return;
+    } else if (value.transferDimension !== undefined) return;
+    return { ...base, kind: 'exercise', attemptId: value.attemptId, activityType: value.activityType, rubricJson: value.rubricJson,
+      ...(typeof value.transferDimension === 'string' ? { transferDimension: value.transferDimension as ExerciseActivity['transferDimension'] } : {}) };
+  }
 }
 
 export function validateLearningResponse(value: unknown): LearningResponse | undefined {
@@ -121,6 +151,23 @@ export function validateLearningResponse(value: unknown): LearningResponse | und
   if (value.kind === 'flashcard' && onlyKeys(value, [...responseKeys, 'rating']) && typeof value.rating === 'string' && ['again', 'hard', 'easy'].includes(value.rating)) {
     return { ...base, kind: 'flashcard', rating: value.rating as RecallRating };
   }
+  if (value.kind === 'exercise' && onlyKeys(value, [...responseKeys, 'attemptId', 'answer']) && bounded(value.attemptId) && bounded(value.answer, 12000)) {
+    return { ...base, kind: 'exercise', attemptId: value.attemptId, answer: value.answer };
+  }
+}
+
+export function validateTrainingChoice(value: unknown): TrainingChoice | undefined {
+  if (!record(value) || !onlyKeys(value, ['version', 'requestText', 'choices', 'hasMore']) || value.version !== 1
+    || !bounded(value.requestText, 12000) || typeof value.hasMore !== 'boolean' || !Array.isArray(value.choices)
+    || value.choices.length < 1 || value.choices.length > 20) return;
+  const choices: TrainingChoice['choices'] = [];
+  for (const choice of value.choices) {
+    if (!record(choice) || !onlyKeys(choice, ['trainingId', 'trainingName', 'domainId']) || !bounded(choice.trainingId)
+      || !bounded(choice.trainingName, 1000) || !optionalId(choice.domainId) || choices.some(item => item.trainingId === choice.trainingId)) return;
+    choices.push({ trainingId: choice.trainingId, trainingName: choice.trainingName,
+      ...(typeof choice.domainId === 'string' ? { domainId: choice.domainId } : {}) });
+  }
+  return { version: 1, requestText: value.requestText, choices, hasMore: value.hasMore };
 }
 
 function parseJson(raw: string): unknown {
@@ -149,8 +196,8 @@ export function learningProtocolFences(source: string): Fence[] {
     if (!opening) continue;
     const tag = opening[2].trim().toLowerCase();
     // A partially streamed tag is kept out of the Markdown/code renderer too.
-    const reserved = /^tutor-(activity|evaluation|response|study-request|attachments|conversation-title)/.test(tag)
-      || (!!tag && ['tutor-activity', 'tutor-evaluation', 'tutor-response', 'tutor-study-request', 'tutor-attachments', 'tutor-conversation-title'].some(known => known.startsWith(tag)));
+    const reserved = /^tutor-(activity|evaluation|response|study-request|resume-request|training-choice|introduction|guidance|attachments|conversation-title)/.test(tag)
+      || (!!tag && ['tutor-activity', 'tutor-evaluation', 'tutor-response', 'tutor-study-request', 'tutor-resume-request', 'tutor-training-choice', 'tutor-introduction', 'tutor-guidance', 'tutor-attachments', 'tutor-conversation-title'].some(known => known.startsWith(tag)));
     open = { start: line.index, bodyStart: line.index + line[0].length, delimiter: opening[1][0],
       length: opening[1].length, tag, reserved };
   }
@@ -162,7 +209,7 @@ export function learningProtocolFences(source: string): Fence[] {
 export function parseLearningContent(source: string, { complete }: { complete: boolean }): LearningContentSegment[] {
   const segments: LearningContentSegment[] = [];
   const fences = learningProtocolFences(source);
-  const multipleActivities = fences.filter(fence => fence.tag === 'tutor-activity').length > 1;
+  const multipleActivities = fences.filter(fence => ['tutor-activity', 'tutor-training-choice'].includes(fence.tag)).length > 1;
   let cursor = 0;
   for (const fence of fences) {
     if (fence.start > cursor) segments.push({ type: 'text', text: source.slice(cursor, fence.start) });
@@ -171,7 +218,10 @@ export function parseLearningContent(source: string, { complete }: { complete: b
     else if (fence.closed && fence.tag === 'tutor-activity' && !multipleActivities) {
       const activity = validateLearningActivity(parseJson(fence.body));
       segments.push(activity ? { type: 'activity', activity } : { type: 'invalid' });
-    } else if (fence.tag !== 'tutor-response' && fence.tag !== 'tutor-study-request') segments.push({ type: 'invalid' });
+    } else if (fence.closed && fence.tag === 'tutor-training-choice' && !multipleActivities) {
+      const choice = validateTrainingChoice(parseJson(fence.body));
+      segments.push(choice ? { type: 'training-choice', choice } : { type: 'invalid' });
+    } else if (!['tutor-response', 'tutor-study-request', 'tutor-resume-request'].includes(fence.tag)) segments.push({ type: 'invalid' });
     cursor = fence.end;
   }
   if (cursor < source.length) segments.push({ type: 'text', text: source.slice(cursor) });
@@ -197,5 +247,6 @@ export function responseMatchesActivity(activity: LearningActivity, response: Le
   if (activity.kind === 'quiz' && response.kind === 'quiz') {
     return response.attemptId === activity.attemptId && activity.options.some(option => option.id === response.selectedOptionId);
   }
+  if (activity.kind === 'exercise' && response.kind === 'exercise') return response.attemptId === activity.attemptId;
   return activity.kind === 'flashcard' && response.kind === 'flashcard';
 }

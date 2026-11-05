@@ -5,6 +5,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -13,9 +14,23 @@ import (
 	storeport "tutor-mcp/store"
 )
 
+type pedagogicalTurnRoutedStore struct{ *routedToolStore }
+
+func (s *pedagogicalTurnRoutedStore) WithTenantReadTx(ctx context.Context, scope models.TenantScope, fn func(context.Context, storeport.Store) error) error {
+	if os.Getenv("TUTOR_TEST_PG_DSN") == "" {
+		return s.routedToolStore.WithTenantReadTx(ctx, scope, fn)
+	}
+	// The shared SQLite probe deliberately executes a forbidden write. On
+	// PostgreSQL that aborts the transaction and masks the handler being tested.
+	// Use the real read-only PG transaction without poisoning it; db's reader
+	// suite separately proves that PostgreSQL rejects writes on this route.
+	s.reads++
+	return s.Store.WithTenantReadTx(ctx, scope, fn)
+}
+
 func TestPedagogicalTurnModeEnforcesScopeTransactionAndReplay(t *testing.T) {
 	s, deps, ctx, p, _, selected := pedagogicalTurnFixture(t)
-	wrapped := &routedToolStore{Store: s}
+	wrapped := &pedagogicalTurnRoutedStore{routedToolStore: &routedToolStore{Store: s}}
 	deps.Store = wrapped
 	for _, test := range []struct {
 		mode, grant  string

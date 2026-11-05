@@ -3,8 +3,9 @@
 Tutor MCP's own code remains MIT licensed. Its Go dependencies, the Go runtime,
 embedded third-party code and container certificates retain their original terms.
 
-`scripts/package-release.py` builds all six Linux/macOS/Windows amd64/arm64
-archives with `CGO_ENABLED=0`. Each archive contains the binary, the project's
+`scripts/package-release.py` builds the four Linux/Windows amd64/arm64
+archives in the [current platform policy](supported-platforms.md), with
+`CGO_ENABLED=0`. Each archive contains the binary, the project's
 `LICENSE` and `THIRD_PARTY_NOTICES/`. The latter contains original licence texts,
 NOTICE and attribution files, additional copyright/licence comments from the
 selected source files, and a versioned inventory with their SHA-256 hashes.

@@ -15,7 +15,7 @@ const modes = [
 
 export function StudyComposer({draft,onChange,disabled,canSend,pending,onSend,onCancel,home=false,trainingName,trainings=[],onChooseTraining,onOpenLibrary,menuRequest=0,mode,attachments=[],onAttachments}: {
   draft:string; onChange:(value:string)=>void; disabled:boolean; canSend:boolean; pending:boolean; onSend:()=>void; onCancel:()=>void;
-  mode?:'quiz'|'flashcard'; home?:boolean; trainingName?:string; trainings?:Training[]; onChooseTraining?:(item:Training)=>void; onOpenLibrary?:()=>void; menuRequest?:number;
+  mode?:'quiz'|'flashcard'|'exercise'; home?:boolean; trainingName?:string; trainings?:Training[]; onChooseTraining?:(item:Training)=>void; onOpenLibrary?:()=>void; menuRequest?:number;
   attachments?:TextAttachment[]; onAttachments?:(files:TextAttachment[])=>void;
 }) {
   const input = useRef<HTMLTextAreaElement>(null);
@@ -60,7 +60,7 @@ export function StudyComposer({draft,onChange,disabled,canSend,pending,onSend,on
     </div>}
     <div className="composer-context">
       <button ref={trainingButton} type="button" className={trainingName?'has-training':''} disabled={disabled} aria-expanded={trainingOpen} onClick={()=>{setTrainingOpen(value=>!value);setOpen(false);}}><Icon name="book" size={14}/><span>{trainingName || t('Choisir une formation')}</span><Icon name="chevron" size={10}/></button>
-      <button type="button" disabled={disabled} onClick={()=>{setOpen(value=>!value);setTrainingOpen(false);}} aria-haspopup="menu" aria-expanded={open}><Icon name="clock" size={14}/><span>{t((draft.startsWith('/quiz')||mode==='quiz')?'Mode quiz':(draft.startsWith('/flashcard')||mode==='flashcard')?'Mode flashcards':'À votre rythme')}</span></button>
+      <button type="button" disabled={disabled} onClick={()=>{setOpen(value=>!value);setTrainingOpen(false);}} aria-haspopup="menu" aria-expanded={open}><Icon name="clock" size={14}/><span>{t((draft.startsWith('/quiz')||mode==='quiz')?'Mode quiz':(draft.startsWith('/flashcard')||mode==='flashcard')?'Mode flashcards':mode==='exercise'?'Mode exercice':'À votre rythme')}</span></button>
     </div>
     <div className="composer-box">
     {!!attachments.length && <ul className="composer-attachments" aria-label={t('Fichiers joints')}>{attachments.map((file,index)=><li key={index}><Icon name="book" size={14}/><span>{file.name}</span><button className="workspace-icon" type="button" disabled={disabled || readingFiles} aria-label={t('Retirer {name}',{name:file.name})} onClick={()=>onAttachments?.(attachments.filter((_,i)=>i!==index))}><Icon name="close" size={14}/></button></li>)}</ul>}

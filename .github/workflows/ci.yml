@@ -63,6 +63,7 @@ jobs:
         run: |
           python3 -B -m unittest discover -s scripts -p test_third_party_notices.py
           python3 -B -m unittest discover -s scripts -p test_installers.py
+          python3 -B -m unittest discover -s scripts -p test_platform_policy.py
 
       - name: Staticcheck
         run: |
@@ -167,10 +168,6 @@ jobs:
             goarch: amd64
           - goos: linux
             goarch: arm64
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
           - goos: windows
             goarch: amd64
           - goos: windows
@@ -208,7 +205,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0

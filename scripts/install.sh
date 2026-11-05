@@ -32,7 +32,7 @@ download() {
 detect_os() {
 	case "$(uname -s)" in
 		Linux) printf '%s\n' linux ;;
-		Darwin) printf '%s\n' darwin ;;
+		Darwin) die "macOS is not a supported target for new releases; use a historical release's source and installer for its historical artifacts" ;;
 		*) die "unsupported OS: $(uname -s)" ;;
 	esac
 }

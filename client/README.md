@@ -5,19 +5,20 @@ Le client est développé dans ce dossier du dépôt Tutor ; le serveur pédagog
 reste à la racine. La cible de référence est **Windows x64**. Un agent peut être
 exécuté nativement ou dans une distribution **WSL2** choisie explicitement.
 
-## Client ACP 0.0.12
+## Client ACP 0.0.13
 
-Avec Tutor-MCP v0.7.4, le client prépare le contexte pédagogique avant la
-génération : formation sélectionnée, notions utiles, difficultés, observations
-récentes et séance active. Une activité demandée reçoit la décision du moteur
-serveur. La progression reste sous son autorité ; le harness formule la réponse.
+Avec Tutor-MCP v0.7.5, le client prépare la reprise avant la génération :
+formation confirmée, notions utiles, difficultés, observations récentes, séance
+active et décision du moteur. Le harness formule une introduction ou un exercice
+ouvert sans cascade d’appels outils. Un nom ambigu demande un choix explicite. La progression reste sous son autorité ; le harness formule la réponse.
 La consolidation mémoire peut s'exécuter en arrière-plan avec les autorisations
 requises, et les enregistrements interrompus peuvent reprendre sans doublon.
 
-Télécharger l'[installateur Windows x64](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.4/Tutor_ACP_0.0.12_windows_x64-setup.exe).
-Les gains nécessitent le serveur mis à jour ; un ancien serveur conserve le
-parcours précédent. Le délai complet d'une à cinq secondes reste à qualifier
-avec les modèles réels. Voir les [notes de version](../docs/release-v0.7.4.md).
+Télécharger l'[installateur Windows x64](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.5/Tutor_ACP_0.0.13_windows_x64-setup.exe).
+La reprise préparée nécessite le serveur mis à jour ; sur un ancien serveur,
+la demande reste conservée jusqu’à sa mise à jour. La cible de réponse complète
+en une à cinq secondes n’est pas atteinte par les premiers essais réels. Voir
+les [notes de version](../docs/release-v0.7.5.md).
 
 Cette version intègre le workspace avec rail d’icônes, barre latérale masquable,
 accueil allégé, compositeur fixe et cartes de quiz/flashcards. Les thèmes existants,
@@ -34,7 +35,7 @@ les pièces jointes y figurent par leur nom. Les titres sont reformulés au prem
 
 ## Agent Qwen local en développement
 
-La distribution Windows regroupe **Tutor 0.0.12 et l’agent local dans un seul
+La distribution Windows regroupe **Tutor 0.0.13 et l’agent local dans un seul
 installateur**. Dans **Paramètres → Connexion et outils**, installer le modèle
 Qwen avec le bouton de téléchargement, ou sélectionner le GGUF déjà disponible
 sur l’ordinateur. L’application conserve le modèle dans son dossier de données

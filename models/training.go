@@ -81,12 +81,31 @@ type TrainingSubmission struct {
 }
 
 type ConversationContext struct {
-	ConversationID   string `json:"conversation_id"`
-	TrainingID       string `json:"training_id"`
-	DomainID         string `json:"domain_id"`
-	Revision         string `json:"revision"`
-	SelectionVersion int    `json:"selection_version"`
-	Name             string `json:"name"`
+	ConversationID   string           `json:"conversation_id"`
+	TrainingID       string           `json:"training_id"`
+	DomainID         string           `json:"domain_id"`
+	Revision         string           `json:"revision"`
+	SelectionVersion int              `json:"selection_version"`
+	Name             string           `json:"name"`
+	Training         *TrainingContext `json:"training,omitempty"`
+}
+
+// TrainingContext contains only the selected learner's programme metadata.
+// It omits authoring drafts, other learners' progress and mutable capabilities.
+type TrainingContext struct {
+	ID                 string `json:"id"`
+	Kind               string `json:"kind"`
+	Name               string `json:"name"`
+	Description        string `json:"description"`
+	DomainID           string `json:"domain_id"`
+	FormationID        string `json:"formation_id,omitempty"`
+	LearningVersionID  string `json:"learning_version_id,omitempty"`
+	CurriculumRevision string `json:"curriculum_revision"`
+}
+
+type ResumeTrainingChoices struct {
+	Items   []TrainingContext `json:"items"`
+	HasMore bool              `json:"has_more"`
 }
 
 type TrainingRequest struct {

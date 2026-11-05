@@ -110,6 +110,29 @@ func (policy *toolPolicy) denies(name string) bool {
 	return decision == "deny"
 }
 
+// A bundled preparation must not turn a denied underlying mutation into an
+// allowed one. Inspect dependencies before replay as well as execution, so
+// revoking consent also prevents disclosure of an earlier mutation receipt.
+func (policy *toolPolicy) deniesCall(call *mcp.CallToolRequest) bool {
+	if call == nil || call.Params == nil {
+		return false
+	}
+	if policy.denies(call.Params.Name) {
+		return true
+	}
+	if call.Params.Name != "prepare_pedagogical_turn" {
+		return false
+	}
+	var in PreparePedagogicalTurnParams
+	if err := json.Unmarshal(call.Params.Arguments, &in); err != nil {
+		return true
+	}
+	if in.Mode != "activity" {
+		return false
+	}
+	return policy.denies("get_next_activity") || ((in.TrainingID != "" || in.TrainingName != "") && policy.denies("select_conversation_training"))
+}
+
 // ToolPolicyHTTPMiddleware is placed inside authentication. Invalid, repeated
 // or oversized policies fail closed and cannot be interpreted differently by
 // different layers of a proxy chain.
@@ -145,7 +168,7 @@ func ToolPolicyMiddleware() mcp.Middleware {
 			}
 			if method == "tools/call" {
 				call, ok := req.(*mcp.CallToolRequest)
-				if ok && call.Params != nil && policy.denies(call.Params.Name) {
+				if ok && policy.deniesCall(call) {
 					result := &mcp.CallToolResult{
 						IsError:           true,
 						Content:           []mcp.Content{&mcp.TextContent{Text: "This tool is disabled in your Tutor permission settings."}},

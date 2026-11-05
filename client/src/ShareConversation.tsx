@@ -9,13 +9,14 @@ import { t } from './i18n';
 
 /** Export only the chosen conversation's visible content, never connection metadata or credentials. */
 export function conversationMarkdown(conversation:Conversation):string {
-  return `# ${conversation.title || t('Conversation')}\n\n`+conversation.messages.filter(message=>message.role==='user'||message.role==='assistant').map(message=>{
+  return `# ${conversation.title || t('Conversation')}\n\n`+conversation.messages.filter(message=>!message.privateOutput && (message.role==='user'||message.role==='assistant')).map(message=>{
     const content=message.role==='user'?visibleStudyText(message.text):parseLearningContent(message.text,{complete:message.status==='complete'}).map(segment=>{
       if(segment.type==='text')return segment.text;
+      if(segment.type==='training-choice')return t('Choisissez la formation à reprendre.')+'\n'+segment.choice.choices.map(choice=>`- ${choice.trainingName}`).join('\n');
       if(segment.type!=='activity')return '';
       const activity=segment.activity;
       // Export the question as seen in the thread, without revealing unsubmitted answers.
-      return `${activity.kind==='quiz'?'Quiz':'Flashcard'} — ${activity.question}${activity.kind==='quiz'?'\n'+activity.options.map(option=>`- ${option.text}`).join('\n'):''}`;
+      return `${t(activity.kind==='quiz'?'Quiz':activity.kind==='exercise'?'Exercice':'Flashcard')} — ${activity.question}${activity.kind==='quiz'?'\n'+activity.options.map(option=>`- ${option.text}`).join('\n'):''}`;
     }).join('\n');
     const files=messageAttachments(message.text);
     return `## ${message.role==='user'?t('Vous'):t('Tutor')}\n\n${content.trim()}${files.length?'\n\n'+t('Fichiers joints (noms uniquement) : {names}',{names:files.map(file=>file.name).join(', ')}):''}${message.status!=='complete'?'\n\n'+t('Réponse incomplète'):''}`;

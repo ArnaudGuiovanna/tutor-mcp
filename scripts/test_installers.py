@@ -82,7 +82,7 @@ class InstallerFixture:
 
 class ShellInstallerTests(unittest.TestCase):
     def test_platform_selection_checksum_and_installed_notices(self):
-        for platform in [('Linux', 'x86_64', 'linux', 'amd64'), ('Darwin', 'arm64', 'darwin', 'arm64')]:
+        for platform in [('Linux', 'x86_64', 'linux', 'amd64'), ('Linux', 'aarch64', 'linux', 'arm64')]:
             with self.subTest(platform=platform), tempfile.TemporaryDirectory() as directory:
                 fixture = InstallerFixture(Path(directory), *platform)
                 fixture.write_main()
@@ -95,6 +95,15 @@ class ShellInstallerTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn('checksum mismatch', result.stderr)
                 self.assertEqual(fixture.assert_installed(self), before)
+
+    def test_unsupported_macos_stops_before_download_or_install(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = InstallerFixture(Path(directory), 'Darwin', 'arm64', 'darwin', 'arm64')
+            result = fixture.run()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('macOS is not a supported target', result.stderr)
+            self.assertFalse(fixture.log.exists())
+            self.assertFalse(fixture.destination.exists())
 
     def test_missing_changed_or_foreign_bundled_notices_are_rejected(self):
         for defect in ('missing', 'changed', 'binary', 'target', 'format'):

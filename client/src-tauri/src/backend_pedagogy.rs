@@ -16,7 +16,11 @@ impl Backend {
         binding: &str,
         operation: &Preparation,
     ) -> Result<Option<PreparedTurn>, String> {
+        let resume = PreparedTurn::is_resume(text)?;
         if self.settings().await.target_id == crate::local_agent::TARGET_ID {
+            if resume {
+                return Err("La reprise préparée nécessite un harness Codex ou Claude. Votre demande reste dans la file.".into());
+            }
             return Ok(None);
         }
         let refresh = {
@@ -34,13 +38,13 @@ impl Backend {
         if refresh {
             self.list_mcp_tools().await?;
         }
-        if !self
-            .tutor
-            .lock()
-            .await
-            .tool_catalog
-            .contains("prepare_pedagogical_turn")
-        {
+        let tutor = self.tutor.lock().await;
+        if resume && !tutor.native_resume_supported {
+            return Err("Le serveur doit être mis à jour pour préparer cette reprise avant le harness. Votre demande reste dans la file.".into());
+        }
+        let supported = tutor.tool_catalog.contains("prepare_pedagogical_turn");
+        drop(tutor);
+        if !supported {
             return Ok(None);
         }
         let conversation = self
@@ -78,6 +82,57 @@ impl Backend {
             operation.check()?;
         }
         Ok(Some(turn))
+    }
+
+    pub(super) async fn finish_native_clarification(
+        &self,
+        conversation_id: &str,
+        text: &str,
+        reply: &str,
+        context: &Value,
+        binding: &str,
+        operation: &Preparation,
+    ) -> Result<(), String> {
+        operation.check()?;
+        let tutor = self.tutor.lock().await;
+        if tutor.binding != binding || self.retired.load(Ordering::Acquire) {
+            return Err("La connexion pédagogique a changé.".into());
+        }
+        self.store.lock().await.transaction(|data| {
+            operation.check()?;
+            let conversation = data
+                .conversations
+                .iter_mut()
+                .find(|c| c.id == conversation_id)
+                .ok_or("Séance introuvable.")?;
+            conversation.active_training = Some(context.clone());
+            if conversation.messages.is_empty() {
+                conversation.title = if data.settings.language == "en" {
+                    "Resume a course".into()
+                } else {
+                    "Reprendre une formation".into()
+                };
+            }
+            for (role, content) in [("user", text), ("assistant", reply)] {
+                conversation.messages.push(Message {
+                    pending_learning_commit: None,
+                    learning_delivery: None,
+                    private_output: false,
+                    training_context: Some(context.clone()),
+                    id: uuid::Uuid::new_v4().to_string(),
+                    role: role.into(),
+                    text: content.into(),
+                    created_at: now(),
+                    status: "complete".into(),
+                });
+            }
+            conversation.updated_at = now();
+            data.pending_message = None;
+            Ok(())
+        })?;
+        drop(tutor);
+        self.state_changed().await;
+        Ok(())
     }
     pub(super) async fn native_policy_binding(&self) -> Option<(String, String, String)> {
         let target = self.store.lock().await.data.settings.target_id.clone();
@@ -324,6 +379,18 @@ impl Backend {
             .map(|m| m.text.clone())
             .ok_or("Réponse introuvable.")?;
         let mut output: PreparedOutput = turn.output(&raw)?;
+        if turn.requires_selection_check() {
+            let current = self
+                .pedagogical_tool(
+                    "get_conversation_context",
+                    json!({"conversation_id":prompt.conversation_id}),
+                    &prompt.conversation_id,
+                    binding,
+                )
+                .await?;
+            turn.validate_selection(&current)?;
+            operation.check()?;
+        }
         if let Some((name, args)) = output.mutation.clone() {
             self.store.lock().await.transaction(|data| {
                 let message = data

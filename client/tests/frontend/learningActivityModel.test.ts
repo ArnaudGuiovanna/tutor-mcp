@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { parseLearningContent, parseLearningResponse, responseMatchesActivity, serializeLearningResponse, validateLearningActivity, validateLearningResponse } from '../../src/learningActivityModel';
-import type { LearningActivity, LearningResponse } from '../../src/learningActivityModel';
+import type { ExerciseActivity, LearningActivity, LearningResponse } from '../../src/learningActivityModel';
 
 const activity: LearningActivity = { version: 1, id: 'activity-1', kind: 'quiz', trainingId: 'personal:go', domainId: 'go', concept: 'variables',
   question: 'Quelle valeur contient x ?', attemptId: 'attempt-1', activityType: 'PRACTICE', rubricJson: '{"criteria":[{"id":"value","max_score":1}],"passing_score":1}', options: [{ id: 'a', text: '3' }, { id: 'b', text: '5' }], correctOptionId: 'b', explanation: 'On ajoute deux à trois.' };
@@ -9,6 +9,25 @@ const response: LearningResponse = { version: 1, activityId: activity.id, kind: 
 const block = (value: unknown) => '```tutor-activity\n' + JSON.stringify(value) + '\n```';
 
 describe('contrat visuel de récupération', () => {
+  it('présente un exercice ouvert lié à une tentative sans note ni réponse fournie par le client', () => {
+    const exercise: ExerciseActivity = { version: 1, id: 'exercise-1', kind: 'exercise', trainingId: 'personal:go', domainId: 'go', concept: 'variables', question: 'Écrivez une addition.', attemptId: 'attempt-1', activityType: 'PRACTICE', rubricJson: '{}' };
+    const answer = { version: 1 as const, kind: 'exercise' as const, activityId: exercise.id, trainingId: exercise.trainingId, domainId: exercise.domainId, concept: exercise.concept, attemptId: exercise.attemptId, answer: 'x := 3\nx += 2', responseTimeSeconds: 8 };
+    expect(parseLearningContent(block(exercise), { complete: true })).toEqual([{ type: 'activity', activity: exercise }]);
+    expect(parseLearningResponse(serializeLearningResponse(answer))).toEqual(answer);
+    expect(responseMatchesActivity(exercise, answer)).toBe(true);
+    expect(responseMatchesActivity(exercise, { ...answer, attemptId: 'another' })).toBe(false);
+    for (const invalid of [{ ...exercise, attemptId: undefined }, { ...exercise, answer: '5' }, { ...exercise, options: [] }, { ...exercise, correctOptionId: 'a' }, { ...exercise, activityType: 'REST' }, { ...exercise, rubricJson: '[]' }]) expect(validateLearningActivity(invalid)).toBeUndefined();
+    for (const invalid of [{ ...answer, answer: '' }, { ...answer, answer: 'é'.repeat(6001) }, { ...answer, answer: 'a\0b' }, { ...answer, success: true }, { ...answer, selectedOptionId: 'a' }, { ...answer, attemptId: undefined }]) expect(validateLearningResponse(invalid)).toBeUndefined();
+  });
+
+  it('affiche seulement les choix complets du serveur sans exposer le JSON ni accepter des choix ambigus', () => {
+    const choice = { version: 1, requestText: 'Reprendre Go', choices: [{ trainingId: 'go-1', trainingName: 'Go', domainId: 'go' }], hasMore: false };
+    const choices = (value: unknown) => '```tutor-training-choice\n' + JSON.stringify(value) + '\n```';
+    expect(parseLearningContent(choices(choice), { complete: true })).toEqual([{ type: 'training-choice', choice }]);
+    expect(parseLearningContent(choices(choice), { complete: false })).toEqual([{ type: 'pending' }]);
+    for (const value of [{ ...choice, choices: [] }, { ...choice, choices: [choice.choices[0], choice.choices[0]] }, { ...choice, hasMore: 'false' }, { ...choice, choices: [{ ...choice.choices[0], format: 'quiz' }] }, { ...choice, requestText: 'x'.repeat(12001) }]) expect(parseLearningContent(choices(value), { complete: true })).toEqual([{ type: 'invalid' }]);
+    expect(parseLearningContent(choices(choice) + '\n' + block(activity), { complete: true })).toEqual([{ type: 'invalid' }, { type: 'invalid' }]);
+  });
   it('conserve le texte autour des activités validées et préserve les extraits de code ordinaires', () => {
     const before = 'À vous.\n\n```go\nx := 3\n```\n\n';
     expect(parseLearningContent(before + block(activity) + '\nAprès.', { complete: true })).toEqual([
@@ -27,6 +46,14 @@ describe('contrat visuel de récupération', () => {
     }
     for (const source of ['```tutor-activity\n{"answer":"secret"}\n```', '```tutor-activity\n{"answer":"secret"', block({ ...activity, options: [{ id: 'a', text: '1' }] })]) {
       expect(parseLearningContent(source, { complete: true })).toEqual([{ type: 'invalid' }]);
+    }
+  });
+
+  it('ne rend pas les enveloppes d’introduction et d’aide avant leur conversion native en prose',()=>{
+    for(const tag of ['tutor-introduction','tutor-guidance']) {
+      const raw='```'+tag+'\n{"body":"PRIVATE_UNVALIDATED"}\n```';
+      expect(parseLearningContent(raw,{complete:false})).toEqual([{type:'pending'}]);
+      expect(parseLearningContent(raw,{complete:true})).toEqual([{type:'invalid'}]);
     }
   });
 

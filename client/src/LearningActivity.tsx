@@ -37,6 +37,7 @@ function ActivityContent({ activity, response, disabled = false, onRespond, open
   const inputName = useId();
   const titleId = useId();
   const [selected, setSelected] = useState('');
+  const [exerciseAnswer, setExerciseAnswer] = useState('');
   const [revealed, setRevealed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
@@ -50,6 +51,7 @@ function ActivityContent({ activity, response, disabled = false, onRespond, open
   const answerShown = revealed || !!committed;
   const quizCorrect = activity.kind === 'quiz' && committed?.kind === 'quiz' && activity.correctOptionId === committed.selectedOptionId;
   const selectedId = committed?.kind === 'quiz' ? committed.selectedOptionId : selected;
+  const validExerciseAnswer = !!exerciseAnswer.trim() && !exerciseAnswer.includes('\0') && new TextEncoder().encode(exerciseAnswer).length <= 12000;
   const elapsed = () => Math.min(86400, Math.max(0, (Date.now() - startedAt.current) / 1000));
 
   useEffect(() => { if (committed) feedback.current?.focus(); }, [committed]);
@@ -57,11 +59,12 @@ function ActivityContent({ activity, response, disabled = false, onRespond, open
   useEffect(() => { if (revealed && document.visibilityState === 'visible') onReveal?.(); }, [revealed,onReveal]);
 
   async function respond(rating?: RecallRating) {
-    if (locked || submissionLock.current || (activity.kind === 'quiz' && !selected) || (activity.kind === 'flashcard' && (!revealed || !rating))) return;
+    if (locked || submissionLock.current || (activity.kind === 'quiz' && !selected) || (activity.kind === 'flashcard' && (!revealed || !rating)) || (activity.kind === 'exercise' && !validExerciseAnswer)) return;
     const base = { version: 1 as const, activityId: activity.id, trainingId: activity.trainingId, domainId: activity.domainId,
       concept: activity.concept, responseTimeSeconds: activity.kind === 'flashcard' ? recallSeconds.current ?? elapsed() : elapsed() };
     const answer: LearningResponse = activity.kind === 'quiz'
       ? { ...base, kind: 'quiz', selectedOptionId: selected, ...(activity.attemptId ? { attemptId: activity.attemptId } : {}) }
+      : activity.kind === 'exercise' ? { ...base, kind: 'exercise', attemptId: activity.attemptId, answer: exerciseAnswer }
       : { ...base, kind: 'flashcard', rating: rating! };
     submissionLock.current = true; setSubmitting(true); setError('');
     try {
@@ -72,7 +75,7 @@ function ActivityContent({ activity, response, disabled = false, onRespond, open
   }
 
   return <section className={`learning-card ${activity.kind}`} aria-labelledby={titleId} aria-busy={submitting}>
-    <header className="learning-card-heading"><span className="learning-card-kind">{activity.kind === 'quiz' ? t('QUIZ') : t('FLASHCARDS')}</span><span className="learning-card-concept">{t(activity.kind==='quiz'?'Question {number}':'Carte {number}',{number:questionNumber})}</span><span className="learning-segments" aria-hidden="true">{Array.from({length:Math.min(questionNumber,10)},(_,index)=><span key={index}/>)}</span></header>
+    <header className="learning-card-heading"><span className="learning-card-kind">{t(activity.kind === 'quiz' ? 'QUIZ' : activity.kind === 'exercise' ? 'EXERCICE' : 'FLASHCARDS')}</span><span className="learning-card-concept">{t(activity.kind==='flashcard'?'Carte {number}':'Question {number}',{number:questionNumber})}</span><span className="learning-segments" aria-hidden="true">{Array.from({length:Math.min(questionNumber,10)},(_,index)=><span key={index}/>)}</span></header>
     <div id={titleId} className="learning-question"><MessageBody text={activity.question} openLink={openLink} /></div>
     {activity.kind === 'quiz' ? <>
       <fieldset className="learning-quiz-options" role="radiogroup" aria-label={t('Choisissez une réponse')} disabled={locked}>
@@ -91,6 +94,14 @@ function ActivityContent({ activity, response, disabled = false, onRespond, open
         <MessageBody text={activity.explanation} openLink={openLink} />
         <p className="learning-card-hint">{t('Correction proposée par le tuteur. Le suivi pédagogique reste géré par Tutor-MCP.')}</p>
       </div>}
+    </> : activity.kind === 'exercise' ? <>
+      <label className="learning-answer-label" htmlFor={inputName}>{t('Votre réponse à l’exercice')}</label>
+      <textarea id={inputName} className="learning-exercise-answer" rows={4} maxLength={12000} disabled={locked}
+        value={committed?.kind === 'exercise' ? committed.answer : exerciseAnswer} onChange={event => setExerciseAnswer(event.target.value)}
+        aria-describedby={`${inputName}-help`}/>
+      <p id={`${inputName}-help`} className="learning-card-hint">{t('Validez ici votre réponse. Pour demander de l’aide, utilisez « Un indice » ou le message au tuteur.')}</p>
+      {!committed && <div className="learning-card-actions">{onHint && <button className="workspace-outline" disabled={locked} onClick={onHint}>{t('Un indice')}</button>}<button className="workspace-primary" disabled={locked || !validExerciseAnswer} onClick={() => void respond()}>{submitting ? t('Envoi…') : t('Valider')}</button></div>}
+      {committed && <div ref={feedback} className="learning-feedback" tabIndex={-1} role="status"><p>{t('Réponse enregistrée. Le retour du tuteur apparaît dans la conversation.')}</p></div>}
     </> : <>
       {!answerShown && <div className="learning-flashcard-front"><p>{t('Cherchez la réponse de mémoire, puis retournez la carte.')}</p><button className="button blue" disabled={locked} onClick={() => { recallSeconds.current = elapsed(); setRevealed(true); }}>{t('Retourner la carte')}<Icon name="refresh" size={16} /></button></div>}
       {answerShown && <div ref={flashcardAnswer} className="learning-flashcard-back" role="region" aria-label={t('Réponse de la flashcard')} tabIndex={-1}><p className="learning-answer-label">{t('Réponse')}</p><MessageBody text={activity.answer} openLink={openLink} /></div>}
@@ -98,6 +109,6 @@ function ActivityContent({ activity, response, disabled = false, onRespond, open
       {committed?.kind === 'flashcard' && <div ref={feedback} className="learning-feedback self-report" tabIndex={-1} role="status"><p className="learning-feedback-title">{t('Votre autoévaluation : {rating}', { rating: t(ratings.find(rating => rating.value === committed.rating)!.label) })}</p><p>{t('Votre déclaration reste distincte d’une réponse vérifiée dans un quiz.')}</p></div>}
     </>}
     {error && <p className="learning-card-error" role="alert">{error}</p>}
-    {committed && onContinue && <div className="learning-card-actions"><button className="workspace-primary" disabled={disabled || submitting} onClick={onContinue}>{t(activity.kind === 'quiz' ? 'Question suivante' : 'Carte suivante')}</button></div>}
+    {committed && onContinue && <div className="learning-card-actions"><button className="workspace-primary" disabled={disabled || submitting} onClick={onContinue}>{t(activity.kind === 'quiz' ? 'Question suivante' : activity.kind === 'exercise' ? 'Activité suivante' : 'Carte suivante')}</button></div>}
   </section>;
 }
