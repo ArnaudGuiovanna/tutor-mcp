@@ -55,13 +55,37 @@ def source_comments(path):
             yield comment
 
 
+def component_relative(source, root):
+    """Return source relative to its component root.
+
+    The same toolchain tree may be reported under two spellings, for example a
+    hosted Windows tool cache visible on two drives through a junction. Try the
+    path as given, then its resolved form, then the same location below the
+    root once both anchors are removed. Anything else is outside the component.
+    """
+    candidates = [source]
+    if isinstance(source, Path):
+        candidates.append(source.resolve())
+    for candidate in candidates:
+        if candidate.is_relative_to(root):
+            return candidate.relative_to(root)
+    flavour = type(root)
+    root_tail = root.parts[1:]
+    for candidate in candidates:
+        tail = candidate.parts[1:]
+        if root_tail and len(tail) > len(root_tail) and flavour(*tail[:len(root_tail)]) == flavour(*root_tail):
+            return flavour(*tail[len(root_tail):])
+    raise ValueError(f'source is outside its component root {root}: {source}')
+
+
 def legal_files(root, packages):
     """Collect root terms and every selected package's ancestor notices."""
     directories = {root}
     for package in packages:
-        directory = Path(package['Dir']).resolve()
-        if not directory.is_relative_to(root):
-            raise ValueError(f"package source is outside its component: {package['ImportPath']}")
+        try:
+            directory = root / component_relative(Path(package['Dir']), root)
+        except ValueError:
+            raise ValueError(f"package source is outside its component: {package['ImportPath']}") from None
         directories.update((directory, *[p for p in directory.parents if p.is_relative_to(root)]))
     return sorted({path for directory in directories for path in directory.iterdir()
                    if path.is_file() and LEGAL_NAME.match(path.name)})
@@ -103,7 +127,7 @@ def copy_component(output, name, version, source_root, packages, *, extra_files=
                 source = Path(package['Dir']) / filename
                 # Go/assembly comments share the // and /* syntaxes.
                 for comment in source_comments(source):
-                    comments.setdefault(comment, set()).add(source.relative_to(source_root).as_posix())
+                    comments.setdefault(comment, set()).add(component_relative(source, source_root).as_posix())
     if comments:
         data = '\n\n'.join('Source: ' + ', '.join(sorted(sources)) + '\n' + comment
                            for comment, sources in sorted(comments.items())).encode('utf-8') + b'\n'

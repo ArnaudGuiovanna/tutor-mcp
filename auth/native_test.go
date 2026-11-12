@@ -642,7 +642,7 @@ func TestNativeChallengeBudgetIsPerClientNotPerIdentity(t *testing.T) {
 		return recorder.Code
 	}
 	throttled := false
-	for range nativeChallengeIdentityPerMinute + 1 {
+	for range nativeChallengeIdentityBurst + 1 {
 		if post("198.51.100.9:1234") == http.StatusTooManyRequests {
 			throttled = true
 		}
@@ -652,5 +652,37 @@ func TestNativeChallengeBudgetIsPerClientNotPerIdentity(t *testing.T) {
 	}
 	if code := post("203.0.113.20:5678"); code != http.StatusOK {
 		t.Fatalf("key holder on another address status=%d, want 200", code)
+	}
+}
+
+// The real Rust qualification journey opens and revokes several sessions with
+// the same key from one address within seconds, and an institution network
+// may place many learners behind one address. Neither may be throttled.
+func TestNativeChallengeBudgetAdmitsIntensiveLegitimateUse(t *testing.T) {
+	server, _, key, _ := newNativeTestServer(t, false)
+	post := func(publicKey string) int {
+		raw, _ := json.Marshal(map[string]string{
+			"tenant_id": server.options.InstitutionID, "public_key": publicKey, "action": "session",
+			"scope": models.OAuthScopeLearnerRead,
+		})
+		request := httptest.NewRequest(http.MethodPost, server.endpoint("challenge"), bytes.NewReader(raw))
+		request.Header.Set("Content-Type", "application/json")
+		request.RemoteAddr = "198.51.100.30:4000"
+		recorder := httptest.NewRecorder()
+		server.HandleChallenge(recorder, request)
+		return recorder.Code
+	}
+	// One key: a session ceremony and a logout ceremony per session, for more
+	// sessions than the qualification journey opens (eight challenges).
+	for i := range 20 {
+		if code := post(nativeTestPub(key)); code != http.StatusOK {
+			t.Fatalf("challenge %d for the key holder status=%d, want 200", i+1, code)
+		}
+	}
+	// Other identities behind the same address are not starved by that key.
+	for i := range 40 {
+		if code := post(nativeTestPub(nativeTestKey(byte(10 + i)))); code == http.StatusTooManyRequests {
+			t.Fatalf("identity %d behind a shared address was throttled", i+1)
+		}
 	}
 }

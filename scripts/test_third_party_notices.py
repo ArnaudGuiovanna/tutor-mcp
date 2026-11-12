@@ -3,7 +3,7 @@ import hashlib
 import io
 import json
 import runpy
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import subprocess
 import sys
 import tarfile
@@ -12,7 +12,8 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
-from third_party_notices import collect, copy_component, run_json, source_comments, verify_archive
+from third_party_notices import (collect, component_relative, copy_component, run_json, source_comments,
+                                 verify_archive)
 
 
 class NoticeTests(unittest.TestCase):
@@ -97,6 +98,42 @@ class NoticeTests(unittest.TestCase):
             self.assertEqual(files['internal/selected/NOTICE'], b'Package attribution\n')
             self.assertIn(comment.encode(), files['selected source comments'])
             self.assertNotIn(b'Copyright string', files['selected source comments'])
+
+    def test_toolchain_sources_reported_on_another_drive_stay_in_their_component(self):
+        root = PureWindowsPath(r'D:\hostedtoolcache\windows\go\1.26.11\x64')
+        source = PureWindowsPath(r'C:\hostedtoolcache\windows\go\1.26.11\x64\src\internal\goarch\goarch.go')
+        self.assertEqual(component_relative(source, root).as_posix(), 'src/internal/goarch/goarch.go')
+        # Windows paths compare case-insensitively.
+        upper = PureWindowsPath(r'C:\HostedToolCache\Windows\Go\1.26.11\X64\src\runtime\proc.go')
+        self.assertEqual(component_relative(upper, root).as_posix(), 'src/runtime/proc.go')
+        same = PureWindowsPath(r'D:\hostedtoolcache\windows\go\1.26.11\x64\src\os\file.go')
+        self.assertEqual(component_relative(same, root).as_posix(), 'src/os/file.go')
+        for outside in (r'C:\hostedtoolcache\windows\go\1.26.10\x64\src\os\file.go',
+                        r'C:\other\go\1.26.11\x64\src\os\file.go', r'C:\hostedtoolcache\windows\go\1.26.11\x64'):
+            with self.subTest(outside=outside), self.assertRaisesRegex(ValueError, 'outside its component'):
+                component_relative(PureWindowsPath(outside), root)
+        with self.assertRaisesRegex(ValueError, 'outside its component'):
+            component_relative(PurePosixPath('/opt/go/src/os/file.go'), PurePosixPath('/usr/local/go'))
+
+    def test_package_sources_under_an_alias_of_the_component_root_are_attributed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            toolchain, output = root / 'toolchain', root / 'notices'
+            package = toolchain / 'src' / 'selected'
+            package.mkdir(parents=True)
+            output.mkdir()
+            alias = root / 'alias'
+            try:
+                alias.symlink_to(toolchain, target_is_directory=True)
+            except OSError:
+                self.skipTest('directory links are unavailable')
+            (toolchain / 'LICENSE').write_text('Original toolchain licence\n')
+            comment = '// Copyright toolchain author. Use of this source is governed by a licence.'
+            (package / 'selected.go').write_text(comment + '\npackage selected\n')
+            metadata = {'ImportPath': 'selected', 'Dir': str(alias / 'src' / 'selected'), 'GoFiles': ['selected.go']}
+            component = copy_component(output, 'go', 'go1.26.11', toolchain, [metadata])
+            files = {record['source']: (output / record['file']).read_bytes() for record in component['notices']}
+            self.assertIn(b'Source: src/selected/selected.go\n' + comment.encode(), files['selected source comments'])
 
     def test_module_without_licence_and_missing_additional_native_notice_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

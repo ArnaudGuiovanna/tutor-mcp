@@ -72,9 +72,16 @@ type NativeIdentityServer struct {
 	challengeIdentityLimiter *RateLimiter
 }
 
+// A single client legitimately requests several challenges per key in quick
+// succession (session, grant change, logout, recovery), and an institution
+// network may place many learners behind one address. The per-(address, key)
+// budget therefore allows a full minute of tokens as an immediate burst, and
+// the per-address budget accommodates many identities on the same network.
 const (
-	nativeChallengeIPPerMinute       = 20
-	nativeChallengeIdentityPerMinute = 6
+	nativeChallengeIPPerMinute       = 120
+	nativeChallengeIPBurst           = 60
+	nativeChallengeIdentityPerMinute = 30
+	nativeChallengeIdentityBurst     = 30
 )
 
 type nativeChallengeRequest struct {
@@ -126,9 +133,9 @@ func NewNativeIdentityServer(store storeport.NativeIdentityStore, options Native
 	return &NativeIdentityServer{
 		store: store, options: options, origin: origin, now: time.Now,
 		challengeIPLimiter: NewRateLimiterWithNamespace("native_challenge_ip",
-			nativeChallengeIPPerMinute/60.0, nativeChallengeIPPerMinute),
+			nativeChallengeIPPerMinute/60.0, nativeChallengeIPBurst),
 		challengeIdentityLimiter: NewRateLimiterWithNamespace("native_challenge_identity",
-			nativeChallengeIdentityPerMinute/60.0, nativeChallengeIdentityPerMinute),
+			nativeChallengeIdentityPerMinute/60.0, nativeChallengeIdentityBurst),
 	}, nil
 }
 

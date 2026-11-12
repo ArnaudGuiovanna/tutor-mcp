@@ -159,25 +159,20 @@ func SelectConceptAtWithContext(
 }
 
 // fringeItem pairs a concept with its current mastery for scoring.
-// Built once by externalFringe so the scoring loop is allocation-free.
+// Built once by externalFringeVerified so the scoring loop is allocation-free.
 type fringeItem struct {
 	concept string
 	mastery float64
 }
 
-// externalFringe returns the concepts that are currently *learnable*:
+// externalFringeVerified returns the concepts that are currently *learnable*:
 // prereqs satisfied at MasteryKST(), own mastery strictly below
 // MasteryBKT(). Concepts with NaN mastery are excluded defensively.
 //
 // Concepts present in graph.Concepts but absent from states are
 // treated as mastery=0, eligible if their prereqs are satisfied
-// (OQ-4.1 = A for sub-question (a)).
-func externalFringe(states []*models.ConceptState, graph models.KnowledgeSpace) []fringeItem {
-	return externalFringeVerified(states, graph, nil)
-}
-
-// externalFringeVerified is externalFringe with the unverified-prerequisite
-// cap of PrerequisiteRoutingMastery applied when verified is non-nil.
+// (OQ-4.1 = A for sub-question (a)). When verified is non-nil, the
+// unverified-prerequisite cap of PrerequisiteRoutingMastery applies.
 func externalFringeVerified(states []*models.ConceptState, graph models.KnowledgeSpace, verified map[string]bool) []fringeItem {
 	stateByConcept := make(map[string]*models.ConceptState, len(states))
 	for _, cs := range states {
@@ -251,22 +246,16 @@ func resolveRelevance(gr map[string]float64, concept string) (score float64, eli
 // concepts instead of consolidating one.
 const ConsolidationBonus = 1.5
 
-// selectInstruction implements the INSTRUCTION branch:
+// selectInstructionWithContext implements the INSTRUCTION branch:
 //
 //	score = relEff × (1 - mastery) × (1 + ConsolidationBonus × [started])
 //
 // over the external fringe, where relEff(c) = max(rel(c), max rel of the
 // concepts that transitively require c) and started means
 // ConsolidationMasteryLow < mastery < ConsolidationMasteryHigh. Tie-break is
-// alphabetical (the fringe is pre-sorted by externalFringe). OQ-4.6 = A.
-func selectInstruction(
-	states []*models.ConceptState,
-	graph models.KnowledgeSpace,
-	goalRelevance map[string]float64,
-) Selection {
-	return selectInstructionWithContext(states, graph, graph, goalRelevance, nil)
-}
-
+// alphabetical (the fringe is pre-sorted by externalFringeVerified).
+// OQ-4.6 = A. relevanceGraph provides the transitive "required by" edges
+// used for relEff; verified is forwarded to externalFringeVerified.
 func selectInstructionWithContext(
 	states []*models.ConceptState,
 	graph models.KnowledgeSpace,
