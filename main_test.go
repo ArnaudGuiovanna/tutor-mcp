@@ -39,6 +39,22 @@ func TestShouldPrintVersion(t *testing.T) {
 	}
 }
 
+func TestGracefulShutdownTimeoutCoversConfiguredToolCalls(t *testing.T) {
+	for _, tc := range []struct {
+		toolCall time.Duration
+		want     time.Duration
+	}{
+		{toolCall: time.Second, want: 30 * time.Second},
+		{toolCall: 20 * time.Second, want: 30 * time.Second},
+		{toolCall: 30 * time.Second, want: 40 * time.Second},
+		{toolCall: 600 * time.Second, want: 610 * time.Second},
+	} {
+		if got := gracefulShutdownTimeout(tc.toolCall); got != tc.want {
+			t.Fatalf("gracefulShutdownTimeout(%s) = %s, want %s", tc.toolCall, got, tc.want)
+		}
+	}
+}
+
 func TestVersionLine(t *testing.T) {
 	oldVersion, oldCommit, oldBuildDate := version, commit, buildDate
 	defer func() {

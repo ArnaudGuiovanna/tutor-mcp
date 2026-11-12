@@ -167,6 +167,45 @@ func ValidateRubric(rubric models.AssessmentRubric) error {
 	return nil
 }
 
+// DecisionRubricMinimumPassingRatio is the lowest passing_score, as a fraction
+// of the criteria maximum, accepted for a decision-bound summative attempt
+// (MASTERY_CHALLENGE, TRANSFER_PROBE, RECALL_EXERCISE). A rubric that passes
+// at 1/10 of its points cannot support a demonstration, a transfer record or
+// a scheduled recall.
+const DecisionRubricMinimumPassingRatio = 0.6
+
+// MasteryChallengeMinimumCriteria is the minimum number of independent
+// criteria of a decision-bound MASTERY_CHALLENGE rubric: an integrated task
+// scored by one criterion cannot separate partial from complete performance.
+const MasteryChallengeMinimumCriteria = 2
+
+// ValidateDecisionRubric applies the activity-specific floor to a strict
+// rubric bound to a pedagogical decision. Formative activity types keep the
+// structural rules of ValidateRubric only.
+func ValidateDecisionRubric(activityType models.ActivityType, rubric models.AssessmentRubric) error {
+	switch activityType {
+	case models.ActivityMasteryChallenge, models.ActivityTransferProbe, models.ActivityRecall:
+	default:
+		return nil
+	}
+	if activityType == models.ActivityMasteryChallenge && len(rubric.Criteria) < MasteryChallengeMinimumCriteria {
+		return fmt.Errorf("MASTERY_CHALLENGE rubric_json must define at least %d criteria (got %d): split the task into independently scored observable criteria",
+			MasteryChallengeMinimumCriteria, len(rubric.Criteria))
+	}
+	maxTotal := new(big.Rat)
+	for _, criterion := range rubric.Criteria {
+		maxTotal.Add(maxTotal, decimal(criterion.MaxScore))
+	}
+	floor := new(big.Rat).Mul(maxTotal, new(big.Rat).SetFrac64(int64(DecisionRubricMinimumPassingRatio*10), 10))
+	if decimal(rubric.PassingScore).Cmp(floor) < 0 {
+		maximum, _ := maxTotal.Float64()
+		minimum, _ := floor.Float64()
+		return fmt.Errorf("%s rubric_json.passing_score %v is below the required floor: it must be at least %.0f%% of the criteria maximum %v, i.e. passing_score >= %v",
+			activityType, rubric.PassingScore, DecisionRubricMinimumPassingRatio*100, maximum, minimum)
+	}
+	return nil
+}
+
 // RubricMap bridges the canonical envelope to existing score and
 // persistence helpers without dropping its generated answer key or anchors.
 func RubricMap(rubric models.AssessmentRubric) map[string]any {

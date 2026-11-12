@@ -55,7 +55,7 @@ func TestLoadStartupConfigDefaults(t *testing.T) {
 
 func TestDisabledDCRRouteIsNotMounted(t *testing.T) {
 	mux := http.NewServeMux()
-	mountDynamicClientRegistration(mux, auth.DCRModeDisabled, nil, nil)
+	mountDynamicClientRegistration(mux, auth.DCRModeDisabled, nil, dcrRouteLimiters{})
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/register", nil))
 	if rec.Code != http.StatusNotFound {

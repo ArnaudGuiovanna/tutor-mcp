@@ -33,6 +33,7 @@ func TestEndToEnd_TenSuccessesMoveMastery(t *testing.T) {
 		t.Fatalf("init_domain failed: %s", resultText(res))
 	}
 
+	touched := map[string]bool{}
 	for i := 0; i < 10; i++ {
 		actRes := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{})
 		if actRes.IsError {
@@ -47,6 +48,7 @@ func TestEndToEnd_TenSuccessesMoveMastery(t *testing.T) {
 		if concept == "" {
 			t.Fatalf("iter %d: empty concept in activity: %v", i, activity)
 		}
+		touched[concept] = true
 		recRes := callTool(t, deps, registerRecordInteraction, "L_owner", "record_interaction", map[string]any{
 			"concept":               concept,
 			"activity_type":         "RECALL_EXERCISE",
@@ -75,8 +77,11 @@ func TestEndToEnd_TenSuccessesMoveMastery(t *testing.T) {
 	if movedConcepts == 0 {
 		t.Fatal("no concept's PMastery moved above the 0.1 default after 10 successes — the BKT/FSRS chain is broken")
 	}
-	if totalReps != 10 {
-		t.Errorf("expected sum(cs.Reps)=10 across all concepts (one per recorded success), got %d", totalReps)
+	// All ten successes happen on the same day: only the first success per
+	// concept creates/advances its FSRS card; later same-day successes leave
+	// the memory state unchanged (no massed-practice stability inflation).
+	if totalReps != len(touched) {
+		t.Errorf("expected sum(cs.Reps)=%d (one FSRS review per concept touched today), got %d", len(touched), totalReps)
 	}
 }
 
@@ -101,7 +106,9 @@ func TestEndToEnd_SharedConceptLabelsStayIsolatedByDomain(t *testing.T) {
 	programmingState.CardState = "review"
 	programmingState.Reps = 1
 	programmingState.Stability = 30
-	programmingState.LastReview = &now
+	// Two days ago: a same-day success would (correctly) not advance FSRS.
+	programmingReview := now.Add(-48 * time.Hour)
+	programmingState.LastReview = &programmingReview
 	mathematicsState := models.NewConceptStateInDomain("L_owner", mathematics.ID, "functions")
 	mathematicsState.CardState = "review"
 	mathematicsState.Reps = 1

@@ -1,6 +1,6 @@
 import type { CSSProperties } from 'react';
 
-type IconName = 'panel' | 'calendar' | 'edit' | 'stop' | 'share' | 'copy' | 'sun' | 'gear' | 'users' | 'search' | 'command' | 'book' | 'chat' | 'plug' | 'arrow' | 'check' | 'close' | 'refresh' | 'pause' | 'spark' | 'shield' | 'external' | 'clock' | 'plus' | 'chevron';
+type IconName = 'panel' | 'calendar' | 'edit' | 'stop' | 'share' | 'copy' | 'sun' | 'gear' | 'users' | 'search' | 'command' | 'book' | 'chat' | 'plug' | 'arrow' | 'check' | 'close' | 'refresh' | 'pause' | 'spark' | 'shield' | 'external' | 'clock' | 'plus' | 'chevron' | 'cards';
 
 const paths: Record<IconName, React.ReactNode> = {
   panel: <><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></>,
@@ -10,7 +10,7 @@ const paths: Record<IconName, React.ReactNode> = {
   share: <><path d="M12 16V3m-4 4 4-4 4 4M5 13v7h14v-7"/></>,
   copy: <><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></>,
   sun: <><circle cx="12" cy="12" r="4" /><path d="M12 2v2m0 16v2M2 12h2m16 0h2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></>,
-  gear: <><circle cx="12" cy="12" r="3.2" /><path d="M12 2.5v2.6m0 13.8v2.6M2.5 12h2.6m13.8 0h2.6M5.3 5.3l1.8 1.8m9.8 9.8 1.8 1.8M5.3 18.7l1.8-1.8m9.8-9.8 1.8-1.8" /></>,
+  gear: <><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" /><circle cx="12" cy="12" r="3" /></>,
   users: <><circle cx="9" cy="8" r="3.4" /><path d="M2.8 19.5c.6-3.3 3.2-5.2 6.2-5.2s5.6 1.9 6.2 5.2M15.5 4.9a3.3 3.3 0 0 1 0 6.3M17.8 14.5c1.9.6 3.1 2.4 3.4 5" /></>,
   search: <><circle cx="10.5" cy="10.5" r="6.5" /><path d="m15.5 15.5 5 5" /></>,
   command: <><path d="M9 9V6a3 3 0 1 0-3 3h3Zm0 0h6m-6 0v6m6-6V6a3 3 0 1 1 3 3h-3Zm0 6v3a3 3 0 1 0 3-3h-3Zm0 0H9m0 0v3a3 3 0 1 1-3-3h3Z" /></>,
@@ -28,6 +28,7 @@ const paths: Record<IconName, React.ReactNode> = {
   clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
   plus: <path d="M12 5v14M5 12h14" />,
   chevron: <path d="m9 5 7 7-7 7" />,
+  cards: <><rect x="3" y="7" width="13" height="14" rx="2" /><path d="M7.5 3.6 18.4 2a2 2 0 0 1 2.3 1.7l1.6 10.9a2 2 0 0 1-1.7 2.3l-1.6.2" /><path d="m6.5 14 2 2 3.5-4" /></>,
 };
 
 export function Icon({ name, size = 20, style }: { name: IconName; size?: number; style?: CSSProperties }) {

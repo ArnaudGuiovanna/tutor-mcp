@@ -98,11 +98,12 @@ type Interaction struct {
 	MisconceptionType   string
 	MisconceptionDetail string
 	DomainID            string // optional, blank for pre-issue-#24 rows
-	// BKTSlip / BKTGuess capture the slip/guess parameters the project's
-	// non-canonical error-type-aware heuristic
-	// (algorithms.BKTUpdateHeuristicSlipByErrorType) actually fed into the
-	// BKT update for this observation, so the run can be replayed
-	// deterministically. Pointers so a NULL on pre-issue-#51 rows stays
+	// BKTSlip / BKTGuess capture the slip/guess parameters actually used by
+	// the BKT update for this observation, so the run can be replayed
+	// deterministically. The runtime applies the declared fixed parameters
+	// (reference or collective policy); error_type no longer adjusts them
+	// (the former heuristic, algorithms.BKTUpdateHeuristicSlipByErrorType, is
+	// deprecated). Pointers so a NULL on pre-issue-#51 rows stays
 	// distinguishable from a legitimate zero. See issue #51 / #8.
 	BKTSlip         *float64
 	BKTGuess        *float64

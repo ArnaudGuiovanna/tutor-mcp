@@ -61,6 +61,37 @@ type Store struct {
 	// trusted evidence outside high-stakes domains. See
 	// SetHostLLMDemonstrationPolicy.
 	hostLLMDemonstrates bool
+	// maxActiveDomains bounds free domain creation per learner; zero means
+	// DefaultMaxActiveDomainsPerLearner. See SetMaxActiveDomainsPerLearner.
+	maxActiveDomains int
+}
+
+// DefaultMaxActiveDomainsPerLearner is the active-domain quota applied when
+// none is configured.
+const DefaultMaxActiveDomainsPerLearner = 200
+
+// DomainQuotaError reports that a learner already holds the maximum number of
+// active (non-archived, non-deleted) domains.
+type DomainQuotaError struct{ Limit int }
+
+func (e *DomainQuotaError) Error() string {
+	return fmt.Sprintf("active domain limit reached (%d): archive or delete an unused domain before creating a new one", e.Limit)
+}
+
+// SetMaxActiveDomainsPerLearner configures the per-learner active-domain
+// quota enforced at domain creation. Values below 1 restore the default.
+func (s *Store) SetMaxActiveDomainsPerLearner(limit int) {
+	if limit < 1 {
+		limit = 0
+	}
+	s.maxActiveDomains = limit
+}
+
+func (s *Store) activeDomainLimit() int {
+	if s.maxActiveDomains < 1 {
+		return DefaultMaxActiveDomainsPerLearner
+	}
+	return s.maxActiveDomains
 }
 
 type tenantTransactionContext struct {
@@ -266,7 +297,7 @@ func (s *Store) WithTx(ctx context.Context, fn func(s store.Store) error) error 
 			return fmt.Errorf("transaction: nested store mismatch")
 		}
 		copyScope := scoped.scope
-		return fn(&Store{db: scoped.tx, root: nil, dialect: s.dialect, secretKeyring: s.secretKeyring, hostLLMDemonstrates: s.hostLLMDemonstrates, tenantScope: &copyScope})
+		return fn(&Store{db: scoped.tx, root: nil, dialect: s.dialect, secretKeyring: s.secretKeyring, hostLLMDemonstrates: s.hostLLMDemonstrates, maxActiveDomains: s.maxActiveDomains, tenantScope: &copyScope})
 	}
 	if s.root == nil {
 		return fn(s)
@@ -293,7 +324,7 @@ func (s *Store) WithTx(ctx context.Context, fn func(s store.Store) error) error 
 	// connection and any locks are released even when fn panics. Rollback is
 	// harmless after a successful Commit (it returns sql.ErrTxDone).
 	defer func() { _ = tx.Rollback() }()
-	if err := fn(&Store{db: tx, root: nil, dialect: s.dialect, secretKeyring: s.secretKeyring, hostLLMDemonstrates: s.hostLLMDemonstrates, tenantScope: s.tenantScope}); err != nil {
+	if err := fn(&Store{db: tx, root: nil, dialect: s.dialect, secretKeyring: s.secretKeyring, hostLLMDemonstrates: s.hostLLMDemonstrates, maxActiveDomains: s.maxActiveDomains, tenantScope: s.tenantScope}); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -329,7 +360,7 @@ func (s *Store) withTenantTransaction(ctx context.Context, scope models.TenantSc
 			return err
 		}
 		copyScope := scope
-		return fn(ctx, &Store{db: scoped.tx, root: nil, dialect: s.dialect, secretKeyring: s.secretKeyring, hostLLMDemonstrates: s.hostLLMDemonstrates, tenantScope: &copyScope})
+		return fn(ctx, &Store{db: scoped.tx, root: nil, dialect: s.dialect, secretKeyring: s.secretKeyring, hostLLMDemonstrates: s.hostLLMDemonstrates, maxActiveDomains: s.maxActiveDomains, tenantScope: &copyScope})
 	}
 	if s.root == nil {
 		// The original transaction context also carries its root identity for
@@ -375,7 +406,7 @@ func (s *Store) withTenantTransaction(ctx context.Context, scope models.TenantSc
 		}
 	}
 	copyScope := scope
-	txStore := &Store{db: tx, root: nil, dialect: s.dialect, secretKeyring: s.secretKeyring, hostLLMDemonstrates: s.hostLLMDemonstrates, tenantScope: &copyScope}
+	txStore := &Store{db: tx, root: nil, dialect: s.dialect, secretKeyring: s.secretKeyring, hostLLMDemonstrates: s.hostLLMDemonstrates, maxActiveDomains: s.maxActiveDomains, tenantScope: &copyScope}
 	txCtx := context.WithValue(ctx, tenantTransactionContextKey{}, &tenantTransactionContext{root: s.root, tx: tx, scope: scope, readOnly: readOnly})
 	txCtx, err = memory.WithNarrativeTenantScope(txCtx, scope)
 	if err != nil {
@@ -403,7 +434,7 @@ func (s *Store) inTx(ctx context.Context, opts *sql.TxOptions, fn func(txs *Stor
 			return fmt.Errorf("transaction: nested store mismatch")
 		}
 		copyScope := scoped.scope
-		return fn(&Store{db: scoped.tx, root: nil, dialect: s.dialect, secretKeyring: s.secretKeyring, hostLLMDemonstrates: s.hostLLMDemonstrates, tenantScope: &copyScope})
+		return fn(&Store{db: scoped.tx, root: nil, dialect: s.dialect, secretKeyring: s.secretKeyring, hostLLMDemonstrates: s.hostLLMDemonstrates, maxActiveDomains: s.maxActiveDomains, tenantScope: &copyScope})
 	}
 	if s.root == nil {
 		return fn(s)
@@ -415,7 +446,7 @@ func (s *Store) inTx(ctx context.Context, opts *sql.TxOptions, fn func(txs *Stor
 	// Keep the transaction cleanup panic-safe for every internal transaction,
 	// just as WithTx does for caller-provided callbacks.
 	defer func() { _ = tx.Rollback() }()
-	txs := &Store{db: tx, dialect: s.dialect, secretKeyring: s.secretKeyring, hostLLMDemonstrates: s.hostLLMDemonstrates, tenantScope: s.tenantScope}
+	txs := &Store{db: tx, dialect: s.dialect, secretKeyring: s.secretKeyring, hostLLMDemonstrates: s.hostLLMDemonstrates, maxActiveDomains: s.maxActiveDomains, tenantScope: s.tenantScope}
 	if err := fn(txs); err != nil {
 		return err
 	}
@@ -1185,6 +1216,15 @@ func (s *Store) CreateDomainWithValueFramings(ctx context.Context, learnerID, na
 		}
 		if err := txs.ensureFreeDomainAllowed(ctx, learnerID); err != nil {
 			return err
+		}
+		var active int
+		if err := txs.queryRow(ctx,
+			`SELECT COUNT(*) FROM domains WHERE learner_id = ? AND deleted_at IS NULL AND archived = 0`, learnerID,
+		).Scan(&active); err != nil {
+			return fmt.Errorf("count active domains: %w", err)
+		}
+		if limit := txs.activeDomainLimit(); active >= limit {
+			return &DomainQuotaError{Limit: limit}
 		}
 		if _, err := txs.exec(ctx,
 			`INSERT INTO domains (id, learner_id, tenant_id, name, personal_goal, graph_json, value_framings_json, graph_version, created_at)
@@ -2433,6 +2473,13 @@ func (s *Store) CreateAuthCodeWithBindingAndScope(ctx context.Context, code, lea
 	return s.CreateAuthCodeForPrincipal(ctx, code, principal, codeChallenge, codeChallengeMethod, clientID, redirectURI, resource, canonicalScope, expiresAt)
 }
 
+// authCodeStorageKey is the only form in which an authorization code is
+// persisted: a database reader cannot redeem a pending code. The column keeps
+// its name and type, so no schema change is needed.
+func authCodeStorageKey(raw string) string {
+	return credentialRouteKey(raw)
+}
+
 func (s *Store) CreateAuthCodeForPrincipal(ctx context.Context, code string, principal models.Principal, codeChallenge, codeChallengeMethod, clientID, redirectURI, resource, scope string, expiresAt time.Time) error {
 	if strings.TrimSpace(resource) == "" {
 		return fmt.Errorf("create auth code: resource is required")
@@ -2457,7 +2504,7 @@ func (s *Store) CreateAuthCodeForPrincipal(ctx context.Context, code string, pri
 		    (code, tenant_id, user_id, membership_id, membership_version, learner_id,
 		     code_challenge, code_challenge_method, client_id, redirect_uri, resource, scope, expires_at, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		code, principal.TenantID, principal.UserID, principal.MembershipID, principal.TokenVersion,
+		authCodeStorageKey(code), principal.TenantID, principal.UserID, principal.MembershipID, principal.TokenVersion,
 		nullString(principal.LearnerID), codeChallenge, codeChallengeMethod, clientID, redirectURI,
 		resource, canonicalScope, expiresAt, createdAt,
 	)
@@ -2506,11 +2553,12 @@ func (s *Store) GetAuthCode(ctx context.Context, code, clientID string) (*models
                      AND ((oauth_codes.learner_id IS NULL AND tm.learner_id IS NULL AND u.email_verified_at IS NOT NULL)
                        OR (l.id = oauth_codes.learner_id AND ((l.identity_mode = 'email' AND l.email_verified_at IS NOT NULL) OR l.identity_mode = 'username')))
 		   )`,
-		code, scope.TenantID, scope.UserID, scope.MembershipID, scope.LearnerID,
+		authCodeStorageKey(code), scope.TenantID, scope.UserID, scope.MembershipID, scope.LearnerID,
 		clientID, time.Now().UTC(),
 	).Scan(&ac.Code, &ac.UserID, &ac.TenantID, &ac.MembershipID, &ac.MembershipVersion,
 		&ac.LearnerID, &ac.CodeChallenge, &ac.CodeChallengeMethod, &ac.ClientID,
 		&ac.RedirectURI, &ac.Resource, &ac.Scope, &ac.ExpiresAt)
+	ac.Code = code
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("get auth code: %w", store.ErrInvalidAuthCode)
 	}
@@ -2557,11 +2605,12 @@ func (s *Store) ConsumeAuthCode(ctx context.Context, code, clientID string) (*mo
 		   )
 		 RETURNING code, user_id, tenant_id, membership_id, membership_version, COALESCE(learner_id, ''),
 		           code_challenge, code_challenge_method, client_id, redirect_uri, resource, scope, expires_at`,
-		code, scope.TenantID, scope.UserID, scope.MembershipID, scope.LearnerID,
+		authCodeStorageKey(code), scope.TenantID, scope.UserID, scope.MembershipID, scope.LearnerID,
 		clientID, time.Now().UTC(),
 	).Scan(&ac.Code, &ac.UserID, &ac.TenantID, &ac.MembershipID, &ac.MembershipVersion,
 		&ac.LearnerID, &ac.CodeChallenge, &ac.CodeChallengeMethod, &ac.ClientID,
 		&ac.RedirectURI, &ac.Resource, &ac.Scope, &ac.ExpiresAt)
+	ac.Code = code
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("consume auth code: %w", store.ErrInvalidAuthCode)
 	}
@@ -2767,36 +2816,28 @@ func (s *Store) CleanupExpiredOAuthClients(ctx context.Context) (int64, error) {
 		if err := rows.Close(); err != nil {
 			return fmt.Errorf("close expired oauth clients: %w", err)
 		}
+		// Each client is removed in its own savepoint: one blocked by a
+		// tenant-scoped reference must not prevent the others' cleanup.
 		for _, item := range expired {
+			deleted, err := txs.deleteOAuthClientInSavepoint(
+				ctx, "cleanup_oauth_client", item.clientID, now,
+				"expires_at IS NOT NULL AND expires_at <= ?", []any{now},
+			)
+			if err != nil {
+				return err
+			}
+			if !deleted {
+				continue
+			}
 			if err := txs.appendDCRAudit(
 				ctx, "client_expired_deleted", "scheduler-cleanup",
 				item.tokenID, item.clientID, map[string]any{"reason": "unused registration TTL elapsed"}, now,
 			); err != nil {
 				return err
 			}
+			removed++
 		}
-		if _, err := txs.exec(ctx,
-			`UPDATE refresh_tokens SET revoked_at = COALESCE(revoked_at, ?)
-			 WHERE client_id IN (SELECT client_id FROM oauth_clients WHERE expires_at IS NOT NULL AND expires_at <= ?)`,
-			now, now,
-		); err != nil {
-			return err
-		}
-		for _, table := range []string{"oauth_codes", "learner_approved_clients"} {
-			if _, err := txs.exec(ctx,
-				`DELETE FROM `+table+` WHERE client_id IN
-				 (SELECT client_id FROM oauth_clients WHERE expires_at IS NOT NULL AND expires_at <= ?)`,
-				now,
-			); err != nil {
-				return err
-			}
-		}
-		result, err := txs.exec(ctx, `DELETE FROM oauth_clients WHERE expires_at IS NOT NULL AND expires_at <= ?`, now)
-		if err != nil {
-			return err
-		}
-		removed, err = result.RowsAffected()
-		return err
+		return nil
 	})
 	if err != nil {
 		return 0, fmt.Errorf("cleanup expired oauth clients: %w", err)

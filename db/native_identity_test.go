@@ -291,12 +291,31 @@ func TestNativeLimitsBoundChallengesAndSessions(t *testing.T) {
 	tenant := nativeTestTenant(t, s, "native-limits")
 	n := nativeTestMember(t, s, tenant, 17, []string{models.RoleLearner})
 	for i := range 16 {
-		if err := s.CreateNativeChallenge(t.Context(), nativeTestChallenge(n, fmt.Sprintf("challenge-%d", i))); err != nil {
+		challenge := nativeTestChallenge(n, fmt.Sprintf("challenge-%d", i))
+		if i == 0 {
+			challenge.CreatedAt = challenge.CreatedAt.Add(-10 * time.Second)
+			challenge.ExpiresAt = challenge.ExpiresAt.Add(-10 * time.Second)
+		}
+		if err := s.CreateNativeChallenge(t.Context(), challenge); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := s.CreateNativeChallenge(t.Context(), nativeTestChallenge(n, "excess")); !errors.Is(err, storeport.ErrInvalidNativeChallenge) {
-		t.Fatalf("challenge cap=%v", err)
+	// A full backlog evicts the oldest pending challenge instead of refusing
+	// the key holder.
+	if err := s.CreateNativeChallenge(t.Context(), nativeTestChallenge(n, "newest")); err != nil {
+		t.Fatalf("challenge at cap=%v", err)
+	}
+	var pending int
+	if err := s.root.QueryRow(rb(s, `SELECT COUNT(*) FROM native_challenges WHERE identity_id=?`), n.ID).Scan(&pending); err != nil || pending != 16 {
+		t.Fatalf("pending challenges=%d err=%v", pending, err)
+	}
+	oldest := sha256.Sum256([]byte("challenge-0"))
+	if _, err := s.ConsumeNativeChallenge(t.Context(), hex.EncodeToString(oldest[:]), time.Now().UTC()); !errors.Is(err, storeport.ErrInvalidNativeChallenge) {
+		t.Fatalf("oldest challenge survived eviction: %v", err)
+	}
+	newest := sha256.Sum256([]byte("newest"))
+	if _, err := s.ConsumeNativeChallenge(t.Context(), hex.EncodeToString(newest[:]), time.Now().UTC()); err != nil {
+		t.Fatalf("newest challenge unusable: %v", err)
 	}
 	for i := range 32 {
 		if _, err := s.CreateNativeSession(t.Context(), nativeTestSession(n, fmt.Sprintf("session-%d", i), []string{models.OAuthScopeLearnerRead})); err != nil {

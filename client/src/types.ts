@@ -30,13 +30,19 @@ export interface Settings {
   manualTarget?: AgentTarget;
   cwd: string;
   tutor: { mode: 'local' | 'remote'; activity?: 'auto' | 'author' | 'learn' | 'train'; url: string; command: string; args: string[] };
+  /** JSON `setupCompleted` (Rust `setup_completed`): the guided setup was finished. */
+  setupCompleted?: boolean;
 }
 
 export type PermissionDecision = 'ask' | 'allow' | 'deny';
 export interface PermissionPolicy { origin: string; institutionId: string; agentId: string; defaultDecision: PermissionDecision; tools: Record<string, PermissionDecision> }
 export interface McpTool { name: string; description?: string; annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean } }
 export interface AgentConfigOption { id: string; name: string; category?: string; type: string; currentValue: string; options?: ({value: string; name: string} | {group: string; options: {value: string; name: string}[]})[] }
-export interface AgentConfiguration { speedOptions?: string[]; connected: boolean; configOptions: AgentConfigOption[]; current: {model: string; reasoningEffort: string; speed: string}; supported: {model: boolean; reasoningEffort: boolean; speed: boolean} }
+export interface AgentConfiguration {
+  speedOptions?: string[]; connected: boolean; configOptions: AgentConfigOption[]; current: {model: string; reasoningEffort: string; speed: string}; supported: {model: boolean; reasoningEffort: boolean; speed: boolean};
+  /** Values the harness session really applies; `automatic` when no model was chosen. Absent from older backends. */
+  effective?: { model: string | null; reasoningEffort: string | null; automatic: boolean };
+}
 export interface InstitutionMember { membership_id: string; user_id: string; name?: string; public_key?: string; recovery_public_key?: string; roles: string[]; status: string }
 export interface InstitutionOverview { institution: {id:string;name:string}; membership:{id:string;roles:string[];status:string}; capabilities:{manage_members:boolean;transfer_ownership:boolean;request_erasure:boolean;last_owner:boolean}; personal_learning:boolean; erasure_requests:{id:string;status:string;created_at:string;completed_at?:string}[] }
 
@@ -88,7 +94,15 @@ export interface TutorStatus {
 }
 
 export interface Snapshot {
-  agentStatus?: { phase: 'running' | 'stopped'; authentication: 'checking' | 'unknown' | 'none' | 'authenticated' | 'not_required'; targetId?: string; environment?: string; distribution?: string; wslUser?: string; lastFailure?: { source: 'adapter' | 'acp'; category: string; message: string } | null };
+  agentStatus?: {
+    phase: 'running' | 'stopped'; authentication: 'checking' | 'unknown' | 'none' | 'authenticated' | 'not_required'; targetId?: string; environment?: string; distribution?: string; wslUser?: string; lastFailure?: { source: 'adapter' | 'acp'; category: string; message: string } | null;
+    /** Supervised reconnection of an unexpectedly stopped harness (absent from older backends). */
+    reconnect?: AgentReconnect;
+    /** RFC 3339 end of a provider limit; new turns are refused until then. */
+    limitedUntil?: string | null;
+    limitKind?: AgentLimitKind | null;
+    invalidFrames?: number;
+  };
   agentConnection?: AgentConnection | null;
   pendingMessage?: { text: string; conversationId?: string; paused?: boolean } | null;
   profileEpoch?: number;
@@ -102,6 +116,15 @@ export interface Snapshot {
   activeConversationId?: string;
   tutorStatus: TutorStatus;
   agentConnected: boolean;
+}
+
+export type AgentLimitKind = 'rate_limit' | 'overloaded' | 'usage_limit';
+export interface AgentReconnect {
+  state: 'idle' | 'waiting' | 'connecting' | 'failed';
+  attempt: number;
+  /** RFC 3339, set while waiting. */
+  nextAttemptAt: string | null;
+  cause: string | null;
 }
 
 export interface AuthMethod {

@@ -84,6 +84,8 @@ pub struct Settings {
     pub agent: AgentSettings,
     pub permission_policy: Option<crate::permissions::PermissionPolicy>,
     pub review_plans: std::collections::BTreeMap<String, crate::learning_ui::ReviewPlan>,
+    /// Set once the first-run setup has been completed. Serialized as `setupCompleted`.
+    pub setup_completed: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -97,6 +99,7 @@ impl Default for Settings {
             agent: AgentSettings::default(),
             permission_policy: None,
             review_plans: Default::default(),
+            setup_completed: false,
         }
     }
 }

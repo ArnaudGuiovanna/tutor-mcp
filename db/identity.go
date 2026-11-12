@@ -108,13 +108,22 @@ func (s *Store) GetPrincipal(ctx context.Context, scope models.TenantScope, scop
 	return principal, nil
 }
 
+// ValidatePrincipal checks that principal still matches an active membership.
+//
+// Inside a tenant transaction it runs on that transaction; a PostgreSQL write
+// transaction also takes FOR SHARE on the membership row so revocation waits
+// for the in-flight effect. Called on the root store (for example by the HTTP
+// bearer middleware before any tool runs), it opens its own read-only tenant
+// transaction: a lock taken there would be released at once by the commit, so
+// a write transaction would cost a writer slot without protecting anything.
+// The tool transaction revalidates under its own lock.
 func (s *Store) ValidatePrincipal(ctx context.Context, principal models.Principal) error {
 	if err := principal.Validate(); err != nil {
 		return fmt.Errorf("validate principal: %w", storeport.ErrInvalidPrincipal)
 	}
 	if slices.Contains(principal.Roles, models.RoleServiceAccount) {
 		if !s.inTenantTransaction(ctx, principal.TenantScope()) && s.root != nil {
-			return s.WithTenantTx(ctx, principal.TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {
+			return s.WithTenantReadTx(ctx, principal.TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {
 				return scoped.(*Store).validateServiceAccountPrincipal(txCtx, principal)
 			})
 		}
@@ -122,14 +131,14 @@ func (s *Store) ValidatePrincipal(ctx context.Context, principal models.Principa
 	}
 	if slices.Contains(principal.Roles, models.RoleSupport) {
 		if !s.inTenantTransaction(ctx, principal.TenantScope()) && s.root != nil {
-			return s.WithTenantTx(ctx, principal.TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {
+			return s.WithTenantReadTx(ctx, principal.TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {
 				return scoped.(*Store).validateSupportPrincipal(txCtx, principal)
 			})
 		}
 		return s.validateSupportPrincipal(ctx, principal)
 	}
 	if !s.inTenantTransaction(ctx, principal.TenantScope()) && s.root != nil {
-		return s.WithTenantTx(ctx, principal.TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {
+		return s.WithTenantReadTx(ctx, principal.TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {
 			return scoped.ValidatePrincipal(txCtx, principal)
 		})
 	}

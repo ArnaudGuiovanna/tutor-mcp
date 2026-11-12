@@ -154,7 +154,7 @@ describe('Modalités visuelles et planning intégrés', () => {
   });
 
   it('attend l’identité institutionnelle avant de charger et activer le planning', async () => {
-    const state = initialState(true); state.settings.tutor = {...state.settings.tutor,mode:'remote',url:'https://institution.example'};
+    const state = initialState(true); state.settings.setupCompleted = true; state.settings.tutor = {...state.settings.tutor,mode:'remote',url:'https://institution.example'};
     const fixture = client(state); const doc = trainingFixture();
     let resolveOverview!:(value:Awaited<ReturnType<typeof fixture.api.tutorOverview>>)=>void;
     vi.mocked(fixture.api.tutorOverview).mockImplementation(() => new Promise(resolve => {resolveOverview = resolve;}));

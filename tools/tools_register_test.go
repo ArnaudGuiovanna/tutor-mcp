@@ -152,8 +152,8 @@ func TestRegisterTools_Smoke(t *testing.T) {
 			t.Errorf("%s has no safety annotations", name)
 			continue
 		}
-		if tool.Annotations.ReadOnlyHint != readOnlyTools[name] {
-			t.Errorf("%s readOnlyHint=%v, policy=%v", name, tool.Annotations.ReadOnlyHint, readOnlyTools[name])
+		if tool.Annotations.ReadOnlyHint != toolReadOnlyHint(name) {
+			t.Errorf("%s readOnlyHint=%v, policy=%v", name, tool.Annotations.ReadOnlyHint, toolReadOnlyHint(name))
 		}
 		if tool.Annotations.DestructiveHint == nil || tool.Annotations.OpenWorldHint == nil {
 			t.Errorf("%s has incomplete boolean safety hints", name)
@@ -209,6 +209,12 @@ func TestRegisterTools_Smoke(t *testing.T) {
 	// get_next_activity can enqueue the same proactive mirror webhook as the
 	// explicit mirror tool, so its open-world hint must remain consistent.
 	assertToolSafetyHints(t, registered["get_next_activity"], false, false, true)
+	// Training reads need only a read grant and change nothing the caller can
+	// observe; they must not ask hosts for a destructive-action approval.
+	for _, name := range []string{"get_training", "list_training_library", "get_training_policy", "find_training_members", "preview_training_edit", "preview_training_lifecycle"} {
+		assertToolSafetyHints(t, registered[name], true, false, false)
+	}
+	assertToolSafetyHints(t, registered["save_training_edit"], false, true, false)
 }
 
 func TestRegisterTools_LegacyRolloutAdvertisesOnlyBundle(t *testing.T) {

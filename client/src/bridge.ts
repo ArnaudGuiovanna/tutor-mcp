@@ -4,7 +4,7 @@ import type { AgentConfiguration, McpTool, AgentConnection, AgentTarget, Convers
 
 function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (!isTauri()) {
-    return Promise.reject(new Error('Ouvrez Tutor depuis son application installée. La prévisualisation web ne peut pas lancer Codex ni accéder à vos connexions.'));
+    return Promise.reject(new Error('Ouvrez Tutor depuis son application installée. La prévisualisation web ne peut pas lancer votre agent IA ni accéder à vos connexions.'));
   }
   return invoke<T>(command, args);
 }

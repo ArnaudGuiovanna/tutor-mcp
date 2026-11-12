@@ -47,6 +47,12 @@ configuration, touches no tenant data and only changes the SQL projection that
 derives effective evaluation trust. It is part of the fingerprint for the same
 reason.
 
+`SetMaxActiveDomainsPerLearner` (2026-11-12) belongs to the same category. It
+is called once at startup with `LEARNER_MAX_ACTIVE_DOMAINS`, touches no tenant
+data and only sets the bound that domain creation enforces inside the caller's
+tenant transaction. Tenant-scoped Stores derived from the root Store inherit
+the value.
+
 Institution accounts (browser console, invitations and self-service signup)
 resolve their tenant from a typed secret, like the credentials above:
 `ConsoleSessionCredential`, `InvitationCredential`, `SignupCredential` and

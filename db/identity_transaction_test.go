@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"tutor-mcp/models"
@@ -74,5 +76,47 @@ func TestPrincipalWriteTransactionFencesConcurrentRevocation(t *testing.T) {
 	})
 	if !errors.Is(err, storeport.ErrInvalidPrincipal) {
 		t.Fatalf("old authorization after revocation: %v", err)
+	}
+}
+
+// The HTTP bearer middleware validates on the root store before any tool
+// transaction. That pre-check must not wait for (or occupy) the single SQLite
+// writer connection; the tool transaction revalidates under its own lock.
+func TestRootPrincipalValidationUsesReadTransaction(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tutor.db")
+	writer, err := OpenDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(writer); err != nil {
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	s, err := NewSQLiteStore(writer, path)
+	if err != nil {
+		_ = writer.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.EnsureInstallation(t.Context(), "local"); err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.EnsureLocalIdentity(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := s.GetPrincipalForLearner(t.Context(), id, []string{models.OAuthScopeLearner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	busy, err := writer.Conn(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	if err := s.ValidatePrincipal(ctx, p); err != nil {
+		t.Fatalf("root validation waited for the writer: %v", err)
 	}
 }

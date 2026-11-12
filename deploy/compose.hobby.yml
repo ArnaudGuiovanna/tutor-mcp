@@ -22,7 +22,7 @@ services:
     restart: unless-stopped
     stop_grace_period: 40s
   caddy:
-    image: caddy:2
+    image: caddy:2@sha256:9c1b76fb701c1f77383d3124d9f626e38bcf83bc1255ed47475d4f2420701d03
     environment:
       TUTOR_DOMAIN: ${TUTOR_DOMAIN:?Set TUTOR_DOMAIN to your public DNS name}
     ports:

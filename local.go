@@ -22,7 +22,8 @@ import (
 )
 
 func newTutorServer(deps *tools.Deps, timeout time.Duration) *mcp.Server {
-	server := mcp.NewServer(&mcp.Implementation{Name: "tutor-mcp", Version: mcpVersion()}, nil)
+	// Shared by stdio and HTTP: both transports advertise the same loop.
+	server := mcp.NewServer(&mcp.Implementation{Name: "tutor-mcp", Version: mcpVersion()}, &mcp.ServerOptions{Instructions: tools.ServerInstructions})
 	if timeout <= 0 {
 		panic("MCP tool call timeout must be positive")
 	}

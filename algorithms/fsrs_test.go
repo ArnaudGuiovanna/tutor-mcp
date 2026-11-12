@@ -450,3 +450,21 @@ func TestNextDifficultyClamped(t *testing.T) {
 		})
 	}
 }
+
+// P2-15: the forgetting-alert countdown follows the FSRS curve.
+func TestDaysUntilRetrievabilityInvertsCurve(t *testing.T) {
+	for _, stability := range []float64{0.5, 3, 40} {
+		days := DaysUntilRetrievability(stability, Retrievability(2, stability), 0.30)
+		got := math.Pow(1+fsrsFactor*(2+days)/stability, fsrsDecay)
+		if math.Abs(got-0.30) > 1e-9 {
+			t.Fatalf("S=%.1f: R after %.3f more days = %.6f, want 0.30", stability, days, got)
+		}
+	}
+	if DaysUntilRetrievability(10, 0.25, 0.30) != 0 || DaysUntilRetrievability(0, 0.9, 0.3) != 0 {
+		t.Fatal("no time left below the target or for an invalid stability")
+	}
+	// A slow-decaying card has far more time left than a fast one at the same retention.
+	if DaysUntilRetrievability(100, 0.39, 0.30) <= DaysUntilRetrievability(1, 0.39, 0.30) {
+		t.Fatal("countdown must scale with stability")
+	}
+}

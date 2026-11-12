@@ -72,6 +72,57 @@ type GateInput struct {
 	RecentConcepts       []string        // DESC, last-first
 	Alerts               []models.Alert
 	AntiRepeatWindow     int // 0 disables; default DefaultAntiRepeatWindow
+	// VerifiedConcepts lists the concepts with assessed or spaced evidence of
+	// success (see PrerequisiteRoutingMastery). Nil keeps the raw estimate for
+	// prerequisites (pure-function callers); the orchestrator always sets it.
+	VerifiedConcepts map[string]bool
+}
+
+// UnverifiedPrerequisiteMasteryCap bounds the estimate a prerequisite
+// contributes to routing while it has no verified success. Just below the
+// unified 0.85 threshold: a few host-declared successes can no longer unlock
+// the next concepts by themselves.
+const UnverifiedPrerequisiteMasteryCap = 0.84
+
+// PrerequisiteRoutingMastery is the estimate of a prerequisite used to unlock
+// its successors. When verified is nil the raw estimate is returned. Otherwise
+// an unverified prerequisite is capped at UnverifiedPrerequisiteMasteryCap.
+//
+// Verification (computed by the orchestrator) is either a passed evaluated
+// assessment attempt on the concept, or a successful FSRS review at least one
+// day after the previous one. The second path keeps hosts that never use
+// assessment attempts progressing: they are slowed (a successor unlocks after
+// a spaced success instead of within the first session) but never blocked.
+func PrerequisiteRoutingMastery(concept string, cs *models.ConceptState, verified map[string]bool) float64 {
+	if cs == nil || math.IsNaN(cs.PMastery) {
+		return math.NaN()
+	}
+	if verified != nil && !verified[concept] {
+		return math.Min(cs.PMastery, UnverifiedPrerequisiteMasteryCap)
+	}
+	return cs.PMastery
+}
+
+// SpacedSuccessVerified reports whether the last applied FSRS review was a
+// success after at least one whole day: the card is in review state and its
+// recorded elapsed interval is >= 1 day. Same-day successes leave the memory
+// state untouched, so they cannot satisfy this.
+func SpacedSuccessVerified(cs *models.ConceptState) bool {
+	return cs != nil && cs.LastReview != nil && !cs.LastReview.IsZero() &&
+		cs.CardState == string(algorithms.Review) && cs.ElapsedDays >= 1
+}
+
+// ConsolidationMasteryLow and ConsolidationMasteryHigh bound a concept that
+// is "started": practised beyond the bootstrap prior and not yet above the
+// routing threshold. Such concepts get a selection bonus and are exempt from
+// anti-repetition until they have two consecutive interactions.
+const (
+	ConsolidationMasteryLow  = 0.10
+	ConsolidationMasteryHigh = 0.85
+)
+
+func startedConcept(cs *models.ConceptState) bool {
+	return cs != nil && !math.IsNaN(cs.PMastery) && cs.PMastery > ConsolidationMasteryLow && cs.PMastery < ConsolidationMasteryHigh
 }
 
 // GateResult is the structured output of ApplyGate. It has three
@@ -217,7 +268,7 @@ func ApplyGate(input GateInput) (GateResult, error) {
 		}
 	} else {
 		for _, c := range input.Concepts {
-			prereqOK[c] = prereqsSatisfied(c, input.Graph, input.States, kstThreshold)
+			prereqOK[c] = prereqsSatisfiedFor(c, input.Graph, input.States, kstThreshold, input.VerifiedConcepts)
 		}
 	}
 
@@ -233,7 +284,7 @@ func ApplyGate(input GateInput) (GateResult, error) {
 				continue
 			}
 			if !prereqOK[c] {
-				missing := missingPrereqs(c, input.Graph, input.States, kstThreshold)
+				missing := missingPrereqsFor(c, input.Graph, input.States, kstThreshold, input.VerifiedConcepts)
 				slog.Info("gate: misconception on concept with unsatisfied prereqs (pathological — possible domain misconfig)",
 					"concept", c,
 					"missing_prereq_count", len(missing),
@@ -275,7 +326,13 @@ func ApplyGate(input GateInput) (GateResult, error) {
 		inRecent := recentSet[c]
 		hasForgetting := forgettingSet[c]
 		hasMisconception := input.ActiveMisconceptions[c]
-		if !inRecent || hasForgetting || hasMisconception {
+		// A started concept stays available until it was the subject of the
+		// two most recent interactions: consolidation over breadth, then
+		// one forced interleave.
+		// DIAGNOSTIC is about coverage, so it keeps the plain rule.
+		consolidating := input.Phase != models.PhaseDiagnostic &&
+			startedConcept(input.States[c]) && !lastTwoAre(input.RecentConcepts, c)
+		if !inRecent || hasForgetting || hasMisconception || consolidating {
 			finalCandidates = append(finalCandidates, c)
 		}
 	}
@@ -352,7 +409,11 @@ func ApplyGate(input GateInput) (GateResult, error) {
 
 // ─── Helpers (private) ─────────────────────────────────────────────────────
 
-func prereqsSatisfied(concept string, graph models.KnowledgeSpace, states map[string]*models.ConceptState, kstThreshold float64) bool {
+func lastTwoAre(recent []string, concept string) bool {
+	return len(recent) >= 2 && recent[0] == concept && recent[1] == concept
+}
+
+func prereqsSatisfiedFor(concept string, graph models.KnowledgeSpace, states map[string]*models.ConceptState, kstThreshold float64, verified map[string]bool) bool {
 	for _, prereq := range graph.Prerequisites[concept] {
 		cs := states[prereq]
 		if cs == nil {
@@ -360,14 +421,14 @@ func prereqsSatisfied(concept string, graph models.KnowledgeSpace, states map[st
 			// convention ≡ not satisfied.
 			return false
 		}
-		if math.IsNaN(cs.PMastery) || cs.PMastery < kstThreshold {
+		if pm := PrerequisiteRoutingMastery(prereq, cs, verified); math.IsNaN(pm) || pm < kstThreshold {
 			return false
 		}
 	}
 	return true
 }
 
-func missingPrereqs(concept string, graph models.KnowledgeSpace, states map[string]*models.ConceptState, kstThreshold float64) []string {
+func missingPrereqsFor(concept string, graph models.KnowledgeSpace, states map[string]*models.ConceptState, kstThreshold float64, verified map[string]bool) []string {
 	var missing []string
 	for _, prereq := range graph.Prerequisites[concept] {
 		cs := states[prereq]
@@ -375,7 +436,7 @@ func missingPrereqs(concept string, graph models.KnowledgeSpace, states map[stri
 			missing = append(missing, prereq)
 			continue
 		}
-		if math.IsNaN(cs.PMastery) || cs.PMastery < kstThreshold {
+		if pm := PrerequisiteRoutingMastery(prereq, cs, verified); math.IsNaN(pm) || pm < kstThreshold {
 			missing = append(missing, prereq)
 		}
 	}

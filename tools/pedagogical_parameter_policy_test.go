@@ -181,7 +181,7 @@ func (f *parameterPolicyFixture) prepare(t *testing.T, p models.Principal, domai
 	if err := f.s.CreatePedagogicalDecision(t.Context(), p.TenantScope(), d); err != nil {
 		t.Fatal(err)
 	}
-	a := &models.AssessmentAttempt{ID: "attempt-" + id, LearnerID: p.LearnerID, DomainID: domainID, ConceptID: competency.Key, SessionID: session.ID, ActivityID: id, ActivityVersion: 1, ActivityType: string(activity), DecisionID: id, CurriculumVersion: curriculum.Version, CurriculumConceptJSON: string(raw), Observable: "Independent response", TaskText: "Name the larger number: 2 or 4", RubricJSON: `{"criteria":[{"id":"correct","description":"Correct response","max_score":1}],"passing_score":1}`, PassingScore: 1, CreatedAt: at.Add(-time.Minute)}
+	a := &models.AssessmentAttempt{ID: "attempt-" + id, LearnerID: p.LearnerID, DomainID: domainID, ConceptID: competency.Key, SessionID: session.ID, ActivityID: id, ActivityVersion: 1, ActivityType: string(activity), DecisionID: id, CurriculumVersion: curriculum.Version, CurriculumConceptJSON: string(raw), Observable: "Independent response", TaskText: "Name the larger number: 2 or 4", RubricJSON: `{"criteria":[{"id":"correct","description":"Correct response","max_score":1},{"id":"reasoning","description":"Justified response","max_score":1}],"passing_score":2}`, PassingScore: 2, CreatedAt: at.Add(-time.Minute)}
 	if err := f.s.CreateAssessmentAttempt(t.Context(), a); err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +192,7 @@ func (f *parameterPolicyFixture) prepare(t *testing.T, p models.Principal, domai
 	if err := f.s.SubmitAssessmentAttempt(t.Context(), p.LearnerID, a.ID, response, "", at); err != nil {
 		t.Fatal(err)
 	}
-	return interactionInput{DomainID: domainID, SessionID: session.ID, Concept: competency.Key, ActivityType: string(activity), AssessmentAttemptID: a.ID, Success: success, Confidence: .8, ResponseTimeSeconds: 5, AssessmentScore: score, EvaluatorID: "host", EvaluationMethod: models.EvaluationMethodHostLLM, RubricScoreJSON: fmt.Sprintf(`{"criteria_scores":[{"id":"correct","score":%g,"evidence":"Committed learner response."}]}`, score)}
+	return interactionInput{DomainID: domainID, SessionID: session.ID, Concept: competency.Key, ActivityType: string(activity), AssessmentAttemptID: a.ID, Success: success, Confidence: .8, ResponseTimeSeconds: 5, AssessmentScore: 2 * score, EvaluatorID: "host", EvaluationMethod: models.EvaluationMethodHostLLM, RubricScoreJSON: fmt.Sprintf(`{"criteria_scores":[{"id":"correct","score":%g,"evidence":"Committed learner response."},{"id":"reasoning","score":%g,"evidence":"Committed learner reasoning."}]}`, score, score)}
 }
 
 func (f *parameterPolicyFixture) apply(t *testing.T, p models.Principal, input interactionInput, at time.Time) (*models.ConceptState, map[string]any, error) {

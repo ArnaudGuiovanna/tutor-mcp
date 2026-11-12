@@ -89,8 +89,11 @@ impl Backend {
         self.close_native_permissions(&operation.id).await;
         // A cancelled session/new/load may still finish in the adapter. Retire
         // that process so no late replay/configuration can become reusable state.
-        let stopped = if operation.loading.load(Ordering::Acquire) {
-            self.stop_agent().await
+        // This is not a voluntary disconnection: supervision reconnects.
+        let stopped: Result<(), String> = if operation.loading.load(Ordering::Acquire) {
+            self.restart_agent("Une préparation annulée a été interrompue ; l’agent est relancé.")
+                .await;
+            Ok(())
         } else {
             Ok(())
         };

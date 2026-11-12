@@ -6,7 +6,7 @@
 //! Version/capability negotiation belongs to the caller. This transport also
 //! works for a local MCP server; it never assumes an ACP-shaped `initialize`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::{Duration, Instant};
@@ -24,10 +24,130 @@ const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PENDING: usize = 64;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+/// Consecutive malformed frames tolerated before the transport is closed.
+const MAX_CONSECUTIVE_INVALID_FRAMES: u32 = 16;
+/// Private stderr retention; only a redacted tail ever leaves this module.
+const STDERR_TAIL_BYTES: usize = 64 * 1024;
+/// Redacted stderr excerpt attached to an unexpected-exit diagnostic.
+const STDERR_DIAGNOSTIC_BYTES: usize = 8 * 1024;
+/// session/prompt fails only after this long without any session/update for
+/// its session (and no pending permission), re-armed by every update.
+const PROMPT_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Absolute ceiling for one session/prompt, whatever its activity.
+const PROMPT_MAX_DURATION: Duration = Duration::from_secs(30 * 60);
 pub const REQUEST_CANCELLED_BEFORE_WRITE: &str = "Préparation annulée.";
 
+/// Stable classification of an ACP/JSON-RPC failure. Provider text never
+/// decides the kind except for the documented auth wording on -32000.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorKind {
+    RateLimit,
+    Overloaded,
+    Auth,
+    UsageLimit,
+    Context,
+    Transport,
+    Protocol,
+    Cancelled,
+    Other,
+}
+
+impl ErrorKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RateLimit => "rate_limit",
+            Self::Overloaded => "overloaded",
+            Self::Auth => "auth",
+            Self::UsageLimit => "usage_limit",
+            Self::Context => "context",
+            Self::Transport => "transport",
+            Self::Protocol => "protocol",
+            Self::Cancelled => "cancelled",
+            Self::Other => "other",
+        }
+    }
+
+    pub fn parse(kind: &str) -> Option<Self> {
+        [
+            Self::RateLimit,
+            Self::Overloaded,
+            Self::Auth,
+            Self::UsageLimit,
+            Self::Context,
+            Self::Transport,
+            Self::Protocol,
+            Self::Cancelled,
+            Self::Other,
+        ]
+        .into_iter()
+        .find(|candidate| candidate.as_str() == kind)
+    }
+
+    /// Kinds during which new provider requests are pointless for a while.
+    pub fn is_limit(self) -> bool {
+        matches!(self, Self::RateLimit | Self::Overloaded | Self::UsageLimit)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct AcpError {
+    pub kind: ErrorKind,
+    pub retry_after: Option<Duration>,
+    pub message: String,
+}
+
+impl AcpError {
+    fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            retry_after: None,
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for AcpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl From<AcpError> for String {
+    fn from(error: AcpError) -> Self {
+        error.message
+    }
+}
+
+impl From<&str> for AcpError {
+    fn from(message: &str) -> Self {
+        Self::new(ErrorKind::Transport, message)
+    }
+}
+
+impl From<String> for AcpError {
+    fn from(message: String) -> Self {
+        Self::new(ErrorKind::Transport, message)
+    }
+}
+
 type RpcResponse = Result<Value, String>;
-type PendingRequests = HashMap<u64, oneshot::Sender<RpcResponse>>;
+type TypedResponse = Result<Value, AcpError>;
+type PendingRequests = HashMap<u64, oneshot::Sender<TypedResponse>>;
+
+/// Why one inbound frame was not processed.
+enum FrameError {
+    /// Malformed or unexpected frame: skipped and counted.
+    Invalid,
+    /// The transport itself is unusable (already failed, or lock poisoned).
+    Fatal(String),
+}
+
+impl From<&str> for FrameError {
+    fn from(_: &str) -> Self {
+        Self::Invalid
+    }
+}
 
 struct Permission {
     id: Value,
@@ -47,6 +167,12 @@ struct Inner {
     connection_id: String,
     started: Instant,
     timings: TimingJournal,
+    stderr_tail: StdMutex<VecDeque<u8>>,
+    invalid_frames: AtomicU64,
+    /// Last session/update per session with an outstanding session/prompt.
+    prompt_activity: StdMutex<HashMap<String, Instant>>,
+    /// Inactivity limit of session/prompt in milliseconds; 0 disables it.
+    prompt_idle_ms: AtomicU64,
 }
 
 impl Drop for Inner {
@@ -152,11 +278,16 @@ impl AcpClient {
             connection_id: uuid::Uuid::new_v4().to_string(),
             started: Instant::now(),
             timings: TimingJournal::default(),
+            stderr_tail: StdMutex::new(VecDeque::new()),
+            invalid_frames: AtomicU64::new(0),
+            prompt_activity: StdMutex::new(HashMap::new()),
+            prompt_idle_ms: AtomicU64::new(PROMPT_IDLE_TIMEOUT.as_millis() as u64),
         });
 
         let reader_inner = Arc::downgrade(&inner);
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
+            let mut consecutive_invalid = 0_u32;
             loop {
                 let frame = read_frame(&mut reader).await;
                 let Some(inner) = reader_inner.upgrade() else {
@@ -166,15 +297,30 @@ impl AcpClient {
                     break;
                 }
                 match frame {
-                    Ok(Some(frame)) => {
-                        if let Err(message) = dispatch(&inner, &frame).await {
-                            fail(&inner, "error", &message);
+                    Ok(Some(frame)) => match dispatch(&inner, &frame).await {
+                        Ok(()) => consecutive_invalid = 0,
+                        Err(FrameError::Invalid) => {
+                            // A stray log line or an atypical envelope must not
+                            // kill a healthy harness. Its content is never kept.
+                            inner.invalid_frames.fetch_add(1, Ordering::Relaxed);
+                            consecutive_invalid += 1;
+                            if consecutive_invalid >= MAX_CONSECUTIVE_INVALID_FRAMES {
+                                fail_with_diagnostic(
+                                    &inner,
+                                    "error",
+                                    "L’agent envoie des réponses RPC invalides de façon répétée.",
+                                );
+                                break;
+                            }
+                        }
+                        Err(FrameError::Fatal(message)) => {
+                            fail_with_diagnostic(&inner, "error", &message);
                             break;
                         }
-                    }
+                    },
                     Ok(None) => break,
                     Err(message) => {
-                        fail(&inner, "error", &message);
+                        fail_with_diagnostic(&inner, "error", &message);
                         break;
                     }
                 }
@@ -185,7 +331,7 @@ impl AcpClient {
             if let Some(inner) = reader_inner.upgrade() {
                 tokio::time::sleep(Duration::from_millis(250)).await;
                 if !inner.closed.load(Ordering::Acquire) {
-                    fail(
+                    fail_with_diagnostic(
                         &inner,
                         "closed",
                         "La sortie de l’agent a été fermée avant sa réponse. Reconnectez l’agent.",
@@ -195,15 +341,24 @@ impl AcpClient {
         });
 
         // Drain in fixed chunks: stderr may contain a very long line, provider
-        // credentials, prompts, or access tokens. Its content is never emitted
-        // into UI events, persisted, or included in connection errors.
+        // credentials, prompts, or access tokens. Only the last 64 KiB stay in
+        // memory; a short, redacted tail is attached to an unexpected-exit
+        // diagnostic and is never persisted.
+        let stderr_inner = Arc::downgrade(&inner);
         tokio::spawn(async move {
             let mut stderr = stderr;
             let mut buffer = [0_u8; 4096];
             loop {
                 match stderr.read(&mut buffer).await {
                     Ok(0) | Err(_) => break,
-                    Ok(_) => {}
+                    Ok(read) => {
+                        let Some(inner) = stderr_inner.upgrade() else {
+                            continue;
+                        };
+                        if let Ok(mut tail) = inner.stderr_tail.lock() {
+                            push_tail(&mut tail, &buffer[..read]);
+                        };
+                    }
                 }
             }
         });
@@ -221,7 +376,7 @@ impl AcpClient {
                             Ok(status) => format!("L’agent s’est arrêté avec une erreur (code {}). Vérifiez sa connexion et son installation.", status.code().map(|code|code.to_string()).unwrap_or_else(||"signal".into())),
                             Err(_) => "Le statut du processus de l’agent est indisponible.".to_string(),
                         };
-                        fail(&inner, "closed", &message);
+                        fail_with_diagnostic(&inner, "closed", &message);
                     }
                     // Unix process groups can still contain descendants after
                     // their leader exits (for example a local MCP server).
@@ -271,8 +426,29 @@ impl AcpClient {
     }
 
     pub async fn request(&self, method: &str, params: Value) -> RpcResponse {
-        self.request_with_deadline(method, params, request_deadline(method))
+        self.request_typed(method, params)
             .await
+            .map_err(String::from)
+    }
+
+    /// Same as `request`, keeping the classified failure.
+    pub async fn request_typed(&self, method: &str, params: Value) -> TypedResponse {
+        self.request_with_gate(method, params, request_deadline(method), None)
+            .await
+    }
+
+    /// Override the session/prompt inactivity limit (None: only the absolute
+    /// ceiling applies, e.g. for a local model with a long silent prefill).
+    pub fn set_prompt_idle_timeout(&self, idle: Option<Duration>) {
+        self.inner.prompt_idle_ms.store(
+            idle.map_or(0, |idle| idle.as_millis().max(1) as u64),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Malformed inbound frames skipped since the process started.
+    pub fn invalid_frames(&self) -> u64 {
+        self.inner.invalid_frames.load(Ordering::Relaxed)
     }
 
     /// Attribute diagnostics locally without changing any JSON-RPC parameters.
@@ -307,6 +483,7 @@ impl AcpClient {
         self.for_operation(operation_id)
             .request_with_gate(method, params, request_deadline(method), Some(cancelled))
             .await
+            .map_err(String::from)
     }
 
     /// Bounded, content-free diagnostic records, including unattributed calls.
@@ -314,13 +491,16 @@ impl AcpClient {
         self.inner.timings.snapshot()
     }
 
+    #[cfg(test)]
     async fn request_with_deadline(
         &self,
         method: &str,
         params: Value,
         deadline: Duration,
     ) -> RpcResponse {
-        self.request_with_gate(method, params, deadline, None).await
+        self.request_with_gate(method, params, deadline, None)
+            .await
+            .map_err(String::from)
     }
 
     async fn request_with_gate(
@@ -329,12 +509,29 @@ impl AcpClient {
         params: Value,
         deadline: Duration,
         cancelled: Option<&AtomicBool>,
-    ) -> RpcResponse {
-        validate_method(method)?;
+    ) -> TypedResponse {
+        validate_method(method).map_err(|m| AcpError::new(ErrorKind::Protocol, m))?;
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let mut timing = RpcTiming::new(self.inner.clone(), id, self.operation_id.clone(), method);
         let mut forced_outcome = None;
-        let result: RpcResponse = async {
+        let prompt_session = (method == "session/prompt")
+            .then(|| {
+                params
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .flatten();
+        let _activity = prompt_session.as_ref().map(|session| {
+            if let Ok(mut activity) = self.inner.prompt_activity.lock() {
+                activity.insert(session.clone(), Instant::now());
+            }
+            ActivityGuard {
+                inner: Arc::downgrade(&self.inner),
+                session: session.clone(),
+            }
+        });
+        let result: TypedResponse = async {
             let (sender, receiver) = oneshot::channel();
             {
                 let mut pending = self
@@ -361,8 +558,27 @@ impl AcpClient {
                 }),
                 cancelled,
             )
-            .await?;
-            match timeout(deadline, receiver).await {
+            .await
+            .map_err(|message| {
+                if message == REQUEST_CANCELLED_BEFORE_WRITE {
+                    AcpError::new(ErrorKind::Cancelled, message)
+                } else {
+                    AcpError::new(ErrorKind::Transport, message)
+                }
+            })?;
+            let waited = match &prompt_session {
+                Some(session) => {
+                    wait_for_prompt(
+                        &self.inner,
+                        session,
+                        receiver,
+                        deadline.min(PROMPT_MAX_DURATION),
+                    )
+                    .await
+                }
+                None => timeout(deadline, receiver).await.map_err(|_| ()),
+            };
+            match waited {
                 Ok(Ok(response)) => response,
                 Ok(Err(_)) => Err("La connexion à l’agent a été interrompue.".into()),
                 Err(_) => {
@@ -380,8 +596,9 @@ impl AcpClient {
                             .notify("$/cancel_request", json!({"requestId": id}))
                             .await;
                     }
-                    Err(format!(
-                        "Le délai de réponse de l’agent est dépassé pour {method}."
+                    Err(AcpError::new(
+                        ErrorKind::Transport,
+                        format!("Le délai de réponse de l’agent est dépassé pour {method}."),
                     ))
                 }
             }
@@ -396,7 +613,9 @@ impl AcpClient {
             Ok(response) if response.get("isError").and_then(Value::as_bool) != Some(true) => {
                 TimingOutcome::Succeeded
             }
-            Err(error) if error == REQUEST_CANCELLED_BEFORE_WRITE => TimingOutcome::Cancelled,
+            Err(error) if error.message == REQUEST_CANCELLED_BEFORE_WRITE => {
+                TimingOutcome::Cancelled
+            }
             _ => TimingOutcome::Failed,
         });
         timing.finish(outcome);
@@ -451,7 +670,11 @@ impl AcpClient {
                 }
                 _ => return Err("La décision de permission est invalide.".into()),
             }
+            let session = permission.session_id.clone();
             pending.remove(&key);
+            // The human decision restarts the inactivity window: the time
+            // spent waiting for the learner is not silence of the harness.
+            touch_prompt_activity(&self.inner, &session);
         }
         write_message(
             &self.inner,
@@ -682,25 +905,24 @@ async fn write_message_checked(
     }
 }
 
-async fn dispatch(inner: &Inner, frame: &[u8]) -> Result<(), String> {
-    let packet: Value =
-        serde_json::from_slice(frame).map_err(|_| "L’agent a envoyé une réponse RPC invalide.")?;
-    let object = packet
-        .as_object()
-        .ok_or("L’agent a envoyé une enveloppe RPC invalide.")?;
-    if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
-        return Err("La version JSON-RPC de l’agent est invalide.".into());
+async fn dispatch(inner: &Inner, frame: &[u8]) -> Result<(), FrameError> {
+    if frame.iter().all(u8::is_ascii_whitespace) {
+        return Ok(()); // Blank keep-alive lines are harmless.
     }
+    let packet: Value = serde_json::from_slice(frame).map_err(|_| FrameError::Invalid)?;
+    let object = packet.as_object().ok_or(FrameError::Invalid)?;
+    if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        return Err(FrameError::Invalid);
+    }
+    let fatal = |message: String| FrameError::Fatal(message);
     if let Some(method) = object.get("method") {
-        let method = method
-            .as_str()
-            .ok_or("La méthode de l’agent est invalide.")?;
-        validate_method(method)?;
+        let method = method.as_str().ok_or(FrameError::Invalid)?;
+        validate_method(method).map_err(|_| FrameError::Invalid)?;
         if object.contains_key("result") || object.contains_key("error") {
-            return Err("L’agent a mélangé requête et réponse RPC.".into());
+            return Err(FrameError::Invalid);
         }
         if let Some(id) = object.get("id") {
-            let key = rpc_id_key(id).ok_or("L’identifiant de requête de l’agent est invalide.")?;
+            let key = rpc_id_key(id).ok_or(FrameError::Invalid)?;
             if method == "session/request_permission" {
                 let permission = parse_permission(&packet);
                 match permission {
@@ -709,14 +931,14 @@ async fn dispatch(inner: &Inner, frame: &[u8]) -> Result<(), String> {
                             let mut pending = inner
                                 .permissions
                                 .lock()
-                                .map_err(|_| "Verrou ACP indisponible.")?;
+                                .map_err(|_| fatal("Verrou ACP indisponible.".into()))?;
                             if inner.closed.load(Ordering::Acquire) {
                                 return Ok(());
                             }
                             if pending.contains_key(&key) {
-                                return Err(
-                                    "L’agent a réutilisé une permission encore en attente.".into(),
-                                );
+                                // A reused pending ID is ignored; the original
+                                // request keeps waiting for its human decision.
+                                return Err(FrameError::Invalid);
                             }
                             if pending.len() >= MAX_PENDING {
                                 false
@@ -727,7 +949,7 @@ async fn dispatch(inner: &Inner, frame: &[u8]) -> Result<(), String> {
                         };
                         if accepted {
                             if inner.events.send(packet).is_err() {
-                                cancel_permissions(inner, None).await?;
+                                cancel_permissions(inner, None).await.map_err(fatal)?;
                             }
                         } else {
                             write_message(
@@ -735,17 +957,17 @@ async fn dispatch(inner: &Inner, frame: &[u8]) -> Result<(), String> {
                                 &json!({"jsonrpc":"2.0", "id":id,
                                 "error":{"code":-32000,"message":"Client busy"}}),
                             )
-                            .await?;
+                            .await
+                            .map_err(fatal)?;
                         }
                     }
-                    None => {
-                        write_message(
-                            inner,
-                            &json!({"jsonrpc":"2.0", "id":id,
+                    None => write_message(
+                        inner,
+                        &json!({"jsonrpc":"2.0", "id":id,
                         "error":{"code":-32602,"message":"Invalid permission request"}}),
-                        )
-                        .await?
-                    }
+                    )
+                    .await
+                    .map_err(fatal)?,
                 }
             } else {
                 write_message(
@@ -753,7 +975,8 @@ async fn dispatch(inner: &Inner, frame: &[u8]) -> Result<(), String> {
                     &json!({"jsonrpc":"2.0", "id":id,
                     "error":{"code":-32601,"message":"Method not supported by this client"}}),
                 )
-                .await?;
+                .await
+                .map_err(fatal)?;
             }
         } else {
             if method == "$/cancel_request" {
@@ -762,17 +985,30 @@ async fn dispatch(inner: &Inner, frame: &[u8]) -> Result<(), String> {
                         let permission = inner
                             .permissions
                             .lock()
-                            .map_err(|_| "Verrou ACP indisponible.")?
+                            .map_err(|_| fatal("Verrou ACP indisponible.".into()))?
                             .remove(&key);
                         if let Some(permission) = permission {
+                            touch_prompt_activity(inner, &permission.session_id);
                             write_message(
                                 inner,
                                 &json!({"jsonrpc":"2.0", "id":permission.id,
                                 "result":{"outcome":{"outcome":"cancelled"}}}),
                             )
-                            .await?;
+                            .await
+                            .map_err(fatal)?;
                         }
                     }
+                }
+            }
+            if method == "session/update" {
+                if let Some(session) = packet.pointer("/params/sessionId").and_then(Value::as_str) {
+                    touch_prompt_activity(inner, session);
+                }
+                if let Some(limit) = packet
+                    .pointer("/params/update/_meta/_claude~1rateLimit")
+                    .and_then(claude_rate_limit)
+                {
+                    let _ = inner.events.send(limit_event(&limit));
                 }
             }
             // Notifications cannot execute client actions. Forward them for
@@ -781,94 +1017,365 @@ async fn dispatch(inner: &Inner, frame: &[u8]) -> Result<(), String> {
         }
         return Ok(());
     }
-    let id = object
-        .get("id")
-        .and_then(Value::as_u64)
-        .ok_or("L’identifiant de réponse de l’agent est invalide.")?;
-    if object.contains_key("result") == object.contains_key("error") {
-        return Err("La réponse RPC doit contenir un résultat ou une erreur.".into());
-    }
-    let result = if let Some(error) = object.get("error") {
-        let code = error
-            .get("code")
-            .and_then(Value::as_i64)
-            .ok_or("L’erreur RPC est invalide.")?;
-        let message = error
-            .get("message")
-            .and_then(Value::as_str)
-            .ok_or("L’erreur RPC est invalide.")?;
-        // Error data and arbitrary provider text can contain a credential or a
-        // copied request. Preserve the code and useful category, not its text.
-        let lower = message.to_lowercase();
-        let info = error
-            .pointer("/data/codexErrorInfo")
-            .unwrap_or(&Value::Null);
-        // Claude uses errorKind; Codex uses codexErrorInfo. Only recognized
-        // enums/numeric statuses influence the message, never data.message.
-        let kind = error
-            .pointer("/data/errorKind")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let http_status = error
-            .pointer("/data/httpStatusCode")
-            .and_then(Value::as_u64)
-            .or_else(|| {
-                info.as_object().and_then(|fields| {
-                    fields
-                        .values()
-                        .find_map(|value| value.get("httpStatusCode").and_then(Value::as_u64))
-                })
-            });
-        let auth_required = code == -32000
-            || http_status == Some(401)
-            || info == "unauthorized"
-            || matches!(kind, "authentication_failed" | "oauth_org_not_allowed")
-            || lower.contains("auth")
-            || lower.contains("api key");
-        if auth_required {
+    let Some(id) = response_id(object.get("id")) else {
+        return Err(FrameError::Invalid);
+    };
+    let result = if object.contains_key("result") == object.contains_key("error") {
+        Err(AcpError::new(
+            ErrorKind::Protocol,
+            "La réponse RPC de l’agent ne contient ni un résultat ni une erreur valides.",
+        ))
+    } else if let Some(error) = object.get("error") {
+        let error = classify_rpc_error(error);
+        if error.kind == ErrorKind::Auth {
             let _ = inner.events.send(json!({"type":"authentication_required"}));
         }
-        let category = if auth_required {
-            "Authentification de l’agent nécessaire ou refusée"
-        } else if http_status == Some(429) || info == "rateLimitExceeded" || kind == "rate_limit" {
-            "L’adaptateur ACP signale une limitation temporaire des requêtes, pas un état vérifié de votre forfait"
-        } else if info == "usageLimitExceeded"
-            || matches!(kind, "billing_error" | "account_on_hold")
-        {
-            "Le harness signale une limite d’utilisation ; consultez son état de connexion et d’accès"
-        } else if info == "contextWindowExceeded"
-            || info == "sessionBudgetExceeded"
-            || kind == "max_output_tokens"
-        {
-            "La limite de cette session est atteinte ; ouvrez une nouvelle conversation"
-        } else if matches!(kind, "verification_required" | "cloud_credential_error") {
-            "Le harness demande une vérification des accès dans son environnement fournisseur"
-        } else if matches!(kind, "overloaded" | "server_error") {
-            "Le harness signale une indisponibilité temporaire du fournisseur"
-        } else if lower.contains("cancel") {
-            "Requête annulée"
-        } else if lower.contains("not found") {
-            "Ressource introuvable"
-        } else if lower.contains("not support") || code == -32601 {
-            "Opération non prise en charge"
-        } else {
-            "L’adaptateur ACP a refusé la requête ; la cause fournisseur n’est pas précisée"
-        };
-        Err(format!("{category} (JSON-RPC {code})."))
+        if error.kind.is_limit() {
+            let _ = inner.events.send(limit_event(&error));
+        }
+        Err(error)
     } else {
         Ok(object.get("result").cloned().unwrap_or(Value::Null))
     };
+    let malformed = matches!(&result, Err(error) if error.kind == ErrorKind::Protocol && !object.contains_key("error"));
     if let Some(sender) = inner
         .pending
         .lock()
-        .map_err(|_| "Verrou ACP indisponible.")?
+        .map_err(|_| fatal("Verrou ACP indisponible.".into()))?
         .remove(&id)
     {
         let _ = sender.send(result);
     }
     // A late response after a timeout is harmless and must not become an event
     // or be mistaken for the result of a later mutation.
-    Ok(())
+    if malformed {
+        Err(FrameError::Invalid)
+    } else {
+        Ok(())
+    }
+}
+
+/// Our request IDs are integers; some agents echo them back as strings.
+fn response_id(id: Option<&Value>) -> Option<u64> {
+    match id? {
+        Value::Number(number) => number.as_u64(),
+        Value::String(text) if text.len() <= 20 => text.parse().ok(),
+        _ => None,
+    }
+}
+
+/// Classify an ACP error object. Only codes, documented enums and numeric
+/// statuses decide; provider text never reaches the message (it can contain a
+/// credential or a copied request).
+pub fn classify_rpc_error(error: &Value) -> AcpError {
+    let code = error.get("code").and_then(Value::as_i64).unwrap_or(-32603);
+    let lower = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_lowercase();
+    let data = error.get("data").unwrap_or(&Value::Null);
+    let info = data.get("codexErrorInfo").unwrap_or(&Value::Null);
+    // Codex: a string enum, or {"variant": {"httpStatusCode": n, ...}}.
+    let info_name = info
+        .as_str()
+        .or_else(|| {
+            info.as_object()
+                .and_then(|o| o.keys().next().map(String::as_str))
+        })
+        .unwrap_or_default();
+    let info_details = info
+        .as_object()
+        .and_then(|o| o.values().next())
+        .unwrap_or(&Value::Null);
+    // Claude: data.errorKind from SDKAssistantMessageError.
+    let kind = data
+        .get("errorKind")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let http_status = data
+        .get("httpStatusCode")
+        .and_then(Value::as_u64)
+        .or_else(|| info_details.get("httpStatusCode").and_then(Value::as_u64));
+    let retry_after = [data, info_details].into_iter().find_map(|source| {
+        source
+            .get("retryAfterMs")
+            .and_then(Value::as_u64)
+            .map(Duration::from_millis)
+            .or_else(|| {
+                ["retryAfter", "retryAfterSeconds", "retry_after"]
+                    .iter()
+                    .find_map(|key| source.get(*key).and_then(Value::as_u64))
+                    .map(Duration::from_secs)
+            })
+    });
+    let auth_wording = [
+        "authentication",
+        "unauthorized",
+        "api key",
+        "credential",
+        "not logged in",
+    ]
+    .iter()
+    .any(|word| lower.contains(word));
+    let (kind, category) = if http_status == Some(429)
+        || info_name == "rateLimitExceeded"
+        || kind == "rate_limit"
+    {
+        (ErrorKind::RateLimit, "L’adaptateur ACP signale une limitation temporaire des requêtes, pas un état vérifié de votre forfait")
+    } else if matches!(kind, "overloaded" | "server_error")
+        || info_name == "serverOverloaded"
+        || matches!(http_status, Some(503 | 529))
+    {
+        (
+            ErrorKind::Overloaded,
+            "Le harness signale une indisponibilité temporaire du fournisseur",
+        )
+    } else if info_name == "usageLimitExceeded"
+        || matches!(kind, "billing_error" | "account_on_hold")
+    {
+        (ErrorKind::UsageLimit, "Le harness signale une limite d’utilisation ; consultez son état de connexion et d’accès")
+    } else if http_status == Some(401)
+        || info_name == "unauthorized"
+        || matches!(kind, "authentication_failed" | "oauth_org_not_allowed")
+        // ACP reserves -32000 for auth_required; other agents reuse it, so
+        // the documented wording is also required.
+        || (code == -32000 && auth_wording)
+    {
+        (
+            ErrorKind::Auth,
+            "Authentification de l’agent nécessaire ou refusée",
+        )
+    } else if matches!(info_name, "contextWindowExceeded" | "sessionBudgetExceeded")
+        || kind == "max_output_tokens"
+    {
+        (
+            ErrorKind::Context,
+            "La limite de cette session est atteinte ; ouvrez une nouvelle conversation",
+        )
+    } else if matches!(kind, "verification_required" | "cloud_credential_error") {
+        (
+            ErrorKind::Other,
+            "Le harness demande une vérification des accès dans son environnement fournisseur",
+        )
+    } else if matches!(kind, "transport_lost" | "worker_shutdown")
+        || matches!(
+            info_name,
+            "httpConnectionFailed"
+                | "responseStreamConnectionFailed"
+                | "responseStreamDisconnected"
+                | "responseTooManyFailedAttempts"
+        )
+    {
+        (
+            ErrorKind::Transport,
+            "Le harness a perdu sa connexion au fournisseur",
+        )
+    } else if lower.contains("cancel") {
+        (ErrorKind::Cancelled, "Requête annulée")
+    } else if lower.contains("not found") {
+        (ErrorKind::Other, "Ressource introuvable")
+    } else if lower.contains("not support") || code == -32601 {
+        (ErrorKind::Protocol, "Opération non prise en charge")
+    } else if matches!(code, -32700 | -32600 | -32602) {
+        (
+            ErrorKind::Protocol,
+            "L’adaptateur ACP a refusé une requête invalide",
+        )
+    } else {
+        (
+            ErrorKind::Other,
+            "L’adaptateur ACP a refusé la requête ; la cause fournisseur n’est pas précisée",
+        )
+    };
+    AcpError {
+        kind,
+        retry_after,
+        message: format!("{category} (JSON-RPC {code})."),
+    }
+}
+
+/// `usage_update._meta["_claude/rateLimit"]` (SDKRateLimitInfo). Only a
+/// rejected status not covered by an allowed overage blocks new requests.
+fn claude_rate_limit(info: &Value) -> Option<AcpError> {
+    if info.get("status").and_then(Value::as_str) != Some("rejected")
+        || matches!(
+            info.get("overageStatus").and_then(Value::as_str),
+            Some("allowed" | "allowed_warning")
+        )
+    {
+        return None;
+    }
+    let retry_after = info
+        .get("resetsAt")
+        .and_then(Value::as_f64)
+        .map(|resets| resets - chrono::Utc::now().timestamp() as f64)
+        .filter(|seconds| *seconds > 0.0)
+        .map(|seconds| Duration::from_secs(seconds.ceil() as u64));
+    let usage = info
+        .get("rateLimitType")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind != "overage" && kind.starts_with("seven_day"));
+    Some(AcpError {
+        kind: if usage {
+            ErrorKind::UsageLimit
+        } else {
+            ErrorKind::RateLimit
+        },
+        retry_after,
+        message: "Le harness signale que la limite de requêtes est atteinte.".into(),
+    })
+}
+
+fn limit_event(error: &AcpError) -> Value {
+    json!({"type":"rate_limited","kind":error.kind.as_str(),
+        "retryAfterMs":error.retry_after.map(|d| d.as_millis() as u64)})
+}
+
+/// Wait for a session/prompt answer while its session shows activity.
+async fn wait_for_prompt(
+    inner: &Arc<Inner>,
+    session: &str,
+    receiver: oneshot::Receiver<TypedResponse>,
+    ceiling: Duration,
+) -> Result<Result<TypedResponse, oneshot::error::RecvError>, ()> {
+    let started = Instant::now();
+    let idle = match inner.prompt_idle_ms.load(Ordering::Relaxed) {
+        0 => ceiling,
+        millis => Duration::from_millis(millis),
+    };
+    tokio::pin!(receiver);
+    loop {
+        let last = inner
+            .prompt_activity
+            .lock()
+            .ok()
+            .and_then(|activity| activity.get(session).copied())
+            .unwrap_or(started);
+        let awaiting_human = inner
+            .permissions
+            .lock()
+            .is_ok_and(|pending| pending.values().any(|p| p.session_id == session));
+        let now = Instant::now();
+        if now.duration_since(started) >= ceiling
+            || (!awaiting_human && now.duration_since(last) >= idle)
+        {
+            return Err(());
+        }
+        let idle_deadline = if awaiting_human {
+            // Re-check soon enough that a decision is followed by the
+            // inactivity rule again, never later than one idle window.
+            now + idle.min(Duration::from_secs(5))
+        } else {
+            last + idle
+        };
+        let wake = idle_deadline.min(started + ceiling);
+        tokio::select! {
+            response = &mut receiver => return Ok(response),
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(wake)) => {}
+        }
+    }
+}
+
+/// Record activity for a session whose session/prompt is outstanding.
+/// Sessions without an outstanding prompt are left untracked.
+fn touch_prompt_activity(inner: &Inner, session: &str) {
+    if let Ok(mut activity) = inner.prompt_activity.lock() {
+        if let Some(last) = activity.get_mut(session) {
+            *last = Instant::now();
+        }
+    }
+}
+
+struct ActivityGuard {
+    inner: Weak<Inner>,
+    session: String,
+}
+
+impl Drop for ActivityGuard {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.upgrade() {
+            if let Ok(mut activity) = inner.prompt_activity.lock() {
+                activity.remove(&self.session);
+            }
+        }
+    }
+}
+
+fn push_tail(tail: &mut VecDeque<u8>, bytes: &[u8]) {
+    let bytes = &bytes[bytes.len().saturating_sub(STDERR_TAIL_BYTES)..];
+    let overflow = (tail.len() + bytes.len()).saturating_sub(STDERR_TAIL_BYTES);
+    tail.drain(..overflow);
+    tail.extend(bytes);
+}
+
+/// Remove anything resembling a credential from diagnostic text.
+pub fn redact_secrets(text: &str) -> String {
+    const SECRET_KEYS: [&str; 8] = [
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "api_key",
+        "apikey",
+        "api-key",
+        "authorization",
+    ];
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        let lower = line.to_ascii_lowercase();
+        if SECRET_KEYS.iter().any(|key| lower.contains(key)) || lower.contains("bearer") {
+            // The whole line is suspect: keep that something was there.
+            lines.push("[ligne expurgée]".to_string());
+            continue;
+        }
+        let words: Vec<String> = line
+            .split(' ')
+            .map(|word| {
+                let core = word.trim_matches(|c: char| "\"'`,;()[]{}<>".contains(c));
+                let credential_like = core.starts_with("sk-")
+                    || core.starts_with("ghp_")
+                    || core.starts_with("xox")
+                    || core.starts_with("eyJ")
+                    || core.matches('.').count() == 2 && core.len() > 40
+                    || (core.len() >= 32
+                        && core
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || "-_=+/".contains(c))
+                        && core.chars().any(|c| c.is_ascii_digit()));
+                if credential_like {
+                    "[expurgé]".to_string()
+                } else {
+                    word.to_string()
+                }
+            })
+            .collect();
+        lines.push(words.join(" "));
+    }
+    lines.join("\n")
+}
+
+fn stderr_diagnostic(inner: &Inner) -> Option<String> {
+    let tail = inner.stderr_tail.lock().ok()?;
+    if tail.is_empty() {
+        return None;
+    }
+    let bytes: Vec<u8> = tail.iter().copied().collect();
+    let text = String::from_utf8_lossy(&bytes);
+    let redacted = redact_secrets(&text);
+    // Keep whole lines from the end within the excerpt budget.
+    let mut excerpt = String::new();
+    for line in redacted.lines().rev() {
+        if excerpt.len() + line.len() + 1 > STDERR_DIAGNOSTIC_BYTES {
+            break;
+        }
+        excerpt = if excerpt.is_empty() {
+            line.to_string()
+        } else {
+            format!("{line}\n{excerpt}")
+        };
+    }
+    (!excerpt.trim().is_empty()).then_some(excerpt)
 }
 
 fn parse_permission(packet: &Value) -> Option<Permission> {
@@ -915,6 +1422,9 @@ async fn cancel_permissions(inner: &Inner, session_id: Option<&str>) -> Result<(
             .filter_map(|key| pending.remove(&key))
             .collect::<Vec<_>>()
     };
+    for permission in &permissions {
+        touch_prompt_activity(inner, &permission.session_id);
+    }
     for permission in permissions {
         write_message(
             inner,
@@ -927,20 +1437,33 @@ async fn cancel_permissions(inner: &Inner, session_id: Option<&str>) -> Result<(
 }
 
 fn fail(inner: &Inner, status: &str, message: &str) {
+    fail_inner(inner, status, message, false);
+}
+
+/// Unexpected end of the transport: also attach a redacted stderr excerpt.
+fn fail_with_diagnostic(inner: &Inner, status: &str, message: &str) {
+    fail_inner(inner, status, message, true);
+}
+
+fn fail_inner(inner: &Inner, status: &str, message: &str, diagnostic: bool) {
     if inner.closed.swap(true, Ordering::AcqRel) {
         return;
     }
     if let Ok(mut pending) = inner.pending.lock() {
         for (_, sender) in pending.drain() {
-            let _ = sender.send(Err(message.to_string()));
+            let _ = sender.send(Err(AcpError::new(ErrorKind::Transport, message)));
         }
     }
     if let Ok(mut pending) = inner.permissions.lock() {
         pending.clear();
     }
-    let _ = inner
-        .events
-        .send(json!({"type":"connection", "status":status, "message":message}));
+    let mut event = json!({"type":"connection", "status":status, "message":message});
+    if diagnostic {
+        if let Some(tail) = stderr_diagnostic(inner) {
+            event["stderrTail"] = json!(tail);
+        }
+    }
+    let _ = inner.events.send(event);
     if let Ok(mut shutdown) = inner.shutdown.lock() {
         if let Some(shutdown) = shutdown.take() {
             let _ = shutdown.send(());
@@ -1423,8 +1946,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_or_oversized_frames_are_rejected_without_logging_the_payload() {
-        for method in ["test/invalid", "test/oversized", "test/partial"] {
+    async fn an_invalid_line_is_skipped_and_counted_without_closing_a_healthy_agent() {
+        let (client, mut events) = client().await;
+        let result = client
+            .request_with_deadline("test/invalid", json!({}), Duration::from_millis(300))
+            .await;
+        assert!(result.unwrap_err().contains("délai"));
+        assert_eq!(client.invalid_frames(), 1);
+        assert!(!client.inner.closed.load(Ordering::Acquire));
+        assert_eq!(
+            client.request("test/count", json!({})).await.unwrap()["ignored"],
+            0
+        );
+        while let Ok(event) = events.try_recv() {
+            assert_ne!(event["type"], "connection");
+            assert!(!event.to_string().contains("private-payload"));
+        }
+        client.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn oversized_or_truncated_frames_are_rejected_without_logging_the_payload() {
+        for method in ["test/oversized", "test/partial"] {
             let (client, mut events) = client().await;
             let result = timeout(Duration::from_secs(5), client.request(method, json!({})))
                 .await
@@ -1456,6 +1999,263 @@ mod tests {
             json!({"type":"authentication_required"})
         );
         assert!(events.try_recv().is_err(), "stderr must not be forwarded");
+        client.stop().await.unwrap();
+    }
+
+    #[test]
+    fn errors_are_classified_from_codes_and_enums_not_provider_text() {
+        let kind = |error: Value| classify_rpc_error(&error).kind;
+        assert_eq!(
+            kind(json!({"code":-32603,"message":"x","data":{"errorKind":"rate_limit"}})),
+            ErrorKind::RateLimit
+        );
+        assert_eq!(
+            kind(
+                json!({"code":-32603,"message":"x","data":{"codexErrorInfo":{"httpConnectionFailed":{"httpStatusCode":429}}}})
+            ),
+            ErrorKind::RateLimit
+        );
+        assert_eq!(
+            kind(
+                json!({"code":-32603,"message":"x","data":{"codexErrorInfo":"rateLimitExceeded"}})
+            ),
+            ErrorKind::RateLimit
+        );
+        assert_eq!(
+            kind(json!({"code":-32603,"message":"x","data":{"errorKind":"overloaded"}})),
+            ErrorKind::Overloaded
+        );
+        assert_eq!(
+            kind(
+                json!({"code":-32603,"message":"x","data":{"codexErrorInfo":"usageLimitExceeded"}})
+            ),
+            ErrorKind::UsageLimit
+        );
+        assert_eq!(
+            kind(
+                json!({"code":-32603,"message":"x","data":{"codexErrorInfo":"contextWindowExceeded"}})
+            ),
+            ErrorKind::Context
+        );
+        assert_eq!(
+            kind(json!({"code":-32000,"message":"Authentication required"})),
+            ErrorKind::Auth
+        );
+        assert_eq!(
+            kind(json!({"code":-32603,"message":"x","data":{"httpStatusCode":401}})),
+            ErrorKind::Auth
+        );
+        // -32000 alone, or provider prose mentioning "author", is not auth.
+        assert_eq!(
+            kind(json!({"code":-32000,"message":"permission failed"})),
+            ErrorKind::Other
+        );
+        assert_eq!(
+            kind(json!({"code":-32603,"message":"Unknown author of this OAuth API key"})),
+            ErrorKind::Other
+        );
+        assert_eq!(
+            kind(json!({"code":-32601,"message":"nope"})),
+            ErrorKind::Protocol
+        );
+        assert_eq!(
+            kind(json!({"message":"request cancelled"})),
+            ErrorKind::Cancelled
+        );
+        assert_eq!(kind(json!({})), ErrorKind::Other);
+        let error = classify_rpc_error(&json!({"code":-32603,"message":"sk-secret",
+            "data":{"errorKind":"rate_limit","retryAfterMs":1500}}));
+        assert_eq!(error.retry_after, Some(Duration::from_millis(1500)));
+        assert!(!error.message.contains("sk-secret"));
+        let error = classify_rpc_error(&json!({"code":-32603,"message":"x",
+            "data":{"codexErrorInfo":{"responseTooManyFailedAttempts":{"retryAfter":30}}}}));
+        assert_eq!(error.kind, ErrorKind::Transport);
+        assert_eq!(error.retry_after, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn claude_rate_limit_metadata_blocks_only_rejected_requests() {
+        let resets = chrono::Utc::now().timestamp() + 600;
+        let limit = claude_rate_limit(
+            &json!({"status":"rejected","resetsAt":resets,"rateLimitType":"five_hour"}),
+        )
+        .unwrap();
+        assert_eq!(limit.kind, ErrorKind::RateLimit);
+        let seconds = limit.retry_after.unwrap().as_secs();
+        assert!((590..=601).contains(&seconds), "{seconds}");
+        assert_eq!(
+            claude_rate_limit(&json!({"status":"rejected","rateLimitType":"seven_day"}))
+                .unwrap()
+                .kind,
+            ErrorKind::UsageLimit
+        );
+        assert!(claude_rate_limit(&json!({"status":"allowed_warning"})).is_none());
+        assert!(
+            claude_rate_limit(&json!({"status":"rejected","overageStatus":"allowed"})).is_none()
+        );
+    }
+
+    #[test]
+    fn response_ids_accept_integer_strings_only() {
+        assert_eq!(response_id(Some(&json!(7))), Some(7));
+        assert_eq!(response_id(Some(&json!("7"))), Some(7));
+        assert_eq!(response_id(Some(&json!("abc"))), None);
+        assert_eq!(response_id(Some(&json!(-1))), None);
+        assert_eq!(response_id(None), None);
+    }
+
+    #[test]
+    fn stderr_tail_is_bounded_and_redacted() {
+        let mut tail = VecDeque::new();
+        push_tail(&mut tail, &vec![b'a'; STDERR_TAIL_BYTES + 10]);
+        push_tail(&mut tail, b"end");
+        assert_eq!(tail.len(), STDERR_TAIL_BYTES);
+        assert_eq!(
+            tail.iter().rev().take(3).copied().collect::<Vec<_>>(),
+            b"dne"
+        );
+        let redacted = redact_secrets(
+            "starting adapter\nAuthorization: Bearer abc\nkey sk-ant-private value\ntoken=xyz\njwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl ok\nid 0123456789abcdef0123456789abcdef0123",
+        );
+        assert!(redacted.contains("starting adapter"));
+        for secret in ["Bearer", "sk-ant", "xyz", "eyJhbGci", "0123456789abcdef"] {
+            assert!(!redacted.contains(secret), "{secret}: {redacted}");
+        }
+        assert!(redacted.contains("ok"));
+    }
+
+    #[tokio::test]
+    async fn an_unexpected_exit_reports_only_a_redacted_stderr_tail() {
+        let (client, mut events) = client().await;
+        let _ = client.request("test/secret_error", json!({})).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(client.request("test/crash", json!({})).await.is_err());
+        let event = timeout(Duration::from_secs(3), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                if event["type"] == "connection" {
+                    return event;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(event["stderrTail"], "[ligne expurgée]");
+        assert!(!event.to_string().contains("sk-private"));
+        client.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_silent_prompt_times_out_but_a_pending_human_permission_does_not() {
+        let (client, mut events) = client().await;
+        client.set_prompt_idle_timeout(Some(Duration::from_millis(300)));
+        let worker = client.clone();
+        let prompt = tokio::spawn(async move {
+            worker
+                .request(
+                    "session/prompt",
+                    json!({"sessionId":"lesson-1","permission":true}),
+                )
+                .await
+        });
+        let permission = timeout(Duration::from_secs(3), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                if event["method"] == "session/request_permission" {
+                    return event;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        // Waiting for the learner is not inactivity of the harness.
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        assert!(!prompt.is_finished());
+        client
+            .reply(
+                permission["id"].clone(),
+                json!({"outcome":{"outcome":"selected","optionId":"allow-once"}}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(prompt.await.unwrap().unwrap()["decision"], "allow-once");
+        // The fixture never answers this one and sends no update.
+        let silent = client
+            .request(
+                "session/prompt",
+                json!({"sessionId":"silent","permission":true}),
+            )
+            .await;
+        // The fixture's update and permission name another session: this
+        // prompt sees no activity of its own and ends on inactivity.
+        assert!(silent.unwrap_err().contains("délai"));
+        client.stop().await.unwrap();
+    }
+
+    /// Agent whose tool stays silent for a while after the permission answer.
+    fn silent_tool_spec(silence_ms: u64) -> LaunchSpec {
+        let script = format!(
+            r#"import json, sys, time
+prompt = None
+for line in sys.stdin:
+    request = json.loads(line)
+    method = request.get("method")
+    if method == "session/prompt":
+        prompt = request
+        print(json.dumps({{"jsonrpc": "2.0", "id": "perm", "method": "session/request_permission",
+            "params": {{"sessionId": "lesson-1", "toolCall": {{"toolCallId": "tool-1"}},
+            "options": [{{"optionId": "allow-once", "name": "Autoriser", "kind": "allow_once"}}]}}}}), flush=True)
+    elif method is None and request.get("id") == "perm":
+        time.sleep({silence})
+        print(json.dumps({{"jsonrpc": "2.0", "id": prompt["id"],
+            "result": {{"stopReason": "end_turn"}}}}), flush=True)
+"#,
+            silence = silence_ms as f64 / 1000.0
+        );
+        LaunchSpec {
+            program: if cfg!(windows) { "python" } else { "python3" }.into(),
+            args: vec!["-u".into(), "-c".into(), script],
+            env: Vec::new(),
+            cwd: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_late_permission_decision_restarts_the_inactivity_window() {
+        let (events, mut receiver) = mpsc::unbounded_channel();
+        let client = AcpClient::spawn(silent_tool_spec(250), events)
+            .await
+            .unwrap();
+        client.set_prompt_idle_timeout(Some(Duration::from_millis(400)));
+        let worker = client.clone();
+        let prompt = tokio::spawn(async move {
+            worker
+                .request("session/prompt", json!({"sessionId":"lesson-1"}))
+                .await
+        });
+        let permission = timeout(Duration::from_secs(3), async {
+            loop {
+                let event = receiver.recv().await.unwrap();
+                if event["method"] == "session/request_permission" {
+                    return event;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        // The learner decides well after the inactivity limit, shortly
+        // before the waiter's next periodic check.
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        assert!(!prompt.is_finished());
+        client
+            .reply(
+                permission["id"].clone(),
+                json!({"outcome":{"outcome":"selected","optionId":"allow-once"}}),
+            )
+            .await
+            .unwrap();
+        // The tool then works silently for less than the inactivity limit.
+        assert_eq!(prompt.await.unwrap().unwrap()["stopReason"], "end_turn");
         client.stop().await.unwrap();
     }
 

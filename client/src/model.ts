@@ -1,5 +1,5 @@
 import { t, dateLocale } from './i18n';
-import type { Intent, JsonRecord, PermissionRequest, ToolActivity, TutorOverview } from './types';
+import type { AgentLimitKind, AgentReconnect, Intent, JsonRecord, PermissionRequest, Snapshot, ToolActivity, TutorOverview } from './types';
 
 export function record(value: unknown): JsonRecord {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as JsonRecord : {};
@@ -152,11 +152,39 @@ export function statusLabel(status: string, context: 'enrollment' | 'member' | '
   return t(contextual[context]?.[status] || labels[status] || status);
 }
 
+/** The untranslated message of a failure; translate it once, when it is rendered. */
+export function failureText(error: unknown): string {
+  return error instanceof Error ? error.message : typeof error === 'string' ? error : 'L’opération a échoué. Réessayez après avoir vérifié les connexions.';
+}
+
 export function errorMessage(error: unknown): string {
-  return t(error instanceof Error ? error.message : typeof error === 'string' ? error : 'L’opération a échoué. Réessayez après avoir vérifié les connexions.');
+  return t(failureText(error));
 }
 
 export function displayDate(value: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? '' : new Intl.DateTimeFormat(dateLocale(), { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }).format(date);
+}
+
+const reconnectStates: AgentReconnect['state'][] = ['idle', 'waiting', 'connecting', 'failed'];
+const limitKinds: AgentLimitKind[] = ['rate_limit', 'overloaded', 'usage_limit'];
+
+/** Supervised reconnection state, from a snapshot field or an `agent_reconnect` event. Missing or unknown values are idle. */
+export function agentReconnect(value: unknown): AgentReconnect {
+  const source = record(value);
+  const state = reconnectStates.find(item => item === source.state) || 'idle';
+  return { state, attempt: typeof source.attempt === 'number' && Number.isFinite(source.attempt) ? source.attempt : 0,
+    nextAttemptAt: text(source.nextAttemptAt) || null, cause: text(source.cause) || null };
+}
+
+/** A provider limit announced by an `agent_limited` event; null when it is malformed. */
+export function limitFromEvent(event: JsonRecord): { kind: AgentLimitKind; until: string } | null {
+  if (event.type !== 'agent_limited' || Number.isNaN(Date.parse(text(event.until)))) return null;
+  return { kind: limitKinds.find(item => item === event.kind) || 'rate_limit', until: text(event.until) };
+}
+
+/** The limit still in force at `now`, if any. */
+export function activeLimit(status: Snapshot['agentStatus'], now = Date.now()): { kind: AgentLimitKind; until: number } | null {
+  const until = Date.parse(status?.limitedUntil || '');
+  return Number.isFinite(until) && until > now ? { kind: limitKinds.find(item => item === status?.limitKind) || 'rate_limit', until } : null;
 }

@@ -48,6 +48,11 @@ type startupConfig struct {
 	AuthBcryptMaxConcurrent  int
 	OAuthDCRMode             string
 	OAuthDCRInitialTokenHash [sha256.Size]byte
+	// OAuthDCRMaxRegistrationsPerIPPerDay bounds admitted /register requests
+	// per client IP over a rolling day (OAUTH_DCR_MAX_REGISTRATIONS_PER_IP_PER_DAY).
+	OAuthDCRMaxRegistrationsPerIPPerDay int
+	// OAuthCIMD is the Client ID Metadata Document policy (OAUTH_CIMD_MODE).
+	OAuthCIMD auth.CIMDPolicy
 
 	// OAuthGranularScopes gates publication and issuance of per-tool
 	// learner:read / learner:write grants. It defaults to false so a schema
@@ -58,6 +63,9 @@ type startupConfig struct {
 	// count as demonstrated evidence outside high-stakes domains
 	// (ASSESSMENT_HOST_LLM_DEMONSTRATES, default on).
 	AssessmentHostLLMDemonstrates bool
+	// MaxActiveDomainsPerLearner is the per-learner active-domain quota
+	// applied at creation (LEARNER_MAX_ACTIVE_DOMAINS, default 200).
+	MaxActiveDomainsPerLearner int
 }
 
 func loadStartupConfig(port string) (startupConfig, error) {
@@ -106,6 +114,11 @@ func loadStartupConfig(port string) (startupConfig, error) {
 		return startupConfig{}, err
 	}
 	cfg.AssessmentHostLLMDemonstrates = hostLLMDemonstrates
+	maxActiveDomains, err := intEnvInRange("LEARNER_MAX_ACTIVE_DOMAINS", db.DefaultMaxActiveDomainsPerLearner, 1, 100_000)
+	if err != nil {
+		return startupConfig{}, err
+	}
+	cfg.MaxActiveDomainsPerLearner = maxActiveDomains
 	var dcrMode string
 	var dcrTokenHash [sha256.Size]byte
 	if cfg.ProcessRole == "api" || cfg.ProcessRole == "all" {
@@ -118,6 +131,15 @@ func loadStartupConfig(port string) (startupConfig, error) {
 	}
 	cfg.OAuthDCRMode = dcrMode
 	cfg.OAuthDCRInitialTokenHash = dcrTokenHash
+	dcrDaily, err := intEnvInRange("OAUTH_DCR_MAX_REGISTRATIONS_PER_IP_PER_DAY", defaultDCRRegistrationsPerIPPerDay, 1, 1_000_000)
+	if err != nil {
+		return startupConfig{}, err
+	}
+	cfg.OAuthDCRMaxRegistrationsPerIPPerDay = dcrDaily
+	cfg.OAuthCIMD, err = auth.ParseCIMDPolicy(os.Getenv("OAUTH_CIMD_MODE"))
+	if err != nil {
+		return startupConfig{}, err
+	}
 	authBcryptMaxConcurrent, err := intEnvInRange(
 		"AUTH_BCRYPT_MAX_CONCURRENT",
 		defaultAuthBcryptMaxConcurrent,
@@ -283,6 +305,10 @@ func validateProductionConfig(cfg startupConfig) error {
 	}
 	return nil
 }
+
+// defaultDCRRegistrationsPerIPPerDay is deliberately generous: hosted
+// connectors register from a small set of provider egress addresses.
+const defaultDCRRegistrationsPerIPPerDay = 500
 
 func loadOAuthDCRPolicy(deploymentProfile string) (string, [sha256.Size]byte, error) {
 	var tokenHash [sha256.Size]byte

@@ -7,6 +7,8 @@ package db
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -491,4 +493,66 @@ func insertInteractionWithType(t *testing.T, store *Store, concept string, succe
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+// P2-10: InteractionsAboveBKT counts interactions that started above the
+// threshold, not the successes that were still climbing toward it.
+func TestGetActionHistoryForConcept_StreakCountsPriorMasteryAboveThreshold(t *testing.T) {
+	store := setupTestDB(t)
+	now := time.Now().UTC()
+	for i, prior := range []float64{0.10, 0.42, 0.76, 0.91, 0.93} {
+		insertInteractionWithType(t, store, "A", true, "PRACTICE", now.Add(time.Duration(i-5)*time.Hour))
+		var id int64
+		if err := store.root.QueryRow(rb(store, `SELECT MAX(id) FROM interactions`)).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.root.Exec(rb(store, `INSERT INTO pedagogical_snapshots
+			(interaction_id, learner_id, domain_id, concept, activity_type, before_json, observation_json, after_json, decision_json)
+			VALUES (?, 'L1', '', 'A', 'PRACTICE', ?, '{}', '{}', '{}')`),
+			id, fmt.Sprintf(`{"p_mastery":%v}`, prior)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h, err := store.GetActionHistoryForConcept(context.Background(), "L1", "A", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.InteractionsAboveBKT != 2 {
+		t.Fatalf("five successes but only two started above 0.85: got %d", h.InteractionsAboveBKT)
+	}
+}
+
+func TestActionHistorySnapshotLookupUsesInteractionIndex(t *testing.T) {
+	store := setupTestDB(t)
+	if store.dialect != DialectSQLite {
+		var count int
+		if err := store.root.QueryRow(`SELECT COUNT(*) FROM pg_indexes
+			WHERE schemaname = current_schema() AND indexname = 'idx_pedagogical_snapshots_interaction'`).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("interaction index missing: count=%d err=%v", count, err)
+		}
+		return
+	}
+	rows, err := store.root.Query(`EXPLAIN QUERY PLAN SELECT activity_type, success,
+		 (SELECT p.before_json FROM pedagogical_snapshots p WHERE p.interaction_id = interactions.id ORDER BY p.id LIMIT 1)
+		 FROM `+currentInteractionsSQL+` AS interactions
+		 WHERE learner_id = ? AND concept = ? AND domain_id = ? ORDER BY created_at DESC LIMIT ?`, "L1", "c", "d", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var plan []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, detail)
+	}
+	for _, detail := range plan {
+		if strings.HasPrefix(detail, "SEARCH") && strings.Contains(detail, "idx_pedagogical_snapshots_interaction") {
+			return
+		}
+	}
+	t.Fatalf("snapshot lookup does not use the interaction index: %q", plan)
 }

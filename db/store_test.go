@@ -14,6 +14,37 @@ import (
 
 const testOAuthResource = "https://test.example/mcp"
 
+func TestAuthCodeIsPersistedOnlyAsDigest(t *testing.T) {
+	store := setupTestDB(t)
+	ctx := context.Background()
+	learner, err := store.CreateLearner(ctx, "digest@example.test", "hash", "objective", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	learnerID := learner.ID
+	if err := store.CreateOAuthClient(ctx, "client-digest", "Digest", `["https://d.example/cb"]`); err != nil {
+		t.Fatal(err)
+	}
+	const raw = "raw-authorization-code"
+	if err := store.CreateAuthCodeWithBinding(ctx, raw, learnerID, "chal", "", "client-digest", "", testOAuthResource, time.Now().Add(5*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	var stored string
+	if err := store.root.QueryRow(`SELECT code FROM oauth_codes`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored == raw || stored != authCodeStorageKey(raw) {
+		t.Fatalf("authorization code stored as %q, want its digest", stored)
+	}
+	if _, err := store.ConsumeAuthCode(ctx, stored, "client-digest"); err == nil {
+		t.Fatal("the stored digest was redeemable as a code")
+	}
+	ac, err := store.ConsumeAuthCode(ctx, raw, "client-digest")
+	if err != nil || ac.Code != raw {
+		t.Fatalf("consume raw code=%+v err=%v", ac, err)
+	}
+}
+
 func TestConsumeAuthCode_WrongClientID(t *testing.T) {
 	store := setupTestDB(t)
 
@@ -35,7 +66,7 @@ func TestConsumeAuthCode_WrongClientID(t *testing.T) {
 
 	// Code must still be present after failed consume attempt
 	var count int
-	if err := store.root.QueryRow(rb(store, `SELECT COUNT(*) FROM oauth_codes WHERE code = ?`), "code-1").Scan(&count); err != nil {
+	if err := store.root.QueryRow(rb(store, `SELECT COUNT(*) FROM oauth_codes WHERE code = ?`), authCodeStorageKey("code-1")).Scan(&count); err != nil {
 		t.Fatalf("count: %v", err)
 	}
 	if count != 1 {
@@ -50,7 +81,7 @@ func TestConsumeAuthCode_WrongClientID(t *testing.T) {
 		t.Fatalf("unexpected ac: %+v", ac)
 	}
 
-	if err := store.root.QueryRow(rb(store, `SELECT COUNT(*) FROM oauth_codes WHERE code = ?`), "code-1").Scan(&count); err != nil {
+	if err := store.root.QueryRow(rb(store, `SELECT COUNT(*) FROM oauth_codes WHERE code = ?`), authCodeStorageKey("code-1")).Scan(&count); err != nil {
 		t.Fatalf("count: %v", err)
 	}
 	if count != 0 {

@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import App from '../../src/App';
 import { parseLearningResponse } from '../../src/learningActivityModel';
 import { parseResumeRequest, resumeRequestText } from '../../src/resumeRequests';
+import { parseStudyRequest } from '../../src/studyRequests';
 import type { ConversationContext } from '../../src/types';
 import { client, conversation, initialState } from './clientFixture';
 import { trainingFixture } from './trainingFixture';
@@ -67,26 +68,99 @@ describe('reprise préparée avant formulation par le harness', () => {
     expect(fixture.api.acknowledgeLearningDelivery).not.toHaveBeenCalled();
   });
 
-  it('sépare aide en conversation et réponse explicite, puis poursuit selon une nouvelle décision serveur', async () => {
+  it('répond à l’exercice depuis le seul composeur, sépare une question au tuteur, puis poursuit selon une nouvelle décision serveur', async () => {
     const state = initialState(true); state.activeConversationId = conversation.id;
     state.conversations = [{ ...conversation, activeTraining: context, messages: [{ id: 'exercise', role: 'assistant', status: 'complete', createdAt: conversation.createdAt, trainingContext: context, text: activityText }] }];
     const fixture = client(state); render(<App api={fixture.api}/>); const user = userEvent.setup();
-    await screen.findByLabelText('Votre réponse à l’exercice');
+    await screen.findByText('Écrivez une addition en Go.');
     expect(screen.queryByText(/PRIVATE_RUBRIC/)).toBeNull();
+    // One input only: the exercise card no longer duplicates the composer.
+    expect(screen.getAllByRole('textbox')).toHaveLength(1);
+    expect(document.querySelectorAll('textarea')).toHaveLength(1);
+    expect((screen.getByRole('radio', { name: 'Réponse à l’exercice' }) as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByLabelText('Message au tuteur').getAttribute('placeholder')).toBe('Votre réponse à l’exercice…');
+
+    await user.click(screen.getByRole('radio', { name: 'Question au tuteur' }));
+    expect(document.activeElement).toBe(screen.getByLabelText('Message au tuteur'));
     await user.type(screen.getByLabelText('Message au tuteur'), 'Je ne comprends pas cette consigne');
     await user.click(screen.getByRole('button', { name: 'Envoyer (Ctrl Entrée)' }));
     await waitFor(() => expect(fixture.api.sendPrompt).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(fixture.api.sendPrompt).mock.calls[0][1]).toBe('Je ne comprends pas cette consigne');
     expect(parseLearningResponse(vi.mocked(fixture.api.sendPrompt).mock.calls[0][1])).toBeUndefined();
-    await waitFor(() => expect(screen.getByLabelText('Votre réponse à l’exercice').matches(':disabled')).toBe(false));
-    await user.type(screen.getByLabelText('Votre réponse à l’exercice'), 'x := 3\nx += 2');
-    await user.click(screen.getByRole('button', { name: 'Valider' }));
+
+    // The answer mode is the default again for the next message.
+    await waitFor(() => expect((screen.getByRole('radio', { name: 'Réponse à l’exercice' }) as HTMLInputElement).checked).toBe(true));
+    await waitFor(() => expect(screen.getByLabelText('Message au tuteur').matches(':disabled')).toBe(false));
+    await user.type(screen.getByLabelText('Message au tuteur'), 'x := 3\nx += 2');
+    await user.click(screen.getByRole('button', { name: 'Envoyer (Ctrl Entrée)' }));
     await waitFor(() => expect(fixture.api.sendPrompt).toHaveBeenCalledTimes(2));
-    expect(parseLearningResponse(vi.mocked(fixture.api.sendPrompt).mock.calls[1][1])).toMatchObject({ kind: 'exercise', attemptId: 'attempt-go', answer: 'x := 3\nx += 2' });
+    const answer = parseLearningResponse(vi.mocked(fixture.api.sendPrompt).mock.calls[1][1]);
+    expect(answer).toMatchObject({ version: 1, kind: 'exercise', activityId: 'exercise-go', trainingId: 'personal:go', domainId: 'go', concept: 'variables', attemptId: 'attempt-go', answer: 'x := 3\nx += 2' });
+    expect(answer?.responseTimeSeconds).toBeGreaterThanOrEqual(0);
+    expect(answer).not.toHaveProperty('success');
     expect(await screen.findByText('Retour confirmé')).toBeTruthy();
-    expect(screen.getByLabelText('Votre réponse à l’exercice').matches(':disabled')).toBe(true);
+    expect(screen.getByText(/Réponse enregistrée/)).toBeTruthy();
+    // Once answered, the composer is an ordinary message field again.
+    expect(screen.queryByRole('radio', { name: 'Réponse à l’exercice' })).toBeNull();
     await user.click(screen.getByRole('button', { name: 'Activité suivante' }));
     await waitFor(() => expect(fixture.api.sendPrompt).toHaveBeenCalledTimes(3));
     expect(parseResumeRequest(vi.mocked(fixture.api.sendPrompt).mock.calls[2][1])).toEqual({ version: 1, trainingId: context.training_id, domainId: context.domain_id, trainingName: 'Go' });
+  });
+
+  it('note une réponse commençant par une barre oblique qui n’est pas une commande reconnue', async () => {
+    const state = initialState(true); state.activeConversationId = conversation.id;
+    state.conversations = [{ ...conversation, activeTraining: context, messages: [{ id: 'exercise', role: 'assistant', status: 'complete', createdAt: conversation.createdAt, trainingContext: context, text: activityText }] }];
+    const fixture = client(state); render(<App api={fixture.api}/>); const user = userEvent.setup();
+    await screen.findByText('Écrivez une addition en Go.');
+    expect((screen.getByRole('radio', { name: 'Réponse à l’exercice' }) as HTMLInputElement).checked).toBe(true);
+    await user.click(screen.getByLabelText('Message au tuteur'));
+    await user.paste('/^a+$/');
+    await user.click(screen.getByRole('button', { name: 'Envoyer (Ctrl Entrée)' }));
+    await waitFor(() => expect(fixture.api.sendPrompt).toHaveBeenCalledTimes(1));
+    expect(parseLearningResponse(vi.mocked(fixture.api.sendPrompt).mock.calls[0][1])).toMatchObject({ kind: 'exercise', activityId: 'exercise-go', answer: '/^a+$/' });
+  });
+
+  it('sort de la voie réponse pour une commande reconnue comme /quiz', async () => {
+    const state = initialState(true); state.activeConversationId = conversation.id;
+    state.conversations = [{ ...conversation, activeTraining: context, messages: [{ id: 'exercise', role: 'assistant', status: 'complete', createdAt: conversation.createdAt, trainingContext: context, text: activityText }] }];
+    const fixture = client(state);
+    vi.mocked(fixture.api.trainingAction).mockImplementation(async action => {
+      if (action === 'get_conversation_context' || action === 'select_conversation_training') return context;
+      throw new Error('Unexpected frontend tool: ' + action);
+    });
+    render(<App api={fixture.api}/>); const user = userEvent.setup();
+    await screen.findByText('Écrivez une addition en Go.');
+    await user.click(screen.getByLabelText('Message au tuteur'));
+    await user.paste('/quiz variables');
+    await user.click(screen.getByRole('button', { name: 'Envoyer (Ctrl Entrée)' }));
+    await waitFor(() => expect(fixture.api.sendPrompt).toHaveBeenCalledTimes(1));
+    const sent = vi.mocked(fixture.api.sendPrompt).mock.calls[0][1];
+    expect(parseLearningResponse(sent)).toBeUndefined();
+    expect(parseStudyRequest(sent)).toMatchObject({ format: 'quiz', intent: 'practice' });
+  });
+
+  it('demande un indice depuis la barre du composeur sans soumettre de réponse', async () => {
+    const state = initialState(true); state.activeConversationId = conversation.id;
+    state.conversations = [{ ...conversation, activeTraining: context, messages: [{ id: 'exercise', role: 'assistant', status: 'complete', createdAt: conversation.createdAt, trainingContext: context, text: activityText }] }];
+    const fixture = client(state); render(<App api={fixture.api}/>);
+    await userEvent.click(await screen.findByRole('button', { name: 'Un indice' }));
+    await waitFor(() => expect(fixture.api.sendPrompt).toHaveBeenCalledTimes(1));
+    const sent = vi.mocked(fixture.api.sendPrompt).mock.calls[0][1];
+    expect(sent).toContain('Écrivez une addition en Go.');
+    expect(parseLearningResponse(sent)).toBeUndefined();
+  });
+
+  it('ne traite pas comme réponse un exercice d’une autre formation que la formation active', async () => {
+    const state = initialState(true); state.activeConversationId = conversation.id;
+    const other: ConversationContext = { ...context, training_id: 'personal:rust', domain_id: 'rust', name: 'Rust' };
+    state.conversations = [{ ...conversation, activeTraining: other, messages: [{ id: 'exercise', role: 'assistant', status: 'complete', createdAt: conversation.createdAt, trainingContext: context, text: activityText }] }];
+    const fixture = client(state); render(<App api={fixture.api}/>); const user = userEvent.setup();
+    await screen.findByText('Écrivez une addition en Go.');
+    expect(screen.queryByRole('radio', { name: 'Réponse à l’exercice' })).toBeNull();
+    await user.type(screen.getByLabelText('Message au tuteur'), 'x := 3');
+    await user.click(screen.getByRole('button', { name: 'Envoyer (Ctrl Entrée)' }));
+    await waitFor(() => expect(fixture.api.sendPrompt).toHaveBeenCalledTimes(1));
+    expect(parseLearningResponse(vi.mocked(fixture.api.sendPrompt).mock.calls[0][1])).toBeUndefined();
   });
 
   it('ne rend pas une activité privée ou en cours de validation comme formulaire de réponse', async () => {
@@ -94,9 +168,11 @@ describe('reprise préparée avant formulation par le harness', () => {
     state.conversations = [{ ...conversation, activeTraining: context, messages: [{ id: 'exercise', role: 'assistant', status: 'streaming', privateOutput: true, createdAt: conversation.createdAt, trainingContext: context, text: activityText }] }];
     const fixture = client(state); render(<App api={fixture.api}/>);
     await screen.findByLabelText('Message au tuteur');
-    expect(screen.queryByLabelText('Votre réponse à l’exercice')).toBeNull();
+    expect(screen.queryByRole('radio', { name: 'Réponse à l’exercice' })).toBeNull();
+    expect(screen.queryByText('Écrivez une addition en Go.')).toBeNull();
     const completed = fixture.getState(); completed.conversations[0].messages[0].status = 'complete'; completed.conversations[0].messages[0].privateOutput = false;
     act(() => fixture.broadcast(completed));
-    expect(await screen.findByLabelText('Votre réponse à l’exercice')).toBeTruthy();
+    expect(await screen.findByRole('radio', { name: 'Réponse à l’exercice' })).toBeTruthy();
+    expect(screen.getAllByRole('textbox')).toHaveLength(1);
   });
 });

@@ -1253,13 +1253,25 @@ async fn rpc_refusals_keep_the_harness_alive_and_do_not_invent_a_subscription_ba
         .generation
         .clone();
     let conversation = backend.start_conversation(None, None).await.unwrap();
-    for (marker, expected) in [
-        ("RATE", "limitation temporaire"),
-        ("CLAUDE_RATE", "limitation temporaire"),
-        ("CLAUDE_BILLING", "limite d’utilisation"),
-        ("QUOTA", "limite d’utilisation"),
-        ("AUTH", "Authentification"),
-        ("UNKNOWN", "cause fournisseur n’est pas précisée"),
+    for (marker, expected, limit) in [
+        (
+            "RATE",
+            "limite de requêtes de l’agent est atteinte",
+            Some("rate_limit"),
+        ),
+        (
+            "CLAUDE_RATE",
+            "limite de requêtes de l’agent est atteinte",
+            Some("rate_limit"),
+        ),
+        (
+            "CLAUDE_BILLING",
+            "limite d’utilisation",
+            Some("usage_limit"),
+        ),
+        ("QUOTA", "limite d’utilisation", Some("usage_limit")),
+        ("AUTH", "Authentification", None),
+        ("UNKNOWN", "cause fournisseur n’est pas précisée", None),
     ] {
         let error = backend
             .send_prompt(conversation.id.clone(), format!("EXPERIENCE_RPC:{marker}"))
@@ -1267,6 +1279,19 @@ async fn rpc_refusals_keep_the_harness_alive_and_do_not_invent_a_subscription_ba
             .unwrap_err();
         assert!(error.contains(expected), "{error}");
         assert!(!error.contains("quota du fournisseur est atteint"));
+        let status = backend.snapshot().await["agentStatus"].clone();
+        assert_eq!(status["limitKind"].as_str(), limit, "{marker}");
+        if limit.is_some() {
+            // The resume time is explicit, and nothing is sent meanwhile.
+            assert!(error.contains("Réessayez après"), "{error}");
+            assert!(status["limitedUntil"].is_string());
+            let blocked = backend
+                .send_prompt(conversation.id.clone(), "Pas maintenant".into())
+                .await
+                .unwrap_err();
+            assert_eq!(blocked, error);
+            assert!(backend.clear_agent_limit());
+        }
         assert_eq!(
             backend.agent.lock().await.as_ref().unwrap().generation,
             generation
@@ -1376,7 +1401,8 @@ async fn disk_failure_rolls_back_new_conversations_and_unsent_messages() {
 }
 
 #[tokio::test]
-async fn a_chunk_that_cannot_be_persisted_stops_the_agent_and_never_reports_success() {
+async fn a_chunk_that_cannot_be_persisted_ends_the_turn_keeps_the_agent_and_never_reports_success()
+{
     let directory = tempfile::tempdir().unwrap();
     let (backend, mut events) = connected(directory.path()).await;
     let conversation = backend.start_conversation(None, None).await.unwrap();
@@ -1410,7 +1436,12 @@ async fn a_chunk_that_cannot_be_persisted_stops_the_agent_and_never_reports_succ
     assert!(result.is_err());
     assert!(backend.prompt.lock().await.is_none());
     let snapshot = backend.snapshot().await;
-    assert_eq!(snapshot["agentConnected"], false);
+    // A local storage failure ends the turn; the healthy harness is kept.
+    assert_eq!(snapshot["agentConnected"], true);
+    assert_eq!(
+        backend.agent.lock().await.as_ref().unwrap().generation,
+        generation
+    );
     assert_eq!(
         snapshot["conversations"][0]["messages"][1]["text"],
         "Réponse commencée."
@@ -2872,4 +2903,329 @@ async fn workspace_title_metadata_is_persisted_without_an_extra_prompt() {
         );
         backend.shutdown().await;
     }
+}
+
+#[test]
+fn setup_completed_is_persisted_as_camel_case_and_defaults_to_false() {
+    let restored: Settings = serde_json::from_value(json!({"language":"fr"})).unwrap();
+    assert!(!restored.setup_completed);
+    let settings = Settings {
+        setup_completed: true,
+        ..Default::default()
+    };
+    let value = serde_json::to_value(&settings).unwrap();
+    assert_eq!(value["setupCompleted"], true);
+    let restored: Settings = serde_json::from_value(value).unwrap();
+    assert!(restored.setup_completed);
+}
+
+#[tokio::test]
+async fn save_settings_accepts_and_exposes_setup_completed() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Backend::new(directory.path(), Arc::new(|_, _| {})).unwrap();
+    let mut settings = backend.settings().await;
+    assert_eq!(
+        backend.snapshot().await["settings"]["setupCompleted"],
+        false
+    );
+    settings.setup_completed = true;
+    let snapshot = backend.save_settings(settings).await.unwrap();
+    assert_eq!(snapshot["settings"]["setupCompleted"], true);
+    assert!(
+        WorkspaceStore::load(directory.path())
+            .unwrap()
+            .data
+            .settings
+            .setup_completed
+    );
+    let status = &backend.snapshot().await["agentStatus"];
+    assert_eq!(status["reconnect"]["state"], "idle");
+    assert!(status["limitedUntil"].is_null());
+    assert!(status["limitKind"].is_null());
+}
+
+#[test]
+fn economy_defaults_follow_the_advertised_options_per_family() {
+    let claude = json!({"category":"model","options":[
+        {"value":"default","name":"Default","description":"Sonnet"},
+        {"value":"opus","name":"Opus"},
+        {"value":"haiku","name":"Haiku","description":"claude-haiku-5-5"}]});
+    assert_eq!(
+        economy_model(&claude, AgentFamily::Claude).as_deref(),
+        Some("haiku")
+    );
+    let exact = json!({"options":[{"value":"haiku"},{"value":"claude-haiku-5-5"}]});
+    assert_eq!(
+        economy_model(&exact, AgentFamily::Claude).as_deref(),
+        Some("claude-haiku-5-5")
+    );
+    let codex = json!({"options":[{"value":"gpt-5.6"},{"value":"gpt-5.6-luna"}]});
+    assert_eq!(
+        economy_model(&codex, AgentFamily::Codex).as_deref(),
+        Some("gpt-5.6-luna")
+    );
+    let newer = json!({"options":[{"value":"gpt-5.6-luna"},{"value":"gpt-6-luna"}]});
+    assert_eq!(
+        economy_model(&newer, AgentFamily::Codex).as_deref(),
+        Some("gpt-6-luna")
+    );
+    assert!(economy_model(&codex, AgentFamily::Other).is_none());
+    assert!(economy_model(
+        &json!({"options":[{"value":"gpt-5.6"}]}),
+        AgentFamily::Codex
+    )
+    .is_none());
+    assert_eq!(
+        lowest_effort(&json!({"options":[{"value":"default"},{"value":"high"},{"value":"low"},{"value":"medium"}]})).as_deref(),
+        Some("low")
+    );
+    assert_eq!(
+        lowest_effort(&json!({"options":[{"value":"minimal"},{"value":"low"}]})).as_deref(),
+        Some("minimal")
+    );
+    assert!(lowest_effort(&json!({"options":[{"value":"default"}]})).is_none());
+}
+
+#[test]
+fn agent_families_are_recognized_from_bundled_ids_and_adapter_paths() {
+    let mut target = fixture_target();
+    assert_eq!(agent_family(&target), AgentFamily::Other);
+    target.id = "bundled:claude".into();
+    assert_eq!(agent_family(&target), AgentFamily::Claude);
+    target.id = "manual".into();
+    target.adapter_path =
+        Some("/x/node_modules/@agentclientprotocol/codex-acp/dist/index.js".into());
+    assert_eq!(agent_family(&target), AgentFamily::Codex);
+}
+
+#[test]
+fn fast_speed_never_enables_the_costly_provider_fast_mode_option() {
+    let response = json!({"configOptions":[
+        {"id":"model","category":"model","currentValue":"haiku","options":[{"value":"haiku"},{"value":"opus"}]},
+        {"id":"fast-mode","category":"other","type":"boolean","currentValue":false}]});
+    let view = configuration_view(true, &response, &Default::default());
+    assert_eq!(view["speedOptions"], json!(["balanced", "fast"]));
+    assert_eq!(view["effective"]["model"], "haiku");
+    assert_eq!(view["effective"]["automatic"], true);
+}
+
+#[test]
+fn claude_sessions_carry_the_tutor_rules_and_a_lean_context() {
+    let params = learning_session_params("/work", &json!([]), None, None);
+    let options = &params["_meta"]["claudeCode"]["options"];
+    assert_eq!(options["systemPrompt"], TUTOR_RULES);
+    assert_eq!(options["settingSources"], json!(["user"]));
+    assert_eq!(options["strictMcpConfig"], true);
+    // User hooks, plugin hooks and CLAUDE.md files never reach Tutor sessions.
+    assert_eq!(options["settings"], json!({"disableAllHooks":true}));
+    assert_eq!(options["env"]["CLAUDE_CODE_DISABLE_CLAUDE_MDS"], "1");
+    assert!(options["settings"].get("apiKeyHelper").is_none());
+    assert_eq!(options["promptSuggestions"], false);
+    assert_eq!(options["maxTurns"], 12);
+    assert_eq!(options["tools"], json!([]));
+    assert_eq!(options["allowDangerouslySkipPermissions"], false);
+    let background = background_session_params("/work");
+    assert_eq!(background["mcpServers"], json!([]));
+    assert_eq!(
+        background["_meta"]["claudeCode"]["options"]["systemPrompt"],
+        BACKGROUND_SYSTEM_PROMPT
+    );
+    assert!(!TUTOR_RULES.contains('{'));
+}
+
+async fn generation_of(backend: &Backend) -> Option<String> {
+    backend
+        .agent
+        .lock()
+        .await
+        .as_ref()
+        .map(|agent| agent.generation.clone())
+}
+
+#[tokio::test]
+async fn an_unrequested_exit_is_reconnected_without_replaying_the_conversation() {
+    let directory = tempfile::tempdir().unwrap();
+    let (backend, mut events) = connected(directory.path()).await;
+    let conversation = backend.start_conversation(None, None).await.unwrap();
+    let first = generation_of(&backend).await.unwrap();
+    backend
+        .on_agent_event(
+            &first,
+            json!({"type":"connection","status":"closed","message":"Le processus de l’agent s’est arrêté."}),
+        )
+        .await;
+    assert!(generation_of(&backend).await.is_none());
+    let status = backend.snapshot().await["agentStatus"]["reconnect"].clone();
+    assert_eq!(status["state"], "waiting");
+    assert!(status["nextAttemptAt"].is_string());
+    let second = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Some(generation) = generation_of(&backend).await {
+                return generation;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("supervised reconnection");
+    assert_ne!(first, second);
+    assert_eq!(
+        backend.snapshot().await["agentStatus"]["reconnect"]["state"],
+        "idle"
+    );
+    let mut reconnect_events = 0;
+    while let Ok(event) = events.try_recv() {
+        if event["value"]["type"] == "agent_reconnect" {
+            reconnect_events += 1;
+        }
+    }
+    assert!(reconnect_events >= 2);
+    // The next message loads the session again in the new process; nothing
+    // was replayed in between.
+    std::fs::write(directory.path().join("fixture-rpc.jsonl"), "").unwrap();
+    backend
+        .send_prompt(conversation.id.clone(), "Après reconnexion".into())
+        .await
+        .unwrap();
+    let methods: Vec<String> = latency_requests(directory.path())
+        .iter()
+        .filter_map(|record| record["method"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(
+        methods.iter().filter(|m| *m == "session/prompt").count(),
+        1,
+        "{methods:?}"
+    );
+    backend.shutdown().await;
+}
+
+fn last_reconnect_event(events: &mut tokio::sync::mpsc::UnboundedReceiver<Value>) -> Option<Value> {
+    let mut last = None;
+    while let Ok(event) = events.try_recv() {
+        if event["value"]["type"] == "agent_reconnect" {
+            last = Some(event["value"].clone());
+        }
+    }
+    last
+}
+
+#[tokio::test]
+async fn a_successful_connection_clears_a_definitive_reconnection_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    let (backend, mut events) = connected(directory.path()).await;
+    let launch = backend.agent_launch().await.unwrap();
+    // Automatic path: resuming the harness does not reset the supervisor
+    // explicitly, yet the live process must end the failed state.
+    backend.stop_agent().await.unwrap();
+    backend.exhaust_reconnection_for_test("Processus arrêté");
+    assert_eq!(
+        backend.snapshot().await["agentStatus"]["reconnect"]["state"],
+        "failed"
+    );
+    while events.try_recv().is_ok() {}
+    {
+        let _operation = backend.operation.lock().await;
+        backend.resume_agent_locked(Some(launch.clone())).await;
+    }
+    assert!(generation_of(&backend).await.is_some());
+    let event = last_reconnect_event(&mut events).expect("agent_reconnect event");
+    assert_eq!(event["state"], "idle");
+    assert_eq!(event["attempt"], 0);
+    assert!(event["cause"].is_null());
+    let status = backend.snapshot().await["agentStatus"]["reconnect"].clone();
+    assert_eq!(status["state"], "idle");
+    assert_eq!(status["attempt"], 0);
+    assert!(status["cause"].is_null());
+
+    // Manual path: connect_agent announces the cleared state as well.
+    backend.stop_agent().await.unwrap();
+    backend.exhaust_reconnection_for_test("Processus arrêté");
+    while events.try_recv().is_ok() {}
+    backend.connect_agent(launch.0, launch.1).await.unwrap();
+    let event = last_reconnect_event(&mut events).expect("agent_reconnect event");
+    assert_eq!(event["state"], "idle");
+    assert_eq!(event["attempt"], 0);
+    assert!(event["cause"].is_null());
+    backend.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_requested_restart_relaunches_without_consuming_the_retry_budget() {
+    let directory = tempfile::tempdir().unwrap();
+    let (backend, _events) = connected(directory.path()).await;
+    // Even after a definitive failure, a restart asked by Tutor relaunches.
+    backend.exhaust_reconnection_for_test("Processus arrêté");
+    let first = generation_of(&backend).await.unwrap();
+    backend.restart_agent("Arrêt demandé").await;
+    let wait_for_new = |previous: String| {
+        let backend = backend.clone();
+        async move {
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if let Some(generation) = generation_of(&backend).await {
+                        if generation != previous {
+                            return generation;
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("restarted harness")
+        }
+    };
+    let mut generation = wait_for_new(first).await;
+    // Repeated cancellations never exhaust the crash budget.
+    for _ in 0..6 {
+        backend.restart_agent("Arrêt demandé").await;
+        generation = wait_for_new(generation).await;
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while backend.snapshot().await["agentStatus"]["reconnect"]["state"] != "idle" {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("reconnection state settles");
+    assert_eq!(backend.supervisor.lock().unwrap().failures_for_test(), 0);
+    backend.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_voluntary_disconnection_is_never_reconnected() {
+    let directory = tempfile::tempdir().unwrap();
+    let (backend, _events) = connected(directory.path()).await;
+    let generation = generation_of(&backend).await.unwrap();
+    backend.disconnect_agent().await.unwrap();
+    backend
+        .on_agent_event(
+            &generation,
+            json!({"type":"connection","status":"closed","message":"late"}),
+        )
+        .await;
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    assert!(generation_of(&backend).await.is_none());
+    assert_eq!(
+        backend.snapshot().await["agentStatus"]["reconnect"]["state"],
+        "idle"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_model_choice_keeps_the_running_harness() {
+    let directory = tempfile::tempdir().unwrap();
+    let (backend, _events) = connected(directory.path()).await;
+    let generation = generation_of(&backend).await.unwrap();
+    assert!(backend
+        .set_agent_configuration(crate::workspace::AgentSettings {
+            model: "invented".into(),
+            ..Default::default()
+        })
+        .await
+        .is_err());
+    assert_eq!(
+        generation_of(&backend).await.as_deref(),
+        Some(generation.as_str())
+    );
+    backend.shutdown().await;
 }

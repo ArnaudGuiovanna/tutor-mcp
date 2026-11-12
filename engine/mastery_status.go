@@ -109,7 +109,7 @@ func AssessMasteryStatus(
 
 	status.Retained = cs != nil && cs.CardState != "new" &&
 		status.RetentionEstimate >= algorithms.RetentionRecallRoutingThreshold && linkedRecall
-	status.Demonstrated = hasTrustedPassedDemonstration(concept, assessments)
+	status.Demonstrated = status.Estimated && hasTrustedPassedDemonstration(concept, assessments)
 	status.Transferred = status.Demonstrated &&
 		(transfer.ReadinessLabel == TransferReadinessReady || transfer.ReadinessLabel == TransferReadinessRobust)
 
@@ -280,17 +280,47 @@ func isRetrievalActivity(activityType string) bool {
 	}
 }
 
+// hasTrustedPassedDemonstration is true when the most recent trusted
+// summative attempt (MASTERY_CHALLENGE or TRANSFER_PROBE, ordered by committed
+// response time) passed. A later trusted failure revokes an earlier pass, so
+// Demonstrated is not permanent. A cold DIAGNOSTIC_ASSESSMENT measures prior
+// knowledge with a single item and is not a demonstration.
 func hasTrustedPassedDemonstration(concept string, assessments []*models.AssessmentAttempt) bool {
+	var latest *models.AssessmentAttempt
 	for _, attempt := range assessments {
-		if !isTrustedPassedAssessment(attempt, concept) {
+		if !isTrustedEvaluatedAssessment(attempt, concept) {
 			continue
 		}
 		switch models.ActivityType(attempt.ActivityType) {
-		case models.ActivityDiagnosticAssessment, models.ActivityMasteryChallenge, models.ActivityTransferProbe:
-			return true
+		case models.ActivityMasteryChallenge, models.ActivityTransferProbe:
+		default:
+			continue
+		}
+		if latest == nil || attempt.SubmittedAt.After(*latest.SubmittedAt) ||
+			(attempt.SubmittedAt.Equal(*latest.SubmittedAt) && attempt.ID > latest.ID) {
+			latest = attempt
 		}
 	}
-	return false
+	return latest != nil && latest.Passed
+}
+
+// latestTrustedDemonstrationAt returns the committed response time of the
+// most recent trusted passed MASTERY_CHALLENGE or TRANSFER_PROBE.
+func latestTrustedDemonstrationAt(concept string, assessments []*models.AssessmentAttempt) (time.Time, bool) {
+	var latest time.Time
+	found := false
+	for _, attempt := range assessments {
+		if !isTrustedEvaluatedAssessment(attempt, concept) || !attempt.Passed {
+			continue
+		}
+		switch models.ActivityType(attempt.ActivityType) {
+		case models.ActivityMasteryChallenge, models.ActivityTransferProbe:
+			if !found || attempt.SubmittedAt.After(latest) {
+				latest, found = *attempt.SubmittedAt, true
+			}
+		}
+	}
+	return latest, found
 }
 
 func trustedTransferRecords(concept string, transfers []*models.TransferRecord, assessments []*models.AssessmentAttempt) []*models.TransferRecord {
@@ -313,21 +343,11 @@ func trustedTransferRecords(concept string, transfers []*models.TransferRecord, 
 		// transfer score must not turn a trusted failed attempt into a pass.
 		// Clone so callers' audit records remain immutable.
 		verifiedRecord := *record
-		var provenance struct {
-			AdjudicationID string `json:"adjudication_id"`
-		}
-		if json.Unmarshal([]byte(attempt.EvaluationProvenanceJSON), &provenance) == nil && provenance.AdjudicationID != "" {
-			// The accepted independent grade supersedes the host's auxiliary
-			// transfer score in this read model, without rewriting that record.
-			if rubric, err := assessment.ParseRubric(attempt.RubricJSON); err == nil {
-				var maximum float64
-				for _, criterion := range rubric.Criteria {
-					maximum += criterion.MaxScore
-				}
-				if maximum > 0 {
-					verifiedRecord.Score = min(1, max(0, attempt.Score/maximum))
-				}
-			}
+		// The frozen rubric ratio of the graded attempt (the accepted
+		// adjudication when one exists) supersedes the host's auxiliary
+		// transfer score in this read model, without rewriting the record.
+		if maximum := attemptRubricMaximum(attempt.RubricJSON); maximum > 0 {
+			verifiedRecord.Score = min(1, max(0, attempt.Score/maximum))
 		}
 		if !attempt.Passed {
 			verifiedRecord.Score = 0
@@ -340,8 +360,31 @@ func trustedTransferRecords(concept string, transfers []*models.TransferRecord, 
 	return verified
 }
 
-func isTrustedPassedAssessment(attempt *models.AssessmentAttempt, concept string) bool {
-	return isTrustedEvaluatedAssessment(attempt, concept) && attempt.Passed
+// attemptRubricMaximum is the criteria maximum of a frozen rubric: the strict
+// bound schema when it parses, otherwise the max_score fields of a legacy
+// standalone rubric. Zero means unknown.
+func attemptRubricMaximum(rubricJSON string) float64 {
+	var maximum float64
+	if rubric, err := assessment.ParseRubric(rubricJSON); err == nil {
+		for _, criterion := range rubric.Criteria {
+			maximum += criterion.MaxScore
+		}
+		return maximum
+	}
+	var legacy struct {
+		Criteria []struct {
+			MaxScore float64 `json:"max_score"`
+		} `json:"criteria"`
+	}
+	if json.Unmarshal([]byte(rubricJSON), &legacy) != nil {
+		return 0
+	}
+	for _, criterion := range legacy.Criteria {
+		if criterion.MaxScore > 0 {
+			maximum += criterion.MaxScore
+		}
+	}
+	return maximum
 }
 
 func isTrustedEvaluatedAssessment(attempt *models.AssessmentAttempt, concept string) bool {

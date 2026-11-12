@@ -217,7 +217,9 @@ func TestDCREquivalentPublicRegistrationIsConcurrentAndQuotaIdempotent(t *testin
 	server, store := newTestServer(t)
 	const rawToken = "ccccccccccccccccccccccccccccccccccccccccccc"
 	configureTokenDCR(t, server, rawToken)
-	if _, err := store.RawDB().Exec(`UPDATE oauth_dcr_initial_access_tokens SET max_registrations = 1`); err != nil {
+	// Two units: replays must not consume the second one, and an exhausted
+	// capability admits nothing, so the spare unit keeps replays admissible.
+	if _, err := store.RawDB().Exec(`UPDATE oauth_dcr_initial_access_tokens SET max_registrations = 2`); err != nil {
 		t.Fatal(err)
 	}
 	const body = `{"client_name":"Equivalent","redirect_uris":["https://client.example/cb"],"token_endpoint_auth_method":"none"}`
@@ -268,6 +270,15 @@ func TestDCREquivalentPublicRegistrationIsConcurrentAndQuotaIdempotent(t *testin
 
 	distinct := dcrRegistrationRequest(server, rawToken,
 		`{"client_name":"Distinct","redirect_uris":["https://other.example/cb"]}`)
+	if distinct.Code != http.StatusCreated {
+		t.Fatalf("second unit status=%d body=%q", distinct.Code, distinct.Body.String())
+	}
+	exhausted := dcrRegistrationRequest(server, rawToken, body)
+	if exhausted.Code != http.StatusBadRequest || !strings.Contains(exhausted.Body.String(), "quota reached") {
+		t.Fatalf("replay on exhausted token status=%d body=%q", exhausted.Code, exhausted.Body.String())
+	}
+	distinct = dcrRegistrationRequest(server, rawToken,
+		`{"client_name":"Third","redirect_uris":["https://third.example/cb"]}`)
 	if distinct.Code != http.StatusBadRequest || !strings.Contains(distinct.Body.String(), "quota reached") {
 		t.Fatalf("quota response status=%d body=%q", distinct.Code, distinct.Body.String())
 	}
@@ -319,7 +330,7 @@ func TestDCRRotationOverlapsAcrossNodesAndRevocationIsImmediate(t *testing.T) {
 	}
 }
 
-func TestDCRConfidentialReplayReturnsSameEncryptedSecret(t *testing.T) {
+func TestDCRConfidentialRegistrationNeverReturnsStoredSecret(t *testing.T) {
 	server, store := newTestServer(t)
 	encodedKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x6b}, 32))
 	keyring, err := db.NewIntegrationSecretKeyring("dcr:"+encodedKey, "dcr")
@@ -332,21 +343,20 @@ func TestDCRConfidentialReplayReturnsSameEncryptedSecret(t *testing.T) {
 	const body = `{"client_name":"Confidential","redirect_uris":["https://confidential.example/cb"],"token_endpoint_auth_method":"client_secret_basic"}`
 	first := dcrRegistrationRequest(server, rawToken, body)
 	second := dcrRegistrationRequest(server, rawToken, body)
-	if first.Code != http.StatusCreated || second.Code != http.StatusOK {
+	if first.Code != http.StatusCreated || second.Code != http.StatusCreated {
 		t.Fatalf("confidential statuses=%d/%d bodies=%q / %q", first.Code, second.Code, first.Body.String(), second.Body.String())
 	}
 	var firstPayload, secondPayload map[string]any
 	_ = json.Unmarshal(first.Body.Bytes(), &firstPayload)
 	_ = json.Unmarshal(second.Body.Bytes(), &secondPayload)
-	if firstPayload["client_id"] != secondPayload["client_id"] || firstPayload["client_secret"] != secondPayload["client_secret"] {
-		t.Fatalf("confidential replay drifted: first=%v second=%v", firstPayload, secondPayload)
+	if firstPayload["client_id"] == secondPayload["client_id"] || firstPayload["client_secret"] == secondPayload["client_secret"] {
+		t.Fatalf("equivalent confidential registration reused a credential: first=%v second=%v", firstPayload, secondPayload)
 	}
-	secret := firstPayload["client_secret"].(string)
-	var ciphertext string
-	if err := store.RawDB().QueryRow(`SELECT registration_secret_ciphertext FROM oauth_clients`).Scan(&ciphertext); err != nil {
+	var stored int
+	if err := store.RawDB().QueryRow(`SELECT COUNT(*) FROM oauth_clients WHERE registration_secret_ciphertext <> ''`).Scan(&stored); err != nil {
 		t.Fatal(err)
 	}
-	if ciphertext == "" || strings.Contains(ciphertext, secret) {
-		t.Fatal("confidential replay secret was not stored as an opaque envelope")
+	if stored != 0 {
+		t.Fatal("confidential registration persisted a recoverable secret")
 	}
 }

@@ -170,10 +170,13 @@ var allowedActivityTypes = []string{
 	string(models.ActivityDiagnosticAssessment),
 }
 
-// allowedErrorTypes is the vocabulary the BKT heuristic
-// (algorithms.BKTUpdateHeuristicSlipByErrorType) branches on. Anything else
-// is silently treated as standard BKT, so accepting arbitrary labels causes
-// audit-trail noise and breaks alert.go's errorTypeCounts aggregation.
+// allowedErrorTypes is the vocabulary record_interaction accepts for
+// error_type. Mastery updates use the fixed declared BKT parameters and do not
+// branch on it (algorithms.BKTUpdateHeuristicSlipByErrorType has no production
+// caller). The label is stored for audit, aggregated by alert.go's
+// errorTypeCounts, and nudges the independent individual parameter estimate
+// (algorithms.BKTObserveIndividualized via estimateIndependentBKTParameters).
+// Arbitrary labels would add audit noise and split those aggregates.
 var allowedErrorTypes = []string{
 	"SYNTAX_ERROR",
 	"LOGIC_ERROR",

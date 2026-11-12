@@ -22,6 +22,9 @@ import (
 var _ storeport.NativeIdentityStore = (*Store)(nil)
 
 const nativeChallengeTTL = 2 * time.Minute
+
+// maxPendingNativeChallenges bounds outstanding challenges per identity.
+const maxPendingNativeChallenges = 16
 const nativeSessionTTL = 30 * time.Minute
 
 func validNativePublicKey(value string) bool {
@@ -146,8 +149,14 @@ func (s *Store) CreateNativeChallenge(ctx context.Context, c *models.NativeChall
 		if err = tx.queryRow(ctx, `SELECT COUNT(*) FROM native_challenges WHERE tenant_id=? AND identity_id=?`, c.TenantID, c.IdentityID).Scan(&count); err != nil {
 			return err
 		}
-		if count >= 16 {
-			return storeport.ErrInvalidNativeChallenge
+		// Challenge issuance is unauthenticated, so a full backlog must never
+		// block the key holder: the oldest pending challenges make room.
+		if excess := count - (maxPendingNativeChallenges - 1); excess > 0 {
+			if _, err = tx.exec(ctx, `DELETE FROM native_challenges WHERE token_hash IN (
+   SELECT token_hash FROM native_challenges WHERE tenant_id=? AND identity_id=?
+   ORDER BY created_at, token_hash LIMIT ?)`, c.TenantID, c.IdentityID, excess); err != nil {
+				return err
+			}
 		}
 		_, err = tx.exec(ctx, `INSERT INTO native_challenges(token_hash,tenant_id,identity_id,user_id,learner_id,public_key,action,scopes_json,key_version,url,method,payload_hash,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, c.TokenHash, c.TenantID, c.IdentityID, n.UserID, nullString(member.LearnerID), c.PublicKey, c.Action, string(scopes), c.KeyVersion, c.URL, c.Method, c.PayloadHash, c.CreatedAt.UTC(), c.ExpiresAt.UTC())
 		return err

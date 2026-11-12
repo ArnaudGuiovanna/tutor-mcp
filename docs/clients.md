@@ -65,8 +65,10 @@ Institutional operators can restrict dynamic registration; see
 ## Help the client use the learning loop
 
 Ask the assistant to use Tutor MCP explicitly when starting or resuming a lesson.
-Tutor exposes a `tutor_mcp` prompt for clients that support MCP prompts, together
-with tool descriptions that guide the learning loop. The assistant must call the
+Tutor returns short server instructions at connection time, which clients that
+honor MCP `instructions` pass to the model. It also exposes a `tutor_mcp` prompt
+with the full protocol for clients that support MCP prompts, together with tool
+descriptions that guide the learning loop. The assistant must call the
 tools to read context and record work; plain conversation alone does not update
 the learning record. See the [tool catalog](mcp-tools.md).
 

@@ -30,6 +30,31 @@ import (
 // import cycle prevents sharing. If you tune this, update both packages.
 const nodeFragileMasteryThreshold = 0.30
 
+type olmNodeClass int
+
+const (
+	olmNodeNotStarted olmNodeClass = iota
+	olmNodeFragile
+	olmNodeSolid
+	olmNodeInProgress
+)
+
+// classifyOLMNode buckets one concept for the OLM summary. Fragility is tested
+// before demonstration: a concept demonstrated weeks ago whose retention has
+// since decayed is shown as fragile, not solid.
+func classifyOLMNode(cs *models.ConceptState, status MasteryStatus) olmNodeClass {
+	switch {
+	case cs == nil || cs.CardState == "new":
+		return olmNodeNotStarted
+	case cs.PMastery < nodeFragileMasteryThreshold || status.RetentionEstimate < algorithms.RetentionRecallRoutingThreshold:
+		return olmNodeFragile
+	case status.Demonstrated:
+		return olmNodeSolid
+	default:
+		return olmNodeInProgress
+	}
+}
+
 // NodeState classifies a concept's mastery for OLM rendering. The values are
 // stable JSON strings consumed by callers that surface OLM state to the
 // learner (dashboards, webhooks).
@@ -229,14 +254,13 @@ func BuildOLMSnapshotAtWithEvidence(ctx context.Context, store storeport.Store, 
 			snap.Transferred++
 		}
 
-		cs := statesByConcept[concept]
-		switch {
-		case cs == nil || cs.CardState == "new":
+		switch classifyOLMNode(statesByConcept[concept], status) {
+		case olmNodeNotStarted:
 			snap.NotStarted++
-		case status.Demonstrated:
-			snap.Solid++
-		case cs.PMastery < nodeFragileMasteryThreshold || status.RetentionEstimate < algorithms.RetentionRecallRoutingThreshold:
+		case olmNodeFragile:
 			snap.Fragile++
+		case olmNodeSolid:
+			snap.Solid++
 		default:
 			snap.InProgress++
 		}

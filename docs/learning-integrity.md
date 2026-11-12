@@ -8,13 +8,16 @@ document defines the product invariants enforced by the runtime and its tests.
 
 Progress is not a single boolean. Each concept can independently be:
 
-- **estimated**: the learner model has enough scored observations to form a
-  bounded estimate;
+- **estimated**: the BKT routing estimate P(L) is at or above 0.85. It is a
+  model estimate driven by recorded observations, not evidence on its own;
 - **retained**: a delayed successful retrieval is linked to a submitted and
   evaluated attempt, occurs at least 24 hours after prior exposure, and meets
   the configured retention gate;
-- **demonstrated**: a versioned assessment attempt passes a rubric that was
-  fixed before grading;
+- **demonstrated**: the concept is estimated and the most recent trusted
+  summative attempt on it — a `MASTERY_CHALLENGE` or `TRANSFER_PROBE` whose
+  task and rubric were frozen before the response, ordered by response time —
+  passed. A later trusted failure revokes the claim until a new pass; a cold
+  `DIAGNOSTIC_ASSESSMENT` measures prior knowledge and never demonstrates;
 - **transferred**: demonstrated evidence also passes trusted transfer probes
   across at least three of the five independent dimensions (near, far,
   debugging, teaching and creative), with no unresolved recent trusted
@@ -33,7 +36,7 @@ alias of the demonstrated count.
 
 ## Assessment evidence
 
-`PRACTICE` and `NEW_CONCEPT` may be recorded without an attempt to preserve a
+Any activity type may be recorded without an attempt to preserve a
 low-friction learning loop. They are explicitly labelled
 `unverified_observation` and may update routing estimates, but can never mint a
 retained, demonstrated or transferred claim. Every interaction used for one of
@@ -69,7 +72,16 @@ storage boundaries. Rubric/scoring JSON must have unique object keys, canonical
 criterion IDs and finite JSON numbers; aliases, numeric strings and unsupported
 fields are rejected. Each criterion is scored exactly once with non-empty
 `evidence`. Optional `total`, `max_total` and per-criterion `max_score` must agree
-with the frozen rubric and scores. Confidence remains descriptive metadata.
+with the frozen rubric and scores. Confidence remains descriptive metadata: it
+no longer selects the FSRS rating (see Routing integrity).
+
+A decision-bound `MASTERY_CHALLENGE`, `TRANSFER_PROBE` or `RECALL_EXERCISE`
+rubric must set `passing_score` to at least 60% of the criteria maximum, and a
+`MASTERY_CHALLENGE` rubric needs at least two criteria. `prepare_assessment_attempt`
+refuses other rubrics with the required minimum, and storage enforces the same
+rule. For an attempt-linked `TRANSFER_PROBE` the stored transfer score is the
+criterion total divided by the rubric maximum; a declared `transfer_score` more
+than 0.05 away from that ratio is refused.
 
 Stored float64 values are summed using their canonical decimal representations;
 passing compares that sum to the frozen threshold without a fixed epsilon.
@@ -84,6 +96,41 @@ learning writes. Standalone/legacy normalization remains unchanged. No existing
 evaluation is rewritten and structural validity never grants evaluator trust.
 This shared contract prepares, but does not implement, an independent review
 channel, reviewer identity or disagreement adjudication.
+
+## Routing integrity
+
+The learner model only moves on facts the server can check:
+
+- **FSRS within a day.** A success less than one day after the last applied
+  review of a card in the review state leaves stability, difficulty, schedule
+  and last review unchanged; massed repetition is not spaced retrieval. A
+  same-day failure is still a lapse, and a learning/relearning card still takes
+  its single same-day step back to review.
+- **FSRS rating.** Failure is Again; hints or a pass within 10% of the rubric
+  maximum above the passing score is Hard; Easy needs a full-marks attempt and
+  a recorded calibration prediction of at least 0.9 on the same concept;
+  everything else, including an absent confidence, is Good.
+- **Assisted success.** With `hints_requested > 0` a success applies only the
+  modeled learning transition, not the "correct" observation. An assisted
+  failure is observed normally.
+- **Prerequisites.** For routing, a prerequisite without verified success is
+  capped at 0.84, below the 0.85 unlock threshold. Verified means a passed
+  evaluated assessment attempt on the concept, or a successful FSRS review at
+  least one day after the previous one. Hosts that never use attempts are
+  therefore slowed (a successor unlocks after a spaced success) but not blocked.
+- **Spaced recall.** A previously acquired card is due when its FSRS
+  `next_review` has passed (desired retention 0.9). Due cards are ranked by
+  relative lateness and, in instruction, interleaved at most one recall per two
+  other activities; when nothing else is available a due recall is served.
+  The 0.40/0.30 retention bands remain the learner-facing forgetting alerts
+  (critical forgetting still bypasses the interleave).
+- **Mastery challenge.** A concept with `MASTERY_READY` that is not yet
+  demonstrated receives a mastery challenge in any learning phase, at most once
+  per five interactions. In maintenance, once every goal-relevant concept is
+  demonstrated and nothing is due, the runtime probes a missing transfer
+  dimension, re-challenges a demonstration older than 60 days, or rests.
+- **Proactive review** is set only when the learner initiated the review before
+  it was due.
 
 ## Mutation delivery
 

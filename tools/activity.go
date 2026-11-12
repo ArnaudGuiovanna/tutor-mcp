@@ -105,6 +105,13 @@ func nextActivityResult(ctx context.Context, deps *Deps, params GetNextActivityP
 			r, _ := errorResult("domain not found")
 			return r, nil, nil
 		}
+		if params.DomainID != "" {
+			// An explicit identifier that is unknown, archived or owned by
+			// someone else is not a setup precondition: answering SETUP_DOMAIN
+			// would invite a duplicate init_domain. List the learner's own active
+			// domains instead, without confirming whether the ID exists.
+			return unknownActivityDomainResult(ctx, deps, learnerID)
+		}
 		setupPrompt := "The learner has no domain yet. Analyse their objective, break it down into concepts, and call init_domain()."
 		if deps.Institution {
 			setupPrompt = domainSetupInstruction(deps)
@@ -216,6 +223,9 @@ func nextActivityResult(ctx context.Context, deps *Deps, params GetNextActivityP
 		Config:           engine.NewDefaultPhaseConfig(),
 		Logger:           deps.Logger,
 		EvidenceSnapshot: evidenceSnapshot,
+	}
+	if scope, scopeErr := pedagogicalScope(ctx, learnerID); scopeErr == nil {
+		input.DecisionScope = scope
 	}
 	if intent == activityIntentReview {
 		input.ReviewOnly = true
@@ -557,10 +567,10 @@ func nextActivityResult(ctx context.Context, deps *Deps, params GetNextActivityP
 		"transfer_profile":          transferProfile,
 		"goal_relevance_status":     goalRelevanceStatus,
 		"pedagogical_contract":      contract,
-		"decision_id":               contract.DecisionID,
-		"audit_rationale":           contract.AuditRationale,
-		"llm_instruction":           contract.LLMInstruction,
-		"learner_explanation":       contract.LearnerExplanation,
+		// decision_id stays at the root: native clients read it there. The
+		// contract's llm_instruction, learner_explanation and audit_rationale
+		// are not repeated here; read them from pedagogical_contract.
+		"decision_id": contract.DecisionID,
 	}
 	if episodicContextVisible(episodicContext) {
 		out["episodic_context"] = episodicContext
@@ -590,6 +600,19 @@ func nextActivityResult(ctx context.Context, deps *Deps, params GetNextActivityP
 			"total_ms", time.Since(totalStart).Milliseconds(),
 		)
 	}
+	return r, nil, nil
+}
+
+func unknownActivityDomainResult(ctx context.Context, deps *Deps, learnerID string) (*mcp.CallToolResult, any, error) {
+	domains, err := deps.Store.GetDomainsByLearner(ctx, learnerID, false)
+	if err != nil {
+		r, _ := safeErrorResult(deps.Logger, "domain not found", err)
+		return r, nil, nil
+	}
+	r, _ := errorResult(fmt.Sprintf(
+		"domain not found: domain_id is unknown or archived; active domains: %s. Retry with one of these domain_id values, or omit domain_id to use the most recent active domain.",
+		domainNames(domains),
+	))
 	return r, nil, nil
 }
 

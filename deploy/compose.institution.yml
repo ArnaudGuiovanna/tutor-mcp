@@ -42,7 +42,7 @@ services:
       - ./secrets/postgres-ca.pem:/etc/tutor-mcp/secrets/postgres-ca.pem:ro
     restart: unless-stopped
   caddy:
-    image: caddy:2
+    image: caddy:2@sha256:9c1b76fb701c1f77383d3124d9f626e38bcf83bc1255ed47475d4f2420701d03
     environment:
       TUTOR_DOMAIN: ${TUTOR_DOMAIN:?Set TUTOR_DOMAIN to your public DNS name}
     ports: ["80:80", "443:443", "443:443/udp"]

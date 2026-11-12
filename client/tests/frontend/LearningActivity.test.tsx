@@ -10,21 +10,20 @@ const flashcard: FlashcardActivity = { version: 1, id: 'flashcard-1', kind: 'fla
   question: 'Comment dit-on « hier » en anglais ?', answer: '**Yesterday**' };
 
 describe('activités visuelles dans la conversation', () => {
-  it('sépare l’aide et la réponse d’exercice, puis verrouille la réponse enregistrée sans inventer de correction', async () => {
+  it('présente l’exercice en lecture seule : la réponse passe par le composeur principal, puis l’état enregistré s’affiche', () => {
     const exercise: ExerciseActivity = { version: 1, id: 'exercise-1', kind: 'exercise', trainingId: 'personal:go', domainId: 'go', concept: 'variables', question: 'Écrivez une addition.', attemptId: 'attempt-1', activityType: 'PRACTICE', rubricJson: '{}' };
-    const user = userEvent.setup(); const submit = vi.fn(async (_response:LearningResponse) => true); const hint = vi.fn();
+    const submit = vi.fn(async (_response:LearningResponse) => true); const hint = vi.fn();
     const view = render(<LearningActivityCard activity={exercise} onRespond={submit} onHint={hint}/>);
-    expect(screen.getByRole('button', { name: 'Valider' }).matches(':disabled')).toBe(true);
-    await user.click(screen.getByRole('button', { name: 'Un indice' }));
-    expect(hint).toHaveBeenCalledTimes(1); expect(submit).not.toHaveBeenCalled();
-    await user.type(screen.getByLabelText('Votre réponse à l’exercice'), 'x := 3\nx += 2');
-    await user.click(screen.getByRole('button', { name: 'Valider' }));
-    expect(submit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({kind:'exercise',attemptId:'attempt-1',answer:'x := 3\nx += 2'}));
-    expect(submit.mock.calls[0][0]).not.toHaveProperty('success');
-    expect(screen.queryByText('Bonne réponse')).toBeNull();
-    view.rerender(<LearningActivityCard activity={exercise} onRespond={submit} response={submit.mock.calls[0][0]}/>);
-    expect(screen.getByLabelText('Votre réponse à l’exercice').matches(':disabled')).toBe(true);
+    expect(screen.getByText('EXERCICE')).toBeTruthy();
+    expect(screen.getByText('Écrivez une addition.')).toBeTruthy();
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Valider' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Un indice' })).toBeNull();
+    const response: LearningResponse = { version: 1, kind: 'exercise', activityId: 'exercise-1', trainingId: 'personal:go', domainId: 'go', concept: 'variables', attemptId: 'attempt-1', answer: 'x := 3', responseTimeSeconds: 4 };
+    view.rerender(<LearningActivityCard activity={exercise} onRespond={submit} response={response}/>);
     expect(screen.getByRole('status').textContent).toContain('Réponse enregistrée');
+    expect(screen.queryByText('Bonne réponse')).toBeNull();
+    expect(submit).not.toHaveBeenCalled();
   });
   it('attend une réponse validée pour montrer la correction, puis conserve une sélection en lecture seule', async () => {
     const user = userEvent.setup(); const submit = vi.fn(async (_response:LearningResponse) => true); const next = vi.fn();
@@ -40,6 +39,9 @@ describe('activités visuelles dans la conversation', () => {
     expect(await screen.findByText(quiz.explanation)).toBeTruthy();
     expect(screen.getByText('Reprenons ce point')).toBeTruthy();
     expect(screen.getByRole('radio', { name: '3' }).matches(':disabled')).toBe(true);
+    // The legend names the group; the correction describes the radio without renaming it.
+    expect(screen.getByRole('group', { name: 'Choisissez une réponse' })).toBeTruthy();
+    expect(document.getElementById(screen.getByRole('radio', { name: '3' }).getAttribute('aria-describedby') || '')?.textContent).toBe('Réponse incorrecte');
     await user.click(screen.getByRole('button', { name: 'Question suivante' }));
     expect(next).toHaveBeenCalledTimes(1);
   });

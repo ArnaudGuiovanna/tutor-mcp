@@ -225,6 +225,7 @@ func main() {
 	}
 	defer func() { _ = unregisterPoolMetrics() }()
 	store.SetHostLLMDemonstrationPolicy(cfg.AssessmentHostLLMDemonstrates)
+	store.SetMaxActiveDomainsPerLearner(cfg.MaxActiveDomainsPerLearner)
 	logger.Info("assessment evidence policy", "host_llm_demonstrates", cfg.AssessmentHostLLMDemonstrates)
 	installationProfile := "legacy"
 	if cfg.DeploymentProfile == "production" {
@@ -362,6 +363,7 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("dynamic client registration policy", "mode", cfg.OAuthDCRMode)
+	oauthServer.ConfigureCIMD(cfg.OAuthCIMD)
 	var nativeIdentity *auth.NativeIdentityServer
 	if cfg.NativeIdentity {
 		nativeIdentity, err = auth.NewNativeIdentityServer(store, auth.NativeIdentityOptions{
@@ -410,8 +412,13 @@ func main() {
 	loginLimiter := auth.NewRateLimiterWithNamespace("oauth_login", 5.0/60, 5)           // password verification
 	tokenLimiter := auth.NewRateLimiterWithNamespace("oauth_token", 20.0/60, 10)         // code exchange and refresh
 	registerLimiter := auth.NewRateLimiterWithNamespace("oauth_register", 5.0/60, 5)     // dynamic client registration
-	accountLimiter := auth.NewRateLimiterWithNamespace("oauth_account", 5.0/60, 5)       // verification and recovery
-	consoleLimiter := auth.NewRateLimiterWithNamespace("console", 60.0/60, 20)           // signed-in console actions
+	// Process-local only: it runs before IAT admission, so an anonymous
+	// request reaches neither the database nor the shared limiter backend.
+	registerAdmissionLimiter := auth.NewRateLimiterWithNamespace("oauth_register_admission", 30.0/60, 30)
+	registerDailyLimiter := auth.NewRateLimiterWithNamespace("oauth_register_daily",
+		float64(cfg.OAuthDCRMaxRegistrationsPerIPPerDay)/(24*60*60), cfg.OAuthDCRMaxRegistrationsPerIPPerDay)
+	accountLimiter := auth.NewRateLimiterWithNamespace("oauth_account", 5.0/60, 5) // verification and recovery
+	consoleLimiter := auth.NewRateLimiterWithNamespace("console", 60.0/60, 20)     // signed-in console actions
 	// Native ceremonies prove a key rather than a guessable password. A normal
 	// connection, grant change or logout each needs a challenge and a signature.
 	nativeLimiter := auth.NewRateLimiterWithNamespace("native_identity", 30.0/60, 20)
@@ -432,6 +439,7 @@ func main() {
 		loginLimiter.SetBackend(rlBackend)
 		tokenLimiter.SetBackend(rlBackend)
 		registerLimiter.SetBackend(rlBackend)
+		registerDailyLimiter.SetBackend(rlBackend)
 		accountLimiter.SetBackend(rlBackend)
 		consoleLimiter.SetBackend(rlBackend)
 		nativeLimiter.SetBackend(rlBackend)
@@ -447,6 +455,8 @@ func main() {
 	defer loginLimiter.Stop()
 	defer tokenLimiter.Stop()
 	defer registerLimiter.Stop()
+	defer registerAdmissionLimiter.Stop()
+	defer registerDailyLimiter.Stop()
 	defer accountLimiter.Stop()
 	defer consoleLimiter.Stop()
 	defer nativeLimiter.Stop()
@@ -463,7 +473,9 @@ func main() {
 		mux.Handle("GET /authorize", auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleAuthorizeGet)))
 		mux.Handle("POST /authorize", auth.RateLimitMiddleware(loginLimiter, http.HandlerFunc(oauthServer.HandleAuthorizePost)))
 		mux.Handle("POST /token", auth.RateLimitMiddleware(tokenLimiter, http.HandlerFunc(oauthServer.HandleToken)))
-		mountDynamicClientRegistration(mux, cfg.OAuthDCRMode, oauthServer, registerLimiter)
+		mountDynamicClientRegistration(mux, cfg.OAuthDCRMode, oauthServer, dcrRouteLimiters{
+			Admission: registerAdmissionLimiter, Requests: registerLimiter, Daily: registerDailyLimiter,
+		})
 	}
 	if !cfg.NativeIdentity && options.Profile == "hobby" {
 		for _, path := range []string{"/account/invite", "/account/reset"} {
@@ -560,7 +572,7 @@ func main() {
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		sig := <-sigCh
 		logger.Info("shutdown signal received", "signal", sig.String())
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout(cfg.MCPToolCallTimeout))
 		defer cancel()
 		err := server.Shutdown(ctx)
 		if drainErr := oauthServer.DrainBackgroundMail(ctx); drainErr != nil {
@@ -579,6 +591,17 @@ func main() {
 		os.Exit(1)
 	}
 	logger.Info("server stopped cleanly")
+}
+
+const (
+	minGracefulShutdownTimeout = 30 * time.Second
+	gracefulShutdownMargin     = 10 * time.Second
+)
+
+// gracefulShutdownTimeout lets an in-flight MCP tool call finish within its
+// configured deadline before the HTTP server stops waiting for it.
+func gracefulShutdownTimeout(toolCallTimeout time.Duration) time.Duration {
+	return max(minGracefulShutdownTimeout, toolCallTimeout+gracefulShutdownMargin)
 }
 
 // The native client view and MCP tools are two interfaces of the same OAuth
@@ -690,14 +713,27 @@ func mountInstitutionAccounts(mux *http.ServeMux, oauthServer *auth.OAuthServer,
 	}
 }
 
-func mountDynamicClientRegistration(mux *http.ServeMux, mode string, oauthServer *auth.OAuthServer, limiter *auth.RateLimiter) {
+// dcrRouteLimiters are the per-IP budgets of POST /register. Admission must be
+// process-local: it bounds anonymous requests before the IAT lookup. Requests
+// and Daily run after admission and may use the shared backend.
+type dcrRouteLimiters struct {
+	Admission *auth.RateLimiter
+	Requests  *auth.RateLimiter
+	Daily     *auth.RateLimiter
+}
+
+func mountDynamicClientRegistration(mux *http.ServeMux, mode string, oauthServer *auth.OAuthServer, limiters dcrRouteLimiters) {
 	if mode == auth.DCRModeDisabled {
 		return
 	}
-	// IAT admission deliberately wraps the limiter: an anonymous invalid
-	// request must not mutate the shared PostgreSQL rate-limit backend.
-	mux.Handle("POST /register", oauthServer.DynamicClientRegistrationAdmission(
-		auth.RateLimitMiddleware(limiter, http.HandlerFunc(oauthServer.HandleRegister)),
+	// IAT admission deliberately wraps the shared limiters: an anonymous
+	// invalid request must not mutate the shared PostgreSQL rate-limit backend.
+	mux.Handle("POST /register", auth.RateLimitMiddleware(limiters.Admission,
+		oauthServer.DynamicClientRegistrationAdmission(
+			auth.RateLimitMiddleware(limiters.Requests,
+				auth.RateLimitMiddleware(limiters.Daily, http.HandlerFunc(oauthServer.HandleRegister)),
+			),
+		),
 	))
 }
 

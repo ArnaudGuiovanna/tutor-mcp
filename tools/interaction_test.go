@@ -67,9 +67,10 @@ func setupFileBackedToolsTest(t *testing.T) (*db.Store, *Deps) {
 // upserts silently lose updates (verified empirically: 94.5% loss under
 // 50 goroutines × 20 iterations on this same in-memory DB shape).
 //
-// Oracle: after N parallel successes from a fresh state, reps must equal
-// the number of successful applyInteraction calls (FSRS bumps reps by 1
-// per ReviewCard) and PMastery must have moved up from the default 0.1.
+// Oracle: after N parallel failures from a fresh state, reps must equal
+// the number of applyInteraction calls (FSRS bumps reps by 1 per applied
+// review). Failures are used because same-day successes on a reviewed card
+// deliberately leave the FSRS state unchanged and so cannot count updates.
 //
 // N is chosen large enough to make the race observable at N=1 -count of
 // the test: at N=50 the post-fix invariant fails reliably (well under 1%
@@ -91,7 +92,7 @@ func TestRecordInteraction_NoLostUpdateUnderConcurrency(t *testing.T) {
 			input := interactionInput{
 				Concept:             "a",
 				ActivityType:        "RECALL_EXERCISE",
-				Success:             true,
+				Success:             false,
 				ResponseTimeSeconds: 5.0,
 				Confidence:          0.8,
 				DomainID:            domain.ID,
@@ -130,9 +131,6 @@ func TestRecordInteraction_NoLostUpdateUnderConcurrency(t *testing.T) {
 	}
 	if cs.Reps != N {
 		t.Fatalf("lost update: expected reps=%d, got reps=%d (concept_states overwritten by concurrent record_interaction)", N, cs.Reps)
-	}
-	if cs.PMastery <= 0.1 {
-		t.Fatalf("expected PMastery > 0.1 after %d successes, got %f", N, cs.PMastery)
 	}
 }
 

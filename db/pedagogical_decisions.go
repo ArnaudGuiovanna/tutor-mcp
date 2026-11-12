@@ -73,6 +73,40 @@ func (s *Store) GetPedagogicalDecision(ctx context.Context, scope models.TenantS
 	return &decision, nil
 }
 
+// ListRecentPedagogicalDecisions reads the scope learner's decisions for one
+// domain, newest first.
+func (s *Store) ListRecentPedagogicalDecisions(ctx context.Context, scope models.TenantScope, domainID string, limit int) ([]*models.PedagogicalDecision, error) {
+	if scope.LearnerID == "" || domainID == "" || limit <= 0 {
+		return nil, fmt.Errorf("list pedagogical decisions: learner, domain and limit required")
+	}
+	var decisions []*models.PedagogicalDecision
+	err := s.withPedagogicalScope(ctx, scope, func(txCtx context.Context, txs *Store) error {
+		rows, err := txs.query(txCtx, `SELECT snapshot_json FROM pedagogical_decisions
+		 WHERE tenant_id = ? AND learner_id = ? AND domain_id = ?
+		 ORDER BY created_at DESC, id DESC LIMIT ?`, scope.TenantID, scope.LearnerID, domainID, limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var payload string
+			if err := rows.Scan(&payload); err != nil {
+				return err
+			}
+			var decision models.PedagogicalDecision
+			if err := json.Unmarshal([]byte(payload), &decision); err != nil {
+				return fmt.Errorf("decode pedagogical decision: %w", err)
+			}
+			decisions = append(decisions, &decision)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list pedagogical decisions: %w", err)
+	}
+	return decisions, nil
+}
+
 // Compose both with the root store used by MCP middleware and with the typed
 // transaction store returned to other callers. Never replace an active scope.
 func (s *Store) withPedagogicalScope(ctx context.Context, scope models.TenantScope, fn func(context.Context, *Store) error) error {

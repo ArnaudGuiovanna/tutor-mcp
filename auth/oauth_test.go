@@ -1360,3 +1360,71 @@ func TestInstitutionMemberSuspendedIsRejectedAtRefresh(t *testing.T) {
 		t.Fatalf("suspended membership refresh = %d %v, want 400 invalid_grant", status, refreshed)
 	}
 }
+
+func TestAuthorizePost_RejectsCrossOriginFormBeforeCSRFConsumption(t *testing.T) {
+	s, store := newTestServer(t)
+	seedClient(t, store, "cid", "https://good.example/cb")
+	seedLearner(t, store, "u@example.com", "correct-password")
+	post := func(token string, headers map[string]string) int {
+		form := url.Values{}
+		form.Set("csrf_token", token)
+		form.Set("mode", "login")
+		form.Set("client_id", "cid")
+		form.Set("redirect_uri", "https://good.example/cb")
+		form.Set("response_type", "code")
+		form.Set("resource", testOAuthResource)
+		form.Set("code_challenge", "abc")
+		form.Set("code_challenge_method", "S256")
+		form.Set("email", "u@example.com")
+		form.Set("password", "wrong-password")
+		req := httptest.NewRequest(http.MethodPost, "/authorize", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		for name, value := range headers {
+			req.Header.Set(name, value)
+		}
+		req.AddCookie(&http.Cookie{Name: "csrf_token", Value: token})
+		rec := httptest.NewRecorder()
+		s.HandleAuthorizePost(rec, req)
+		return rec.Code
+	}
+	for _, headers := range []map[string]string{
+		{"Sec-Fetch-Site": "cross-site"},
+		{"Sec-Fetch-Site": "same-site"},
+		{"Origin": "https://evil.example"},
+		{"Sec-Fetch-Site": "cross-site", "Origin": "null"},
+	} {
+		if code := post("shared-token", headers); code != http.StatusForbidden {
+			t.Fatalf("headers %v status=%d, want 403", headers, code)
+		}
+	}
+	// The refused submissions did not burn the token; legitimate browser and
+	// non-browser shapes reach credential validation.
+	if code := post("shared-token", map[string]string{"Sec-Fetch-Site": "same-origin", "Origin": s.baseURL}); code != http.StatusUnauthorized {
+		t.Fatalf("same-origin status=%d, want 401", code)
+	}
+	if code := post("null-origin-token", map[string]string{"Origin": "null"}); code != http.StatusUnauthorized {
+		t.Fatalf("opaque origin status=%d, want 401", code)
+	}
+	if code := post("headerless-token", nil); code != http.StatusUnauthorized {
+		t.Fatalf("headerless status=%d, want 401", code)
+	}
+}
+
+func TestAccountFormRejectsCrossOriginSubmission(t *testing.T) {
+	s, _ := newTestServer(t)
+	form := url.Values{"csrf_token": {"account-token"}}
+	req := httptest.NewRequest(http.MethodPost, "/recover", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "https://evil.example")
+	req.AddCookie(&http.Cookie{Name: accountCSRFCookieName, Value: "account-token"})
+	if s.validateAccountCSRF(req) {
+		t.Fatal("cross-origin account form accepted")
+	}
+	req = httptest.NewRequest(http.MethodPost, "/recover", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", strings.ToUpper(s.baseURL))
+	req.AddCookie(&http.Cookie{Name: accountCSRFCookieName, Value: "account-token"})
+	if !s.validateAccountCSRF(req) {
+		t.Fatal("same-origin account form rejected")
+	}
+}

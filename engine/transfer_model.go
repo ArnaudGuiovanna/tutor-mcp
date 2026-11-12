@@ -79,20 +79,25 @@ type TransferProfile struct {
 }
 
 type TransferDimensionSummary struct {
-	Dimension    TransferDimension `json:"dimension"`
-	Attempts     int               `json:"attempts"`
-	AverageScore float64           `json:"average_score"`
-	BestScore    float64           `json:"best_score"`
-	Covered      bool              `json:"covered"`
-	Passing      bool              `json:"passing"`
-	FailureCount int               `json:"failure_count"`
+	Dimension TransferDimension `json:"dimension"`
+	Attempts  int               `json:"attempts"`
+	// AverageScore keeps its legacy JSON name but is the score of the latest
+	// observation of the dimension (mean of records sharing that timestamp),
+	// which is what Passing and the readiness label are judged on.
+	AverageScore float64 `json:"average_score"`
+	BestScore    float64 `json:"best_score"`
+	Covered      bool    `json:"covered"`
+	Passing      bool    `json:"passing"`
+	FailureCount int     `json:"failure_count"`
 }
 
 type transferDimensionBucket struct {
 	attempts     int
-	sum          float64
 	best         float64
 	failureCount int
+	latestSum    float64
+	latestCount  int
+	latestAt     time.Time
 }
 
 // TransferDimensions returns the stable canonical order used in JSON summaries.
@@ -150,7 +155,18 @@ func BuildTransferProfile(concept string, scores []*models.TransferRecord) Trans
 		value := clampTransferScore(score.Score)
 		bucket := buckets[dimension]
 		bucket.attempts++
-		bucket.sum += value
+		// The current state of a dimension is its latest observation (records
+		// sharing the latest timestamp, e.g. undated legacy rows, are
+		// averaged, so input order never matters). History stays in attempts
+		// and failure counts but no longer averages an old failure into a
+		// permanent block after the learner repaired it.
+		switch {
+		case bucket.attempts == 1 || score.CreatedAt.After(bucket.latestAt):
+			bucket.latestSum, bucket.latestCount, bucket.latestAt = value, 1, score.CreatedAt
+		case score.CreatedAt.Equal(bucket.latestAt):
+			bucket.latestSum += value
+			bucket.latestCount++
+		}
 		if bucket.attempts == 1 || value > bucket.best {
 			bucket.best = value
 		}
@@ -176,7 +192,7 @@ func BuildTransferProfile(concept string, scores []*models.TransferRecord) Trans
 		}
 		if bucket.attempts > 0 {
 			summary.Covered = true
-			summary.AverageScore = roundTransferScore(bucket.sum / float64(bucket.attempts))
+			summary.AverageScore = roundTransferScore(bucket.latestSum / float64(bucket.latestCount))
 			summary.BestScore = roundTransferScore(bucket.best)
 			summary.Passing = summary.AverageScore >= TransferPassingThreshold
 
@@ -270,8 +286,16 @@ func BuildTrustedTransferProfileAt(concept string, scores []*models.TransferReco
 			profile.LatestFailureAt = &failureAt
 		}
 	}
+	// One rule for the trusted profile: blocked iff a dimension's latest
+	// trusted observation failed inside the blocking window. A failure that
+	// aged out of the window no longer blocks through the aggregate label.
 	if profile.BlockingFailures > 0 {
 		profile.ReadinessLabel = TransferReadinessBlocked
+	} else if profile.ReadinessLabel == TransferReadinessBlocked {
+		profile.ReadinessLabel = transferReadinessLabel(
+			profile.Attempts, profile.Coverage, profile.PassingCoverage,
+			max(profile.ObservedScore, TransferFailureThreshold), 1,
+		)
 	}
 	return profile
 }

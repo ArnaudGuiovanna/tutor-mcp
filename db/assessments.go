@@ -132,6 +132,9 @@ func (s *Store) createAssessmentAttempt(ctx context.Context, a *models.Assessmen
 		if a.PassingScore != rubric.PassingScore {
 			return fmt.Errorf("create assessment attempt: passing score contradicts frozen rubric")
 		}
+		if err := assessment.ValidateDecisionRubric(models.ActivityType(a.ActivityType), rubric); err != nil {
+			return fmt.Errorf("create assessment attempt: %w", err)
+		}
 		if s.dialect == DialectPostgres {
 			var version int
 			if err := s.queryRow(ctx, `SELECT graph_version FROM domains WHERE id = ? AND learner_id = ? AND tenant_id = ? FOR SHARE`,

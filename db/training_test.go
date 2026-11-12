@@ -390,3 +390,25 @@ func TestTrainingLegacyCatalogueCannotExposePrivateDesignOrBypassReview(t *testi
 		t.Fatal("approval did not preserve nominative publication")
 	}
 }
+
+func TestTrainingMemberSearchTreatsWildcardsLiterally(t *testing.T) {
+	s := setupTestDB(t)
+	tenant := nativeTestTenant(t, s, "training-member-search")
+	trainingPrincipal(t, s, tenant, 155, true)
+	author := trainingPrincipal(t, s, tenant, 151, false)
+	trainingPrincipal(t, s, tenant, 153, false)
+	d := trainingDomain(t, s, author, "Recherche de membres")
+	doc := trainingCall[models.TrainingDocument](t, s, author, "share_training", models.TrainingRequest{ID: "personal:" + d.ID, Name: "Annuaire", ExpectedRevision: "1", Key: "share"})
+	search := func(query string) []map[string]string {
+		t.Helper()
+		return trainingCall[[]map[string]string](t, s, author, "find_training_members", models.TrainingRequest{ID: doc.Training.ID, Query: query})
+	}
+	if found := search("lève"); len(found) == 0 {
+		t.Fatal("literal name search found no member")
+	}
+	for _, query := range []string{"%%", "__", `\%`, " % ", "_%"} {
+		if found := search(query); len(found) != 0 {
+			t.Fatalf("query %q enumerated %d members", query, len(found))
+		}
+	}
+}

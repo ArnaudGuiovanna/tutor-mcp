@@ -9,6 +9,8 @@ import "math"
 // The IRT functions in this file form a historical standalone API. Generated
 // tasks have no calibrated item parameters, so live interaction updates and
 // activity selection do not call this API. Persisted legacy theta is retained.
+// Every exported function here is Deprecated: no production caller remains,
+// and none may be added without an independently calibrated item model.
 
 const (
 	// irtBasePriorPrecision anchors the online estimate to the previously
@@ -30,10 +32,12 @@ type IRTItem struct {
 	Discrimination float64
 }
 
+// Deprecated: no production caller; generated tasks have no calibrated IRT item parameters.
 func IRTProbability(theta, difficulty, discrimination float64) float64 {
 	return 1.0 / (1.0 + math.Exp(-discrimination*(theta-difficulty)))
 }
 
+// Deprecated: no production caller; generated tasks have no calibrated IRT item parameters.
 func IRTUpdateTheta(theta float64, items []IRTItem, responses []bool) float64 {
 	return IRTUpdateThetaCumulative(theta, 0, items, responses)
 }
@@ -45,6 +49,8 @@ func IRTUpdateTheta(theta float64, items []IRTItem, responses []bool) float64 {
 // items' likelihood under a Gaussian prior centred on theta. This is a compact
 // Laplace/MAP approximation: it needs no schema change, keeps prior evidence in
 // the estimate, and—unlike an unregularized one-item MLE—has a finite optimum.
+//
+// Deprecated: no production caller; generated tasks have no calibrated IRT item parameters.
 func IRTUpdateThetaCumulative(theta float64, priorObservations int, items []IRTItem, responses []bool) float64 {
 	if len(items) == 0 || len(items) != len(responses) {
 		return theta
@@ -95,11 +101,14 @@ func isFiniteIRTItem(item IRTItem) bool {
 
 // IRTIsInZPD retains a legacy project-specific band for compatibility.
 // This interval is not an empirically established zone of proximal development.
+//
+// Deprecated: no production caller; generated tasks have no calibrated IRT item parameters.
 func IRTIsInZPD(pCorrect float64) bool {
 	return pCorrect >= 0.55 && pCorrect <= 0.80
 }
 
 // FSRSDifficultyToIRT maps FSRS difficulty [1, 10] to IRT scale [-3, 3].
+//
 // Deprecated: FSRS difficulty describes a learner's memory of a concept, not
 // item difficulty. This numerical mapping must not feed a live learner model
 // or pedagogical decision. It remains only for compatibility with old replays.

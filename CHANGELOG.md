@@ -108,6 +108,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   confirmation.
 - `tutor-control-plane -action=invite-owner` prints the first owner's
   invitation link for an operator-provisioned institution.
+- New settings: `OAUTH_CIMD_MODE` (`on`, `off` or a hostname allowlist for
+  Client ID Metadata Documents, default `on`),
+  `OAUTH_DCR_MAX_REGISTRATIONS_PER_IP_PER_DAY` (daily per-IP budget for
+  `/register`, default 500) and `LEARNER_MAX_ACTIVE_DOMAINS` (active domains per
+  learner, default 200). See `docs/configuration.md`.
 
 ### Changed
 
@@ -138,9 +143,44 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - A new TOTP authenticator is usable only after it confirms a code, and a code
   is accepted once per time step. Five wrong second-factor codes block further
   attempts for that account, whatever passwords are entered meanwhile.
+- Dynamic client registration: each confidential registration now creates a
+  new client and returns a new `client_id` and `client_secret` (201); public
+  clients remain deduplicated. The registration-token quota applies before
+  deduplication, and at the global client cap the oldest never-activated
+  provisional client may be evicted. See `docs/oauth-dcr-production.md`.
+- Authorization codes are stored hashed; codes issued before the upgrade and
+  not yet exchanged are invalid (they expire within 5 minutes anyway). Server
+  forms also check `Origin` / `Sec-Fetch-Site` against `BASE_URL`.
+- Pedagogical engine: due FSRS reviews are served when they fall due,
+  interleaved with acquisition (at most one due recall for two new-material
+  activities during instruction, without quota during maintenance). A concept is `demonstrated` only when its mastery estimate is
+  also reached and its latest trusted summative evidence passed; a cold
+  diagnostic no longer counts. Rubrics bound to a pedagogical decision must
+  meet a minimum passing score (and, for mastery challenges, a minimum number
+  of criteria). An attempt-linked `transfer_score` is derived from the frozen
+  rubric. `prepare_assessment_attempt` can now refuse a rubric below that
+  floor, and `record_interaction` can refuse a `transfer_score` that
+  contradicts the frozen rubric scores.
+- MCP surface: the server returns short instructions in its `initialize`
+  result; training tools advertise only the parts of the programme document
+  each operation consumes; validation errors are
+  returned to the host with their reason; an unknown or archived `domain_id`
+  in `get_next_activity` answers "domain not found" with the learner's active
+  domains instead of a setup prompt; read-only tools carry the `readOnlyHint`
+  annotation. `get_next_activity` no longer repeats `llm_instruction`,
+  `learner_explanation` and `audit_rationale` at the root of its result; read
+  them from `pedagogical_contract` (`decision_id` stays at the root). An index
+  on `pedagogical_snapshots(interaction_id, id)` speeds up interaction reads.
+- Tutor desktop client: guided first-run installation, exercise answers sent
+  from the study composer, supervision of the backend connection with request
+  limits, a fast model selected by default, and interface refinements.
 
 ### Security
 
+- Build with Go 1.26.11 to include the standard-library security fix
+  GO-2026-6859, with `golang.org/x/crypto` v0.58.0 and `golang.org/x/sys`
+  v0.49.0. CI, Docker and release packaging use the patched toolchain.
+  Existing binaries must be rebuilt to receive the fix.
 - Build with Go 1.26.10 to include the compromised-intermediate-certificate
   mitigation in `crypto/x509` (GO-2026-6809 / CVE-2026-111943). CI, Docker and
   release packaging use the patched toolchain. Existing binaries require a

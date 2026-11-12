@@ -61,7 +61,30 @@ func setAccountCSRFCookie(w http.ResponseWriter, value, path string, maxAge int)
 	http.SetCookie(w, cookie)
 }
 
+// sameOriginFormPost rejects a browser form submission that declares another
+// origin than BASE_URL. Sec-Fetch-Site is authoritative when present; an
+// explicit Origin must otherwise match. Absent headers (non-browser clients,
+// older browsers) and the opaque "null" origin that no-referrer pages send are
+// accepted, and the double-submit CSRF token remains mandatory in every case.
+func (s *OAuthServer) sameOriginFormPost(r *http.Request) bool {
+	if site := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site"))); site != "" {
+		return site == "same-origin" || site == "none"
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" || origin == "null" {
+		return true
+	}
+	expected, err := url.Parse(strings.TrimSuffix(s.baseURL, "/"))
+	if err != nil || expected.Host == "" {
+		return false
+	}
+	return strings.EqualFold(origin, expected.Scheme+"://"+expected.Host)
+}
+
 func (s *OAuthServer) validateAccountCSRF(r *http.Request) bool {
+	if !s.sameOriginFormPost(r) {
+		return false
+	}
 	cookie, err := r.Cookie(accountCSRFCookieName)
 	formToken := r.FormValue("csrf_token")
 	if err != nil || cookie.Value == "" || formToken == "" ||

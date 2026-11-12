@@ -74,7 +74,7 @@ func TestInstitutionBadgesRealInteractionAndFSRS(t *testing.T) {
 		if err := s.CreatePedagogicalDecision(ctx, p.TenantScope(), d); err != nil {
 			t.Fatal(err)
 		}
-		a := &models.AssessmentAttempt{ID: "attempt-" + id, LearnerID: p.LearnerID, DomainID: e.DomainID, ConceptID: "numbers", SessionID: session.ID, ActivityID: id, ActivityVersion: 1, ActivityType: string(activity), DecisionID: id, CurriculumVersion: curriculum.Version, CurriculumConceptJSON: string(raw), Observable: "Independent response", TaskText: "Name the larger number: 2 or 4", RubricJSON: `{"criteria":[{"id":"correct","description":"Correct response","max_score":1}],"passing_score":1}`, PassingScore: 1, CreatedAt: at.Add(-time.Minute)}
+		a := &models.AssessmentAttempt{ID: "attempt-" + id, LearnerID: p.LearnerID, DomainID: e.DomainID, ConceptID: "numbers", SessionID: session.ID, ActivityID: id, ActivityVersion: 1, ActivityType: string(activity), DecisionID: id, CurriculumVersion: curriculum.Version, CurriculumConceptJSON: string(raw), Observable: "Independent response", TaskText: "Name the larger number: 2 or 4", RubricJSON: `{"criteria":[{"id":"correct","description":"Correct response","max_score":1},{"id":"reasoning","description":"Justified response","max_score":1}],"passing_score":2}`, PassingScore: 2, CreatedAt: at.Add(-time.Minute)}
 		if err := s.CreateAssessmentAttempt(ctx, a); err != nil {
 			t.Fatal(err)
 		}
@@ -84,7 +84,7 @@ func TestInstitutionBadgesRealInteractionAndFSRS(t *testing.T) {
 		var state *models.ConceptState
 		err = s.WithTenantTx(ctx, p.TenantScope(), func(txCtx context.Context, _ storeport.Store) error {
 			var applyErr error
-			state, _, applyErr = applyInteraction(txCtx, deps, p.LearnerID, interactionInput{DomainID: e.DomainID, SessionID: session.ID, Concept: "numbers", ActivityType: string(activity), AssessmentAttemptID: a.ID, Success: true, Confidence: .8, AssessmentScore: 1, EvaluatorID: "host", EvaluationMethod: models.EvaluationMethodHostLLM, RubricScoreJSON: `{"criteria_scores":[{"id":"correct","score":1,"evidence":"The response is correct."}]}`}, at.Add(time.Second))
+			state, _, applyErr = applyInteraction(txCtx, deps, p.LearnerID, interactionInput{DomainID: e.DomainID, SessionID: session.ID, Concept: "numbers", ActivityType: string(activity), AssessmentAttemptID: a.ID, Success: true, Confidence: .8, AssessmentScore: 2, EvaluatorID: "host", EvaluationMethod: models.EvaluationMethodHostLLM, RubricScoreJSON: `{"criteria_scores":[{"id":"correct","score":1,"evidence":"The response is correct."},{"id":"reasoning","score":1,"evidence":"The response is justified."}]}`}, at.Add(time.Second))
 			return applyErr
 		})
 		if err != nil {

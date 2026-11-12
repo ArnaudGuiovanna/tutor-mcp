@@ -1,13 +1,38 @@
-.study-command-menu { border-bottom:1px solid var(--line-strong); margin:0 0 12px; padding:0 0 10px; display:grid; gap:4px; }
-.study-command-menu button { display:flex; align-items:center; gap:12px; width:100%; padding:12px; border:1px solid transparent; border-radius:8px; background:transparent; text-align:left; }
-.study-command-menu button:hover,.study-command-menu button:focus-visible { background:var(--hover); }
-.study-command-menu button>span { flex:1; }
-.study-command-menu strong,.study-command-menu small { display:block; }
-.study-command-menu small { color:var(--fg-2); font-size:13px; line-height:1.5; }
-.study-command-menu kbd { color:var(--blue-hi); font-size:12px; overflow-wrap:anywhere; }
-.study-command-trigger { padding:4px 12px; border:1px solid var(--line-strong); border-radius:8px; background:var(--surface); font-size:18px; }
-.study-command-trigger:disabled { opacity:.5; }
-.learning-format-tag { color:var(--blue-hi); font-size:13px; }
-.learning-content-state { color:var(--fg-2); font-size:16px; padding:18px; border:1px solid var(--line); border-radius:12px; }
-.learning-context-warning { color:var(--fg-2); font-size:14px; }
-@media(max-width:600px) { .study-command-menu button { gap:8px; padding:10px 4px; } .study-command-menu kbd { display:none; } }
+/* Menu « / » du composeur : choix de la modalité. */
+.study-command-menu { display: grid; gap: var(--space-1); margin: 0 0 var(--space-3); padding: 0 0 var(--space-2); border-bottom: 1px solid var(--line); }
+.study-command-menu button {
+  display: flex; align-items: center; gap: var(--space-3); width: 100%; padding: var(--space-2) var(--space-3);
+  border: 0; border-radius: var(--r-md); background: transparent; font-size: var(--text-sm); text-align: left;
+}
+.study-command-menu button:hover, .study-command-menu button:focus-visible { background: var(--hover); }
+.study-command-menu button > svg { color: var(--blue-hi); }
+.study-command-menu button > span { flex: 1; }
+.study-command-menu strong, .study-command-menu small { display: block; }
+.study-command-menu strong { font-weight: var(--weight-medium); }
+.study-command-menu small { color: var(--fg-2); font-size: var(--text-xs); line-height: var(--leading-ui); }
+.study-command-menu kbd { color: var(--blue-hi); font: var(--text-xs) var(--mono); overflow-wrap: anywhere; }
+.learning-format-tag { color: var(--blue-hi); font-size: var(--text-sm); }
+.learning-content-state { padding: var(--space-4); border: 1px solid var(--line); border-radius: var(--r-lg); color: var(--fg-2); font-size: var(--text-sm); }
+.learning-context-warning { color: var(--fg-2); font-size: var(--text-sm); }
+
+/* Exercice en cours : un seul composeur, avec une destination explicite (réponse ou question). */
+.composer-exercise {
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-2);
+  padding: var(--space-2); border: 1px solid var(--line-strong); border-top-color: var(--line); border-bottom: 0; background: var(--void);
+}
+.composer-target { display: inline-flex; gap: 2px; margin: 0; padding: 2px; border: 1px solid var(--line); border-radius: var(--r-md); }
+.composer-target label {
+  position: relative; display: inline-flex; align-items: center; min-height: var(--control-sm); padding: 0 var(--space-3);
+  border-radius: var(--r-sm); color: var(--fg-2); font-size: var(--text-sm); cursor: pointer;
+}
+.composer-target label:hover { color: var(--fg); }
+.composer-target label.selected { background: var(--raised); color: var(--fg); box-shadow: inset 0 0 0 1px var(--line-strong); }
+.composer-target input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer; }
+.composer-target label:has(input:focus-visible) { outline: 2px solid var(--blue); outline-offset: 2px; }
+.composer-target:disabled label { color: var(--text-disabled); cursor: not-allowed; }
+.composer-exercise .composer-hint { min-height: var(--control-sm); padding-block: 0; }
+
+@media (max-width: 640px) {
+  .study-command-menu button { gap: var(--space-2); padding: var(--space-2) var(--space-1); }
+  .study-command-menu kbd { display: none; }
+}

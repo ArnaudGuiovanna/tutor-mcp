@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"tutor-mcp/algorithms"
+	assessmentrules "tutor-mcp/assessment"
 	"tutor-mcp/auth"
 	"tutor-mcp/engine"
 	"tutor-mcp/models"
@@ -98,6 +99,7 @@ func applyInteraction(
 	err = deps.Store.WithTx(ctx, func(s store.Store) error {
 		fsrsObservationAt := now
 		fsrsEventProtocol := "legacy_grading_time"
+		attemptPassingScore, attemptMaxTotal := 0.0, 0.0
 		// The store's for-update reads lock domain before assessment/model rows,
 		// serializing semantic revision with this entire observation.
 		// Lock and consume the assessment state in the same transaction as the
@@ -124,6 +126,8 @@ func applyInteraction(
 			}
 			input.DecisionID = attempt.DecisionID
 			input.CurriculumVersion = attempt.CurriculumVersion
+			attemptPassingScore = attempt.PassingScore
+			attemptMaxTotal = assessmentMaxTotal(attempt.RubricJSON, input.Rubric)
 			if attempt.EventProtocol == models.LearningEventProtocol {
 				if attempt.SubmittedAt == nil || attempt.SubmittedAt.After(now) {
 					return fmt.Errorf("invalid committed response time")
@@ -209,7 +213,7 @@ func applyInteraction(
 			PGuess:   priorPGuess,
 		}
 		bktMode := engine.BKTUpdateModeForActivity(models.ActivityType(input.ActivityType))
-		bktResult := updateBKTWithFixedParameters(bktState, bktMode, input.Success)
+		bktResult := updateBKTWithFixedParameters(bktState, bktMode, input.Success, input.HintsRequested)
 		bktState = bktResult.State
 		slipUsed := bktResult.Params.PSlip
 		guessUsed := bktResult.Params.PGuess
@@ -221,6 +225,7 @@ func applyInteraction(
 			"bkt_effective_params":         effectiveParams,
 			"bkt_update_mode":              bktMode,
 			"bkt_transition_applied":       bktResult.TransitionApplied,
+			"bkt_observation_applied":      !input.Success || input.HintsRequested <= 0,
 			"bkt_posterior":                bktResult.PosteriorMastery,
 			"bkt_transition_delta":         bktState.PMastery - bktResult.PosteriorMastery,
 			"bkt_forget":                   bktResult.Params.PForget,
@@ -262,8 +267,10 @@ func applyInteraction(
 			interaction.MisconceptionDetail = input.MisconceptionDetail
 		}
 
-		// Proactive review flag — derived from the prior schedule.
-		if priorNextReview != nil && priorNextReview.After(now) && priorCardState != "new" {
+		// Proactive review flag: the learner chose to review before the
+		// schedule asked for it. A system-routed activity on a card that is
+		// not yet due is not the learner's initiative.
+		if input.SelfInitiated && priorNextReview != nil && priorNextReview.After(now) && priorCardState != "new" {
 			interaction.IsProactiveReview = true
 		}
 
@@ -306,13 +313,19 @@ func applyInteraction(
 			if transferSessionID == "" {
 				transferSessionID = input.TransferSessionID
 			}
+			transferScore := *input.TransferScore
+			if input.AssessmentAttemptID != "" && attemptMaxTotal > 0 {
+				// A linked transfer score is the frozen rubric ratio, never a
+				// separate host claim (record_interaction rejects a divergent one).
+				transferScore = min(1, max(0, input.AssessmentScore/attemptMaxTotal))
+			}
 			record := &models.TransferRecord{
 				LearnerID:           learnerID,
 				DomainID:            input.DomainID,
 				AssessmentAttemptID: input.AssessmentAttemptID,
 				ConceptID:           input.Concept,
 				ContextType:         input.TransferDimension,
-				Score:               *input.TransferScore,
+				Score:               transferScore,
 				SessionID:           transferSessionID,
 			}
 			if err := s.CreateTransferRecord(ctx, record); err != nil {
@@ -321,21 +334,22 @@ func applyInteraction(
 			observation = mergeObservation(observation, map[string]any{
 				"transfer_evidence": map[string]any{
 					"dimension": input.TransferDimension,
-					"score":     *input.TransferScore,
+					"score":     transferScore,
 					"recorded":  true,
 				},
 			})
 		}
 
 		// ── FSRS update — reads from prior snapshot. ───────────────────
-		rating := algorithms.Good
-		if !input.Success {
-			rating = algorithms.Again
-		} else if input.Confidence >= 0.9 {
-			rating = algorithms.Easy
-		} else if input.Confidence < 0.5 {
-			rating = algorithms.Hard
+		var calibrated *models.CalibrationRecord
+		if input.Success && input.CalibrationID != "" {
+			if record, err := s.GetCalibrationRecord(ctx, input.CalibrationID, learnerID); err == nil &&
+				record != nil && record.ConceptID == input.Concept {
+				calibrated = record
+			}
 		}
+		rating := fsrsRatingForObservation(input, attemptPassingScore, attemptMaxTotal, calibrated)
+		observation["fsrs_rating"] = int(rating)
 
 		fsrsCard := algorithms.FSRSCard{
 			Stability:     priorStability,
@@ -355,6 +369,17 @@ func applyInteraction(
 			// runtime schedule recall on a concept the learner never learned.
 			fsrsApplied = false
 			fsrsSkipReason = "failed_cold_diagnostic_creates_no_card"
+		}
+		if fsrsApplied && sameDaySuccessKeepsMemoryState(priorCardState, priorLastReview, fsrsObservationAt, input.Success) {
+			// FSRS-5's short-term branch multiplies S on every same-day pass
+			// (x1.41 Good, x2.36 Easy) without a ceiling, so a session of
+			// repeated successes inflated stability by an order of magnitude
+			// and scheduled the first spaced review weeks away. Massed
+			// repetition is not evidence of long-term memory: a same-day pass
+			// on a reviewed card leaves S, D, the schedule and LastReview
+			// unchanged. A same-day failure is still applied (lapse).
+			fsrsApplied = false
+			fsrsSkipReason = "same_day_success_keeps_memory_state"
 		}
 		if fsrsApplied {
 			fsrsCard = algorithms.ReviewCard(fsrsCard, rating, fsrsObservationAt)
@@ -418,6 +443,72 @@ func applyInteraction(
 	}
 
 	return resultCS, resultMeta, nil
+}
+
+// fsrsNearThresholdMargin is the fraction of the rubric maximum above the
+// passing score within which a pass is graded Hard: a response that only
+// just met the frozen criteria was an effortful retrieval, not a fluent one.
+const fsrsNearThresholdMargin = 0.10
+
+// fsrsEasyCalibratedConfidence is the minimum recorded calibration prediction
+// (0..1, normalised from the 1..5 scale) for an Easy rating.
+const fsrsEasyCalibratedConfidence = 0.9
+
+// fsrsRatingForObservation maps an observation to an FSRS rating from facts
+// the server can check, never from the host's free "confidence" field:
+//
+//   - failure                                   → Again
+//   - hints requested, or a pass within
+//     fsrsNearThresholdMargin of the rubric floor → Hard
+//   - a full-marks pass on an assessment attempt
+//     whose recorded calibration prediction (same
+//     concept) was at least 0.9                   → Easy
+//   - otherwise (including confidence 0 = absent) → Good
+func fsrsRatingForObservation(input interactionInput, passingScore, maxTotal float64, calibration *models.CalibrationRecord) algorithms.Rating {
+	if !input.Success {
+		return algorithms.Again
+	}
+	if input.HintsRequested > 0 {
+		return algorithms.Hard
+	}
+	scored := input.AssessmentAttemptID != "" && maxTotal > 0
+	if scored && passingScore > 0 && input.AssessmentScore-passingScore < fsrsNearThresholdMargin*maxTotal {
+		return algorithms.Hard
+	}
+	if scored && input.AssessmentScore >= maxTotal && calibration != nil &&
+		calibration.Predicted >= fsrsEasyCalibratedConfidence {
+		return algorithms.Easy
+	}
+	return algorithms.Good
+}
+
+// assessmentMaxTotal returns the frozen rubric maximum of an attempt: the
+// strict bound rubric when it parses, otherwise the normalised legacy rubric.
+func assessmentMaxTotal(rubricJSON string, normalized any) float64 {
+	if rubric, err := assessmentrules.ParseRubric(rubricJSON); err == nil {
+		total := 0.0
+		for _, criterion := range rubric.Criteria {
+			total += criterion.MaxScore
+		}
+		return total
+	}
+	if rubric, ok := normalized.(map[string]any); ok {
+		_, total := rubricMaxScores(rubric)
+		return total
+	}
+	return 0
+}
+
+// sameDaySuccessKeepsMemoryState is true for a successful response less than
+// one whole day after the last applied review of a card already in the FSRS
+// review state. Learning/relearning cards still take their single same-day
+// step (it is what moves a lapsed card back to review); once in review,
+// further same-day passes are massed practice and leave the memory state as is.
+func sameDaySuccessKeepsMemoryState(priorCardState string, priorLastReview, observedAt time.Time, success bool) bool {
+	if !success || priorLastReview.IsZero() || algorithms.CardState(priorCardState) != algorithms.Review {
+		return false
+	}
+	return algorithms.CurrentElapsedDays(observedAt, &priorLastReview) == 0
 }
 
 // failedColdDiagnostic is true for a failed DIAGNOSTIC_ASSESSMENT on a

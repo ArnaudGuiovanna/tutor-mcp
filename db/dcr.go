@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"tutor-mcp/models"
 	storeport "tutor-mcp/store"
 )
@@ -274,16 +276,15 @@ func (s *Store) RegisterDynamicOAuthClient(ctx context.Context, registration mod
 		return nil, fmt.Errorf("DCR client secret and hash must be supplied together")
 	}
 
-	secretCiphertext := ""
-	if registration.CandidateClientSecret != "" && s.secretKeyring != nil {
-		var err error
-		secretCiphertext, err = s.secretKeyring.encryptWithAAD(
-			registration.CandidateClientSecret,
-			dcrRegistrationSecretAAD(registration.CandidateClientID, registration.Fingerprint),
-		)
-		if err != nil {
-			return nil, fmt.Errorf("encrypt DCR replay secret: %w", err)
-		}
+	// A confidential client's secret is returned exactly once, at creation.
+	// Confidential registrations are therefore never deduplicated: each one
+	// creates a distinct client (subject to quota and cap) and no recoverable
+	// copy of the secret is persisted. Only public clients, which carry no
+	// credential, share an identity through the metadata fingerprint.
+	confidential := registration.CandidateClientSecret != ""
+	fingerprint := registration.Fingerprint
+	if confidential {
+		fingerprint = ""
 	}
 
 	var result *models.DynamicClientRegistrationResult
@@ -291,7 +292,6 @@ func (s *Store) RegisterDynamicOAuthClient(ctx context.Context, registration mod
 		if err := txs.lockDCRRegistration(ctx); err != nil {
 			return err
 		}
-		tokenAtQuota := false
 		if registration.TokenID != "" {
 			var maxRegistrations, usedRegistrations int
 			var expiresAt, revokedAt sql.NullTime
@@ -310,47 +310,37 @@ func (s *Store) RegisterDynamicOAuthClient(ctx context.Context, registration mod
 			if err != nil {
 				return fmt.Errorf("revalidate DCR token: %w", err)
 			}
-			tokenAtQuota = usedRegistrations >= maxRegistrations
+			// The quota gate precedes replay recognition: an exhausted
+			// capability admits nothing, not even an equivalent request.
+			if usedRegistrations >= maxRegistrations {
+				return storeport.ErrDCRInitialAccessTokenQuota
+			}
 		}
 
-		var clientID, secretHash, replayCiphertext string
-		var issuedAt, expiresAt flexTime
-		var permanent bool
-		err := txs.queryRow(ctx,
-			`SELECT client_id, client_secret_hash, registration_secret_ciphertext, created_at, expires_at, expires_at IS NULL
-			 FROM oauth_clients WHERE registration_fingerprint = ?`,
-			registration.Fingerprint,
-		).Scan(&clientID, &secretHash, &replayCiphertext, &issuedAt, &expiresAt, &permanent)
-		switch {
-		case err == nil:
-			// A successful authorization-code exchange activates the client by
-			// clearing its provisional expiry. It must remain replayable after
-			// restart; an invalid non-NULL timestamp still fails closed.
-			if !permanent && (!expiresAt.Valid || !expiresAt.Time.After(registration.Now)) {
-				return storeport.ErrDCRReplaySecretUnavailable
-			}
-			secret := ""
-			if secretHash != "" {
-				if replayCiphertext == "" || txs.secretKeyring == nil {
+		if !confidential {
+			var clientID, secretHash string
+			var issuedAt, expiresAt flexTime
+			var permanent bool
+			err := txs.queryRow(ctx,
+				`SELECT client_id, client_secret_hash, created_at, expires_at, expires_at IS NULL
+				 FROM oauth_clients WHERE registration_fingerprint = ?`,
+				fingerprint,
+			).Scan(&clientID, &secretHash, &issuedAt, &expiresAt, &permanent)
+			switch {
+			case err == nil:
+				// A successful authorization-code exchange activates the client by
+				// clearing its provisional expiry. It must remain replayable after
+				// restart; an invalid non-NULL timestamp still fails closed.
+				if secretHash != "" || !permanent && (!expiresAt.Valid || !expiresAt.Time.After(registration.Now)) {
 					return storeport.ErrDCRReplaySecretUnavailable
 				}
-				secret, err = txs.secretKeyring.decryptWithAAD(
-					replayCiphertext, dcrRegistrationSecretAAD(clientID, registration.Fingerprint),
-				)
-				if err != nil {
-					return fmt.Errorf("authenticate DCR replay secret: %w", err)
+				result = &models.DynamicClientRegistrationResult{
+					ClientID: clientID, IssuedAt: issuedAt.Time.UTC(), ExpiresAt: expiresAt.Time.UTC(), Replayed: true,
 				}
+				return nil
+			case !errors.Is(err, sql.ErrNoRows):
+				return fmt.Errorf("load equivalent DCR client: %w", err)
 			}
-			result = &models.DynamicClientRegistrationResult{
-				ClientID: clientID, ClientSecret: secret,
-				IssuedAt: issuedAt.Time.UTC(), ExpiresAt: expiresAt.Time.UTC(), Replayed: true,
-			}
-			return nil
-		case !errors.Is(err, sql.ErrNoRows):
-			return fmt.Errorf("load equivalent DCR client: %w", err)
-		}
-		if tokenAtQuota {
-			return storeport.ErrDCRInitialAccessTokenQuota
 		}
 
 		var clientCount int
@@ -358,7 +348,13 @@ func (s *Store) RegisterDynamicOAuthClient(ctx context.Context, registration mod
 			return fmt.Errorf("count DCR clients: %w", err)
 		}
 		if clientCount >= registration.MaxClients {
-			return storeport.ErrOAuthClientLimitReached
+			evicted, err := txs.evictOldestProvisionalOAuthClient(ctx, registration.Now, registration.ExpiresAt)
+			if err != nil {
+				return err
+			}
+			if !evicted {
+				return storeport.ErrOAuthClientLimitReached
+			}
 		}
 		if _, err := txs.exec(ctx,
 			`INSERT INTO oauth_clients
@@ -367,7 +363,7 @@ func (s *Store) RegisterDynamicOAuthClient(ctx context.Context, registration mod
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			registration.CandidateClientID, registration.ClientName, registration.RedirectURIsJSON,
 			registration.CandidateClientSecretHash, registration.ExpiresAt.UTC(),
-			registration.Fingerprint, registration.TokenID, secretCiphertext,
+			fingerprint, registration.TokenID, "",
 		); err != nil {
 			return fmt.Errorf("create dynamic OAuth client: %w", err)
 		}
@@ -404,6 +400,134 @@ func (s *Store) RegisterDynamicOAuthClient(ctx context.Context, registration mod
 		return nil, err
 	}
 	return result, nil
+}
+
+// dcrEvictionGrace protects a provisional client whose authorization flow
+// may still be in progress from cap-driven eviction.
+const dcrEvictionGrace = time.Hour
+
+// dcrEvictionCandidates bounds how many provisional clients one registration
+// tries before reporting the cap as reached.
+const dcrEvictionCandidates = 5
+
+// evictOldestProvisionalOAuthClient frees one slot under the global client cap
+// by deleting the oldest client that never completed a code exchange. Active
+// clients, service-account clients and recent registrations are never chosen.
+// It must run inside the registration transaction.
+//
+// Provisional clients all receive the same TTL, so the expiry orders them by
+// registration time; newExpiry is the expiry the incoming client would get.
+//
+// Dependent rows live in tenant-scoped tables that this global transaction
+// may not see. Each attempt therefore runs in a savepoint: a candidate that
+// still has a referencing row is skipped instead of aborting the transaction.
+func (s *Store) evictOldestProvisionalOAuthClient(ctx context.Context, now, newExpiry time.Time) (bool, error) {
+	rows, err := s.query(ctx,
+		`SELECT c.client_id, c.registration_token_id FROM oauth_clients c
+		 WHERE c.expires_at IS NOT NULL AND c.expires_at <= ?
+		   AND NOT EXISTS (SELECT 1 FROM service_accounts sa WHERE sa.client_id = c.client_id)
+		   AND NOT EXISTS (SELECT 1 FROM refresh_tokens rt WHERE rt.client_id = c.client_id)
+		 ORDER BY c.expires_at, c.client_id LIMIT ?`,
+		newExpiry.Add(-dcrEvictionGrace).UTC(), dcrEvictionCandidates,
+	)
+	if err != nil {
+		return false, fmt.Errorf("select provisional OAuth client for eviction: %w", err)
+	}
+	type candidate struct{ clientID, tokenID string }
+	var candidates []candidate
+	for rows.Next() {
+		var item candidate
+		if err := rows.Scan(&item.clientID, &item.tokenID); err != nil {
+			_ = rows.Close()
+			return false, fmt.Errorf("scan provisional OAuth client for eviction: %w", err)
+		}
+		candidates = append(candidates, item)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return false, fmt.Errorf("iterate provisional OAuth clients for eviction: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return false, fmt.Errorf("close provisional OAuth clients for eviction: %w", err)
+	}
+	for _, item := range candidates {
+		deleted, err := s.deleteOAuthClientInSavepoint(ctx, "dcr_evict_client", item.clientID, now, "expires_at IS NOT NULL", nil)
+		if err != nil {
+			return false, fmt.Errorf("evict provisional OAuth client: %w", err)
+		}
+		if !deleted {
+			continue
+		}
+		if err := s.appendDCRAudit(ctx, "client_evicted_deleted", "oauth-register", item.tokenID, item.clientID, map[string]any{
+			"reason": "global client cap reached; oldest unused registration evicted",
+		}, now); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// deleteOAuthClientInSavepoint removes one client and its dependent
+// credentials atomically. The client row is deleted only when condition
+// (a fixed SQL predicate over oauth_clients) still holds. It reports false,
+// with the savepoint rolled back, when nothing was deleted or a remaining
+// foreign-key reference prevents the deletion.
+func (s *Store) deleteOAuthClientInSavepoint(ctx context.Context, savepoint, clientID string, now time.Time, condition string, conditionArgs []any) (deleted bool, err error) {
+	if _, err := s.exec(ctx, `SAVEPOINT `+savepoint); err != nil {
+		return false, err
+	}
+	release := true
+	defer func() {
+		if release {
+			if _, releaseErr := s.exec(ctx, `RELEASE SAVEPOINT `+savepoint); releaseErr != nil {
+				err = errors.Join(err, releaseErr)
+			}
+		}
+	}()
+	rollback := func(cause error) (bool, error) {
+		if _, rollbackErr := s.exec(ctx, `ROLLBACK TO SAVEPOINT `+savepoint); rollbackErr != nil {
+			release = false
+			return false, errors.Join(cause, rollbackErr)
+		}
+		if cause != nil && !isForeignKeyViolation(cause) {
+			return false, cause
+		}
+		return false, nil
+	}
+	if _, err := s.exec(ctx,
+		`UPDATE refresh_tokens SET revoked_at = COALESCE(revoked_at, ?) WHERE client_id = ?`,
+		now.UTC(), clientID,
+	); err != nil {
+		return rollback(err)
+	}
+	for _, table := range []string{"oauth_codes", "learner_approved_clients"} {
+		if _, err := s.exec(ctx, `DELETE FROM `+table+` WHERE client_id = ?`, clientID); err != nil {
+			return rollback(err)
+		}
+	}
+	args := append([]any{clientID}, conditionArgs...)
+	result, err := s.exec(ctx, `DELETE FROM oauth_clients WHERE client_id = ? AND `+condition, args...)
+	if err != nil {
+		return rollback(err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return rollback(err)
+	}
+	if affected != 1 {
+		return rollback(nil)
+	}
+	return true, nil
+}
+
+// isForeignKeyViolation recognizes a referencing row that blocks a delete.
+func isForeignKeyViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23503"
+	}
+	return strings.Contains(err.Error(), "FOREIGN KEY constraint failed")
 }
 
 func (s *Store) ListDCRInitialAccessTokens(ctx context.Context, limit int) ([]models.DCRInitialAccessToken, error) {

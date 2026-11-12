@@ -8,11 +8,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"tutor-mcp/models"
 	storeport "tutor-mcp/store"
@@ -37,7 +37,7 @@ func (s *Store) trainingEditable(ctx context.Context, p models.Principal, f mode
 
 func (s *Store) TrainingAction(ctx context.Context, p models.Principal, action string, in models.TrainingRequest) (any, error) {
 	if !models.ValidTrainingAction(action) || len(in.Query) > 200 || len(in.ID) > 255 || len(in.After) > 255 || len(in.ConversationID) > 128 || len(in.Reason) > 4000 {
-		return nil, fmt.Errorf("invalid training request")
+		return nil, storeport.Invalid("invalid training request")
 	}
 	commonWrite := slices.Contains([]string{"share_training", "submit_training", "decide_training", "publish_training", "set_training_access", "set_training_policy"}, action) || (strings.HasPrefix(in.ID, "formation:") && slices.Contains([]string{"save_training_edit", "propose_training_edit", "archive_training", "restore_training", "delete_training", "withdraw_training"}, action))
 	if commonWrite && !models.OAuthScopeAllows(strings.Join(p.Scopes, " "), models.OAuthScopeFormationContribute) {
@@ -71,7 +71,7 @@ func (s *Store) TrainingAction(ctx context.Context, p models.Principal, action s
 		var requestHash string
 		if !read {
 			if in.Key == "" || len(in.Key) > 128 {
-				return fmt.Errorf("key is required (up to 128 bytes)")
+				return storeport.Invalid("key is required (up to 128 bytes)")
 			}
 			var err error
 			requestHash, err = catalogRequestHash(struct {
@@ -162,10 +162,10 @@ func (s *Store) trainingLibrary(ctx context.Context, p models.Principal, in mode
 		in.Limit = 20
 	}
 	if validatePage(in.Limit) != nil {
-		return page, fmt.Errorf("invalid page")
+		return page, storeport.Invalid("invalid page")
 	}
 	if !slices.Contains([]string{"", "personal", "institutional", "shared", "mine", "review", "archived"}, in.Filter) {
-		return page, fmt.Errorf("invalid filter")
+		return page, storeport.Invalid("invalid filter")
 	}
 	if in.Filter == "archived" {
 		return s.trainingArchivedLibrary(ctx, p, in)
@@ -475,7 +475,7 @@ func (s *Store) trainingDocumentView(ctx context.Context, p models.Principal, id
 
 func (s *Store) conversationContext(ctx context.Context, p models.Principal, id string) (*models.ConversationContext, error) {
 	if id == "" {
-		return nil, fmt.Errorf("conversation_id is required")
+		return nil, storeport.Invalid("conversation_id is required")
 	}
 	c := &models.ConversationContext{ConversationID: id}
 	err := s.queryRow(ctx, `SELECT training_id,domain_id,revision,selection_version FROM conversation_contexts WHERE tenant_id=? AND membership_id=? AND conversation_id=?`, p.TenantID, p.MembershipID, id).Scan(&c.TrainingID, &c.DomainID, &c.Revision, &c.SelectionVersion)
@@ -505,7 +505,7 @@ func (s *Store) conversationContext(ctx context.Context, p models.Principal, id 
 
 func (s *Store) selectConversationTraining(ctx context.Context, p models.Principal, in models.TrainingRequest) (*models.ConversationContext, error) {
 	if in.ConversationID == "" || in.ExpectedSelection == nil {
-		return nil, fmt.Errorf("conversation_id and expected_selection are required")
+		return nil, storeport.Invalid("conversation_id and expected_selection are required")
 	}
 	doc, err := s.trainingDocument(ctx, p, in.ID)
 	if err != nil {
@@ -551,7 +551,7 @@ func (s *Store) trainingPolicy(ctx context.Context, p models.Principal, in model
 			return nil, storeport.ErrInvalidPrincipal
 		}
 		if in.PersonalLearning == nil {
-			return nil, fmt.Errorf("personal_learning is required")
+			return nil, storeport.Invalid("personal_learning is required")
 		}
 		if err := s.SetInstitutionLearningPolicy(ctx, p, *in.PersonalLearning); err != nil {
 			return nil, err
@@ -582,11 +582,11 @@ func validateTrainingEdit(current *models.TrainingDocument, in models.TrainingRe
 		return nil, nil, storeport.ErrCurriculumVersionConflict
 	}
 	if in.Document == nil {
-		return nil, nil, fmt.Errorf("document is required")
+		return nil, nil, storeport.Invalid("document is required")
 	}
 	raw, err := json.Marshal(in.Document)
 	if err != nil || len(raw) > 1024*1024 {
-		return nil, nil, fmt.Errorf("document exceeds limits")
+		return nil, nil, storeport.Invalid("document exceeds limits")
 	}
 	candidate := &models.TrainingDocument{}
 	if err = json.Unmarshal(raw, candidate); err != nil {
@@ -599,7 +599,7 @@ func validateTrainingEdit(current *models.TrainingDocument, in models.TrainingRe
 	invalidated := []string{}
 	if current.Curriculum != nil {
 		if candidate.Curriculum == nil {
-			return nil, nil, fmt.Errorf("curriculum is required")
+			return nil, nil, storeport.Invalid("curriculum is required")
 		}
 		next := candidate.Curriculum
 		next.DomainID = current.Curriculum.DomainID
@@ -612,22 +612,24 @@ func validateTrainingEdit(current *models.TrainingDocument, in models.TrainingRe
 		next.Provenance = models.CurriculumProvenance{SourceType: "author", Author: p.UserID, Rationale: "reviewed programme edit"}
 		next.Review = models.CurriculumReview{Status: models.CurriculumReviewUnreviewed}
 		if len(next.Concepts) > 500 || len(next.Graph.Concepts) == 0 {
-			return nil, nil, fmt.Errorf("curriculum requires 1..500 concepts")
+			return nil, nil, storeport.Invalid("curriculum requires 1..500 concepts")
 		}
 		if err = validateCurriculumSnapshot(next); err != nil {
-			return nil, nil, err
+			// Every server-owned field was reset above, so this only reports
+			// the caller's own curriculum content.
+			return nil, nil, &storeport.ValidationError{Message: err.Error()}
 		}
 		byID := map[string]models.CurriculumConcept{}
 		for _, c := range next.Concepts {
 			byID[c.ID] = c
 			if len(c.Label) > 500 || len(c.Description) > 16000 {
-				return nil, nil, fmt.Errorf("concept exceeds limits")
+				return nil, nil, storeport.Invalid("concept exceeds limits")
 			}
 		}
 		for _, c := range current.Curriculum.Concepts {
 			replacement, ok := byID[c.ID]
 			if !ok || replacement.Key != c.Key {
-				return nil, nil, fmt.Errorf("retain stable identities; retire concepts instead of removing them")
+				return nil, nil, storeport.Invalid("retain stable identities; retire concepts instead of removing them")
 			}
 			if c.Status != replacement.Status || !models.SameCurriculumDefinition(c, replacement) {
 				invalidated = append(invalidated, c.ID)
@@ -636,13 +638,13 @@ func validateTrainingEdit(current *models.TrainingDocument, in models.TrainingRe
 	} else {
 		candidate.Curriculum = nil
 		if len(candidate.Modules) < 1 || len(candidate.Modules) > 100 || len(candidate.Concepts) < 1 || len(candidate.Concepts) > 500 {
-			return nil, nil, fmt.Errorf("programme requires modules and concepts")
+			return nil, nil, storeport.Invalid("programme requires modules and concepts")
 		}
 		modules := map[string]bool{}
 		keys := map[string]bool{}
 		for _, m := range candidate.Modules {
 			if m.StableKey == "" || len(m.StableKey) > 200 || len(m.Title) > 500 || strings.TrimSpace(m.Title) == "" || modules[m.StableKey] || m.Position < 0 {
-				return nil, nil, fmt.Errorf("invalid module")
+				return nil, nil, storeport.Invalid("invalid module")
 			}
 			modules[m.StableKey] = true
 		}
@@ -650,7 +652,7 @@ func validateTrainingEdit(current *models.TrainingDocument, in models.TrainingRe
 		for i := range candidate.Concepts {
 			c := &candidate.Concepts[i]
 			if keys[c.StableKey] || !modules[c.ModuleStableKey] || c.Position < 0 || strings.TrimSpace(c.Label) == "" {
-				return nil, nil, fmt.Errorf("invalid concept or module")
+				return nil, nil, storeport.Invalid("invalid concept or module")
 			}
 			keys[c.StableKey] = true
 			if err = normalizeFormationConcept(c); err != nil {
@@ -782,7 +784,7 @@ func (s *Store) replaceTrainingContent(ctx context.Context, p models.Principal, 
 			metadata = "{}"
 		}
 		if !json.Valid([]byte(metadata)) {
-			return fmt.Errorf("invalid module metadata")
+			return storeport.Invalid("invalid module metadata")
 		}
 		if _, err = s.exec(ctx, `INSERT INTO formation_modules(id,tenant_id,formation_version_id,stable_key,title,position,metadata_json) VALUES(?,?,?,?,?,?,?)`, id, p.TenantID, versionID, m.StableKey, m.Title, m.Position, metadata); err != nil {
 			return err
@@ -804,7 +806,7 @@ func (s *Store) replaceTrainingContent(ctx context.Context, p models.Principal, 
 	for _, c := range concepts {
 		for _, pre := range c.Prerequisites {
 			if conceptIDs[pre] == "" {
-				return fmt.Errorf("unknown prerequisite")
+				return storeport.Invalid("unknown prerequisite")
 			}
 			if _, err := s.exec(ctx, `INSERT INTO concept_prerequisites(tenant_id,formation_version_id,concept_id,prerequisite_id) VALUES(?,?,?,?)`, p.TenantID, versionID, conceptIDs[c.StableKey], conceptIDs[pre]); err != nil {
 				return err
@@ -820,7 +822,7 @@ func (s *Store) shareTraining(ctx context.Context, p models.Principal, in models
 	}
 	name := strings.TrimSpace(in.Name)
 	if name == "" || len(name) > 500 {
-		return nil, fmt.Errorf("name is required")
+		return nil, storeport.Invalid("name is required")
 	}
 	var source *models.TrainingDocument
 	var err error
@@ -868,7 +870,7 @@ func (s *Store) shareTraining(ctx context.Context, p models.Principal, in models
 		audience = "invitation"
 	}
 	if !slices.Contains([]string{"open", "invitation", "approval"}, audience) {
-		return nil, fmt.Errorf("invalid audience")
+		return nil, storeport.Invalid("invalid audience")
 	}
 	if _, err = s.exec(ctx, `INSERT INTO formations(id,tenant_id,name,description,status,created_by,created_at,updated_at,owner_membership_id,enrollment_policy) VALUES(?,?,?,?,'draft',?,?,?,?,?)`, id, p.TenantID, name, source.Training.Description, p.UserID, now, now, ownerID, audience); err != nil {
 		return nil, err
@@ -943,7 +945,7 @@ func (s *Store) trainingPublication(ctx context.Context, p models.Principal, act
 			return nil, storeport.ErrInvalidPrincipal
 		}
 		if strings.TrimSpace(in.Reason) == "" {
-			return nil, fmt.Errorf("a reason is required")
+			return nil, storeport.Invalid("a reason is required")
 		}
 		if in.Decision == "changes_requested" {
 			if _, err = s.exec(ctx, `UPDATE training_submissions SET status='changes_requested',reason=? WHERE tenant_id=? AND id=? AND status='pending'`, in.Reason, p.TenantID, doc.Submission.ID); err != nil {
@@ -952,7 +954,7 @@ func (s *Store) trainingPublication(ctx context.Context, p models.Principal, act
 			return s.trainingDocument(ctx, p, in.ID)
 		}
 		if in.Decision != "approve" {
-			return nil, fmt.Errorf("invalid decision")
+			return nil, storeport.Invalid("invalid decision")
 		}
 	} else if !t.CanPublish {
 		return nil, storeport.ErrInvalidPrincipal
@@ -1020,7 +1022,18 @@ func (s *Store) trainingAccess(ctx context.Context, p models.Principal, in model
 	}
 	if in.Audience != "" {
 		if !slices.Contains([]string{"open", "invitation", "approval"}, in.Audience) {
-			return nil, fmt.Errorf("invalid audience")
+			return nil, storeport.Invalid("invalid audience")
+		}
+		// Like archive/restore, the audience of a published offering is part
+		// of its publication: changing it requires publication authority.
+		if in.Audience != t.Audience && !t.CanPublish {
+			var publishedVersions int
+			if err = s.queryRow(ctx, `SELECT COUNT(*) FROM formation_versions WHERE tenant_id=? AND formation_id=? AND status<>'draft'`, p.TenantID, t.FormationID).Scan(&publishedVersions); err != nil {
+				return nil, err
+			}
+			if publishedVersions > 0 {
+				return nil, storeport.ErrInvalidPrincipal
+			}
 		}
 		if _, err = s.exec(ctx, `UPDATE formations SET enrollment_policy=?,updated_at=? WHERE tenant_id=? AND id=?`, in.Audience, time.Now().UTC(), p.TenantID, t.FormationID); err != nil {
 			return nil, err
@@ -1038,7 +1051,7 @@ func (s *Store) trainingAccess(ctx context.Context, p models.Principal, in model
 			if in.Decision == "edit" {
 				var roles []string
 				if json.Unmarshal([]byte(rolesJSON), &roles) != nil || (!slices.Contains(roles, models.RoleTrainer) && !slices.Contains(roles, models.RolePedagogyManager)) {
-					return nil, fmt.Errorf("programme editors must be trainers or pedagogy managers")
+					return nil, storeport.Invalid("programme editors must be trainers or pedagogy managers")
 				}
 				if _, err = s.exec(ctx, `INSERT INTO formation_trainers(tenant_id,formation_id,membership_id,assigned_by,assigned_at) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING`, p.TenantID, t.FormationID, member, p.UserID, time.Now().UTC()); err != nil {
 					return nil, err
@@ -1050,7 +1063,7 @@ func (s *Store) trainingAccess(ctx context.Context, p models.Principal, in model
 			}
 		} else {
 			if t.CohortID == "" {
-				return nil, fmt.Errorf("publish the version before inviting members")
+				return nil, storeport.Invalid("publish the version before inviting members")
 			}
 			decision := "invited"
 			if in.Decision == "revoke" {
@@ -1061,7 +1074,7 @@ func (s *Store) trainingAccess(ctx context.Context, p models.Principal, in model
 					return nil, err
 				}
 			} else if in.Decision != "invite" && in.Decision != "" {
-				return nil, fmt.Errorf("invalid access decision")
+				return nil, storeport.Invalid("invalid access decision")
 			}
 			if err = s.setFormationAdmission(ctx, p.TenantID, t.CohortID, member, decision); err != nil {
 				return nil, err
@@ -1083,15 +1096,18 @@ func (s *Store) trainingMembers(ctx context.Context, p models.Principal, in mode
 		return nil, storeport.ErrInvalidPrincipal
 	}
 	out := []map[string]string{}
-	if len(strings.TrimSpace(in.Query)) < 2 {
+	query := strings.TrimSpace(in.Query)
+	if utf8.RuneCountInString(query) < 2 {
 		return out, nil
 	}
-	publicKey := in.Query
-	if normalized, err := NormalizeNativePublicKey(in.Query); err == nil {
+	publicKey := query
+	if normalized, err := NormalizeNativePublicKey(query); err == nil {
 		publicKey = normalized
 	}
+	// The query is matched literally: LIKE wildcards in it are escaped so the
+	// two-character minimum cannot be bypassed to enumerate the directory.
 	rows, err := s.query(ctx, `SELECT m.id,COALESCE(n.display_name,''),COALESCE(n.public_key,'') FROM tenant_memberships m JOIN users u ON u.id=m.user_id LEFT JOIN native_identities n ON n.user_id=u.id AND n.status='active'
- WHERE m.tenant_id=? AND m.status='active' AND u.status='active' AND (lower(COALESCE(n.display_name,'')) LIKE ? OR n.public_key=?) ORDER BY n.display_name,m.id LIMIT 20`, p.TenantID, "%"+strings.ToLower(in.Query)+"%", publicKey)
+ WHERE m.tenant_id=? AND m.status='active' AND u.status='active' AND (lower(COALESCE(n.display_name,'')) LIKE ? ESCAPE '\' OR n.public_key=?) ORDER BY n.display_name,m.id LIMIT 20`, p.TenantID, "%"+escapeLikePattern(strings.ToLower(query))+"%", publicKey)
 	if err != nil {
 		return nil, err
 	}
@@ -1106,13 +1122,19 @@ func (s *Store) trainingMembers(ctx context.Context, p models.Principal, in mode
 	return out, rows.Err()
 }
 
+// escapeLikePattern makes value match literally in a LIKE ... ESCAPE '\'
+// clause on both SQLite and PostgreSQL.
+func escapeLikePattern(value string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(value)
+}
+
 func (s *Store) trainingGroups(ctx context.Context, p models.Principal, in models.TrainingRequest) (models.TrainerCohortPage, error) {
 	page := models.TrainerCohortPage{Items: []models.TrainerCohort{}}
 	if in.Limit == 0 {
 		in.Limit = 20
 	}
 	if validatePage(in.Limit) != nil {
-		return page, fmt.Errorf("invalid page")
+		return page, storeport.Invalid("invalid page")
 	}
 	if !strings.HasPrefix(in.ID, "formation:") {
 		return page, storeport.ErrFormationUnavailable

@@ -11,8 +11,16 @@ import (
 // updateBKTWithFixedParameters changes mastery without adjusting the supplied
 // parameters. A measurement applies no modeled learning/forgetting transition;
 // a learning opportunity uses the parameters declared by the current policy.
-func updateBKTWithFixedParameters(state algorithms.BKTState, mode models.BKTUpdateMode, success bool) algorithms.IndividualBKTUpdateResult {
-	posterior := algorithms.BKTObserve(state, success)
+//
+// An assisted success (hints requested) is not an observation of independent
+// performance: the "correct" likelihood is skipped and only the modeled
+// learning transition of the opportunity applies. An assisted failure is
+// still informative and is observed normally.
+func updateBKTWithFixedParameters(state algorithms.BKTState, mode models.BKTUpdateMode, success bool, hintsRequested int) algorithms.IndividualBKTUpdateResult {
+	posterior := state
+	if !success || hintsRequested <= 0 {
+		posterior = algorithms.BKTObserve(state, success)
+	}
 	result := algorithms.IndividualBKTUpdateResult{
 		State:            posterior,
 		PosteriorMastery: posterior.PMastery,

@@ -56,6 +56,9 @@ type OrchestratorInput struct {
 	// session. It is distinct from Now: OVERLOAD alerts compare the
 	// current clock to the session start.
 	SessionStart time.Time
+	// DecisionScope, when set, lets the cadences count the decisions already
+	// served to this learner, not only the interactions the host recorded.
+	DecisionScope models.TenantScope
 	// ReviewOnly biases the pipeline toward previously studied material
 	// while preserving Gate and ActionSelector constraints.
 	ReviewOnly bool
@@ -246,6 +249,14 @@ type pipelineFixtures struct {
 	Alerts             []models.Alert
 	DiagnosticItems    int             // count since phase_changed_at
 	DiagnosedConcepts  map[string]bool // qualified diagnostic coverage since phase_changed_at
+	// Evidence is the domain evidence snapshot shared with alerting.
+	Evidence *EvidenceSnapshot
+	// VerifiedConcepts holds concepts with a passed evaluated assessment
+	// attempt or a spaced FSRS success (see PrerequisiteRoutingMastery).
+	VerifiedConcepts map[string]bool
+	// RecentDecisions are the decisions served for the domain, newest first.
+	// They count proposals the host never recorded as interactions.
+	RecentDecisions []*models.PedagogicalDecision
 }
 
 func fetchPipelineFixtures(ctx context.Context, store storeport.Store, domain *models.Domain, input OrchestratorInput) (*pipelineFixtures, error) {
@@ -313,6 +324,16 @@ func fetchPipelineFixtures(ctx context.Context, store storeport.Store, domain *m
 			domainInteractions = append(domainInteractions, interaction)
 		}
 	}
+	var recentDecisions []*models.PedagogicalDecision
+	if input.DecisionScope.LearnerID != "" {
+		if input.DecisionScope.LearnerID != input.LearnerID {
+			return nil, fmt.Errorf("get recent decisions: scope does not match learner")
+		}
+		recentDecisions, err = store.ListRecentPedagogicalDecisions(ctx, input.DecisionScope, domain.ID, recentServedWindow)
+		if err != nil {
+			return nil, fmt.Errorf("get recent decisions: %w", err)
+		}
+	}
 	sessionStart := input.SessionStart
 	if sessionStart.IsZero() {
 		var sessionErr error
@@ -329,6 +350,7 @@ func fetchPipelineFixtures(ctx context.Context, store storeport.Store, domain *m
 	}
 	alertEvidence := evidenceSnapshot.ForMasteryAlerts(domainStates)
 	alerts := ComputeAlertsWithEvidenceAt(domainStates, domainInteractions, alertEvidence, sessionStart, input.Now)
+	verified := verifiedConcepts(input.LearnerID, domain.Graph.Concepts, stateMap, evidenceSnapshot, input.Now)
 
 	return &pipelineFixtures{
 		StatesList:         domainStates,
@@ -340,7 +362,31 @@ func fetchPipelineFixtures(ctx context.Context, store storeport.Store, domain *m
 		Alerts:             alerts,
 		DiagnosticItems:    diagItems,
 		DiagnosedConcepts:  diagnosed,
+		Evidence:           evidenceSnapshot,
+		VerifiedConcepts:   verified,
+		RecentDecisions:    recentDecisions,
 	}, nil
+}
+
+// verifiedConcepts marks the concepts whose success is backed by more than a
+// host declaration: a passed evaluated assessment attempt (completed together
+// with its linked interaction), or a successful FSRS review at least one day
+// after the previous one. The result is always non-nil.
+func verifiedConcepts(learnerID string, concepts []string, states map[string]*models.ConceptState, evidence *EvidenceSnapshot, now time.Time) map[string]bool {
+	verified := make(map[string]bool, len(concepts))
+	for _, concept := range concepts {
+		if SpacedSuccessVerified(states[concept]) {
+			verified[concept] = true
+			continue
+		}
+		for _, attempt := range assessmentEvidenceAt(learnerID, concept, evidence.ForConcept(concept).Assessments, now) {
+			if attempt.Passed {
+				verified[concept] = true
+				break
+			}
+		}
+	}
+	return verified
 }
 
 func buildObservables(domain *models.Domain, pf *pipelineFixtures, cfg PhaseConfig, now time.Time) PhaseObservables {
@@ -384,7 +430,7 @@ func buildObservables(domain *models.Domain, pf *pipelineFixtures, cfg PhaseConf
 		if cs.PMastery < exit {
 			belowExit++
 		}
-		if cs.CardState != "new" {
+		if RecallEligible(cs) {
 			retention := algorithms.CurrentRetrievability(now, cs.LastReview, cs.Stability)
 			if retention < cfg.RetentionRecallThreshold {
 				belowRetention = true
@@ -448,6 +494,7 @@ func runPipeline(
 		RecentConcepts:       pf.RecentConcepts,
 		Alerts:               pf.Alerts,
 		AntiRepeatWindow:     antiRep,
+		VerifiedConcepts:     pf.VerifiedConcepts,
 	})
 	if err != nil {
 		return models.Activity{}, pipelineSignal{}, fmt.Errorf("gate: %w", err)
@@ -463,15 +510,36 @@ func runPipeline(
 			}
 			return composeActivity(action, selection, phase), pipelineSignal{}, nil
 		}
-		if selection, ok := recallNeedSelection(domain, pf, phase, input); ok {
-			action, err := selectActionForSelection(ctx, store, pf, selection, phase, input)
-			if err != nil {
-				return models.Activity{}, pipelineSignal{}, err
-			}
+	}
+	recallSelection, recallDue := Selection{}, false
+	if !input.ReviewOnly && phase != models.PhaseDiagnostic {
+		recallSelection, recallDue = recallNeedSelection(domain, pf, phase, input)
+	}
+	routeRecall := func() (models.Activity, pipelineSignal, error) {
+		action, err := selectActionForSelection(ctx, store, pf, recallSelection, phase, input)
+		if err != nil {
+			return models.Activity{}, pipelineSignal{}, err
+		}
+		return composeActivity(recallActionFor(action), recallSelection, phase), pipelineSignal{}, nil
+	}
+	if recallDue && recallQuotaAllows(pf.RecentInteractions, phase) {
+		return routeRecall()
+	}
+	if !input.ReviewOnly && phase != models.PhaseDiagnostic {
+		if selection, ok := masteryChallengeSelection(domain, pf, phase, input); ok {
+			return composeActivity(masteryChallengeAction(), selection, phase), pipelineSignal{}, nil
+		}
+	}
+	if !input.ReviewOnly && phase == models.PhaseMaintenance && !recallDue {
+		if action, selection, ok := demonstratedMaintenanceSelection(domain, pf, phase, input); ok {
 			return composeActivity(action, selection, phase), pipelineSignal{}, nil
 		}
 	}
 	if gateResult.NoCandidate {
+		if recallDue {
+			// Nothing to acquire: a due recall is better than a phase retry.
+			return routeRecall()
+		}
 		return models.Activity{}, pipelineSignal{IsNoFringe: true}, nil
 	}
 
@@ -492,6 +560,8 @@ func runPipeline(
 		selection, err = SelectConceptAtWithContext(phase, pf.StatesList, filteredGraph, pf.GoalRelevance, input.Now, SelectionContext{
 			MaintenanceMasteryFloor: input.Config.EffectiveMasteryExitThreshold(),
 			DiagnosedConcepts:       pf.DiagnosedConcepts,
+			VerifiedConcepts:        pf.VerifiedConcepts,
+			DomainGraph:             &domain.Graph,
 		})
 		if err != nil {
 			return models.Activity{}, pipelineSignal{}, fmt.Errorf("concept_selector: %w", err)
@@ -508,6 +578,9 @@ func runPipeline(
 				activity.Rationale += " - anti-repetition relaxed: no phase-eligible activity remained"
 			}
 			return activity, signal, err
+		}
+		if recallDue {
+			return routeRecall()
 		}
 		return models.Activity{}, pipelineSignal{IsNoFringe: true}, nil
 	}
@@ -535,34 +608,343 @@ func runPipeline(
 	return composeActivity(action, selection, phase), pipelineSignal{}, nil
 }
 
-// recallNeedSelection keeps a previously studied concept available for recall
-// even when its high acquisition estimate excludes it from the instruction
-// fringe. Lower retrievability wins; ties use concept IDs for stable replay.
-// Active misconceptions still take precedence in the action selector.
+// RecallInterleaveInstructionActivities is the number of non-recall
+// activities required after a routed recall before the next due recall in
+// INSTRUCTION: at most one due recall for two acquisition activities, so a
+// backlog of due cards cannot stall acquisition. MAINTENANCE has no quota.
+const RecallInterleaveInstructionActivities = 2
+
+// MasteryChallengeCadence is the minimum number of interactions between two
+// mastery challenges routed outside the high-mastery rotation.
+const MasteryChallengeCadence = 5
+
+// recallNeedSelection picks the most overdue previously acquired concept.
+// A concept is due when its FSRS NextReview has passed, or when its current
+// retrievability is below the FSRS desired retention (0.9) for a card with
+// no stored schedule. Concepts are ranked by relative lateness
+// (now - NextReview) / ScheduledDays, then lower retention, then concept ID.
+// The 0.40/0.30 retention bands remain the user-facing FORGETTING alerts.
 func recallNeedSelection(domain *models.Domain, pf *pipelineFixtures, phase models.Phase, input OrchestratorInput) (Selection, bool) {
 	best := Selection{Phase: phase}
-	bestRetention := input.Config.RetentionRecallThreshold
+	bestOverdue, bestRetention := 0.0, 0.0
 	for _, concept := range domain.Graph.Concepts {
 		relevance, eligible := resolveRelevance(pf.GoalRelevance, concept)
 		if !eligible || relevance <= input.Config.GoalRelevantCutoff {
 			continue
 		}
 		cs := pf.StatesByConcept[concept]
-		if !RecallEligible(cs) {
+		if reviewedWithin(cs, input.Now, RecallMinimumSpacing) {
 			continue
 		}
-		retention := algorithms.CurrentRetrievability(input.Now, cs.LastReview, cs.Stability)
-		if !(retention < input.Config.RetentionRecallThreshold) {
+		overdue, retention, due := RecallDue(cs, input.Now)
+		if !due {
 			continue
 		}
-		if best.Concept == "" || retention < bestRetention || (retention == bestRetention && concept < best.Concept) {
+		if best.Concept == "" || overdue > bestOverdue ||
+			(overdue == bestOverdue && (retention < bestRetention || (retention == bestRetention && concept < best.Concept))) {
 			best.Concept = concept
-			best.Score = 1 - retention
-			best.Rationale = fmt.Sprintf("recall need: current retention %.2f below %.2f", retention, input.Config.RetentionRecallThreshold)
-			bestRetention = retention
+			best.Score = overdue
+			best.Rationale = fmt.Sprintf("recall due: relative lateness %.2f, current retention %.2f", overdue, retention)
+			bestOverdue, bestRetention = overdue, retention
 		}
 	}
 	return best, best.Concept != ""
+}
+
+// RecallMinimumSpacing keeps a card that was just reviewed out of recall
+// selection. A failed review reschedules the card immediately; without this
+// spacing the same recall would be served again before any other activity.
+const RecallMinimumSpacing = 10 * time.Minute
+
+func reviewedWithin(cs *models.ConceptState, now time.Time, window time.Duration) bool {
+	if cs == nil || cs.LastReview == nil || cs.LastReview.IsZero() {
+		return false
+	}
+	elapsed := now.Sub(*cs.LastReview)
+	return elapsed >= 0 && elapsed < window
+}
+
+// RecallDue reports whether an acquired card is due for spaced retrieval and
+// its relative lateness (now - NextReview) / max(1 day, ScheduledDays).
+func RecallDue(cs *models.ConceptState, now time.Time) (overdue, retention float64, due bool) {
+	if !RecallEligible(cs) {
+		return 0, 1, false
+	}
+	retention = algorithms.CurrentRetrievability(now, cs.LastReview, cs.Stability)
+	next := cs.NextReview
+	if next == nil || next.IsZero() {
+		if !(retention < algorithms.FSRSDesiredRetention) {
+			return 0, retention, false
+		}
+		scheduled := cs.LastReview.Add(time.Duration(cs.ScheduledDays) * 24 * time.Hour)
+		next = &scheduled
+	} else if next.After(now) {
+		return 0, retention, false
+	}
+	interval := time.Duration(max(1, cs.ScheduledDays)) * 24 * time.Hour
+	return max(0, float64(now.Sub(*next))/float64(interval)), retention, true
+}
+
+// recallQuotaAllows enforces RecallInterleaveInstructionActivities on the
+// most recent interactions of the domain (newest first).
+func recallQuotaAllows(recent []*models.Interaction, phase models.Phase) bool {
+	if phase == models.PhaseMaintenance {
+		return true
+	}
+	for i, interaction := range recent {
+		if i >= RecallInterleaveInstructionActivities {
+			break
+		}
+		if interaction != nil && models.ActivityType(interaction.ActivityType) == models.ActivityRecall {
+			return false
+		}
+	}
+	return true
+}
+
+// recallActionFor turns the selected action into a retrieval, except when an
+// active misconception must be confronted first.
+func recallActionFor(action Action) Action {
+	if action.Type == models.ActivityDebugMisconception {
+		return action
+	}
+	return Action{
+		Type:             models.ActivityRecall,
+		DifficultyTarget: 0.65,
+		Format:           "spaced_retrieval",
+		EstimatedMinutes: 8,
+		Rationale:        "spaced retrieval of a due card",
+	}
+}
+
+// recentServedWindow bounds the decision history read for cadence and
+// rotation.
+const recentServedWindow = 50
+
+// servedWithinCadence reports whether activityType was served among the last
+// MasteryChallengeCadence recorded interactions or served decisions of the
+// domain. Decisions cover hosts that never record the activity itself.
+func servedWithinCadence(pf *pipelineFixtures, activityType models.ActivityType) bool {
+	for i, interaction := range pf.RecentInteractions {
+		if i >= MasteryChallengeCadence {
+			break
+		}
+		if interaction != nil && models.ActivityType(interaction.ActivityType) == activityType {
+			return true
+		}
+	}
+	for i, decision := range pf.RecentDecisions {
+		if i >= MasteryChallengeCadence {
+			break
+		}
+		if decision != nil && decision.Contract.RecommendedActivityType == activityType {
+			return true
+		}
+	}
+	return false
+}
+
+// lastServedAt returns, per concept, when activityType was last served as an
+// interaction or a decision.
+func lastServedAt(pf *pipelineFixtures, activityType models.ActivityType) map[string]time.Time {
+	last := map[string]time.Time{}
+	note := func(concept string, at time.Time) {
+		if concept != "" && at.After(last[concept]) {
+			last[concept] = at
+		}
+	}
+	for _, interaction := range pf.RecentInteractions {
+		if interaction != nil && models.ActivityType(interaction.ActivityType) == activityType {
+			note(interaction.Concept, interaction.CreatedAt)
+		}
+	}
+	for _, decision := range pf.RecentDecisions {
+		if decision != nil && decision.Contract.RecommendedActivityType == activityType {
+			note(decision.Contract.TargetConcept, decision.CreatedAt)
+		}
+	}
+	return last
+}
+
+// leastRecentlyServed picks the candidate served least recently with
+// activityType; never-served candidates come first and ties keep the
+// candidates' order.
+func leastRecentlyServed(candidates []string, pf *pipelineFixtures, activityType models.ActivityType) string {
+	last := lastServedAt(pf, activityType)
+	best := ""
+	for _, concept := range candidates {
+		if best == "" || last[concept].Before(last[best]) {
+			best = concept
+		}
+	}
+	return best
+}
+
+// masteryChallengeSelection routes a MASTERY_CHALLENGE for a concept that
+// carries AlertMasteryReady but is not yet demonstrated. Outside MAINTENANCE
+// the high-mastery rotation is otherwise unreachable, because the fringe
+// excludes concepts above the routing threshold. Cadence: no mastery
+// challenge among the last MasteryChallengeCadence interactions or served
+// decisions of the domain. Candidates rotate, least recently challenged first.
+func masteryChallengeSelection(domain *models.Domain, pf *pipelineFixtures, phase models.Phase, input OrchestratorInput) (Selection, bool) {
+	if servedWithinCadence(pf, models.ActivityMasteryChallenge) {
+		return Selection{}, false
+	}
+	inDomain := make(map[string]bool, len(domain.Graph.Concepts))
+	for _, concept := range domain.Graph.Concepts {
+		inDomain[concept] = true
+	}
+	var candidates []string
+	for _, alert := range pf.Alerts {
+		if alert.Type != models.AlertMasteryReady || !inDomain[alert.Concept] || pf.ActiveMisc[alert.Concept] {
+			continue
+		}
+		if _, eligible := resolveRelevance(pf.GoalRelevance, alert.Concept); !eligible {
+			continue
+		}
+		evidence := pf.Evidence.ForConcept(alert.Concept)
+		status := AssessMasteryStatus(input.LearnerID, alert.Concept, pf.StatesByConcept[alert.Concept],
+			pf.RecentInteractions, evidence.Transfers, evidence.Assessments, input.Now)
+		if status.Demonstrated {
+			continue
+		}
+		candidates = append(candidates, alert.Concept)
+	}
+	if len(candidates) == 0 {
+		return Selection{}, false
+	}
+	slices.Sort(candidates)
+	return Selection{
+		Concept:   leastRecentlyServed(candidates, pf, models.ActivityMasteryChallenge),
+		Score:     1,
+		Phase:     phase,
+		Rationale: "MASTERY_READY without demonstration: mastery challenge",
+	}, true
+}
+
+// MaintenanceChallengeRefreshAge is the age of the latest demonstration after
+// which MAINTENANCE re-tests a demonstrated concept with a new challenge.
+const MaintenanceChallengeRefreshAge = 60 * 24 * time.Hour
+
+// demonstratedMaintenanceSelection handles MAINTENANCE once every
+// goal-relevant concept is demonstrated and no recall is due. Re-practising
+// demonstrated material at that point is wasted time, so in order:
+//
+//  1. a concept not yet Transferred gets a TRANSFER_PROBE on its first
+//     missing (or failing) transfer dimension;
+//  2. a concept whose latest demonstration is older than
+//     MaintenanceChallengeRefreshAge gets a new MASTERY_CHALLENGE;
+//  3. otherwise REST: the domain is maintained until the next card is due.
+//
+// Probes and challenges follow MasteryChallengeCadence and rotate, least
+// recently served concept first. While one is pending but held back by the
+// cadence, ok is false so normal MAINTENANCE practice runs in between.
+//
+// ok is false while any goal-relevant concept is not demonstrated, so the
+// normal MAINTENANCE selection keeps running.
+func demonstratedMaintenanceSelection(domain *models.Domain, pf *pipelineFixtures, phase models.Phase, input OrchestratorInput) (Action, Selection, bool) {
+	type candidate struct {
+		concept   string
+		status    MasteryStatus
+		transfer  TransferProfile
+		lastShown time.Time
+	}
+	var concepts []candidate
+	for _, concept := range domain.Graph.Concepts {
+		relevance, eligible := resolveRelevance(pf.GoalRelevance, concept)
+		if !eligible || relevance <= input.Config.GoalRelevantCutoff {
+			continue
+		}
+		evidence := pf.Evidence.ForConcept(concept)
+		status := AssessMasteryStatus(input.LearnerID, concept, pf.StatesByConcept[concept],
+			pf.RecentInteractions, evidence.Transfers, evidence.Assessments, input.Now)
+		if !status.Demonstrated || pf.ActiveMisc[concept] {
+			return Action{}, Selection{}, false
+		}
+		attempts := assessmentEvidenceAt(input.LearnerID, concept, evidence.Assessments, input.Now)
+		lastShown, _ := latestTrustedDemonstrationAt(concept, attempts)
+		concepts = append(concepts, candidate{
+			concept:   concept,
+			status:    status,
+			transfer:  BuildTrustedTransferProfileFromEvidence(concept, evidence.Transfers, attempts, input.Now),
+			lastShown: lastShown,
+		})
+	}
+	if len(concepts) == 0 {
+		return Action{}, Selection{}, false
+	}
+	byConcept := make(map[string]candidate, len(concepts))
+	var untransferred, stale []string
+	for _, c := range concepts {
+		byConcept[c.concept] = c
+		if !c.status.Transferred {
+			untransferred = append(untransferred, c.concept)
+		}
+		if c.lastShown.IsZero() || input.Now.Sub(c.lastShown) >= MaintenanceChallengeRefreshAge {
+			stale = append(stale, c.concept)
+		}
+	}
+	held := false
+	if len(untransferred) > 0 {
+		if !servedWithinCadence(pf, models.ActivityTransferProbe) {
+			c := byConcept[leastRecentlyServed(untransferred, pf, models.ActivityTransferProbe)]
+			dimension := transferProbeDimension(c.transfer)
+			return Action{
+					Type:             models.ActivityTransferProbe,
+					DifficultyTarget: 0.65,
+					Format:           "transfer_" + string(dimension),
+					EstimatedMinutes: 20,
+					Rationale:        fmt.Sprintf("demonstrated but not transferred: probe the %s transfer dimension", dimension),
+				}, Selection{Concept: c.concept, Score: 1, Phase: phase,
+					Rationale: "every goal-relevant concept demonstrated, nothing due"}, true
+		}
+		held = true
+	}
+	if len(stale) > 0 {
+		if !servedWithinCadence(pf, models.ActivityMasteryChallenge) {
+			action := masteryChallengeAction()
+			action.Rationale = "latest demonstration is old: refresh the mastery challenge"
+			return action, Selection{Concept: leastRecentlyServed(stale, pf, models.ActivityMasteryChallenge), Score: 1, Phase: phase,
+				Rationale: "every goal-relevant concept demonstrated, nothing due"}, true
+		}
+		held = true
+	}
+	if held {
+		return Action{}, Selection{}, false
+	}
+	return Action{
+			Type:      models.ActivityRest,
+			Format:    "maintenance_complete",
+			Rationale: "nothing is due for recall and every goal-relevant concept is demonstrated and transferred",
+		}, Selection{Phase: phase,
+			Rationale: "maintenance complete until the next scheduled review"}, true
+}
+
+// transferProbeDimension picks the first canonical dimension that is missing,
+// then the first failing one, then the weakest.
+func transferProbeDimension(profile TransferProfile) TransferDimension {
+	if len(profile.MissingDimensions) > 0 {
+		return profile.MissingDimensions[0]
+	}
+	for _, summary := range profile.DimensionSummaries {
+		if summary.Covered && !summary.Passing {
+			return summary.Dimension
+		}
+	}
+	if len(profile.WeakestDimensions) > 0 {
+		return profile.WeakestDimensions[0]
+	}
+	return TransferDimensionNear
+}
+
+func masteryChallengeAction() Action {
+	return Action{
+		Type:             models.ActivityMasteryChallenge,
+		DifficultyTarget: 0.75,
+		Format:           "integrated_performance_task",
+		EstimatedMinutes: 45,
+		Rationale:        "ready for a mastery challenge: prepare it as a decision-bound assessment attempt",
+	}
 }
 
 func criticalForgettingBypassSelection(alerts []models.Alert, phase models.Phase) (Selection, bool) {

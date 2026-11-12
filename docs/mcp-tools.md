@@ -30,6 +30,26 @@ opts into cached-response retention, an expired response produces an explicit
 already-completed error; the durable key and request hash remain, so the tool
 handler is never executed again for that key.
 
+The server's `initialize` result carries short `instructions` describing the
+learning loop (context, session, `get_next_activity`, present, record, close)
+and the `idempotency_key` rule; the `tutor_mcp` prompt holds the full protocol.
+
+Inputs that accept a fixed vocabulary advertise it as a JSON Schema `enum`.
+Rejections that the caller can correct return a message naming the problem
+(for example `training action rejected: invalid filter`), and an unknown or
+archived `domain_id` passed to `get_next_activity` returns `domain not found`
+with the learner's active domains instead of a setup activity. The
+`get_next_activity` payload keeps `llm_instruction`, `learner_explanation` and
+`audit_rationale` inside `pedagogical_contract` only; `decision_id` remains at
+the top level.
+
+Training edit tools (`preview_training_edit`, `propose_training_edit`,
+`save_training_edit`, `share_training`) advertise only the parts of `document`
+the server reads: `curriculum` for a personal training, `modules` and `concepts`
+for an institutional one, and `training.description` for a new institutional
+programme. Server-computed fields returned by `get_training` (capabilities,
+progress, revision, provenance) may still be sent back and are ignored.
+
 Decision-bound assessment rubric criterion IDs are opaque and case-sensitive.
 Copy a curriculum criterion ID exactly, including its upper-case letters,
 underscores and hyphens; do not convert it to a slug. The frozen rubric and
@@ -45,7 +65,7 @@ normalizer for unbound assessments retains its historical behavior.
 | `start_learning_session` | Idempotently open/resume the durable session ID shared by interactions, affect, transfer, intentions, assessments and summaries |
 | `get_learner_context` | Session-start context: active domain, concept states, recent history, active misconceptions |
 | `get_pending_alerts` | Learning + metacognitive alerts requiring action |
-| `get_next_activity` | Next recommended activity + episodic context + reasoning request + tutor mode + motivation brief + mastery uncertainty + transfer profile |
+| `get_next_activity` | Next recommended activity + pedagogical contract (instruction, constraints, optional reasoning request) + episodic context + tutor mode + motivation brief + mastery uncertainty + transfer profile |
 | `prepare_assessment_attempt` / `submit_assessment_attempt` / `cancel_assessment_attempt` | Freeze task/rubric before the response, commit the response before evaluation, or explicitly cancel the attempt |
 | `record_interaction` | Persist an observation and update BKT/FSRS; unlinked practice stays explicitly unverified, while retention/demonstration/transfer evidence references a submitted/evaluated attempt |
 | `record_learning_event` | Record delivered feedback/instruction separately from responses; server time and idempotent event key, without awarding model progress |

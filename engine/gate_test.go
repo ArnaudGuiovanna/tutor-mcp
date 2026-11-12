@@ -277,7 +277,7 @@ func TestApplyGate_AntiRepeat_ExcludesRecent(t *testing.T) {
 	in := GateInput{
 		Phase:            models.PhaseInstruction,
 		Concepts:         []string{"A", "B", "C", "D"},
-		States:           statesMap(gateCS("A", 0.3), gateCS("B", 0.3), gateCS("C", 0.3), gateCS("D", 0.3)),
+		States:           statesMap(gateCS("A", 0.1), gateCS("B", 0.1), gateCS("C", 0.1), gateCS("D", 0.1)),
 		Graph:            graph([]string{"A", "B", "C", "D"}, nil),
 		RecentConcepts:   []string{"A", "B"},
 		AntiRepeatWindow: 2,
@@ -324,7 +324,7 @@ func TestApplyGate_AntiRepeat_RespectsWindowSize(t *testing.T) {
 	in := GateInput{
 		Phase:            models.PhaseInstruction,
 		Concepts:         []string{"A", "B", "C", "D"},
-		States:           statesMap(gateCS("A", 0.3), gateCS("B", 0.3), gateCS("C", 0.3), gateCS("D", 0.3)),
+		States:           statesMap(gateCS("A", 0.1), gateCS("B", 0.1), gateCS("C", 0.1), gateCS("D", 0.1)),
 		Graph:            graph([]string{"A", "B", "C", "D"}, nil),
 		RecentConcepts:   []string{"A", "B", "C"}, // C is "older" than B which is older than A
 		AntiRepeatWindow: 2,                       // exclude A, B only
@@ -751,4 +751,39 @@ func TestApplyGate_ForgettingCritical_OverloadStillWins(t *testing.T) {
 	if r.EscapeAction == nil {
 		t.Fatalf("expected OVERLOAD escape, got allow %+v", r.AllowedConcepts)
 	}
+}
+
+// P1-7: a started concept is exempt from anti-repetition until it was the
+// subject of the two most recent interactions.
+func TestApplyGate_AntiRepeat_StartedConceptConsolidatesTwice(t *testing.T) {
+	in := GateInput{
+		Phase:            models.PhaseInstruction,
+		Concepts:         []string{"A", "B"},
+		States:           statesMap(gateCS("A", 0.4), gateCS("B", 0.1)),
+		Graph:            graph([]string{"A", "B"}, nil),
+		RecentConcepts:   []string{"A"},
+		AntiRepeatWindow: 1,
+	}
+	r, _ := ApplyGate(in)
+	containsAll(t, r.AllowedConcepts, []string{"A", "B"})
+	in.RecentConcepts = []string{"A", "A"}
+	r, _ = ApplyGate(in)
+	containsNone(t, r.AllowedConcepts, []string{"A"})
+}
+
+// P1-5b: the gate caps an unverified prerequisite below the threshold.
+func TestApplyGate_UnverifiedPrerequisiteDoesNotUnlock(t *testing.T) {
+	g := graph([]string{"Basics", "Advanced"}, map[string][]string{"Advanced": {"Basics"}})
+	in := GateInput{
+		Phase:            models.PhaseInstruction,
+		Concepts:         g.Concepts,
+		States:           statesMap(gateCS("Basics", 0.95), gateCS("Advanced", 0.1)),
+		Graph:            g,
+		VerifiedConcepts: map[string]bool{},
+	}
+	r, _ := ApplyGate(in)
+	containsNone(t, r.AllowedConcepts, []string{"Advanced"})
+	in.VerifiedConcepts = map[string]bool{"Basics": true}
+	r, _ = ApplyGate(in)
+	containsAll(t, r.AllowedConcepts, []string{"Advanced"})
 }

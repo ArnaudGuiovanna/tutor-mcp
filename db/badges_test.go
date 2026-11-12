@@ -47,16 +47,17 @@ func badgeObservationContext(t *testing.T, ctx context.Context, s *Store, p mode
 		t.Fatal(err)
 	}
 	raw, _ := json.Marshal(competency)
-	a := &models.AssessmentAttempt{ID: id, LearnerID: p.LearnerID, DomainID: e.DomainID, ConceptID: key, SessionID: session.ID, ActivityID: "activity-" + id, ActivityVersion: 1, ActivityType: string(activity), DecisionID: d.ID, CurriculumVersion: curriculum.Version, CurriculumConceptJSON: string(raw), Observable: "Apply independently", TaskText: "Frozen task", RubricJSON: `{"criteria":[{"id":"correctness","description":"A correct response.","max_score":1}],"passing_score":1}`, PassingScore: 1, CreatedAt: at.Add(-time.Minute)}
+	a := &models.AssessmentAttempt{ID: id, LearnerID: p.LearnerID, DomainID: e.DomainID, ConceptID: key, SessionID: session.ID, ActivityID: "activity-" + id, ActivityVersion: 1, ActivityType: string(activity), DecisionID: d.ID, CurriculumVersion: curriculum.Version, CurriculumConceptJSON: string(raw), Observable: "Apply independently", TaskText: "Frozen task", RubricJSON: `{"criteria":[{"id":"correctness","description":"A correct response.","max_score":1},{"id":"reasoning","description":"A justified response.","max_score":1}],"passing_score":2}`, PassingScore: 2, CreatedAt: at.Add(-time.Minute)}
 	if err := s.CreateAssessmentAttempt(ctx, a); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SubmitAssessmentAttempt(ctx, p.LearnerID, id, "Learner response", "hash", at); err != nil {
 		t.Fatal(err)
 	}
-	score, total := completeBoundScore, 1.0
+	// Two criteria: a decision-bound MASTERY_CHALLENGE needs at least two.
+	score, total := `{"criteria_scores":[{"id":"correctness","score":1,"evidence":"Correct."},{"id":"reasoning","score":1,"evidence":"Justified."}]}`, 2.0
 	if !pass {
-		score, total = `{"criteria_scores":[{"id":"correctness","score":0,"evidence":"Not correct."}]}`, 0
+		score, total = `{"criteria_scores":[{"id":"correctness","score":0,"evidence":"Not correct."},{"id":"reasoning","score":0,"evidence":"Not justified."}]}`, 0
 	}
 	if err := s.CompleteAssessmentEvaluation(ctx, p.LearnerID, id, score, "host", models.EvaluationMethodHostLLM, "{}", total, pass, at.Add(time.Second)); err != nil {
 		t.Fatal(err)
@@ -381,7 +382,16 @@ func TestInstitutionBadgesAdjudicationMigrationAndErasure(t *testing.T) {
 	}
 	s.SetHostLLMDemonstrationPolicy(false)
 	id := badgeObservation(t, s, p, e, "numbers", models.ActivityMasteryChallenge, time.Now().Add(-time.Minute), time.Time{}, time.Time{}, true, 0)
-	review := recordReviewForTest(t, s, reviewWriter(owner), id, "badge-review")
+	// The badge fixture rubric has two criteria (MASTERY_CHALLENGE floor).
+	material, err := s.GetAssessmentReviewMaterial(ctx, reviewWriter(owner), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, replayed, err := s.RecordAssessmentReview(ctx, reviewWriter(owner), id, "badge-review", material.MaterialHash,
+		`{"criteria_scores":[{"id":"correctness","score":1,"evidence":"Correct."},{"id":"reasoning","score":1,"evidence":"Justified."}]}`)
+	if err != nil || replayed {
+		t.Fatalf("record review: replayed=%t err=%v", replayed, err)
+	}
 	adjudicator, sign := adjudicatorForTest(t, s, owner.TenantID)
 	if _, _, err := adjudicator.AdjudicateAssessment(ctx, reviewWriter(owner), id, sign(review, "badge-accept", "accept", 0)); err != nil {
 		t.Fatal(err)

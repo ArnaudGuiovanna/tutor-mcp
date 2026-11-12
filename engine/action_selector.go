@@ -177,7 +177,9 @@ func SelectActionAt(concept string, cs *models.ConceptState, mc *models.Misconce
 	// reviewed at least once. A "new" card has no meaningful Stability
 	// so Retrievability is uninformative (cf. engine/alert.go which
 	// excludes new cards from FORGETTING).
-	if cs.CardState != "new" {
+	// RecallEligible also excludes a card left in the learning state by a
+	// failed first exposure: there is nothing acquired to recall yet.
+	if RecallEligible(cs) {
 		retention := algorithms.CurrentRetrievability(now, cs.LastReview, cs.Stability)
 		if retention < algorithms.RetentionRecallRoutingThreshold {
 			return Action{

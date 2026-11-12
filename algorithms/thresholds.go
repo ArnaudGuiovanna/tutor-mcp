@@ -35,16 +35,20 @@ const (
 	RetentionAlertCriticalThreshold = 0.30
 
 	// RetentionRecallRoutingThreshold is intentionally higher than the
-	// alert thresholds. It is used after a concept has already been selected
-	// for work, to route the activity toward recall before the user-facing
-	// FORGETTING alert bands (<0.40 warning, <0.30 critical) are reached.
+	// alert thresholds. Once a concept has been selected for work, the action
+	// selector turns the activity into a recall below this retention. It does
+	// not decide which concepts are due: the orchestrator schedules recall
+	// from FSRS NextReview (desired retention FSRSDesiredRetention = 0.9), see
+	// engine.RecallDue. The 0.40/0.30 bands are the user-facing alerts.
 	RetentionRecallRoutingThreshold = 0.50
 )
 
-// MasteryBKT returns the threshold for "concept mastered per BKT P(L)".
-// Used by the MASTERY_READY alert, mastery_challenge eligibility,
-// transfer_challenge gating and the mastered-concept count in
-// ComputeMetacognitiveAlerts.
+// MasteryBKT returns the routing threshold on the BKT estimate P(L). Reaching
+// it means "estimated", never "mastered": it excludes a concept from the
+// INSTRUCTION fringe, enters MAINTENANCE, opens the high-mastery rotation of
+// the action selector and is one of the conditions of MASTERY_READY and of a
+// demonstration. A demonstration additionally requires a passed trusted
+// MASTERY_CHALLENGE or TRANSFER_PROBE (engine.AssessMasteryStatus).
 func MasteryBKT() float64 {
 	// Both profiles set BKT mastery to 0.85: the unified profile makes
 	// BKT/KST/Mid share 0.85, and the legacy profile already pinned BKT at

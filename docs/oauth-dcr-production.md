@@ -42,7 +42,41 @@ WWW-Authenticate: Bearer realm="oauth-dcr", error="invalid_token"
 Un IAT valide autorise les clients publics PKCE et confidentiels : l'opérateur
 qui distribue cette capacité assume explicitement cette autorité. Chaque IAT a
 un quota transactionnel ; le token de bootstrap configuré au démarrage reçoit
-1 000 créations. Les replays exacts ne consomment pas une seconde unité.
+1 000 créations. Le quota est vérifié avant toute déduplication : un IAT épuisé
+refuse aussi une requête équivalente à un enregistrement existant. Une requête
+publique dédupliquée ne consomme pas d'unité supplémentaire.
+
+## Limites par IP
+
+Indépendamment des quotas par IAT, `POST /register` est borné par adresse IP
+cliente :
+
+- une limite d'admission fixe de 30 requêtes par minute, locale au processus,
+  appliquée avant la vérification de l'IAT ;
+- une limite par minute et un budget quotidien glissant,
+  `OAUTH_DCR_MAX_REGISTRATIONS_PER_IP_PER_DAY` (défaut `500`, plage
+  1–1 000 000), appliqués après l'admission. Avec `RATELIMIT_BACKEND=postgres`,
+  ces deux compteurs sont partagés entre instances.
+
+Un dépassement reçoit `429`. Le défaut convient aux connecteurs hébergés qui
+s'enregistrent depuis un petit nombre d'adresses de sortie ; l'augmenter si
+un fournisseur légitime atteint le budget, le réduire pour un déploiement
+dont les clients sont connus.
+
+## Client ID Metadata Documents
+
+`OAUTH_CIMD_MODE` contrôle la résolution des `client_id` de type URL HTTPS
+(CIMD), indépendamment de `OAUTH_DCR_MODE` :
+
+- `on` (défaut) résout les documents servis par n'importe quel hôte public ;
+- `off` désactive CIMD ; la discovery publie
+  `client_id_metadata_document_supported: false` ;
+- une liste de noms d'hôtes DNS séparés par des virgules (par exemple
+  `claude.ai,app.example.com`) ne résout que les `client_id` dont l'hôte
+  correspond exactement à l'une des entrées. Schéma, port, chemin, joker et
+  adresse IP sont refusés au démarrage.
+
+Les clients déjà enregistrés en base ne sont pas concernés par ce réglage.
 
 ## Administration et rotation
 
@@ -92,7 +126,7 @@ physiquement, de sorte que leur historique reste réconciliable.
 
 ## Durée de vie
 
-Un client nouvellement enregistré reste éphémère pendant 30 jours. Le premier
+Un client nouvellement enregistré reste provisoire pendant 30 jours. Le premier
 échange de code réussi met `oauth_clients.expires_at` à `NULL` dans la même
 transaction que la consommation du code et la création du refresh token. La
 mutation est idempotente et accepte les clients CIMD non persistés. Le cleanup
@@ -100,14 +134,50 @@ des clients jamais utilisés reste exclusivement dans le job horaire du
 scheduler ; `/register` ne le déclenche plus. La suppression et son audit sont
 dans la même transaction.
 
-Les métadonnées effectives sont canonisées et indexées par empreinte. Deux
-requêtes équivalentes, y compris concurrentes ou avec un ordre différent des
-URI, obtiennent le même `client_id` et une seule consommation de quota. En
-production, le secret d'un client confidentiel est conservé uniquement dans
-une enveloppe AES-256-GCM liée au client et à l'empreinte, afin qu'un replay
-exact rende le même credential sans plaintext dans le dump. Sans keyring en
-développement, la première création confidentielle fonctionne mais un replay
-est refusé plutôt que de créer un doublon ou exposer un secret irrécupérable.
+Le nombre total de clients enregistrés est plafonné (10 000). Lorsque le
+plafond est atteint, un nouvel enregistrement évince d'abord le plus ancien
+client provisoire jamais activé : aucun échange de code réussi, aucun refresh
+token, aucun compte de service, et enregistré depuis plus d'une heure. Ses
+codes en attente et approbations sont supprimés avec lui, dans la même
+transaction, et le journal enregistre `client_evicted_deleted`. Si aucun client
+n'est éligible, l'enregistrement est refusé. Les clients activés ne sont
+jamais évincés.
+
+## Ré-enregistrement
+
+Les clients publics (sans secret) sont dédupliqués : leurs métadonnées
+effectives sont canonisées et indexées par empreinte. Deux requêtes
+équivalentes, y compris concurrentes ou avec un ordre différent des URI,
+obtiennent le même `client_id` ; la première reçoit `201`, les suivantes `200`
+avec ce même `client_id`, sans consommer de quota supplémentaire. Si le client
+équivalent est provisoire et expiré, la requête est refusée jusqu'à son
+nettoyage par le job horaire.
+
+Les clients confidentiels ne sont pas dédupliqués. Chaque enregistrement
+confidentiel admis crée un client distinct et reçoit `201` avec un nouveau
+`client_id` et un nouveau `client_secret`, soumis au quota de l'IAT et au
+plafond global. Le secret n'est renvoyé qu'une seule fois, à la création ;
+seul son hachage bcrypt est conservé. Un client confidentiel qui a perdu son
+secret doit se ré-enregistrer et utiliser le nouveau couple d'identifiants.
+Les enregistrements antérieurs inutilisés expirent selon la règle des clients
+provisoires ci-dessus.
+
+## Formulaires et codes d'autorisation
+
+Les formulaires servis par le serveur (consentement `/authorize` et
+formulaires de compte) vérifient l'origine de la soumission en plus du jeton
+CSRF. Quand le navigateur envoie `Sec-Fetch-Site`, seules les valeurs
+`same-origin` et `none` sont acceptées ; sinon un en-tête `Origin` présent doit
+correspondre à `BASE_URL` (schéma et hôte). Une requête sans ces en-têtes, ou
+avec `Origin: null`, reste soumise au jeton CSRF. Derrière un reverse proxy,
+`BASE_URL` doit donc être l'origine publique exacte vue par le navigateur.
+
+Les codes d'autorisation ne sont stockés que sous forme hachée. Le format de la
+colonne est inchangé et aucune migration n'est nécessaire. Conséquence
+opérationnelle lors de la mise à jour : un code émis par une version antérieure
+et non encore échangé devient invalide. Les codes expirant après 5 minutes,
+l'effet est limité aux flux d'autorisation en cours pendant le déploiement ;
+le client recommence simplement l'autorisation.
 
 ## Déploiement et rollback
 
@@ -121,7 +191,7 @@ est refusé plutôt que de créer un doublon ou exposer un secret irrécupérabl
 Pour revenir en arrière pendant une rotation, conserver les deux capacités et
 remettre l'ancienne valeur de configuration. Après révocation, un rollback
 doit utiliser le nouveau token ou créer une nouvelle capacité : une révocation
-auditée n'est jamais annulée automatiquement. Restaurer une sauvegarde exige de
-restaurer aussi les versions du keyring nécessaires aux secrets confidentiels.
-Le cap global, la limite IP et le budget bcrypt restent des défenses
-complémentaires aux quotas durables par IAT.
+auditée n'est jamais annulée automatiquement. L'authentification des clients
+confidentiels repose uniquement sur le hachage de leur secret et ne dépend pas
+du keyring. Le plafond global, les limites IP et le budget bcrypt restent des
+défenses complémentaires aux quotas durables par IAT.

@@ -144,6 +144,11 @@ func registerPrepareAssessmentAttempt(server *mcp.Server, deps *Deps) {
 			var strict models.AssessmentRubric
 			strict, err = normalizeAssessmentRubric(params.RubricJSON)
 			if err == nil {
+				// Surface the summative floor here: the store enforces it too,
+				// but its error is not shown to the host.
+				err = assessment.ValidateDecisionRubric(models.ActivityType(params.ActivityType), strict)
+			}
+			if err == nil {
 				rubric, warnings = assessmentRubricMap(strict), nil
 			}
 		} else {

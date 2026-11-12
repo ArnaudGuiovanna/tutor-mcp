@@ -168,6 +168,68 @@ func isCIMDClientID(clientID string) bool {
 	return err == nil
 }
 
+const (
+	CIMDModeOn  = "on"
+	CIMDModeOff = "off"
+)
+
+// CIMDPolicy controls which Client ID Metadata Documents are resolved. The zero
+// value accepts every public HTTPS client_id, which is the historical default.
+type CIMDPolicy struct {
+	disabled     bool
+	allowedHosts map[string]bool
+}
+
+// ParseCIMDPolicy reads OAUTH_CIMD_MODE: empty or "on" accepts any public
+// HTTPS host, "off" disables CIMD, and a comma-separated list of hostnames
+// accepts only those exact hosts.
+func ParseCIMDPolicy(raw string) (CIMDPolicy, error) {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	switch value {
+	case "", CIMDModeOn:
+		return CIMDPolicy{}, nil
+	case CIMDModeOff:
+		return CIMDPolicy{disabled: true}, nil
+	}
+	policy := CIMDPolicy{allowedHosts: map[string]bool{}}
+	for _, entry := range strings.Split(value, ",") {
+		host := strings.TrimSuffix(strings.TrimSpace(entry), ".")
+		if host == "" {
+			continue
+		}
+		if len(host) > 253 || strings.ContainsAny(host, "/:@*?#[] ") || net.ParseIP(host) != nil {
+			return CIMDPolicy{}, fmt.Errorf("OAUTH_CIMD_MODE entry %q must be on, off, or a DNS hostname", entry)
+		}
+		policy.allowedHosts[host] = true
+	}
+	if len(policy.allowedHosts) == 0 {
+		return CIMDPolicy{}, fmt.Errorf("OAUTH_CIMD_MODE must be on, off, or a comma-separated list of hostnames")
+	}
+	return policy, nil
+}
+
+// Enabled reports whether any CIMD client may be resolved.
+func (p CIMDPolicy) Enabled() bool { return !p.disabled }
+
+func (p CIMDPolicy) allows(clientID string) bool {
+	if p.disabled {
+		return false
+	}
+	u, err := parseCIMDClientID(clientID)
+	if err != nil {
+		return false
+	}
+	if p.allowedHosts == nil {
+		return true
+	}
+	return p.allowedHosts[strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")]
+}
+
+// ConfigureCIMD installs the boot-time CIMD policy.
+func (s *OAuthServer) ConfigureCIMD(policy CIMDPolicy) {
+	s.cimdPolicy = policy
+}
+
 func (s *OAuthServer) resolveOAuthClient(ctx context.Context, clientID string) (*models.OAuthClient, error) {
 	client, err := s.store.GetOAuthClient(ctx, clientID)
 	if err == nil {
@@ -176,7 +238,7 @@ func (s *OAuthServer) resolveOAuthClient(ctx context.Context, clientID string) (
 	if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
-	if !isCIMDClientID(clientID) {
+	if !s.cimdPolicy.allows(clientID) {
 		return nil, err
 	}
 	return s.fetchCIMDClient(ctx, clientID)
@@ -188,6 +250,9 @@ func (s *OAuthServer) fetchCIMDClient(ctx context.Context, clientID string) (*mo
 	}
 	if _, err := parseCIMDClientID(clientID); err != nil {
 		return nil, err
+	}
+	if !s.cimdPolicy.allows(clientID) {
+		return nil, fmt.Errorf("CIMD client_id is not permitted by policy")
 	}
 
 	now := time.Now().UTC()

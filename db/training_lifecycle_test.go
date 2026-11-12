@@ -192,3 +192,24 @@ func TestTrainingPublishedLifecycleRequiresPublicationAuthority(t *testing.T) {
 	in.Key = "owner-restore"
 	trainingCall[map[string]any](t, s, owner, "restore_training", in)
 }
+
+func TestTrainingPublishedAudienceRequiresPublicationAuthority(t *testing.T) {
+	s := setupTestDB(t)
+	tenant := nativeTestTenant(t, s, "training-audience-authority")
+	owner := trainingPrincipal(t, s, tenant, 189, true)
+	author := trainingPrincipal(t, s, tenant, 191, false)
+	d := trainingDomain(t, s, author, "Audience contribution")
+	doc := trainingCall[models.TrainingDocument](t, s, author, "share_training", models.TrainingRequest{ID: "personal:" + d.ID, ExpectedRevision: "1", Name: "Audience programme", Audience: "invitation", Key: "copy"})
+	// Before any publication the author still shapes the audience freely.
+	doc = trainingCall[models.TrainingDocument](t, s, author, "set_training_access", models.TrainingRequest{ID: doc.Training.ID, ExpectedRevision: doc.Training.Revision, Audience: "approval", Key: "draft-audience"})
+	doc = trainingCall[models.TrainingDocument](t, s, author, "submit_training", models.TrainingRequest{ID: doc.Training.ID, ExpectedRevision: doc.Training.Revision, Key: "submit"})
+	doc = trainingCall[models.TrainingDocument](t, s, owner, "decide_training", models.TrainingRequest{ID: doc.Training.ID, ExpectedRevision: doc.Training.Revision, Decision: "approve", Reason: "approved", Key: "approve"})
+	doc = trainingCall[models.TrainingDocument](t, s, author, "get_training", models.TrainingRequest{ID: doc.Training.ID})
+	if _, err := s.TrainingAction(t.Context(), author, "set_training_access", models.TrainingRequest{ID: doc.Training.ID, ExpectedRevision: doc.Training.Revision, Audience: "open", Key: "author-open"}); !errors.Is(err, storeport.ErrInvalidPrincipal) {
+		t.Fatalf("author without publication authority widened a published audience: %v", err)
+	}
+	// Restating the current audience is not a change.
+	trainingCall[models.TrainingDocument](t, s, author, "set_training_access", models.TrainingRequest{ID: doc.Training.ID, ExpectedRevision: doc.Training.Revision, Audience: doc.Training.Audience, Key: "author-same"})
+	ownerView := trainingCall[models.TrainingDocument](t, s, owner, "get_training", models.TrainingRequest{ID: doc.Training.ID})
+	trainingCall[models.TrainingDocument](t, s, owner, "set_training_access", models.TrainingRequest{ID: ownerView.Training.ID, ExpectedRevision: ownerView.Training.Revision, Audience: "open", Key: "owner-open"})
+}

@@ -63,3 +63,20 @@ describe('Nom de l’agent sélectionné', () => {
     expect(current.onConnect).not.toHaveBeenCalled();
   });
 });
+
+describe('Saisie de la connexion Tutor', () => {
+  it('ne remplace pas une adresse en cours de saisie lors d’un nouvel état, puis se resynchronise après enregistrement', () => {
+    const current = {...props(), section:'institution' as const};
+    current.settings = {...current.settings, tutor:{...current.settings.tutor, mode:'remote', url:'https://ancienne.example'}};
+    const view = render(<Connections {...current}/>);
+    const address = screen.getByLabelText('Adresse de Tutor') as HTMLInputElement;
+    fireEvent.change(address, {target:{value:'https://nouvelle.example'}});
+    // A state broadcast changes the saved Tutor settings while the field is being edited.
+    view.rerender(<Connections {...current} settings={{...current.settings, tutor:{...current.settings.tutor, url:'https://autre.example', command:'tutor-mcp'}}}/>);
+    expect(address.value).toBe('https://nouvelle.example');
+    fireEvent.click(screen.getByRole('button', {name:'Enregistrer la connexion Tutor'}));
+    expect(current.onSave).toHaveBeenCalledWith(expect.objectContaining({tutor:expect.objectContaining({url:'https://nouvelle.example'})}));
+    view.rerender(<Connections {...current} settings={{...current.settings, tutor:{...current.settings.tutor, url:'https://enregistree.example'}}}/>);
+    expect(address.value).toBe('https://enregistree.example');
+  });
+});

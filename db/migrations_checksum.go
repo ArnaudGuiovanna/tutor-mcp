@@ -1975,6 +1975,7 @@ END;`,
 	out = append(out, migration{Version: "0081_native_identities", Body: sqliteNativeIdentityMigration, RebuildKeepsAlterColumns: true})
 	out = append(out, migration{Version: "0082_conversation_training", Body: trainingMigration})
 	out = append(out, migration{Version: "0083_consolidation_maintenance", Body: consolidationMaintenanceMigration})
+	out = append(out, migration{Version: "0084_pedagogical_snapshot_interaction_index", Body: pedagogicalSnapshotInteractionIndexMigration})
 	markRemovedAlterColumns(out)
 	return out
 }

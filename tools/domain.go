@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"tutor-mcp/auth"
+	"tutor-mcp/db"
 	"tutor-mcp/engine"
 	"tutor-mcp/models"
 	storeport "tutor-mcp/store"
@@ -375,6 +376,13 @@ func registerInitDomain(server *mcp.Server, deps *Deps) {
 			}
 			return nil
 		})
+		var quota *db.DomainQuotaError
+		if errors.As(err, &quota) {
+			// The quota message is actionable (archive or delete a domain) and
+			// carries only the configured limit.
+			r, _ := errorResult(quota.Error())
+			return r, nil, nil
+		}
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "failed to create domain", err)
 			return r, nil, nil

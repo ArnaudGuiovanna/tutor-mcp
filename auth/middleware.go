@@ -21,6 +21,10 @@ type contextKey string
 // PrincipalValidator checks current tenant, user, membership status, roles and
 // token version. Production wires the durable identity store here so a
 // suspension or role change revokes an already-issued bearer immediately.
+//
+// This is a pre-check outside any tool transaction; the db store answers it
+// from a read-only tenant transaction. Tools revalidate inside the transaction
+// that owns their effect, where PostgreSQL writers hold the membership row.
 type PrincipalValidator interface {
 	ValidatePrincipal(context.Context, models.Principal) error
 }

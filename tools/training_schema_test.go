@@ -1,7 +1,10 @@
 package tools
 
 import (
+	"bytes"
 	"encoding/json"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -66,5 +69,111 @@ func TestTrainingEditSchemaRetainsProgrammeAndMutationKey(t *testing.T) {
 		if _, ok := schemaProperty(t, schema, "key")["minLength"]; !ok {
 			t.Fatalf("%s no longer requires a nonempty retry key", name)
 		}
+	}
+}
+
+func trainingTestDomain(t *testing.T, deps *Deps, key string) string {
+	t.Helper()
+	created := callTool(t, deps, RegisterTools, "L_owner", "init_domain", map[string]any{
+		"name": "Go " + key, "concepts": []string{"variables", "loops"}, "prerequisites": map[string][]string{"loops": {"variables"}},
+		"idempotency_key": key,
+	})
+	var domain struct {
+		ID string `json:"domain_id"`
+	}
+	if created.IsError || json.Unmarshal([]byte(resultText(created)), &domain) != nil || domain.ID == "" {
+		t.Fatalf("created domain: %s", resultText(created))
+	}
+	return "personal:" + domain.ID
+}
+
+func TestTrainingEditDocumentSchemaIsCompactAndOptional(t *testing.T) {
+	_, deps := setupToolsTest(t)
+	for _, name := range []string{"preview_training_edit", "propose_training_edit", "save_training_edit", "share_training"} {
+		schema := advertisedInputSchema(t, registerTrainingTools, deps, name)
+		document := schemaProperty(t, schema, "document")
+		raw, err := json.Marshal(document)
+		if err != nil || len(raw) > 4096 {
+			t.Fatalf("%s document schema is not compact: bytes=%d err=%v", name, len(raw), err)
+		}
+		for _, computed := range []string{"can_edit", "progress", "author_id", "calibration", "proposal", "submission", "provenance", "created_at"} {
+			if bytes.Contains(raw, []byte(`"`+computed+`"`)) {
+				t.Fatalf("%s advertises server-computed field %s", name, computed)
+			}
+		}
+		if _, required := document["required"]; required {
+			t.Fatalf("%s document requires fields: %v", name, document["required"])
+		}
+		if additional, ok := document["additionalProperties"]; ok {
+			t.Fatalf("%s document rejects unknown members: %v", name, additional)
+		}
+	}
+}
+
+// A document read from get_training, computed fields included, must still be
+// accepted unchanged, and so must the minimal advertised subset.
+func TestTrainingEditAcceptsFullAndMinimalDocuments(t *testing.T) {
+	_, deps := setupToolsTest(t)
+	id := trainingTestDomain(t, deps, "document-roundtrip")
+	read := callTool(t, deps, RegisterTools, "L_owner", "get_training", map[string]any{"id": id})
+	if read.IsError {
+		t.Fatal(resultText(read))
+	}
+	var full map[string]any
+	if err := json.Unmarshal([]byte(resultText(read)), &full); err != nil {
+		t.Fatal(err)
+	}
+	training, _ := full["training"].(map[string]any)
+	revision, _ := training["revision"].(string)
+	if _, ok := training["can_edit"]; !ok || revision == "" {
+		t.Fatalf("get_training no longer returns computed fields: %v", training)
+	}
+	for name, document := range map[string]any{"full": full, "minimal": map[string]any{"curriculum": full["curriculum"]}} {
+		preview := callTool(t, deps, RegisterTools, "L_owner", "preview_training_edit", map[string]any{"id": id, "expected_revision": revision, "document": document})
+		if preview.IsError {
+			t.Fatalf("%s document rejected: %s", name, resultText(preview))
+		}
+	}
+}
+
+func TestTrainingErrorsNameTheCorrectableReason(t *testing.T) {
+	_, deps := setupToolsTest(t)
+	id := trainingTestDomain(t, deps, "training-errors")
+	read := callTool(t, deps, RegisterTools, "L_owner", "get_training", map[string]any{"id": id})
+	var doc struct {
+		Training struct {
+			Revision string `json:"revision"`
+		} `json:"training"`
+	}
+	if read.IsError || json.Unmarshal([]byte(resultText(read)), &doc) != nil {
+		t.Fatal(resultText(read))
+	}
+	for _, tc := range []struct {
+		tool string
+		args map[string]any
+		want string
+	}{
+		{"preview_training_edit", map[string]any{"id": id, "expected_revision": doc.Training.Revision}, "training action rejected: document is required"},
+		{"get_training", map[string]any{"id": "personal:missing"}, "training action rejected: training not found or not available to this account; search with list_training_library"},
+		{"preview_training_lifecycle", map[string]any{"id": id, "decision": "withdraw_training"}, "training action rejected: this account is not permitted"},
+	} {
+		result := callTool(t, deps, RegisterTools, "L_owner", tc.tool, tc.args)
+		if !result.IsError || !strings.HasPrefix(resultText(result), tc.want) {
+			t.Fatalf("%s: got error=%v %q, want prefix %q", tc.tool, result.IsError, resultText(result), tc.want)
+		}
+	}
+}
+
+func TestTrainingEnumsAdvertiseStoreVocabulary(t *testing.T) {
+	_, deps := setupToolsTest(t)
+	for tool, field := range map[string]string{"list_training_library": "filter", "share_training": "audience", "decide_training": "decision", "preview_training_lifecycle": "decision"} {
+		values, _ := schemaProperty(t, advertisedInputSchema(t, registerTrainingTools, deps, tool), field)["enum"].([]any)
+		if len(values) == 0 {
+			t.Fatalf("%s.%s advertises no enum", tool, field)
+		}
+	}
+	filter := schemaProperty(t, advertisedInputSchema(t, registerTrainingTools, deps, "list_training_library"), "filter")["enum"].([]any)
+	if !slices.Contains(filter, any("")) || !slices.Contains(filter, any("archived")) {
+		t.Fatalf("filter enum dropped an accepted value: %v", filter)
 	}
 }

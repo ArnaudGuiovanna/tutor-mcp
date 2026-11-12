@@ -94,6 +94,20 @@ func Retrievability(elapsedDays int, stability float64) float64 {
 	return math.Pow(1+fsrsFactor*float64(elapsedDays)/stability, fsrsDecay)
 }
 
+// DaysUntilRetrievability returns the time, in fractional days, for a card at
+// retrievability current to decay to target on the FSRS-5 forgetting curve
+// R(t) = (1 + factor*t/S)^decay. It is zero when target is not below current
+// and for non-finite or non-positive inputs.
+func DaysUntilRetrievability(stability, current, target float64) float64 {
+	if stability <= 0 || math.IsNaN(stability) || math.IsInf(stability, 0) ||
+		!(current > 0) || current > 1 || !(target > 0) || target >= current {
+		return 0
+	}
+	// Invert R(t): t = S/factor * (R^(1/decay) - 1).
+	age := func(r float64) float64 { return stability / fsrsFactor * (math.Pow(r, 1/fsrsDecay) - 1) }
+	return math.Max(0, age(target)-age(current))
+}
+
 // CurrentElapsedDays returns the whole number of days elapsed since the last
 // review at a decision boundary. ElapsedDays stored on FSRSCard is the interval
 // that preceded the previous review; it is historical data and must not be

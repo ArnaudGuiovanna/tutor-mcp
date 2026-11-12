@@ -44,7 +44,7 @@ func normalizePedagogicalTurnMode(mode string) (string, error) {
 	case "activity":
 		return mode, nil
 	default:
-		return "", errors.New("mode must be context or activity")
+		return "", storeport.Invalid("mode must be context or activity")
 	}
 }
 
@@ -71,6 +71,10 @@ func registerPreparePedagogicalTurn(server *mcp.Server, deps *Deps) {
 		Description: "Prepare one versioned, authorized teaching context for this conversation. context reads without opening a session or changing progression. activity optionally selects training_id or resolves an exact training_name before freezing the canonical engine decision, in one transaction with a stable idempotency_key. Ambiguous names return needs_selection and bounded authorized choices; never guess or enroll implicitly. Expected selection/revision refer to the previous conversation selection. The packet includes training metadata, curriculum, observations, session and full pedagogical_contract, replacing cascading context/activity/training reads. presentation distinguishes instruction, assessment and guidance without changing the canonical decision. Freeze an assessment before display, then submit actual answers, evaluate and record evidence; acknowledge instruction/feedback only after display. No narrative consolidation is required before responding. Later writes revalidate ownership and versions.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in PreparePedagogicalTurnParams) (*mcp.CallToolResult, any, error) {
 		out, err := preparePedagogicalTurn(ctx, deps, in)
+		if errors.Is(err, storeport.ErrCurriculumVersionConflict) {
+			r, _ := errorResult("pedagogical turn unavailable: the conversation selection or curriculum revision changed; prepare a context turn again and pass its current selection_version and revision")
+			return r, nil, nil
+		}
 		if err != nil {
 			r, _ := safeErrorResult(deps.Logger, "pedagogical turn unavailable", err)
 			return r, nil, nil
@@ -87,7 +91,7 @@ func preparePedagogicalTurn(ctx context.Context, deps *Deps, in PreparePedagogic
 	}
 	principal, ok := auth.GetPrincipal(ctx)
 	if !ok || principal.LearnerID == "" {
-		return nil, errors.New("authenticated learner principal required")
+		return nil, storeport.Invalid("authenticated learner principal required")
 	}
 	if err := principal.Validate(); err != nil {
 		return nil, err
@@ -96,45 +100,45 @@ func preparePedagogicalTurn(ctx context.Context, deps *Deps, in PreparePedagogic
 	canRead := models.OAuthScopeAllows(scopes, models.OAuthScopeLearnerRead)
 	canWrite := models.OAuthScopeAllows(scopes, models.OAuthScopeLearnerWrite)
 	if !canRead || (mode == "activity" && !canWrite) {
-		return nil, errors.New("learner permission required for requested mode")
+		return nil, storeport.Invalid("learner permission required for requested mode")
 	}
 	if mode == "activity" {
 		if policy, ok := ctx.Value(toolPolicyKey{}).(*toolPolicy); ok && (policy.denies("get_next_activity") || ((in.TrainingID != "" || in.TrainingName != "") && policy.denies("select_conversation_training"))) {
-			return nil, errors.New("a required activity or training selection tool is disabled in your Tutor permission settings")
+			return nil, storeport.Invalid("a required activity or training selection tool is disabled in your Tutor permission settings")
 		}
 		key := in.IdempotencyKey
 		if key == "" {
 			key = idempotencyKeyFromContext(ctx)
 		}
 		if !validIdempotencyKey.MatchString(key) {
-			return nil, errors.New("activity mode requires a valid idempotency_key")
+			return nil, storeport.Invalid("activity mode requires a valid idempotency_key")
 		}
 		in.IdempotencyKey = key
 	}
 	if (in.TrainingID != "" || in.TrainingName != "") && mode != "activity" {
-		return nil, errors.New("training selection requires activity mode")
+		return nil, storeport.Invalid("training selection requires activity mode")
 	}
 	if in.TrainingID != "" && in.TrainingName != "" {
-		return nil, errors.New("training_id and training_name are mutually exclusive")
+		return nil, storeport.Invalid("training_id and training_name are mutually exclusive")
 	}
 	if in.TrainingName != "" && strings.TrimSpace(in.TrainingName) == "" {
-		return nil, errors.New("training_name must not be blank")
+		return nil, storeport.Invalid("training_name must not be blank")
 	}
 	if err := validateString("training_name", in.TrainingName, 200); err != nil {
-		return nil, err
+		return nil, invalidInput(err)
 	}
 	if bound := storeport.ConversationID(ctx); bound != "" {
 		if in.ConversationID != "" && in.ConversationID != bound {
-			return nil, errors.New("conversation does not match this MCP session")
+			return nil, storeport.Invalid("conversation does not match this MCP session")
 		}
 		in.ConversationID = bound
 	}
 	if in.ConversationID == "" {
-		return nil, errors.New("conversation_id is required")
+		return nil, storeport.Invalid("conversation_id is required")
 	}
 	for name, value := range map[string]string{"conversation_id": in.ConversationID, "attempt_id": in.AttemptID, "expected_revision": in.ExpectedRevision, "training_id": in.TrainingID} {
 		if err := validateString(name, value, maxShortLabelLen); err != nil {
-			return nil, err
+			return nil, invalidInput(err)
 		}
 	}
 	ctx = storeport.WithConversation(ctx, in.ConversationID)
@@ -189,7 +193,7 @@ func preparePedagogicalTurn(ctx context.Context, deps *Deps, in PreparePedagogic
 	}
 	if out.NeedsSelection {
 		if in.AttemptID != "" {
-			return nil, errors.New("select a training before preparing an activity or assessment context")
+			return nil, storeport.Invalid("select a training before preparing an activity or assessment context")
 		}
 		out.Training = nil
 		return boundedPedagogicalTurn(out)
@@ -199,7 +203,7 @@ func preparePedagogicalTurn(ctx context.Context, deps *Deps, in PreparePedagogic
 		return nil, err
 	}
 	if domain.Archived || domain.DeletedAt != nil {
-		return nil, errors.New("selected domain is not active")
+		return nil, storeport.Invalid("selected domain is not active")
 	}
 	snapshot, err := deps.Store.GetCurriculumSnapshot(ctx, principal.LearnerID, domain.ID, domain.GraphVersion)
 	if err != nil {
@@ -213,7 +217,7 @@ func preparePedagogicalTurn(ctx context.Context, deps *Deps, in PreparePedagogic
 			return nil, err
 		}
 		if attempt.DomainID != domain.ID || attempt.CurriculumInvalidatedVersion != 0 || (attempt.CurriculumVersion != 0 && attempt.CurriculumVersion != snapshot.Version) {
-			return nil, errors.New("assessment does not match the selected curriculum")
+			return nil, storeport.Invalid("assessment does not match the selected curriculum")
 		}
 		if !json.Valid([]byte(attempt.RubricJSON)) {
 			return nil, errors.New("invalid stored assessment rubric")
@@ -242,6 +246,11 @@ func preparePedagogicalTurn(ctx context.Context, deps *Deps, in PreparePedagogic
 			return nil, err
 		}
 		if result == nil || result.IsError {
+			// get_next_activity error texts are already written for the caller
+			// (domain not found, invalid intent, ...); keep them actionable.
+			if detail := resultErrorText(result); detail != "" {
+				return nil, storeport.Invalid("canonical activity preparation failed: %s", detail)
+			}
 			return nil, errors.New("canonical activity preparation failed")
 		}
 		activity, ok := result.StructuredContent.(map[string]any)
@@ -318,7 +327,7 @@ func boundedPedagogicalTurn(out *models.PedagogicalTurn) (*models.PedagogicalTur
 		return nil, err
 	}
 	if len(encoded) > pedagogicalTurnBudgetBytes {
-		return nil, fmt.Errorf("pedagogical context exceeds %d bytes; full assessment and pedagogical constraints were preserved, request a narrower context", pedagogicalTurnBudgetBytes)
+		return nil, storeport.Invalid("pedagogical context exceeds %d bytes; full assessment and pedagogical constraints were preserved, request a narrower context", pedagogicalTurnBudgetBytes)
 	}
 	return out, nil
 }
@@ -353,7 +362,7 @@ func pedagogicalTurnCurriculum(snapshot *models.CurriculumSnapshot, highStakes b
 		}
 	}
 	if len(chosen) > pedagogicalTurnConceptLimit {
-		return nil, nil, errors.New("focused prerequisite closure exceeds the context concept limit; no prerequisite was silently discarded")
+		return nil, nil, storeport.Invalid("focused prerequisite closure exceeds the context concept limit; no prerequisite was silently discarded")
 	}
 	for _, key := range snapshot.Graph.Concepts {
 		candidate := make(map[string]bool, len(chosen)+1)

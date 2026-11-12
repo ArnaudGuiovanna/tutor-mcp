@@ -77,7 +77,7 @@ New server distributions target **Linux and Windows**, on amd64 and arm64; the A
 
 For the institutional desktop experience, [install Tutor ACP for Windows](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/download/v0.7.3/Tutor_ACP_0.0.4_windows_x64-setup.exe). Your organization provides the Tutor server; administrators can follow the [institutional setup](docs/installation.md#institutional-deployment) using the [server release](https://github.com/ArnaudGuiovanna/tutor-mcp/releases/tag/v0.7.3).
 
-For local use or development, build the MCP server from source with Git and [Go 1.26.10 or a newer patched release](https://go.dev/dl/):
+For local use or development, build the MCP server from source with Git and [Go 1.26.11 or a newer patched release](https://go.dev/dl/):
 
 ```sh
 git clone --branch main https://github.com/ArnaudGuiovanna/tutor-mcp.git

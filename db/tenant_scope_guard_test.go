@@ -25,7 +25,10 @@ import (
 // GetNativeIdentity, CreateNativeChallenge, ConsumeNativeChallenge,
 // CreateNativeSession, RotateNativeIdentity, RevokeNativeSession. Their narrow
 // proof/nonce boundaries and tenant binding are documented in the contract.
-const legacyUnscopedStoreMethodSetSHA256 = "62821b0f6c413e8d15c5ed43ef9f10d8aea28b8d9e596f7c21600469207ce430"
+// SetMaxActiveDomainsPerLearner is a reviewed process-level configuration
+// setter (like SetHostLLMDemonstrationPolicy): called once at startup, it
+// reads and writes no tenant data.
+const legacyUnscopedStoreMethodSetSHA256 = "9912fe3c2eca545d0e8fb8f71bbc262abda38a2d31334ad94d26cccd06a65296"
 
 func TestNoNewUnscopedStoreMethods(t *testing.T) {
 	fset := token.NewFileSet()

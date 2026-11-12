@@ -494,3 +494,57 @@ func TestAuthorizeAcceptsCIMDWithoutDynamicRegistration(t *testing.T) {
 		t.Fatalf("consent page missing CIMD client name")
 	}
 }
+
+func TestCIMDPolicyGatesResolutionAndDiscovery(t *testing.T) {
+	const allowed = "https://client.example/oauth/metadata.json"
+	const other = "https://elsewhere.example/oauth/metadata.json"
+	var calls atomic.Int32
+	newServer := func(t *testing.T, mode string) *OAuthServer {
+		t.Helper()
+		s, _ := newTestServer(t)
+		s.cimdHTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			calls.Add(1)
+			return cimdResponse(req.URL.String(), "no-store"), nil
+		})}
+		policy, err := ParseCIMDPolicy(mode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.ConfigureCIMD(policy)
+		return s
+	}
+	discovery := func(s *OAuthServer) bool {
+		rec := httptest.NewRecorder()
+		s.HandleAuthServerMetadata(rec, httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil))
+		return strings.Contains(rec.Body.String(), `"client_id_metadata_document_supported":true`)
+	}
+
+	on := newServer(t, "")
+	if _, err := on.resolveOAuthClient(context.Background(), other); err != nil || !discovery(on) {
+		t.Fatalf("default policy must keep CIMD on: err=%v", err)
+	}
+
+	off := newServer(t, "off")
+	before := calls.Load()
+	if _, err := off.resolveOAuthClient(context.Background(), allowed); err == nil {
+		t.Fatal("CIMD resolved while disabled")
+	}
+	if calls.Load() != before || discovery(off) {
+		t.Fatal("disabled CIMD fetched metadata or was advertised")
+	}
+
+	list := newServer(t, "Client.example, partner.example")
+	if _, err := list.resolveOAuthClient(context.Background(), allowed); err != nil {
+		t.Fatalf("allow-listed host rejected: %v", err)
+	}
+	before = calls.Load()
+	if _, err := list.resolveOAuthClient(context.Background(), other); err == nil || calls.Load() != before {
+		t.Fatal("host outside the allow-list was fetched or accepted")
+	}
+
+	for _, invalid := range []string{",", "https://client.example", "*.example", "10.0.0.1", "client.example/path"} {
+		if _, err := ParseCIMDPolicy(invalid); err == nil {
+			t.Fatalf("OAUTH_CIMD_MODE %q accepted", invalid)
+		}
+	}
+}

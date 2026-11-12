@@ -7,10 +7,12 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
+	"tutor-mcp/algorithms"
 	"tutor-mcp/models"
 	storeport "tutor-mcp/store"
 )
@@ -341,12 +343,19 @@ func (s *Store) GetQualifiedDiagnosticConceptsSinceInDomain(ctx context.Context,
 	return concepts, nil
 }
 
+// pedagogicalSnapshotInteractionIndexMigration serves the per-interaction
+// snapshot lookup in getActionHistoryForConcept.
+const pedagogicalSnapshotInteractionIndexMigration = `
+CREATE INDEX IF NOT EXISTS idx_pedagogical_snapshots_interaction ON pedagogical_snapshots(interaction_id, id);
+`
+
 // GetActionHistoryForConcept returns the rotation/streak counts for a
-// concept. The InteractionsAboveBKT field counts consecutive
-// successful interactions on the concept (strict success streak from
-// the most recent backwards) — a simple proxy for "stable above
-// mastery" since we don't snapshot historical PMastery values. The
-// proxy is sound when used after a successful BKT update push.
+// concept. InteractionsAboveBKT counts the most recent consecutive
+// interactions whose prior estimate (the pedagogical snapshot's before state)
+// was already at or above MasteryBKT(): time actually spent above the
+// threshold, not a success streak, which also counted the successes that
+// were still climbing toward it. Legacy interactions without a snapshot fall
+// back to the former success-streak proxy.
 func (s *Store) GetActionHistoryForConcept(ctx context.Context, learnerID, concept string, recentLimit int) (models.ActionHistoryCounts, error) {
 	return s.getActionHistoryForConcept(ctx, learnerID, "", concept, recentLimit, false)
 }
@@ -359,7 +368,9 @@ func (s *Store) getActionHistoryForConcept(ctx context.Context, learnerID, domai
 	if recentLimit <= 0 {
 		recentLimit = 50
 	}
-	query := `SELECT activity_type, success FROM ` + currentInteractionsSQL + ` AS interactions
+	query := `SELECT activity_type, success,
+		 (SELECT p.before_json FROM pedagogical_snapshots p WHERE p.interaction_id = interactions.id ORDER BY p.id LIMIT 1)
+		 FROM ` + currentInteractionsSQL + ` AS interactions
 		 WHERE learner_id = ? AND concept = ?`
 	args := []any{learnerID, concept}
 	if exactDomain {
@@ -382,7 +393,8 @@ func (s *Store) getActionHistoryForConcept(ctx context.Context, learnerID, domai
 	for rows.Next() {
 		var actType string
 		var success int
-		if err := rows.Scan(&actType, &success); err != nil {
+		var before sql.NullString
+		if err := rows.Scan(&actType, &success, &before); err != nil {
 			return models.ActionHistoryCounts{}, fmt.Errorf("scan history: %w", err)
 		}
 		switch actType {
@@ -393,9 +405,18 @@ func (s *Store) getActionHistoryForConcept(ctx context.Context, learnerID, domai
 		case string(models.ActivityTransferProbe):
 			h.TransferCount++
 		}
-		// Streak: count consecutive successes from the head (most recent).
+		// Streak from the head (most recent): interactions that started
+		// above the threshold; legacy rows without a snapshot use success.
 		if streakLive {
-			if success == 1 {
+			above := success == 1
+			if before.Valid {
+				var prior struct {
+					PMastery *float64 `json:"p_mastery"`
+				}
+				above = json.Unmarshal([]byte(before.String), &prior) == nil &&
+					prior.PMastery != nil && *prior.PMastery >= algorithms.MasteryBKT()
+			}
+			if above {
 				h.InteractionsAboveBKT++
 			} else {
 				streakLive = false

@@ -251,11 +251,13 @@ func goldsetConfidence(success bool) float64 {
 	return 0.2
 }
 
+// goldsetTransferScore matches the frozen goldset rubric ratio (2/2 or 0/2):
+// an attempt-linked transfer_score must agree with the rubric within 0.05.
 func goldsetTransferScore(success bool) float64 {
 	if success {
-		return 0.85
+		return 1
 	}
-	return 0.2
+	return 0
 }
 
 func goldsetRubricJSON() string {

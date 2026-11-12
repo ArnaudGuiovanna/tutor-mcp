@@ -167,6 +167,13 @@ func seedDecisionBoundHostEvaluation(t *testing.T, store *db.Store, deps *Deps, 
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
+	// Demonstration requires the model estimate as well as the passed
+	// trusted challenge (P1-3): seed an estimated concept.
+	estimated := models.NewConceptStateInDomain("L_owner", domain.ID, "a")
+	estimated.PMastery = 0.95
+	if err := store.UpsertConceptState(ctx, estimated); err != nil {
+		t.Fatal(err)
+	}
 	session, err := store.OpenLearningSession(ctx, "L_owner", domain.ID, "", now)
 	if err != nil {
 		t.Fatal(err)
@@ -183,7 +190,7 @@ func seedDecisionBoundHostEvaluation(t *testing.T, store *db.Store, deps *Deps, 
 		"domain_id": domain.ID, "session_id": session.ID, "decision_id": decision.ID,
 		"concept": "a", "activity_type": "MASTERY_CHALLENGE", "observable": "Apply the competency.",
 		"task_text":   "Generated task.",
-		"rubric_json": `{"criteria":[{"id":"x","description":"Defined criterion.","max_score":1}],"passing_score":0.6}`,
+		"rubric_json": `{"criteria":[{"id":"x","description":"Defined criterion.","max_score":1},{"id":"y","description":"Second criterion.","max_score":1}],"passing_score":1.2}`,
 	})
 	if prepared.IsError {
 		t.Fatalf("prepare: %s", resultText(prepared))
@@ -196,7 +203,7 @@ func seedDecisionBoundHostEvaluation(t *testing.T, store *db.Store, deps *Deps, 
 	args := assessmentEvaluationArgs(domain.ID, session.ID, attemptID, true)
 	// Only assessment activity types can demonstrate; routine practice cannot.
 	args["activity_type"] = "MASTERY_CHALLENGE"
-	args["rubric_score_json"] = `{"criteria_scores":[{"id":"x","score":1,"evidence":"Observed."}]}`
+	args["rubric_score_json"] = `{"criteria_scores":[{"id":"x","score":1,"evidence":"Observed."},{"id":"y","score":1,"evidence":"Observed."}]}`
 	accepted := callTool(t, deps, registerRecordInteraction, "L_owner", "record_interaction", args)
 	if accepted.IsError {
 		t.Fatalf("evaluate: %s", resultText(accepted))

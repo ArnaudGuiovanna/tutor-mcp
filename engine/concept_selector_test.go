@@ -99,8 +99,10 @@ func TestSelectConcept_Instruction_GoalRelevanceDominatesAtEqualMastery(t *testi
 }
 
 func TestSelectConcept_Instruction_LowMasteryWinsAtEqualRelevance(t *testing.T) {
+	// Both concepts are started (P1-7 consolidation bonus applies to both),
+	// so the lower estimate still wins.
 	graph := graphFlat("A", "B")
-	states := []*models.ConceptState{reviewedCS("A", 0.10), reviewedCS("B", 0.60)}
+	states := []*models.ConceptState{reviewedCS("A", 0.20), reviewedCS("B", 0.60)}
 	gr := map[string]float64{"A": 0.7, "B": 0.7}
 	sel, _ := SelectConcept(models.PhaseInstruction, states, graph, gr)
 	if sel.Concept != "A" {
@@ -163,13 +165,14 @@ func TestSelectConcept_Instruction_NilGoalRelevance_UniformFallback(t *testing.T
 		reviewedCS("B", 0.50),
 		reviewedCS("C", 0.20),
 	}
-	// nil → uniform 1.0 → score = 1 - mastery; A wins with 0.90.
+	// nil → uniform 1.0 → score = (1 - mastery) x consolidation bonus:
+	// A (untouched) 0.90, B 0.50 x 2.5 = 1.25, C 0.80 x 2.5 = 2.0 → C.
 	sel, err := SelectConcept(models.PhaseInstruction, states, graph, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if sel.Concept != "A" {
-		t.Errorf("expected A under uniform fallback, got %s", sel.Concept)
+	if sel.Concept != "C" {
+		t.Errorf("expected C (started, lowest estimate) under uniform fallback, got %s", sel.Concept)
 	}
 }
 
@@ -682,5 +685,49 @@ func TestSelectConceptAtWithContext_DiagnosticPrefersUndiagnosedConcepts(t *test
 	})
 	if all.Concept != "A" {
 		t.Fatalf("once everything is diagnosed the plain argmax applies, got %+v", all)
+	}
+}
+
+// P1-7: a started concept is consolidated before a new one is opened.
+func TestSelectConcept_Instruction_ConsolidatesStartedConcept(t *testing.T) {
+	graph := graphFlat("A", "B")
+	states := []*models.ConceptState{reviewedCS("A", 0.10), reviewedCS("B", 0.45)}
+	sel, _ := SelectConcept(models.PhaseInstruction, states, graph, map[string]float64{"A": 1, "B": 1})
+	if sel.Concept != "B" {
+		t.Fatalf("expected the started concept B, got %s (%s)", sel.Concept, sel.Rationale)
+	}
+}
+
+// P1-7: a prerequisite inherits the relevance of the goals it unlocks.
+func TestSelectConcept_Instruction_PrerequisiteInheritsDescendantRelevance(t *testing.T) {
+	full := models.KnowledgeSpace{
+		Concepts:      []string{"Base", "Side", "Goal"},
+		Prerequisites: map[string][]string{"Goal": {"Base"}},
+	}
+	// The gate removed Goal (its prerequisite is unmet).
+	filtered := models.KnowledgeSpace{Concepts: []string{"Base", "Side"}}
+	gr := map[string]float64{"Base": 0.1, "Side": 0.5, "Goal": 1.0}
+	sel, err := SelectConceptAtWithContext(models.PhaseInstruction, nil, filtered, gr, time.Now(), SelectionContext{DomainGraph: &full})
+	if err != nil || sel.Concept != "Base" {
+		t.Fatalf("expected Base (effective relevance 1.0 from Goal), got %q err=%v", sel.Concept, err)
+	}
+	sel, _ = SelectConceptAtWithContext(models.PhaseInstruction, nil, filtered, gr, time.Now(), SelectionContext{})
+	if sel.Concept != "Side" {
+		t.Fatalf("without the domain graph the filtered graph loses Goal: got %q", sel.Concept)
+	}
+}
+
+// P1-5b: an unverified prerequisite does not unlock its successor; a verified
+// one does.
+func TestSelectConcept_Instruction_UnverifiedPrerequisiteIsCapped(t *testing.T) {
+	graph := graphLinear("A", "B")
+	states := []*models.ConceptState{reviewedCS("A", 0.95)}
+	sel, _ := SelectConceptAtWithContext(models.PhaseInstruction, states, graph, nil, time.Now(), SelectionContext{VerifiedConcepts: map[string]bool{}})
+	if !sel.NoFringe {
+		t.Fatalf("unverified A must not unlock B: %+v", sel)
+	}
+	sel, _ = SelectConceptAtWithContext(models.PhaseInstruction, states, graph, nil, time.Now(), SelectionContext{VerifiedConcepts: map[string]bool{"A": true}})
+	if sel.Concept != "B" {
+		t.Fatalf("verified A must unlock B: %+v", sel)
 	}
 }

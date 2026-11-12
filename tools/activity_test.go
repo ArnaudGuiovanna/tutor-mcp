@@ -93,9 +93,10 @@ func TestGetNextActivity_DomainBackendFailureIsNotSetup(t *testing.T) {
 	}
 }
 
-func TestGetNextActivity_ExplicitArchivedDomainUsesNonRevealingSetup(t *testing.T) {
+func TestGetNextActivity_ExplicitArchivedDomainListsActiveDomains(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	domain := makeOwnerDomain(t, store, "L_owner", "archived-activity-domain")
+	active := makeOwnerDomain(t, store, "L_owner", "active-activity-domain")
 	if err := store.ArchiveDomain(context.Background(), domain.ID, "L_owner"); err != nil {
 		t.Fatalf("archive domain: %v", err)
 	}
@@ -103,12 +104,30 @@ func TestGetNextActivity_ExplicitArchivedDomainUsesNonRevealingSetup(t *testing.
 	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{
 		"domain_id": domain.ID,
 	})
-	if res.IsError {
-		t.Fatalf("archived domain should follow non-revealing absence path: %q", resultText(res))
+	text := resultText(res)
+	// SETUP_DOMAIN here would invite a duplicate init_domain for a subject
+	// the learner already has.
+	if !res.IsError || !strings.HasPrefix(text, "domain not found") || strings.Contains(text, "SETUP_DOMAIN") {
+		t.Fatalf("archived domain must be reported as not found: error=%v text=%q", res.IsError, text)
 	}
-	payload := decodeResult(t, res)
-	if payload["needs_domain_setup"] != true {
-		t.Fatalf("archived domain did not return setup: %v", payload)
+	if !strings.Contains(text, active.ID) || strings.Contains(text, domain.ID) {
+		t.Fatalf("expected only active domains to be listed: %q", text)
+	}
+}
+
+func TestGetNextActivity_UnknownDomainIDIsNotSetup(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	active := makeOwnerDomain(t, store, "L_owner", "Fractions")
+
+	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{
+		"domain_id": "does-not-exist",
+	})
+	text := resultText(res)
+	if !res.IsError || !strings.HasPrefix(text, "domain not found") {
+		t.Fatalf("unknown domain_id must not return a setup activity: error=%v text=%q", res.IsError, text)
+	}
+	if !strings.Contains(text, "Fractions ("+active.ID+")") {
+		t.Fatalf("expected the learner's active domains, got %q", text)
 	}
 }
 
@@ -166,6 +185,16 @@ func TestGetNextActivity_HappyPath(t *testing.T) {
 	}
 	if got := contract["learner_explanation"]; got == "" {
 		t.Fatalf("expected contract learner_explanation, got %v", contract)
+	}
+	// The contract is the single copy of these texts; decision_id stays at
+	// the root because native clients read it there.
+	for _, duplicate := range []string{"llm_instruction", "learner_explanation", "audit_rationale"} {
+		if _, ok := out[duplicate]; ok {
+			t.Fatalf("%s repeated at the payload root", duplicate)
+		}
+	}
+	if _, ok := out["decision_id"]; !ok {
+		t.Fatalf("decision_id must remain at the payload root: %v", out)
 	}
 }
 
@@ -537,19 +566,20 @@ func TestBuildGoalRelevanceStatus(t *testing.T) {
 	})
 }
 
-func TestGetNextActivity_ForeignDomainFallsBackToSetup(t *testing.T) {
+func TestGetNextActivity_ForeignDomainIsNotFound(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	d := makeOwnerDomain(t, store, "L_owner", "math")
 	res := callTool(t, deps, registerGetNextActivity, "L_attacker", "get_next_activity", map[string]any{
 		"domain_id": d.ID,
 	})
-	if res.IsError {
-		t.Fatalf("got %q", resultText(res))
+	text := resultText(res)
+	// The foreign learner sees the same answer as for a missing ID, listing
+	// only their own (here: no) domains.
+	if !res.IsError || text != "domain not found: domain_id is unknown or archived; active domains: (none). Retry with one of these domain_id values, or omit domain_id to use the most recent active domain." {
+		t.Fatalf("foreign domain must be indistinguishable from a missing one: error=%v text=%q", res.IsError, text)
 	}
-	out := decodeResult(t, res)
-	// Foreign learner should fall through to needs_domain_setup since resolveDomain rejects.
-	if out["needs_domain_setup"] != true {
-		t.Fatalf("expected setup fallback for foreign domain, got %v", out)
+	if strings.Contains(text, "math") {
+		t.Fatalf("foreign domain name leaked: %q", text)
 	}
 }
 

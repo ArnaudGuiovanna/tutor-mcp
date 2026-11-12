@@ -59,10 +59,9 @@ func ComputeAlertsWithEvidenceAt(states []*models.ConceptState, recentInteractio
 				urgency = models.UrgencyCritical
 				criticalForgetting[cs.Concept] = true
 			}
-			hoursLeft := 0.0
-			if retention > algorithms.RetentionAlertCriticalThreshold {
-				hoursLeft = (retention - algorithms.RetentionAlertCriticalThreshold) / 0.01 * 2
-			}
+			// Time left on the card's own forgetting curve, not a fixed
+			// 2 hours per retention point.
+			hoursLeft := 24 * algorithms.DaysUntilRetrievability(cs.Stability, retention, algorithms.RetentionAlertCriticalThreshold)
 			alerts = append(alerts, models.Alert{
 				Type:               models.AlertForgetting,
 				Concept:            cs.Concept,

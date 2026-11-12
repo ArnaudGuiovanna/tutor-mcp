@@ -46,6 +46,8 @@ func TestTenantToolReadRoutesAreExplicitAndEnforced(t *testing.T) {
 		"get_pending_alerts", "check_mastery", "get_learner_context", "get_availability_model", "get_olm_snapshot", "get_pedagogical_snapshots",
 		"get_decision_replay_summary", "validate_domain_graph", "get_autonomy_metrics", "feynman_challenge", "transfer_challenge", "read_raw_session",
 		"get_misconceptions", "list_implementation_intentions", "get_dashboard_state", "get_goal_relevance",
+		// trainingPolicy only reads when it is not setting the policy.
+		"get_training_policy",
 	}
 	writers := []string{"get_curriculum_snapshot", "get_memory_state", "get_next_activity", "get_metacognitive_mirror"}
 	if len(readOnlyTools) != len(readers) {

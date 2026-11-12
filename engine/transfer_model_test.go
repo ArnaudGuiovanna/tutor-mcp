@@ -6,6 +6,7 @@ package engine
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"tutor-mcp/models"
 )
@@ -176,5 +177,30 @@ func assertTransferDimensions(t *testing.T, name string, got, want []TransferDim
 	t.Helper()
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("%s dimensions = %v, want %v", name, got, want)
+	}
+}
+
+// P2-12: one rule for "blocked". A repaired dimension is judged on its
+// latest observation by both builders, and an expired trusted failure no
+// longer blocks through the aggregate label.
+func TestTransferProfileBlockedRuleIsConsistent(t *testing.T) {
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	repaired := []*models.TransferRecord{
+		{ConceptID: "c", ContextType: "near", Score: 0.1, CreatedAt: now.Add(-48 * time.Hour)},
+		{ConceptID: "c", ContextType: "near", Score: 0.9, CreatedAt: now.Add(-24 * time.Hour)},
+	}
+	if p := BuildTransferProfile("c", repaired); p.ReadinessLabel == TransferReadinessBlocked {
+		t.Fatalf("a repaired dimension must not stay blocked: %+v", p)
+	}
+	if p := BuildTrustedTransferProfileAt("c", repaired, now); p.ReadinessLabel == TransferReadinessBlocked || p.BlockingFailures != 0 {
+		t.Fatalf("trusted profile disagrees: %+v", p)
+	}
+	expired := []*models.TransferRecord{
+		{ConceptID: "c", ContextType: "near", Score: 0.1, CreatedAt: now.Add(-60 * 24 * time.Hour)},
+		{ConceptID: "c", ContextType: "far", Score: 0.9, CreatedAt: now.Add(-24 * time.Hour)},
+	}
+	p := BuildTrustedTransferProfileAt("c", expired, now)
+	if p.BlockingFailures != 0 || p.ReadinessLabel == TransferReadinessBlocked {
+		t.Fatalf("an expired failure must not block: %+v", p)
 	}
 }

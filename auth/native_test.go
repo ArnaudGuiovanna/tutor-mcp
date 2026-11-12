@@ -626,3 +626,31 @@ func TestNativeNIP98AcceptsIndependentRustClientFixture(t *testing.T) {
 		t.Fatalf("Go rejected the Rust NIP98/BIP340 event: %v", err)
 	}
 }
+
+func TestNativeChallengeBudgetIsPerClientNotPerIdentity(t *testing.T) {
+	server, _, key, _ := newNativeTestServer(t, false)
+	raw, _ := json.Marshal(map[string]string{
+		"tenant_id": server.options.InstitutionID, "public_key": nativeTestPub(key), "action": "session",
+		"scope": models.OAuthScopeLearnerRead,
+	})
+	post := func(remote string) int {
+		request := httptest.NewRequest(http.MethodPost, server.endpoint("challenge"), bytes.NewReader(raw))
+		request.Header.Set("Content-Type", "application/json")
+		request.RemoteAddr = remote
+		recorder := httptest.NewRecorder()
+		server.HandleChallenge(recorder, request)
+		return recorder.Code
+	}
+	throttled := false
+	for range nativeChallengeIdentityPerMinute + 1 {
+		if post("198.51.100.9:1234") == http.StatusTooManyRequests {
+			throttled = true
+		}
+	}
+	if !throttled {
+		t.Fatal("challenge issuance for one identity from one client was not bounded")
+	}
+	if code := post("203.0.113.20:5678"); code != http.StatusOK {
+		t.Fatalf("key holder on another address status=%d, want 200", code)
+	}
+}

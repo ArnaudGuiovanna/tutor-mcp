@@ -94,11 +94,30 @@ func registerTrainingTools(server *mcp.Server, deps *Deps) {
 				return r, nil, nil
 			}
 			if err != nil {
-				r, _ := safeErrorResult(deps.Logger, "training action rejected", err)
+				r, _ := trainingErrorResult(deps, err)
 				return r, nil, nil
 			}
 			r, _ := jsonResult(out)
 			return r, nil, nil
 		})
 	}
+}
+
+// trainingErrorResult keeps the historical "training action rejected" prefix
+// and adds the store's caller-correctable reason, or a fixed explanation for
+// the sentinel errors a caller can act on. Missing and hidden trainings share
+// one message so a response never confirms that an identifier exists.
+func trainingErrorResult(deps *Deps, err error) (*mcp.CallToolResult, error) {
+	const prefix = "training action rejected"
+	switch {
+	case errors.Is(err, storeport.ErrInvalidPrincipal):
+		return errorResult(prefix + ": this account is not permitted to perform this action on this training (check can_* capabilities from get_training)")
+	case errors.Is(err, storeport.ErrFormationUnavailable), errors.Is(err, storeport.ErrNotFound):
+		return errorResult(prefix + ": training not found or not available to this account; search with list_training_library")
+	case errors.Is(err, storeport.ErrIdempotencyKeyConflict):
+		return errorResult(prefix + ": key was already used for a different action or arguments; choose a fresh key")
+	case errors.Is(err, storeport.ErrFormationVersionImmutable):
+		return errorResult(prefix + ": this version is no longer a draft; reload the training and edit its current draft")
+	}
+	return safeErrorResult(deps.Logger, prefix, err)
 }

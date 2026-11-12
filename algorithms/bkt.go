@@ -89,6 +89,10 @@ func BKTTransition(state BKTState) BKTState {
 // The returned (slipUsed, guessUsed) values are the parameters the heuristic
 // fed into BKTUpdate for this observation; callers should log them to the
 // interaction audit trail so the run can be replayed deterministically.
+//
+// Deprecated: no production caller. Interactions update mastery with the
+// fixed declared parameters; error_type is stored for audit and calibration
+// only and no longer changes slip/guess at update time.
 func BKTUpdateHeuristicSlipByErrorType(state BKTState, correct bool, errorType string) (next BKTState, slipUsed, guessUsed float64) {
 	if correct || errorType == "" {
 		return BKTUpdate(state, correct), state.PSlip, state.PGuess

@@ -388,6 +388,9 @@ type InteractionStore interface {
 type AssessmentStore interface {
 	CreatePedagogicalDecision(ctx context.Context, scope models.TenantScope, decision *models.PedagogicalDecision) error
 	GetPedagogicalDecision(ctx context.Context, scope models.TenantScope, decisionID string) (*models.PedagogicalDecision, error)
+	// ListRecentPedagogicalDecisions returns the decisions served to the
+	// scope's learner for one domain, newest first.
+	ListRecentPedagogicalDecisions(ctx context.Context, scope models.TenantScope, domainID string, limit int) ([]*models.PedagogicalDecision, error)
 	CreateAssessmentAttempt(ctx context.Context, attempt *models.AssessmentAttempt) error
 	GetAssessmentAttempt(ctx context.Context, learnerID, attemptID string) (*models.AssessmentAttempt, error)
 	GetAssessmentAttemptForUpdate(ctx context.Context, learnerID, attemptID string) (*models.AssessmentAttempt, error)

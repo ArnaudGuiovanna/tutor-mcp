@@ -110,6 +110,18 @@ type SelectionContext struct {
 	// gain than an untested one, so pure argmax re-tested the same items
 	// instead of covering the curriculum.
 	DiagnosedConcepts map[string]bool
+
+	// VerifiedConcepts caps unverified prerequisites at
+	// UnverifiedPrerequisiteMasteryCap in the INSTRUCTION fringe, exactly as
+	// GateInput.VerifiedConcepts does in the gate. Nil disables the cap.
+	VerifiedConcepts map[string]bool
+
+	// DomainGraph is the full domain graph. INSTRUCTION derives the effective
+	// relevance of a concept from its descendants, which the gate-filtered
+	// graph may no longer contain (a successor whose prerequisite is unmet is
+	// filtered out, yet it is precisely what makes the prerequisite urgent).
+	// Nil falls back to the graph passed to the selector.
+	DomainGraph *models.KnowledgeSpace
 }
 
 func (c SelectionContext) maintenanceFloor() float64 {
@@ -130,7 +142,11 @@ func SelectConceptAtWithContext(
 ) (Selection, error) {
 	switch phase {
 	case models.PhaseInstruction:
-		return selectInstruction(states, graph, goalRelevance), nil
+		relevanceGraph := graph
+		if sctx.DomainGraph != nil {
+			relevanceGraph = *sctx.DomainGraph
+		}
+		return selectInstructionWithContext(states, graph, relevanceGraph, goalRelevance, sctx.VerifiedConcepts), nil
 	case models.PhaseMaintenance:
 		return selectMaintenance(states, graph, goalRelevance, now, sctx.maintenanceFloor()), nil
 	case models.PhaseDiagnostic:
@@ -157,6 +173,12 @@ type fringeItem struct {
 // treated as mastery=0, eligible if their prereqs are satisfied
 // (OQ-4.1 = A for sub-question (a)).
 func externalFringe(states []*models.ConceptState, graph models.KnowledgeSpace) []fringeItem {
+	return externalFringeVerified(states, graph, nil)
+}
+
+// externalFringeVerified is externalFringe with the unverified-prerequisite
+// cap of PrerequisiteRoutingMastery applied when verified is non-nil.
+func externalFringeVerified(states []*models.ConceptState, graph models.KnowledgeSpace, verified map[string]bool) []fringeItem {
 	stateByConcept := make(map[string]*models.ConceptState, len(states))
 	for _, cs := range states {
 		if cs == nil {
@@ -188,7 +210,7 @@ func externalFringe(states []*models.ConceptState, graph models.KnowledgeSpace) 
 					prereqsOK = false
 					break
 				}
-				pm = cs.PMastery
+				pm = PrerequisiteRoutingMastery(prereq, cs, verified)
 			}
 			if pm < kstThreshold {
 				prereqsOK = false
@@ -222,18 +244,37 @@ func resolveRelevance(gr map[string]float64, concept string) (score float64, eli
 	return v, true
 }
 
+// ConsolidationBonus multiplies the score of a started concept
+// (ConsolidationMasteryLow < m < ConsolidationMasteryHigh). Without it the
+// argmax of rel x (1-m) always preferred an untouched concept (m = 0.1) over
+// one already in progress, so learners were spread across many half-learned
+// concepts instead of consolidating one.
+const ConsolidationBonus = 1.5
+
 // selectInstruction implements the INSTRUCTION branch:
 //
-//	score = goal_relevance × (1 - mastery)
+//	score = relEff × (1 - mastery) × (1 + ConsolidationBonus × [started])
 //
-// over the external fringe. Tie-break is alphabetical (the fringe is
-// pre-sorted by externalFringe). OQ-4.6 = A.
+// over the external fringe, where relEff(c) = max(rel(c), max rel of the
+// concepts that transitively require c) and started means
+// ConsolidationMasteryLow < mastery < ConsolidationMasteryHigh. Tie-break is
+// alphabetical (the fringe is pre-sorted by externalFringe). OQ-4.6 = A.
 func selectInstruction(
 	states []*models.ConceptState,
 	graph models.KnowledgeSpace,
 	goalRelevance map[string]float64,
 ) Selection {
-	fringe := externalFringe(states, graph)
+	return selectInstructionWithContext(states, graph, graph, goalRelevance, nil)
+}
+
+func selectInstructionWithContext(
+	states []*models.ConceptState,
+	graph models.KnowledgeSpace,
+	relevanceGraph models.KnowledgeSpace,
+	goalRelevance map[string]float64,
+	verified map[string]bool,
+) Selection {
+	fringe := externalFringeVerified(states, graph, verified)
 	if len(fringe) == 0 {
 		return Selection{
 			NoFringe:  true,
@@ -246,21 +287,28 @@ func selectInstruction(
 	bestScore := math.Inf(-1)
 	bestRel := 0.0
 	bestMastery := 0.0
+	bestStarted := false
 	candidatesEligible := 0
 	for _, item := range fringe {
-		rel, eligible := resolveRelevance(goalRelevance, item.concept)
-		if !eligible {
+		if _, eligible := resolveRelevance(goalRelevance, item.concept); !eligible {
 			// OQ-4.3 = B' — uncovered concept: not selectable until
 			// set_goal_relevance is called.
 			continue
 		}
 		candidatesEligible++
-		score := rel * (1 - item.mastery)
+		rel := effectiveRelevance(item.concept, relevanceGraph, goalRelevance)
+		started := item.mastery > ConsolidationMasteryLow && item.mastery < ConsolidationMasteryHigh
+		bonus := 1.0
+		if started {
+			bonus += ConsolidationBonus
+		}
+		score := rel * (1 - item.mastery) * bonus
 		if score > bestScore {
 			bestScore = score
 			bestConcept = item.concept
 			bestRel = rel
 			bestMastery = item.mastery
+			bestStarted = started
 		}
 	}
 	if candidatesEligible == 0 {
@@ -273,13 +321,48 @@ func selectInstruction(
 			Rationale: "fringe non-empty but no concept covered by goal_relevance - call set_goal_relevance",
 		}
 	}
+	consolidation := ""
+	if bestStarted {
+		consolidation = ", consolidation bonus"
+	}
 	return Selection{
 		Concept: bestConcept,
 		Score:   bestScore,
 		Phase:   models.PhaseInstruction,
-		Rationale: fmt.Sprintf("argmax(rel=%.2f x (1-model estimate)=%.2f) across %d eligible candidates",
-			bestRel, 1-bestMastery, candidatesEligible),
+		Rationale: fmt.Sprintf("argmax(effective rel=%.2f x (1-model estimate)=%.2f%s) across %d eligible candidates",
+			bestRel, 1-bestMastery, consolidation, candidatesEligible),
 	}
+}
+
+// effectiveRelevance is max(rel(c), rel(d)) over every concept d that
+// transitively requires c. A prerequisite inherits the urgency of the goals
+// it unlocks. Descendants absent from a non-nil vector contribute nothing.
+func effectiveRelevance(concept string, graph models.KnowledgeSpace, goalRelevance map[string]float64) float64 {
+	best, _ := resolveRelevance(goalRelevance, concept)
+	if goalRelevance == nil {
+		return best
+	}
+	children := make(map[string][]string, len(graph.Prerequisites))
+	for successor, prereqs := range graph.Prerequisites {
+		for _, prereq := range prereqs {
+			children[prereq] = append(children[prereq], successor)
+		}
+	}
+	seen := map[string]bool{concept: true}
+	queue := append([]string(nil), children[concept]...)
+	for len(queue) > 0 {
+		next := queue[0]
+		queue = queue[1:]
+		if seen[next] {
+			continue
+		}
+		seen[next] = true
+		if rel, ok := goalRelevance[next]; ok && rel > best {
+			best = rel
+		}
+		queue = append(queue, children[next]...)
+	}
+	return best
 }
 
 // selectMaintenance implements the MAINTENANCE branch:

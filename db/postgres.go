@@ -1688,6 +1688,7 @@ END $$;`,
 	{Version: "postgres_0073_native_identities", Body: postgresNativeIdentityMigration},
 	{Version: "postgres_0074_conversation_training", Body: postgresTrainingMigration},
 	{Version: "postgres_0075_consolidation_maintenance", Body: consolidationMaintenanceMigration},
+	{Version: "postgres_0076_pedagogical_snapshot_interaction_index", Body: pedagogicalSnapshotInteractionIndexMigration},
 }
 
 // OpenPostgres opens a PostgreSQL-backed *sql.DB via the pgx database/sql

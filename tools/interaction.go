@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 	"time"
 
@@ -275,6 +276,13 @@ func registerRecordInteraction(server *mcp.Server, deps *Deps) {
 				r, _ := errorResult("success contradicts the outcome derived from the frozen rubric")
 				return r, nil, nil
 			}
+			if params.TransferScore != nil {
+				maxTotal := assessmentMaxTotal(assessment.RubricJSON, rubric)
+				if err := checkLinkedTransferScore(*params.TransferScore, assessmentScore, maxTotal); err != nil {
+					r, _ := errorResult(err.Error())
+					return r, nil, nil
+				}
+			}
 			if params.EvaluationProvenanceJSON != "" {
 				provenance, provenanceErr := normalizeJSONObject("evaluation_provenance_json", params.EvaluationProvenanceJSON)
 				if provenanceErr != nil {
@@ -433,6 +441,24 @@ func normalizeTransferEvidence(activityType, dimension string, score *float64, s
 		return "", err
 	}
 	return string(normalized), nil
+}
+
+// linkedTransferScoreTolerance is the largest accepted gap between a declared
+// transfer_score and the ratio derived from the frozen rubric.
+const linkedTransferScoreTolerance = 0.05
+
+// checkLinkedTransferScore rejects an attempt-linked transfer_score that does
+// not describe the graded response. The stored score is always the derived
+// ratio; the check only stops a host from reporting a contradictory number.
+func checkLinkedTransferScore(declared, total, maxTotal float64) error {
+	if maxTotal <= 0 {
+		return nil
+	}
+	derived := min(1, max(0, total/maxTotal))
+	if math.Abs(declared-derived) > linkedTransferScoreTolerance {
+		return fmt.Errorf("transfer_score %.2f contradicts the frozen rubric: criterion scores total %.4g of %.4g (ratio %.2f); send transfer_score=%.2f", declared, total, maxTotal, derived, derived)
+	}
+	return nil
 }
 
 func normalizeInterpretationBrief(explicit, notes string) string {

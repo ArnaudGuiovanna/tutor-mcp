@@ -6,19 +6,29 @@ package tools
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
+	"os"
+	"regexp"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"tutor-mcp/auth"
+	"tutor-mcp/engine"
+	"tutor-mcp/memory"
 	"tutor-mcp/models"
 	storeport "tutor-mcp/store"
 
 	"github.com/google/jsonschema-go/jsonschema"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"modernc.org/sqlite"
 )
 
 // Deps holds shared dependencies for all MCP tool handlers.
@@ -71,22 +81,36 @@ var readOnlyTools = map[string]bool{
 	"list_implementation_intentions": true,
 	"get_dashboard_state":            true,
 	"get_goal_relevance":             true,
+	// trainingPolicy only reads tenants.policy_json when it is not setting it.
+	"get_training_policy": true,
 }
 
 // readWriteTools contains read-oriented tools whose handlers also persist
 // learner state or enqueue external work. A write-only grant must not expose
 // their primary read payload, while a read-only grant must not authorize their
 // side effects, so these tools require both granular capabilities.
+//
+// Training reads are not listed: their scope comes from
+// models.TrainingReadAction (see requiredOAuthScopesForTool).
 var readWriteTools = map[string]bool{
-	"claim_memory_maintenance":   true,
-	"commit_memory_maintenance":  true,
-	"prepare_pedagogical_turn":   true,
-	"preview_training_lifecycle": true,
-	"list_training_library":      true, "get_training": true, "preview_training_edit": true, "get_training_policy": true, "find_training_members": true,
-	"get_curriculum_snapshot":  true,
-	"get_memory_state":         true,
-	"get_next_activity":        true,
-	"get_metacognitive_mirror": true,
+	"claim_memory_maintenance":  true,
+	"commit_memory_maintenance": true,
+	"prepare_pedagogical_turn":  true,
+	"get_curriculum_snapshot":   true,
+	"get_memory_state":          true,
+	"get_next_activity":         true,
+	"get_metacognitive_mirror":  true,
+}
+
+// toolReadOnlyHint is the advertised MCP readOnlyHint. It differs from
+// readOnlyTools, which selects a read-only database transaction: training
+// reads (get_training, list_training_library, preview_training_edit,
+// preview_training_lifecycle, find_training_members) change nothing the caller
+// can observe and need only a read grant, but they may materialize the
+// immutable curriculum baseline of a legacy personal domain or take a
+// PostgreSQL row lock, so they keep a write transaction.
+func toolReadOnlyHint(name string) bool {
+	return readOnlyTools[name] || models.TrainingReadAction(name)
 }
 
 var writeTools = map[string]bool{
@@ -232,9 +256,77 @@ func hasToolOAuthScopes(ctx context.Context, name string, required []string) boo
 // ignore: a recorded session shows a client inventing "diagnostic_feedback"
 // four times while the description named the two real kinds. Listing them in
 // the schema makes the same constraint part of what the client validates.
+//
+// Only inputs whose handler rejects every other value are listed, so no call
+// that used to succeed can fail schema validation. An optional field whose
+// empty string is accepted lists "" explicitly. Inputs normalized leniently by
+// their handler (get_next_activity.intent, transfer context types, OLM scope)
+// are deliberately absent, as are inputs whose handler answers with a more
+// specific explanation than a schema mismatch (record_interaction's
+// activity_type/error_type self-correction message, curriculum review status).
+// Keys are property paths: "a.b" descends into an object, "a[]" into array
+// items and "a{}" into map values.
 var toolInputEnums = map[string]map[string][]any{
-	"record_learning_event":    {"kind": {"feedback", "instruction"}},
-	"prepare_pedagogical_turn": {"mode": {"context", "activity"}, "intent": {"auto", "review"}},
+	"record_learning_event":      {"kind": {"feedback", "instruction"}},
+	"prepare_pedagogical_turn":   {"mode": {"context", "activity"}, "intent": {"auto", "review"}},
+	"prepare_assessment_attempt": {"activity_type": enumValues(allowedActivityTypes...)},
+	"update_learner_memory": {
+		"scope":     enumValues(allowedMemoryScopes...),
+		"operation": enumValues(append([]string{""}, allowedMemoryOperations...)...),
+	},
+	"update_implementation_intention": {"status": enumValues(models.IntentionStatusHonored, models.IntentionStatusMissed, models.IntentionStatusCancelled)},
+	"list_implementation_intentions":  {"status": enumValues("", models.IntentionStatusPending, models.IntentionStatusHonored, models.IntentionStatusMissed, models.IntentionStatusCancelled)},
+	"learning_negotiation":            {"activity_type": enumValues(append([]string{""}, allowedLearningNegotiationActivityTypes...)...)},
+	"publish_curriculum_revision": {
+		"operation": enumValues(
+			string(models.CurriculumOperationRename), string(models.CurriculumOperationUpdateMetadata),
+			string(models.CurriculumOperationSplit), string(models.CurriculumOperationMerge),
+			string(models.CurriculumOperationRemove), string(models.CurriculumOperationRepairPrerequisites),
+		),
+		"metadata.level":       curriculumLevelEnum,
+		"new_concepts[].level": curriculumLevelEnum,
+	},
+	"init_domain":                {"details{}.level": curriculumLevelEnum},
+	"add_concepts":               {"details{}.level": curriculumLevelEnum},
+	"list_training_library":      {"filter": enumValues("", "personal", "institutional", "shared", "mine", "review", "archived")},
+	"share_training":             {"audience": trainingAudienceEnum},
+	"set_training_access":        {"audience": trainingAudienceEnum},
+	"decide_training":            {"decision": enumValues("approve", "changes_requested")},
+	"preview_training_lifecycle": {"decision": enumValues("archive_training", "restore_training", "delete_training", "withdraw_training")},
+}
+
+var curriculumLevelEnum = enumValues("", string(models.CurriculumLevelUnspecified), string(models.CurriculumLevelFoundation), string(models.CurriculumLevelIntermediate), string(models.CurriculumLevelAdvanced))
+
+var trainingAudienceEnum = enumValues("", "open", "invitation", "approval")
+
+func enumValues(values ...string) []any {
+	out := make([]any, len(values))
+	for i, value := range values {
+		out[i] = value
+	}
+	return out
+}
+
+// schemaPropertyAt resolves a toolInputEnums path inside an object schema.
+func schemaPropertyAt(schema *jsonschema.Schema, path string) *jsonschema.Schema {
+	current := schema
+	for _, segment := range strings.Split(path, ".") {
+		if current == nil {
+			return nil
+		}
+		name, items := strings.CutSuffix(segment, "[]")
+		name, values := strings.CutSuffix(name, "{}")
+		current = current.Properties[name]
+		switch {
+		case current == nil:
+			return nil
+		case items:
+			current = current.Items
+		case values:
+			current = current.AdditionalProperties
+		}
+	}
+	return current
 }
 
 // toolInputStringForms names inputs declared as an object that also accept a
@@ -251,20 +343,24 @@ var toolInputStringForms = map[string][]string{
 func constrainInputSchema[In any](tool *mcp.Tool) {
 	enums, hasEnums := toolInputEnums[tool.Name]
 	stringForms, hasStringForms := toolInputStringForms[tool.Name]
-	if (!hasEnums && !hasStringForms) || tool.InputSchema != nil {
+	if !hasEnums && !hasStringForms {
+		return
+	}
+	if tool.InputSchema != nil {
+		// Hand-built schemas (training, prepare_assessment_attempt) receive
+		// the same enums; alternate string shapes stay an inferred-only feature.
+		explicit, ok := tool.InputSchema.(*jsonschema.Schema)
+		if !ok {
+			return
+		}
+		applyInputEnums(tool.Name, explicit, enums)
 		return
 	}
 	schema, err := jsonschema.For[In](&jsonschema.ForOptions{})
 	if err != nil {
 		panic("cannot infer the input schema of MCP tool " + tool.Name + ": " + err.Error())
 	}
-	for field, values := range enums {
-		property, ok := schema.Properties[field]
-		if !ok {
-			panic("MCP tool " + tool.Name + " has no " + field + " input to constrain")
-		}
-		property.Enum = values
-	}
+	applyInputEnums(tool.Name, schema, enums)
 	for _, field := range stringForms {
 		property, ok := schema.Properties[field]
 		if !ok {
@@ -280,8 +376,18 @@ func constrainInputSchema[In any](tool *mcp.Tool) {
 	tool.InputSchema = schema
 }
 
+func applyInputEnums(toolName string, schema *jsonschema.Schema, enums map[string][]any) {
+	for field, values := range enums {
+		property := schemaPropertyAt(schema, field)
+		if property == nil {
+			panic("MCP tool " + toolName + " has no " + field + " input to constrain")
+		}
+		property.Enum = values
+	}
+}
+
 func addTool[In, Out any](server *mcp.Server, tool *mcp.Tool, handler mcp.ToolHandlerFor[In, Out]) {
-	readOnly := readOnlyTools[tool.Name]
+	readOnly := toolReadOnlyHint(tool.Name)
 	requiredScopes, known := requiredOAuthScopesForTool(tool.Name)
 	if !known {
 		panic("missing OAuth scope policy for MCP tool " + tool.Name)
@@ -508,16 +614,169 @@ func errorResult(msg string) (*mcp.CallToolResult, error) {
 	}, nil
 }
 
-// safeErrorResult logs only the underlying error class and returns an
-// errorResult carrying the public, LLM-facing message. Raw database errors can
-// contain learner values, filesystem paths, SQL details, or credentials, so
-// they belong in an explicitly protected diagnostic sink rather than ordinary
-// application logs.
+// safeErrorResult returns an errorResult carrying the public, LLM-facing
+// message. A store.ValidationError in the chain is a caller-correctable
+// rejection written for the caller, so its message is appended verbatim
+// ("<publicMsg>: <reason>") instead of being collapsed into publicMsg.
+//
+// The operator log keeps enough to diagnose a failing call: the error class
+// and, unless the chain carries SQL driver output, a bounded copy of the
+// message. Driver errors can quote learner values, SQL, connection strings or
+// filesystem paths, so for them only the SQLSTATE (or SQLite result code) is
+// logged.
 func safeErrorResult(logger *slog.Logger, publicMsg string, err error) (*mcp.CallToolResult, error) {
+	if reason, ok := storeport.ValidationMessage(err); ok {
+		// The reason may quote the caller's own content: it is returned to
+		// the caller but kept out of the log.
+		if logger != nil {
+			logger.Info(publicMsg, "error_type", fmt.Sprintf("%T", err), "error_class", "validation")
+		}
+		return errorResult(publicMsg + ": " + reason)
+	}
 	if logger != nil {
-		logger.Error(publicMsg, "error_type", fmt.Sprintf("%T", err))
+		logger.Error(publicMsg, diagnosticErrorAttrs(err)...)
 	}
 	return errorResult(publicMsg)
+}
+
+var sqlStateInText = regexp.MustCompile(`SQLSTATE ([0-9A-Z]{5})`)
+
+// sqlDriverMarkers identify driver output that survived as plain text, for
+// example after fmt.Errorf("%v", err) dropped the typed driver error.
+var sqlDriverMarkers = []string{
+	"sqlstate", "sqlite", "sql logic error", "constraint failed", "database is locked",
+	"no such table", "no such column", "syntax error", "sql: ", "pgx", "pgconn",
+	"failed to connect", "duplicate key value", "violates ", "relation \"",
+}
+
+// loggableSentinels have fixed messages that never embed request data, so
+// their text may be logged when one is found in an error chain.
+var loggableSentinels = []error{
+	context.Canceled, context.DeadlineExceeded, sql.ErrNoRows, sql.ErrTxDone, sql.ErrConnDone,
+	fs.ErrNotExist, fs.ErrExist, fs.ErrPermission, fs.ErrClosed,
+	storeport.ErrNotFound, storeport.ErrLearningSessionClosed, storeport.ErrInvalidPrincipal,
+	storeport.ErrInvalidOAuthScope, storeport.ErrCurriculumVersionConflict, storeport.ErrDomainPhaseConflict,
+	storeport.ErrIdempotencyKeyConflict, storeport.ErrIdempotencyInProgress, storeport.ErrIdempotencyResponseExpired,
+	storeport.ErrAvailabilityVersionConflict, storeport.ErrCohortCapacityReached, storeport.ErrWebhookQueueFull,
+	storeport.ErrFormationVersionImmutable, storeport.ErrFormationDomainLocked, storeport.ErrFormationAdmissionRequired,
+	storeport.ErrFormationUnavailable, storeport.ErrEnrollmentTransition, storeport.ErrInvalidProgressRequest,
+	storeport.ErrProgressUnavailable, storeport.ErrTenantDSARBlocked, storeport.ErrAmbiguousIdentity,
+	storeport.ErrInvalidAssessmentReviewRequest, storeport.ErrAssessmentReviewMaterialUnavailable,
+	storeport.ErrAssessmentReviewConflict, storeport.ErrAssessmentReviewMaterialChanged,
+	storeport.ErrInvalidAssessmentReviewScore,
+	memory.ErrQuotaExceeded, memory.ErrNarrativeNotFound, memory.ErrNarrativeVersionConflict,
+	memory.ErrNarrativeCorrupt, memory.ErrNarrativeMutationConflict, memory.ErrNarrativeBackfillConflict,
+	memory.ErrSessionIndexIncomplete, memory.ErrNarrativeTenantScope,
+	engine.ErrUnknownDomain, engine.ErrUnknownPhase, engine.ErrGateUnknownPhase, engine.ErrInvalidGateResult,
+}
+
+// diagnosticErrorAttrs returns slog attributes describing err without
+// copying free text into the application log. Error messages can quote
+// learner content, concept labels, identifiers, file paths or SQL, so only
+// typed codes and fixed sentinel messages are logged.
+func diagnosticErrorAttrs(err error) []any {
+	attrs := []any{"error_type", fmt.Sprintf("%T", err)}
+	if err == nil {
+		return attrs
+	}
+	if _, ok := storeport.ValidationMessage(err); ok {
+		return append(attrs, "error_class", "validation")
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return append(attrs, "sqlstate", pgErr.Code)
+	}
+	var sqliteErr *sqlite.Error
+	if errors.As(err, &sqliteErr) {
+		return append(attrs, "sqlite_code", sqliteErr.Code())
+	}
+	var connectErr *pgconn.ConnectError
+	if errors.As(err, &connectErr) {
+		return attrs
+	}
+	if message := err.Error(); containsSQLDriverMarker(message) {
+		if code := sqlStateInText.FindStringSubmatch(message); code != nil {
+			attrs = append(attrs, "sqlstate", code[1])
+		}
+		return attrs
+	}
+	if op, cause, ok := osErrorParts(err); ok {
+		attrs = append(attrs, "os_op", op)
+		var errno syscall.Errno
+		if errors.As(cause, &errno) {
+			return append(attrs, "errno", errno.Error())
+		}
+		return append(attrs, "cause_type", fmt.Sprintf("%T", cause))
+	}
+	for _, sentinel := range loggableSentinels {
+		if errors.Is(err, sentinel) {
+			return append(attrs, "sentinel", sentinel.Error())
+		}
+	}
+	if root := rootError(err); root != err {
+		attrs = append(attrs, "root_type", fmt.Sprintf("%T", root))
+	}
+	return attrs
+}
+
+func containsSQLDriverMarker(message string) bool {
+	lower := strings.ToLower(message)
+	for _, marker := range sqlDriverMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// osErrorParts extracts the operation and cause of an operating-system error
+// without its path arguments.
+func osErrorParts(err error) (string, error, bool) {
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) {
+		return pathErr.Op, pathErr.Err, true
+	}
+	var linkErr *os.LinkError
+	if errors.As(err, &linkErr) {
+		return linkErr.Op, linkErr.Err, true
+	}
+	var syscallErr *os.SyscallError
+	if errors.As(err, &syscallErr) {
+		return syscallErr.Syscall, syscallErr.Err, true
+	}
+	return "", nil, false
+}
+
+// rootError follows single-error wrapping to the innermost error.
+func rootError(err error) error {
+	for {
+		next := errors.Unwrap(err)
+		if next == nil {
+			return err
+		}
+		err = next
+	}
+}
+
+// invalidInput marks a local validation error as safe to return verbatim.
+func invalidInput(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &storeport.ValidationError{Message: err.Error()}
+}
+
+// resultErrorText returns the caller-facing text of a failed tool result.
+func resultErrorText(result *mcp.CallToolResult) string {
+	if result == nil || !result.IsError {
+		return ""
+	}
+	for _, content := range result.Content {
+		if text, ok := content.(*mcp.TextContent); ok {
+			return text.Text
+		}
+	}
+	return ""
 }
 
 // noActiveDomainResult returns the canonical "no active domain" payload that
@@ -543,7 +802,7 @@ func domainSetupInstruction(deps *Deps) string {
 	if deps != nil && deps.Institution {
 		return "Call get_my_formations or list_available_formations, help the learner choose a cohort, then call join_formation only with their agreement. Resume using the returned domain_id."
 	}
-	return "appelle init_domain(name, concepts, prerequisites)"
+	return "Call init_domain(name, concepts, prerequisites) from the learner's goal, then resume with the returned domain_id."
 }
 
 // RegisterTools registers all MCP tools and prompts on the given server.

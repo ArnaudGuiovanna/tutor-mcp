@@ -61,28 +61,55 @@ func TestAssessMasteryStatusEvidenceAxes(t *testing.T) {
 		ContextType: "near", Score: 0.95, CreatedAt: failureAt,
 	})
 	status = AssessMasteryStatus("L1", "fractions", cs, interactions, transfers, assessments, now)
-	if status.Transferred || status.TransferReadiness != TransferReadinessBlocked || status.Stage != MasteryStageDemonstrated {
+	// The most recent trusted summative attempt failed: it blocks transfer
+	// and also revokes the earlier demonstration (P1-3), leaving retention.
+	if status.Transferred || status.Demonstrated || status.TransferReadiness != TransferReadinessBlocked || status.Stage != MasteryStageRetained {
 		t.Fatalf("recent trusted transfer failure escaped blocking semantics: %+v", status)
 	}
 }
 
-func TestAssessMasteryStatusDemonstrationIsIndependentOfModelAndRetention(t *testing.T) {
+// P1-3: a demonstration needs a high estimate and a passed trusted
+// MASTERY_CHALLENGE or TRANSFER_PROBE; a cold diagnostic never demonstrates.
+func TestAssessMasteryStatusDemonstrationRequiresEstimateAndSummativeAttempt(t *testing.T) {
 	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
-	attempt := masteryStatusAssessment("expert-performance", "fractions", models.ActivityDiagnosticAssessment, true, now)
+	high := &models.ConceptState{LearnerID: "L1", Concept: "fractions", CardState: "review", PMastery: 0.9, LastReview: &now, Stability: 10}
+	low := &models.ConceptState{LearnerID: "L1", Concept: "fractions", CardState: "review", PMastery: 0.2, LastReview: &now, Stability: 10}
+	diagnostic := masteryStatusAssessment("diag", "fractions", models.ActivityDiagnosticAssessment, true, now)
+	challenge := masteryStatusAssessment("challenge", "fractions", models.ActivityMasteryChallenge, true, now)
 	for _, tc := range []struct {
-		name  string
-		state *models.ConceptState
+		name     string
+		state    *models.ConceptState
+		attempts []*models.AssessmentAttempt
+		want     bool
 	}{
-		{name: "no model state"},
-		{name: "new learner prior", state: models.NewConceptState("L1", "fractions")},
-		{name: "low estimate", state: &models.ConceptState{LearnerID: "L1", Concept: "fractions", CardState: "review", PMastery: 0.2, LastReview: &now, Stability: 10}},
+		{"diagnostic with high estimate", high, []*models.AssessmentAttempt{diagnostic}, false},
+		{"challenge without model state", nil, []*models.AssessmentAttempt{challenge}, false},
+		{"challenge with low estimate", low, []*models.AssessmentAttempt{challenge}, false},
+		{"challenge with high estimate", high, []*models.AssessmentAttempt{challenge}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			status := AssessMasteryStatus("L1", "fractions", tc.state, nil, nil, []*models.AssessmentAttempt{attempt}, now)
-			if !status.Demonstrated || status.Estimated || status.Retained || status.Transferred || status.Stage != MasteryStageDemonstrated {
-				t.Fatalf("direct demonstrated performance must not imply a model estimate or delayed retention: %+v", status)
+			status := AssessMasteryStatus("L1", "fractions", tc.state, nil, nil, tc.attempts, now)
+			if status.Demonstrated != tc.want || status.Retained {
+				t.Fatalf("demonstrated=%v want %v: %+v", status.Demonstrated, tc.want, status)
 			}
 		})
+	}
+}
+
+// P1-3: the most recent trusted summative attempt decides; a later failure
+// revokes an earlier pass and a later pass restores it.
+func TestAssessMasteryStatusLatestSummativeAttemptDecidesDemonstration(t *testing.T) {
+	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	cs := &models.ConceptState{LearnerID: "L1", Concept: "fractions", CardState: "review", PMastery: 0.9, LastReview: &now, Stability: 10}
+	pass := masteryStatusAssessment("pass", "fractions", models.ActivityMasteryChallenge, true, now.Add(-48*time.Hour))
+	fail := masteryStatusAssessment("fail", "fractions", models.ActivityTransferProbe, true, now.Add(-24*time.Hour))
+	fail.Passed = false
+	if status := AssessMasteryStatus("L1", "fractions", cs, nil, nil, []*models.AssessmentAttempt{fail, pass}, now); status.Demonstrated {
+		t.Fatalf("a later trusted failure must revoke the demonstration: %+v", status)
+	}
+	repass := masteryStatusAssessment("repass", "fractions", models.ActivityMasteryChallenge, true, now.Add(-time.Hour))
+	if status := AssessMasteryStatus("L1", "fractions", cs, nil, nil, []*models.AssessmentAttempt{fail, repass, pass}, now); !status.Demonstrated {
+		t.Fatalf("a later trusted pass must restore the demonstration: %+v", status)
 	}
 }
 
@@ -112,14 +139,17 @@ func TestAssessMasteryStatusTransferIsIndependentOfRetentionButRequiresTrustedEv
 		})
 		attempts = append(attempts, masteryStatusAssessment(id, "fractions", models.ActivityTransferProbe, true, now))
 	}
-	status := AssessMasteryStatus("L1", "fractions", nil, nil, transfers, attempts, now)
-	if !status.Demonstrated || !status.Transferred || status.Estimated || status.Retained || status.Stage != MasteryStageTransferred {
+	// Demonstration (and so transfer) requires the model estimate (P1-3), but
+	// a card without any review history still has no retention claim.
+	estimated := &models.ConceptState{LearnerID: "L1", Concept: "fractions", CardState: "new", PMastery: 0.9}
+	status := AssessMasteryStatus("L1", "fractions", estimated, nil, transfers, attempts, now)
+	if !status.Demonstrated || !status.Transferred || !status.Estimated || status.Retained || status.Stage != MasteryStageTransferred {
 		t.Fatalf("trusted transfer evidence must not manufacture retention or depend on its absence: %+v", status)
 	}
 	for _, attempt := range attempts {
 		attempt.TrustedEvaluation = false
 	}
-	status = AssessMasteryStatus("L1", "fractions", nil, nil, transfers, attempts, now)
+	status = AssessMasteryStatus("L1", "fractions", estimated, nil, transfers, attempts, now)
 	if status.Demonstrated || status.Transferred {
 		t.Fatalf("untrusted transfer observations must not establish either axis: %+v", status)
 	}
@@ -129,7 +159,7 @@ func TestAssessMasteryStatusDemonstrationRejectsForeignAndFutureEvidence(t *test
 	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
 	for _, tc := range []string{"another learner", "future evaluation", "response after evaluation"} {
 		t.Run(tc, func(t *testing.T) {
-			attempt := masteryStatusAssessment("expert-performance", "fractions", models.ActivityDiagnosticAssessment, true, now)
+			attempt := masteryStatusAssessment("expert-performance", "fractions", models.ActivityMasteryChallenge, true, now)
 			future := now.Add(time.Hour)
 			switch tc {
 			case "another learner":
@@ -139,7 +169,8 @@ func TestAssessMasteryStatusDemonstrationRejectsForeignAndFutureEvidence(t *test
 			case "response after evaluation":
 				attempt.SubmittedAt = &future
 			}
-			status := AssessMasteryStatus("L1", "fractions", nil, nil, nil, []*models.AssessmentAttempt{attempt}, now)
+			estimated := &models.ConceptState{LearnerID: "L1", Concept: "fractions", CardState: "new", PMastery: 0.9}
+			status := AssessMasteryStatus("L1", "fractions", estimated, nil, nil, []*models.AssessmentAttempt{attempt}, now)
 			if status.Demonstrated || status.Transferred {
 				t.Fatalf("invalid evidence established a claim: %+v", status)
 			}
@@ -221,13 +252,46 @@ func TestAssessMasteryStatus_TrustedHostLLMEvaluationDemonstrates(t *testing.T) 
 	now := time.Now().UTC()
 	attempt := masteryStatusAssessment("host-trusted", "a", models.ActivityMasteryChallenge, false, now)
 	attempt.TrustedEvaluation = true
-	status := AssessMasteryStatus("L1", "a", nil, nil, nil, []*models.AssessmentAttempt{attempt}, now)
+	estimated := &models.ConceptState{LearnerID: "L1", Concept: "a", CardState: "new", PMastery: 0.9}
+	status := AssessMasteryStatus("L1", "a", estimated, nil, nil, []*models.AssessmentAttempt{attempt}, now)
 	if !status.Demonstrated || status.Stage != MasteryStageDemonstrated {
 		t.Fatalf("trusted host_llm evaluation must demonstrate: %+v", status)
 	}
 	untrusted := masteryStatusAssessment("host-raw", "a", models.ActivityMasteryChallenge, false, now)
-	status = AssessMasteryStatus("L1", "a", nil, nil, nil, []*models.AssessmentAttempt{untrusted}, now)
+	status = AssessMasteryStatus("L1", "a", estimated, nil, nil, []*models.AssessmentAttempt{untrusted}, now)
 	if status.Demonstrated {
 		t.Fatalf("a raw host_llm row without the trusted flag must not demonstrate: %+v", status)
+	}
+}
+
+// P1-3: a demonstrated concept whose retention has decayed is fragile.
+func TestClassifyOLMNodeFragileBeforeDemonstrated(t *testing.T) {
+	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	last := now.Add(-90 * 24 * time.Hour)
+	cs := &models.ConceptState{LearnerID: "L1", Concept: "a", CardState: "review", PMastery: 0.9, LastReview: &last, Stability: 2}
+	status := MasteryStatus{Demonstrated: true, RetentionEstimate: 0.2}
+	if got := classifyOLMNode(cs, status); got != olmNodeFragile {
+		t.Fatalf("decayed demonstrated concept classified %d, want fragile", got)
+	}
+	status.RetentionEstimate = 0.95
+	if got := classifyOLMNode(cs, status); got != olmNodeSolid {
+		t.Fatalf("retained demonstrated concept classified %d, want solid", got)
+	}
+}
+
+// P1-9: every linked trusted transfer record is scored by its rubric ratio,
+// not by the host's auxiliary score.
+func TestTrustedTransferRecordsUseRubricRatio(t *testing.T) {
+	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	attempt := masteryStatusAssessment("t1", "a", models.ActivityTransferProbe, true, now)
+	attempt.RubricJSON = `{"criteria":[{"id":"x","description":"d","max_score":2},{"id":"y","description":"d","max_score":2}],"passing_score":2.4}`
+	attempt.Score = 3
+	record := &models.TransferRecord{ConceptID: "a", AssessmentAttemptID: "t1", ContextType: "near", Score: 1, CreatedAt: now}
+	verified := trustedTransferRecords("a", []*models.TransferRecord{record}, []*models.AssessmentAttempt{attempt})
+	if len(verified) != 1 || verified[0].Score != 0.75 {
+		t.Fatalf("verified score=%v, want rubric ratio 0.75", verified)
+	}
+	if record.Score != 1 {
+		t.Fatalf("the caller's record must not be rewritten")
 	}
 }

@@ -274,3 +274,29 @@ func (f pedagogicalDecisionFixture) attempt(t *testing.T, id string) *models.Ass
 		PassingScore: 1, Status: models.AssessmentAttemptPrepared, CreatedAt: time.Now().UTC(),
 	}
 }
+
+func TestListRecentPedagogicalDecisionsNewestFirstPerDomain(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+	owner := newPedagogicalDecisionFixture(t, s, "L1", "recent-owner")
+	other := newPedagogicalDecisionFixture(t, s, "L2", "recent-other")
+	next := *owner.decision
+	next.ID = "decision-recent-next"
+	next.Contract.DecisionID = next.ID
+	next.Contract.RecommendedActivityType = models.ActivityTransferProbe
+	next.CreatedAt = owner.decision.CreatedAt.Add(time.Minute)
+	if err := s.CreatePedagogicalDecision(ctx, owner.scope, &next); err != nil {
+		t.Fatal(err)
+	}
+	decisions, err := s.ListRecentPedagogicalDecisions(ctx, owner.scope, owner.domain.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decisions) != 2 || decisions[0].ID != next.ID || decisions[1].ID != owner.decision.ID ||
+		decisions[0].Contract.RecommendedActivityType != models.ActivityTransferProbe {
+		t.Fatalf("recent decisions=%+v", decisions)
+	}
+	if foreign, err := s.ListRecentPedagogicalDecisions(ctx, owner.scope, other.domain.ID, 10); err != nil || len(foreign) != 0 {
+		t.Fatalf("another learner's decisions leaked: %+v err=%v", foreign, err)
+	}
+}

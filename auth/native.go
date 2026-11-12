@@ -65,7 +65,17 @@ type NativeIdentityServer struct {
 	options NativeIdentityOptions
 	origin  *url.URL
 	now     func() time.Time
+	// Challenge issuance is unauthenticated. Budgets are per client IP and
+	// per (client IP, identity key), never per identity alone, so a third
+	// party cannot exhaust the budget the key holder draws from.
+	challengeIPLimiter       *RateLimiter
+	challengeIdentityLimiter *RateLimiter
 }
+
+const (
+	nativeChallengeIPPerMinute       = 20
+	nativeChallengeIdentityPerMinute = 6
+)
 
 type nativeChallengeRequest struct {
 	TenantID             string `json:"tenant_id"`
@@ -113,7 +123,13 @@ func NewNativeIdentityServer(store storeport.NativeIdentityStore, options Native
 	if options.InstitutionName == "" {
 		options.InstitutionName = options.InstitutionID
 	}
-	return &NativeIdentityServer{store: store, options: options, origin: origin, now: time.Now}, nil
+	return &NativeIdentityServer{
+		store: store, options: options, origin: origin, now: time.Now,
+		challengeIPLimiter: NewRateLimiterWithNamespace("native_challenge_ip",
+			nativeChallengeIPPerMinute/60.0, nativeChallengeIPPerMinute),
+		challengeIdentityLimiter: NewRateLimiterWithNamespace("native_challenge_identity",
+			nativeChallengeIdentityPerMinute/60.0, nativeChallengeIdentityPerMinute),
+	}, nil
 }
 
 func nativeID(value string) bool {
@@ -217,6 +233,13 @@ func nativeIdentityMatches(identity *models.NativeIdentity, tenant, signer, acti
 	return identity.PublicKey == signer
 }
 
+func (s *NativeIdentityServer) allowChallenge(ip, publicKey string) bool {
+	if s.challengeIPLimiter == nil || s.challengeIdentityLimiter == nil {
+		return true
+	}
+	return s.challengeIdentityLimiter.Allow(ip+"\x00"+publicKey) && s.challengeIPLimiter.Allow(ip)
+}
+
 func (s *NativeIdentityServer) HandleChallenge(w http.ResponseWriter, r *http.Request) {
 	var request nativeChallengeRequest
 	if _, ok := nativeReadBody(w, r, &request); !ok {
@@ -224,6 +247,11 @@ func (s *NativeIdentityServer) HandleChallenge(w http.ResponseWriter, r *http.Re
 	}
 	if request.TenantID != s.options.InstitutionID || !nativePayloadFields(request.Action, request.PublicKey, request.NewPublicKey, request.NewRecoveryPublicKey, request.SessionID) {
 		nativeError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if !s.allowChallenge(clientIP(r), request.PublicKey) {
+		w.Header().Set("Retry-After", "10")
+		nativeError(w, http.StatusTooManyRequests, "rate_limit_exceeded")
 		return
 	}
 	identity, err := s.store.GetNativeIdentity(r.Context(), request.TenantID, request.PublicKey, request.Action)

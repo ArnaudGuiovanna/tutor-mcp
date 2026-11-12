@@ -1168,6 +1168,28 @@ func TestHandleRegister_ConfidentialClient(t *testing.T) {
 	}
 }
 
+func TestHandleRegister_EquivalentConfidentialRegistrationGetsDistinctCredentials(t *testing.T) {
+	s, _ := newTestServer(t)
+	body := `{"client_name":"Same","redirect_uris":["https://same.example/cb"],"token_endpoint_auth_method":"client_secret_post"}`
+	register := func() (int, map[string]any) {
+		req := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		s.HandleRegister(rec, req)
+		var resp map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+		return rec.Code, resp
+	}
+	firstCode, first := register()
+	secondCode, second := register()
+	if firstCode != http.StatusCreated || secondCode != http.StatusCreated {
+		t.Fatalf("status = %d/%d, want 201/201", firstCode, secondCode)
+	}
+	if first["client_id"] == second["client_id"] || first["client_secret"] == second["client_secret"] {
+		t.Fatal("an equivalent registration received an existing confidential credential")
+	}
+}
+
 func TestHandleRegister_ConfidentialClientPost(t *testing.T) {
 	s, _ := newTestServer(t)
 

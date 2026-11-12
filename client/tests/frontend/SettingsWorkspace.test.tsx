@@ -24,7 +24,7 @@ describe('Compte et paramètres persistants',()=>{
   expect(fixture.getState().settings.appearance).toEqual({theme:'light',fontSize:14,lineHeight:1.9,reduceMotion:true});
  });
  it('conserve les autorisations réelles dans la portée du compte, serveur et agent',async()=>{
-  const state=initialState(true);state.settings.tutor.mode='remote';state.settings.tutor.url='https://institution.example/';const fixture=client(state);
+  const state=initialState(true);state.settings.tutor.mode='remote';state.settings.tutor.url='https://institution.example/';state.settings.setupCompleted=true;const fixture=client(state);
   vi.mocked(fixture.api.tutorOverview).mockResolvedValue({identity:{tenantId:'tenant-1',userId:'u',membershipId:'member-1'},context:{},formations:{},availableFormations:{}});
   vi.mocked(fixture.api.listMcpTools).mockResolvedValue({tools:[{name:'get_next_activity',description:'Next activity'},{name:'record_interaction'}]});await settings(fixture.api);
   await userEvent.click(screen.getByText('Autorisations par outil'));await screen.findByText('get_next_activity');await userEvent.selectOptions(screen.getByLabelText('Règle pour les outils Tutor'),'allow');
@@ -72,6 +72,18 @@ it('propose seulement les options de modèle, réflexion et vitesse réellement 
  expect(fixture.api.setAgentConfiguration).toHaveBeenLastCalledWith({model:'model-b',reasoningEffort:'high',speed:'fast'});
 });
 
+it('présente le modèle automatique et le modèle réellement utilisé quand aucun modèle n’est choisi',async()=>{
+ const state=initialState(true);const fixture=client(state);
+ const config={connected:true,configOptions:[{id:'model',name:'Model',category:'model',type:'select',currentValue:'mini',options:[{value:'mini',name:'GPT mini'},{value:'large',name:'GPT large'}]},{id:'thought_level',name:'Reasoning',category:'thought_level',type:'select',currentValue:'low',options:[{value:'low',name:'Low'},{value:'high',name:'High'}]}],current:{model:'',reasoningEffort:'',speed:'balanced'},supported:{model:true,reasoningEffort:true,speed:true},speedOptions:['balanced','fast'],effective:{model:'mini',reasoningEffort:'low',automatic:true}};
+ vi.mocked(fixture.api.agentConfiguration).mockResolvedValue(config);await settings(fixture.api);
+ await userEvent.click(screen.getAllByText('Modèle et rapidité')[0]);
+ const select=await screen.findByLabelText(/^Modèle/) as HTMLSelectElement;
+ expect(select.value).toBe('');expect(select.selectedOptions[0].textContent).toBe('Automatique (rapide et économe)');
+ expect(screen.getByText('Modèle utilisé : GPT mini, réflexion faible')).toBeTruthy();
+ expect([...screen.getByLabelText('Préférence de réponse').querySelectorAll('option')].map(option=>option.textContent)).toEqual(['Équilibré','Rapide — petit modèle, effort bas']);
+ expect(fixture.api.setAgentConfiguration).not.toHaveBeenCalled();
+});
+
 it('présente en anglais les statuts de membre et garde la représentation technique de sa clé dans les détails',async()=>{
  const state=initialState(true);const fixture=client(state);setInterfaceLanguage('en');vi.mocked(fixture.api.institutionAction).mockImplementation(async action=>action==='overview'?institution:{items:[{membership_id:'member-2',user_id:'user-2',name:'Alice',roles:['owner'],status:'active',public_key:'a'.repeat(64)}],next_after:''});
  render(<SettingsWorkspace api={fixture.api} snapshot={state} overview={null} busy={false} initialTab="members" renderConnection={()=>null} onSaved={()=>{}}/>);await screen.findByRole('heading',{name:'Alice'});expect(screen.getByText('Owner · Active')).toBeTruthy();const details=screen.getByText('Member public identifier').parentElement as HTMLDetailsElement;expect(details.tagName).toBe('DETAILS');expect(details.open).toBe(false);expect(screen.queryByText(/Active enrolment/)).toBeNull();
@@ -91,7 +103,7 @@ it('conserve le reçu pending d’un effacement accepté lorsque le serveur reti
 });
 
 it('connecte Tutor avec l’agent déjà lancé et règle les outils sur le même écran, sans écraser la nouvelle adresse',async()=>{
- const state=initialState();state.settings.tutor={mode:'remote',url:'https://old.example',command:'tutor-mcp',args:['--local']};state.identity={exists:true,backupConfirmed:true,needsBackup:false};
+ const state=initialState();state.settings.setupCompleted=true;state.settings.tutor={mode:'remote',url:'https://old.example',command:'tutor-mcp',args:['--local']};state.identity={exists:true,backupConfirmed:true,needsBackup:false};
  const fixture=client(state);vi.mocked(fixture.api.tutorOverview).mockResolvedValue({identity:{tenantId:'tenant-1',userId:'u',membershipId:'member-1'},context:{},formations:{},availableFormations:{}});
  vi.mocked(fixture.api.listMcpTools).mockResolvedValue({tools:[{name:'record_interaction'}]});
  await settings(fixture.api);const user=userEvent.setup();
@@ -110,14 +122,14 @@ it('connecte Tutor avec l’agent déjà lancé et règle les outils sur le mêm
 });
 
 it('préserve une exception refusée lorsque la règle générale change',async()=>{
- const state=initialState(true);state.settings.tutor={mode:'remote',url:'https://institution.example',command:'',args:[]};state.settings.permissionPolicy={origin:'https://institution.example',institutionId:'tenant-1',agentId:state.settings.targetId,defaultDecision:'ask',tools:{record_interaction:'deny'}};
+ const state=initialState(true);state.settings.setupCompleted=true;state.settings.tutor={mode:'remote',url:'https://institution.example',command:'',args:[]};state.settings.permissionPolicy={origin:'https://institution.example',institutionId:'tenant-1',agentId:state.settings.targetId,defaultDecision:'ask',tools:{record_interaction:'deny'}};
  const fixture=client(state);vi.mocked(fixture.api.tutorOverview).mockResolvedValue({identity:{tenantId:'tenant-1',userId:'u',membershipId:'m'},context:{},formations:{},availableFormations:{}});
  await settings(fixture.api);await userEvent.selectOptions(screen.getByLabelText('Règle pour les outils Tutor'),'allow');
  await waitFor(()=>expect(fixture.getState().settings.permissionPolicy?.defaultDecision).toBe('allow'));expect(fixture.getState().settings.permissionPolicy?.tools.record_interaction).toBe('deny');
 });
 
 it('crée et sauvegarde l’identité nécessaire directement dans la connexion Tutor',async()=>{
- const state=initialState();state.settings.tutor={mode:'remote',url:'https://institution.example',command:'',args:[]};const fixture=client(state);await settings(fixture.api);
+ const state=initialState();state.settings.setupCompleted=true;state.settings.tutor={mode:'remote',url:'https://institution.example',command:'',args:[]};const fixture=client(state);await settings(fixture.api);
  await userEvent.click(screen.getByRole('button',{name:'Créer mon identité'}));
  expect(await screen.findByRole('region',{name:'Sauvegarde obligatoire'})).toBeTruthy();expect(screen.getByRole('tab',{name:'Connexion et outils'}).getAttribute('aria-selected')).toBe('true');
  await userEvent.type(screen.getByLabelText('Phrase pour chiffrer la sauvegarde'),'une phrase de test');await userEvent.type(screen.getByLabelText('Confirmer la phrase de sauvegarde'),'une phrase de test');

@@ -133,7 +133,8 @@ func registerUpdateLearnerMemory(server *mcp.Server, deps *Deps) {
 			// append could duplicate it, so retain a successful idempotency result
 			// while exposing the directory-sync durability degradation.
 			degradedComponents = append(degradedComponents, "memory_directory_sync")
-			deps.Logger.Warn("update_learner_memory: file committed with degraded directory sync", "err", err, "learner", learnerID, "scope", params.Scope)
+			deps.Logger.Warn("update_learner_memory: file committed with degraded directory sync",
+				append(diagnosticErrorAttrs(err), "learner", learnerID, "scope", params.Scope)...)
 		}
 		key := memoryReadKey(scope, params.ConceptSlug, periodKey, ts)
 		payload := map[string]any{

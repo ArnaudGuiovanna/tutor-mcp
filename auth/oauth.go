@@ -193,6 +193,7 @@ type OAuthServer struct {
 	cimdHTTPClient       *http.Client
 	cimdMu               sync.Mutex
 	cimdCache            map[string]cachedCIMDClient
+	cimdPolicy           CIMDPolicy
 	csrfMu               sync.Mutex
 	usedCSRF             map[string]time.Time
 	lastCSRFPrune        time.Time
@@ -301,7 +302,7 @@ func (s *OAuthServer) HandleAuthServerMetadata(w http.ResponseWriter, r *http.Re
 		"grant_types_supported":                 []string{"authorization_code", "refresh_token", "client_credentials"},
 		"code_challenge_methods_supported":      []string{"S256"},
 		"scopes_supported":                      scopesSupported,
-		"client_id_metadata_document_supported": true,
+		"client_id_metadata_document_supported": s.cimdPolicy.Enabled(),
 		"token_endpoint_auth_methods_supported": []string{"none", "client_secret_basic", "client_secret_post"},
 		// RFC 9207: we include iss in authorization responses.
 		"authorization_response_iss_parameter_supported": true,
@@ -465,6 +466,10 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	if !s.sameOriginFormPost(r) {
+		http.Error(w, "forbidden: cross-origin form submission", http.StatusForbidden)
+		return
+	}
 	cookie, cerr := r.Cookie("csrf_token")
 	formCSRF := r.FormValue("csrf_token")
 	if cerr != nil || cookie.Value == "" || formCSRF == "" ||
@@ -1505,7 +1510,7 @@ func (s *OAuthServer) HandleRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if errors.Is(err, storeport.ErrDCRReplaySecretUnavailable) {
-			writeRegistrationError(w, "registration_disabled", "equivalent confidential client cannot be replayed safely")
+			writeRegistrationError(w, "registration_disabled", "an equivalent registration exists but is no longer usable; retry later")
 			return
 		}
 		s.logger.Error("persist client registration failed", "err", err)

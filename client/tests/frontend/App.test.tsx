@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import App from '../../src/App';
@@ -31,12 +31,19 @@ describe('Apprendre depuis la conversation', () => {
     expect(fixture.api.sendPrompt).not.toHaveBeenCalled();
   });
 
-  it('rétablit le processus après une déconnexion involontaire, sans rejouer de message', async () => {
+  it('laisse la supervision native reconnecter après une déconnexion involontaire et affiche le décompte', async () => {
     const fixture=client(initialState(true));await ready(fixture.api);
     const disconnected=fixture.getState();disconnected.agentConnected=false;fixture.setState(disconnected);
     act(()=>fixture.emit({type:'connection',status:'closed',message:'Processus arrêté'}));
-    await waitFor(()=>expect(fixture.getState().agentConnected).toBe(true));
-    expect(fixture.api.connectAgent).toHaveBeenCalledTimes(1);
+    act(()=>fixture.emit({type:'agent_reconnect',state:'waiting',attempt:1,nextAttemptAt:new Date(Date.now()+4000).toISOString(),cause:'Processus arrêté'}));
+    expect(await screen.findByText(/Reconnexion à l’agent dans [34] s \(tentative 1\)/)).toBeTruthy();
+    expect(screen.queryByRole('alert')).toBeNull();
+    act(()=>fixture.emit({type:'agent_reconnect',state:'connecting',attempt:1,nextAttemptAt:null,cause:'Processus arrêté'}));
+    expect(screen.getByText('Reconnexion à l’agent en cours…')).toBeTruthy();
+    act(()=>fixture.broadcast({...fixture.getState(),agentConnected:true,agentStatus:{phase:'running',authentication:'authenticated',reconnect:{state:'idle',attempt:1,nextAttemptAt:null,cause:null}}}));
+    await waitFor(()=>expect(screen.queryByRole('region',{name:'État de l’agent'})).toBeNull());
+    // Reconnections belong to the native supervisor: the interface never relaunches.
+    expect(fixture.api.connectAgent).not.toHaveBeenCalled();
     expect(fixture.api.sendPrompt).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole('button',{name:'Paramètres'}));
     await userEvent.click(screen.getByRole('button',{name:'Déconnecter Codex'}));
@@ -44,19 +51,74 @@ describe('Apprendre depuis la conversation', () => {
     vi.useFakeTimers();
     try { await act(async()=>{await vi.advanceTimersByTimeAsync(10000);}); }
     finally { vi.useRealTimers(); }
-    expect(fixture.api.connectAgent).toHaveBeenCalledTimes(1);
+    expect(fixture.api.connectAgent).not.toHaveBeenCalled();
   });
 
-  it('borne les tentatives de lancement après des échecs répétés', async () => {
-    const fixture=client();vi.mocked(fixture.api.connectAgent).mockRejectedValue(new Error('Harness indisponible'));
+  it('lance le harness une seule fois puis propose « Reconnecter » après un échec, avec les détails techniques', async () => {
+    const fixture=client();vi.mocked(fixture.api.connectAgent).mockRejectedValueOnce(new Error('Harness indisponible'));
     await ready(fixture.api);
-    await waitFor(()=>expect(fixture.api.connectAgent).toHaveBeenCalledTimes(3), {timeout:6000});
+    expect((await screen.findByRole('alert')).textContent).toContain('Harness indisponible');
     vi.useFakeTimers();
     try { for(let i=0;i<4;i++) await act(async()=>{await vi.advanceTimersByTimeAsync(4000);}); }
     finally { vi.useRealTimers(); }
+    expect(fixture.api.connectAgent).toHaveBeenCalledTimes(1);
+    await userEvent.click(screen.getByRole('button',{name:'Reconnecter'}));
+    await waitFor(()=>expect(fixture.getState().agentConnected).toBe(true));
+    expect(fixture.api.connectAgent).toHaveBeenCalledTimes(2);
+    await waitFor(()=>expect(screen.queryByRole('button',{name:'Reconnecter'})).toBeNull());
+    // The supervisor gave up after repeated exits: its cause and the stderr tail are shown.
+    const stopped=fixture.getState();stopped.agentConnected=false;fixture.setState(stopped);
+    act(()=>fixture.emit({type:'connection',status:'error',message:'L’agent s’est arrêté.',stderrTail:'panic: adaptateur'}));
+    act(()=>fixture.broadcast({...fixture.getState(),agentStatus:{phase:'stopped',authentication:'unknown',reconnect:{state:'failed',attempt:5,nextAttemptAt:null,cause:'Adaptateur introuvable'}}}));
+    expect((await screen.findByRole('alert')).textContent).toBe('La connexion à l’agent a échoué. Adaptateur introuvable');
+    expect(screen.getByText('Détails techniques')).toBeTruthy();expect(screen.getByText('panic: adaptateur')).toBeTruthy();
+    expect(screen.queryByText('L’agent s’est arrêté.')).toBeNull();
+    await userEvent.click(screen.getByRole('button',{name:'Reconnecter'}));
     expect(fixture.api.connectAgent).toHaveBeenCalledTimes(3);
     expect(fixture.api.sendPrompt).not.toHaveBeenCalled();
   });
+
+  it('suspend l’envoi pendant une limite du fournisseur puis le réactive à l’heure dite', async () => {
+    const fixture=client(initialState(true));await ready(fixture.api);
+    vi.useFakeTimers({toFake:['setTimeout','clearTimeout','setInterval','clearInterval','Date']});
+    try {
+      const until=new Date(Date.now()+90_000);
+      act(()=>fixture.emit({type:'agent_limited',kind:'usage_limit',until:until.toISOString(),message:'Limite'}));
+      const time=new Intl.DateTimeFormat('fr-FR',{hour:'2-digit',minute:'2-digit'}).format(until);
+      expect(within(screen.getByRole('region',{name:'État de l’agent'})).getByText(`Limite atteinte (quota d’usage), reprise à ${time}`,{exact:false})).toBeTruthy();
+      expect(screen.getByText(/dans 2 min/)).toBeTruthy();
+      const input=screen.getByLabelText('Message au tuteur') as HTMLTextAreaElement;
+      act(()=>{fireEvent.change(input,{target:{value:'Bonjour'}});});
+      expect(input.value).toBe('Bonjour');expect(input.disabled).toBe(false);
+      const send=screen.getByRole('button',{name:'Envoyer (Ctrl Entrée)'}) as HTMLButtonElement;
+      expect(send.disabled).toBe(true);
+      expect(send.getAttribute('aria-describedby')).toBe('send-blocked-reason');
+      expect(document.getElementById('send-blocked-reason')?.textContent).toBe(`Envoi suspendu : Limite atteinte (quota d’usage), reprise à ${time}.`);
+      await act(async()=>{await vi.advanceTimersByTimeAsync(60_000);});
+      expect(screen.getByText(/dans 30 s/)).toBeTruthy();
+      await act(async()=>{await vi.advanceTimersByTimeAsync(31_000);});
+      expect(screen.queryByText(/Limite atteinte/)).toBeNull();
+      expect((screen.getByRole('button',{name:'Envoyer (Ctrl Entrée)'}) as HTMLButtonElement).disabled).toBe(false);
+      expect(screen.getByRole('button',{name:'Envoyer (Ctrl Entrée)'}).getAttribute('aria-describedby')).toBeNull();
+    } finally { vi.useRealTimers(); }
+    expect(fixture.api.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('rattache l’échec d’un tour à la conversation et propose de le réessayer', async () => {
+    const fixture=client(initialState(true));
+    vi.mocked(fixture.api.sendPrompt).mockImplementationOnce(async()=>{const consumed=fixture.getState();consumed.pendingMessage=null;fixture.setState(consumed);fixture.emit({type:'turn_error',message:'La réponse n’a pas pu être enregistrée : disque plein'});throw new Error('La réponse n’a pas pu être enregistrée : disque plein');});
+    await ready(fixture.api);
+    await userEvent.type(screen.getByLabelText('Message au tuteur'),'Bonjour');await userEvent.click(screen.getByRole('button',{name:'Envoyer (Ctrl Entrée)'}));
+    const failure=await screen.findByText('La réponse a échoué : La réponse n’a pas pu être enregistrée : disque plein');
+    expect(screen.getByRole('region',{name:'Messages de la conversation'}).contains(failure)).toBe(true);
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    expect(document.querySelector('.notice.error')).toBeNull();
+    await userEvent.click(screen.getByRole('button',{name:'Réessayer'}));
+    await waitFor(()=>expect(fixture.api.sendPrompt).toHaveBeenCalledTimes(2));
+    expect(fixture.api.sendPrompt).toHaveBeenLastCalledWith('conversation-1','Bonjour');
+    await waitFor(()=>expect(screen.queryByText(/La réponse a échoué/)).toBeNull());
+  });
+
   it('ouvre directement une conversation et crée sans formulaire d’intention', async () => {
     const {api}=client(initialState(true));await ready(api);const user=userEvent.setup();
     await user.type(screen.getByLabelText('Message au tuteur'),'Je veux apprendre le Go');
@@ -89,7 +151,7 @@ describe('Apprendre depuis la conversation', () => {
   });
 
   it.each([false,true])('active l’espace apprenant d’un propriétaire au premier message en conservant ses droits (reprise : %s)', async resume => {
-    const state=initialState(true);state.settings.tutor.mode='remote';
+    const state=initialState(true);state.settings.tutor.mode='remote';state.settings.setupCompleted=true;
     if(resume){state.conversations=[conversation];state.activeConversationId=conversation.id;}
     const fixture=client(state);
     vi.mocked(fixture.api.tutorOverview).mockResolvedValue({identity:{tenantId:'t',userId:'u',membershipId:'m',roles:['owner']},capabilities:{canEnableLearning:true},context:{},formations:{items:[]},availableFormations:{items:[]}});
@@ -170,7 +232,7 @@ describe('Apprendre depuis la conversation', () => {
   });
 
   it('sélectionne une installation WSL et conserve son chemin Codex explicite', async () => {
-    const state=initialState();state.settings.targetId='';const {api}=client(state);await ready(api);const user=userEvent.setup();await user.click(screen.getByRole('button',{name:'Paramètres'}));
+    const state=initialState();state.settings.targetId='';state.settings.setupCompleted=true;const {api}=client(state);await ready(api);const user=userEvent.setup();await user.click(screen.getByRole('button',{name:'Paramètres'}));
     await user.click(screen.getByRole('button',{name:'Rechercher les installations'}));await user.click(await screen.findByRole('radio',{name:/Codex — Ubuntu/}));
     await waitFor(()=>expect(api.connectAgent).toHaveBeenCalledWith(target,'/home/lea/apprendre'));
     expect(api.saveSettings).toHaveBeenCalledWith(expect.objectContaining({targetId:target.id}));
@@ -182,7 +244,7 @@ describe('Apprendre depuis la conversation', () => {
     await userEvent.type(screen.getByLabelText('Message au tuteur'),'Bonjour');await userEvent.click(screen.getByRole('button',{name:'Envoyer (Ctrl Entrée)'}));await waitFor(()=>expect(fixture.api.sendPrompt).toHaveBeenCalled());
     const waiting = screen.getByText('J’attends la réponse de l’agent…').closest('[role="status"]');
     expect(waiting).toBeTruthy();
-    expect(screen.getByRole('log').contains(waiting)).toBe(true);
+    expect(screen.getByRole('region',{name:'Messages de la conversation'}).contains(waiting)).toBe(true);
     expect(screen.getByText('Total : 0 s · Étape : 0 s')).toBeTruthy();
     act(()=>fixture.emit({method:'session/update',params:{sessionId:'agent-1',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'Une explication progressive.'}}}}));
     expect(await screen.findByText('Une explication progressive.')).toBeTruthy();
@@ -210,8 +272,13 @@ describe('Apprendre depuis la conversation', () => {
     act(()=>fixture.emit({method:'session/update',params:{sessionId:'agent-1',update:{sessionUpdate:'tool_call_update',toolCallId:'tool-1',status:'completed'}}}));
     expect(screen.getByText('J’attends la réponse de l’agent…')).toBeTruthy();
     expect(screen.getByText('La réponse reprend.')).toBeTruthy();
-    act(()=>fixture.emit(retry));await act(async()=>finish({stopReason:'end_turn'}));
+    act(()=>fixture.emit(retry));
+    const done=fixture.getState();done.conversations[0].messages.push({id:'answer',role:'assistant',text:'La réponse reprend.',status:'complete',createdAt:'2026-10-24T11:00:02Z'});fixture.setState(done);
+    await act(async()=>finish({stopReason:'end_turn'}));
     expect(screen.queryByText(retry.message)).toBeNull();
+    // Only a short notice is announced, never the whole response again.
+    await waitFor(()=>expect(screen.getByText('Réponse terminée').getAttribute('role')).toBe('status'));
+    expect(screen.getByText('Réponse terminée').closest('[aria-live="polite"]')).toBeNull();
     act(()=>fixture.emit(retry));expect(screen.queryByText(retry.message)).toBeNull();expect(fixture.api.sendPrompt).toHaveBeenCalledTimes(1);
   });
 
@@ -351,5 +418,41 @@ describe('Annulation de la préparation',()=>{
     expect(screen.getByText('J’enregistre la réponse…')).toBeTruthy();
     await act(async()=>finish({stopReason:'end_turn'}));
     expect(screen.queryByText('J’enregistre la réponse…')).toBeNull();
+  });
+});
+
+describe('Défilement de la conversation', () => {
+  it('garde la liste des messages en bas après un redimensionnement si la lecture y était, sans forcer un lecteur remonté', async () => {
+    const observers: { callback: ResizeObserverCallback; targets: Element[]; disconnected: boolean }[] = [];
+    vi.stubGlobal('ResizeObserver', class {
+      record: { callback: ResizeObserverCallback; targets: Element[]; disconnected: boolean };
+      constructor(callback: ResizeObserverCallback) { this.record = { callback, targets: [], disconnected: false }; observers.push(this.record); }
+      observe(element: Element) { this.record.targets.push(element); }
+      unobserve() {}
+      disconnect() { this.record.disconnected = true; }
+    });
+    try {
+      const state=initialState(true);state.conversations=[conversation];state.activeConversationId=conversation.id;
+      const {unmount}=render(<App api={client(state).api}/>);
+      await screen.findByText('Commençons par observer la Grande Ourse.');
+      const region=screen.getByRole('region',{name:'Messages de la conversation'});
+      let top=0, height=2000, visible=600;
+      Object.defineProperty(region,'scrollTop',{configurable:true,get:()=>top,set:value=>{top=Math.max(0,Math.min(value,height-visible));}});
+      Object.defineProperty(region,'scrollHeight',{configurable:true,get:()=>height});
+      Object.defineProperty(region,'clientHeight',{configurable:true,get:()=>visible});
+      const observer=observers.find(item=>item.targets.includes(region));
+      expect(observer).toBeTruthy();
+      const resize=()=>act(()=>observer!.callback([],{} as ResizeObserver));
+      // At the end, then the window shrinks to 900 px: the region shrinks, no scroll event is fired.
+      top=1400;fireEvent.scroll(region);
+      visible=420;resize();
+      expect(top).toBe(height-visible);
+      // A reader who scrolled back up keeps their position.
+      top=200;fireEvent.scroll(region);
+      visible=300;resize();
+      expect(top).toBe(200);
+      unmount();
+      expect(observer!.disconnected).toBe(true);
+    } finally { vi.unstubAllGlobals(); }
   });
 });

@@ -37,7 +37,6 @@ function ActivityContent({ activity, response, disabled = false, onRespond, open
   const inputName = useId();
   const titleId = useId();
   const [selected, setSelected] = useState('');
-  const [exerciseAnswer, setExerciseAnswer] = useState('');
   const [revealed, setRevealed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
@@ -51,7 +50,6 @@ function ActivityContent({ activity, response, disabled = false, onRespond, open
   const answerShown = revealed || !!committed;
   const quizCorrect = activity.kind === 'quiz' && committed?.kind === 'quiz' && activity.correctOptionId === committed.selectedOptionId;
   const selectedId = committed?.kind === 'quiz' ? committed.selectedOptionId : selected;
-  const validExerciseAnswer = !!exerciseAnswer.trim() && !exerciseAnswer.includes('\0') && new TextEncoder().encode(exerciseAnswer).length <= 12000;
   const elapsed = () => Math.min(86400, Math.max(0, (Date.now() - startedAt.current) / 1000));
 
   useEffect(() => { if (committed) feedback.current?.focus(); }, [committed]);
@@ -59,12 +57,11 @@ function ActivityContent({ activity, response, disabled = false, onRespond, open
   useEffect(() => { if (revealed && document.visibilityState === 'visible') onReveal?.(); }, [revealed,onReveal]);
 
   async function respond(rating?: RecallRating) {
-    if (locked || submissionLock.current || (activity.kind === 'quiz' && !selected) || (activity.kind === 'flashcard' && (!revealed || !rating)) || (activity.kind === 'exercise' && !validExerciseAnswer)) return;
+    if (locked || submissionLock.current || (activity.kind === 'quiz' && !selected) || (activity.kind === 'flashcard' && (!revealed || !rating)) || activity.kind === 'exercise') return;
     const base = { version: 1 as const, activityId: activity.id, trainingId: activity.trainingId, domainId: activity.domainId,
       concept: activity.concept, responseTimeSeconds: activity.kind === 'flashcard' ? recallSeconds.current ?? elapsed() : elapsed() };
     const answer: LearningResponse = activity.kind === 'quiz'
       ? { ...base, kind: 'quiz', selectedOptionId: selected, ...(activity.attemptId ? { attemptId: activity.attemptId } : {}) }
-      : activity.kind === 'exercise' ? { ...base, kind: 'exercise', attemptId: activity.attemptId, answer: exerciseAnswer }
       : { ...base, kind: 'flashcard', rating: rating! };
     submissionLock.current = true; setSubmitting(true); setError('');
     try {
@@ -75,18 +72,18 @@ function ActivityContent({ activity, response, disabled = false, onRespond, open
   }
 
   return <section className={`learning-card ${activity.kind}`} aria-labelledby={titleId} aria-busy={submitting}>
-    <header className="learning-card-heading"><span className="learning-card-kind">{t(activity.kind === 'quiz' ? 'QUIZ' : activity.kind === 'exercise' ? 'EXERCICE' : 'FLASHCARDS')}</span><span className="learning-card-concept">{t(activity.kind==='flashcard'?'Carte {number}':'Question {number}',{number:questionNumber})}</span><span className="learning-segments" aria-hidden="true">{Array.from({length:Math.min(questionNumber,10)},(_,index)=><span key={index}/>)}</span></header>
+    <header className="learning-card-heading"><span className="learning-card-kind">{t(activity.kind === 'quiz' ? 'QUIZ' : activity.kind === 'exercise' ? 'EXERCICE' : 'FLASHCARDS')}</span><span className="learning-card-concept">{t(activity.kind==='flashcard'?'Carte {number}':'Question {number}',{number:questionNumber})}</span></header>
     <div id={titleId} className="learning-question"><MessageBody text={activity.question} openLink={openLink} /></div>
     {activity.kind === 'quiz' ? <>
-      <fieldset className="learning-quiz-options" role="radiogroup" aria-label={t('Choisissez une réponse')} disabled={locked}>
+      <fieldset className="learning-quiz-options" disabled={locked}>
         <legend className="visually-hidden">{t('Choisissez une réponse')}</legend>
-        {activity.options.map((option, index) => <label className={`learning-quiz-option ${selectedId === option.id ? 'selected' : ''} ${committed && option.id === activity.correctOptionId ? 'correct' : ''} ${committed && selectedId === option.id && !quizCorrect ? 'incorrect' : ''}`} key={option.id}>
-          <input type="radio" aria-label={option.text} name={inputName} value={option.id} checked={selectedId === option.id} onChange={() => setSelected(option.id)} />
+        {activity.options.map((option, index) => { const correct = committed && option.id === activity.correctOptionId; const wrong = committed && selectedId === option.id && !quizCorrect; return <label className={`learning-quiz-option ${selectedId === option.id ? 'selected' : ''} ${correct ? 'correct' : ''} ${wrong ? 'incorrect' : ''}`} key={option.id}>
+          {/* The label text names the radio; the correction is its description. */}
+          <input type="radio" name={inputName} value={option.id} checked={selectedId === option.id} aria-describedby={correct || wrong ? `${inputName}-${index}-mark` : undefined} onChange={() => setSelected(option.id)} />
           <span className="learning-option-letter" aria-hidden="true">{String.fromCharCode(65 + index)}</span>
           <span className="learning-option-text">{option.text}</span>
-          {committed && option.id === activity.correctOptionId && <span className="learning-answer-mark"><Icon name="check" size={18} /><span className="visually-hidden">{t('Réponse proposée par la correction')}</span></span>}
-          {committed && selectedId === option.id && !quizCorrect && <span className="learning-answer-mark"><Icon name="close" size={18}/><span className="visually-hidden">{t('Réponse incorrecte')}</span></span>}
-        </label>)}
+          {(correct || wrong) && <span className="learning-answer-mark" aria-hidden="true"><Icon name={correct ? 'check' : 'close'} size={18} /><span id={`${inputName}-${index}-mark`} className="visually-hidden">{t(correct ? 'Réponse proposée par la correction' : 'Réponse incorrecte')}</span></span>}
+        </label>; })}
       </fieldset>
       {!committed && <div className="learning-card-actions">{onHint && <button className="workspace-outline" disabled={locked} onClick={onHint}>{t('Un indice')}</button>}<button className="workspace-primary" disabled={locked || !selected} onClick={() => void respond()}>{submitting ? t('Envoi…') : t('Valider')}</button></div>}
       {committed && <div ref={feedback} className={`learning-feedback ${quizCorrect ? 'correct' : 'incorrect'}`} tabIndex={-1} role="status">
@@ -95,12 +92,7 @@ function ActivityContent({ activity, response, disabled = false, onRespond, open
         <p className="learning-card-hint">{t('Correction proposée par le tuteur. Le suivi pédagogique reste géré par Tutor-MCP.')}</p>
       </div>}
     </> : activity.kind === 'exercise' ? <>
-      <label className="learning-answer-label" htmlFor={inputName}>{t('Votre réponse à l’exercice')}</label>
-      <textarea id={inputName} className="learning-exercise-answer" rows={4} maxLength={12000} disabled={locked}
-        value={committed?.kind === 'exercise' ? committed.answer : exerciseAnswer} onChange={event => setExerciseAnswer(event.target.value)}
-        aria-describedby={`${inputName}-help`}/>
-      <p id={`${inputName}-help`} className="learning-card-hint">{t('Validez ici votre réponse. Pour demander de l’aide, utilisez « Un indice » ou le message au tuteur.')}</p>
-      {!committed && <div className="learning-card-actions">{onHint && <button className="workspace-outline" disabled={locked} onClick={onHint}>{t('Un indice')}</button>}<button className="workspace-primary" disabled={locked || !validExerciseAnswer} onClick={() => void respond()}>{submitting ? t('Envoi…') : t('Valider')}</button></div>}
+      {/* The single composer below the conversation carries the answer. */}
       {committed && <div ref={feedback} className="learning-feedback" tabIndex={-1} role="status"><p>{t('Réponse enregistrée. Le retour du tuteur apparaît dans la conversation.')}</p></div>}
     </> : <>
       {!answerShown && <div className="learning-flashcard-front"><p>{t('Cherchez la réponse de mémoire, puis retournez la carte.')}</p><button className="button blue" disabled={locked} onClick={() => { recallSeconds.current = elapsed(); setRevealed(true); }}>{t('Retourner la carte')}<Icon name="refresh" size={16} /></button></div>}
