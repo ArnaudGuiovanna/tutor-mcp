@@ -38,11 +38,30 @@ WITH CHECK (tenant_id = current_setting('app.current_tenant', true));`
 // It reads only the global tenant roots and returns opaque synthetic actor IDs;
 // no tenant-owned business row is exposed outside a scoped transaction.
 func (s *Store) ListWorkerTenantScopes(ctx context.Context, worker models.WorkerPrincipal, after string, limit int) ([]models.TenantScope, string, error) {
+	return s.listWorkerTenantScopes(ctx, worker, after, limit, true)
+}
+
+// ListWorkerMaintenanceTenantScopes enumerates every tenant root, whatever its
+// lifecycle status, for data-hygiene jobs only. Tenant-owned credential tables
+// are under FORCE ROW LEVEL SECURITY, so expired rows of a suspended or closed
+// tenant are invisible to every transaction that is not scoped to it: without
+// this enumeration they would never be purged. Callers must restrict the work
+// done in these scopes to deleting already-expired state; business jobs keep
+// using ListWorkerTenantScopes, which returns active tenants only.
+func (s *Store) ListWorkerMaintenanceTenantScopes(ctx context.Context, worker models.WorkerPrincipal, after string, limit int) ([]models.TenantScope, string, error) {
+	return s.listWorkerTenantScopes(ctx, worker, after, limit, false)
+}
+
+func (s *Store) listWorkerTenantScopes(ctx context.Context, worker models.WorkerPrincipal, after string, limit int, activeOnly bool) ([]models.TenantScope, string, error) {
 	if !worker.Validate() || limit < 1 || limit > 1000 {
 		return nil, "", fmt.Errorf("list worker tenant scopes: invalid worker or page")
 	}
-	rows, err := s.query(ctx, `SELECT id FROM tenants
-		WHERE status = 'active' AND id > ? ORDER BY id LIMIT ?`, after, limit+1)
+	query := `SELECT id FROM tenants WHERE id > ? ORDER BY id LIMIT ?`
+	if activeOnly {
+		query = `SELECT id FROM tenants
+		WHERE status = 'active' AND id > ? ORDER BY id LIMIT ?`
+	}
+	rows, err := s.query(ctx, query, after, limit+1)
 	if err != nil {
 		return nil, "", err
 	}

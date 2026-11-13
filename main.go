@@ -432,7 +432,7 @@ func serveAPI(store *db.Store, cfg startupConfig, options commandOptions, logger
 
 	if cfg.ProcessRole == "all" {
 		// Development PROCESS_ROLE=all preserves the one-process experience.
-		scheduler, err := startScheduler(store, logger, cfg.SchedulerMode, schedulerOptions(cfg))
+		scheduler, err := startScheduler(store, logger, cfg.DBDriver, cfg.SchedulerMode, schedulerOptions(cfg))
 		if err != nil {
 			return err
 		}
@@ -708,11 +708,29 @@ func schedulerOptions(cfg startupConfig) engine.SchedulerOptions {
 	return engine.SchedulerOptions{ConsolidationDeliveryTimeout: cfg.ConsolidationDeliveryTimeout}
 }
 
-func startScheduler(store *db.Store, logger *slog.Logger, mode string, options engine.SchedulerOptions) (*engine.Scheduler, error) {
-	scheduler := engine.NewScheduler(store, logger)
-	if mode == "distributed" {
-		scheduler = engine.NewDistributedScheduler(store, logger)
+// tenantWorkerActorID identifies the scheduler's synthetic worker principal
+// in worker_tenant_runs, whichever process hosts it.
+const tenantWorkerActorID = "saas_worker"
+
+// newProcessScheduler builds the scheduler of a PROCESS_ROLE=all process.
+// PostgreSQL tenant tables are under FORCE ROW LEVEL SECURITY: an unscoped
+// scheduler would see no tenant row, so every job would silently do nothing.
+// On PostgreSQL the process therefore runs the dedicated worker's scheduler,
+// which enumerates tenants and binds one RLS scope per tenant transaction
+// (its job leases are harmless with a single process). SQLite has no RLS and
+// keeps the legacy single-tenant scheduler.
+func newProcessScheduler(store *db.Store, logger *slog.Logger, driver, mode string) *engine.Scheduler {
+	if driver == "postgres" {
+		return engine.NewTenantDistributedScheduler(store, logger, tenantWorkerActorID)
 	}
+	if mode == "distributed" {
+		return engine.NewDistributedScheduler(store, logger)
+	}
+	return engine.NewScheduler(store, logger)
+}
+
+func startScheduler(store *db.Store, logger *slog.Logger, driver, mode string, options engine.SchedulerOptions) (*engine.Scheduler, error) {
+	scheduler := newProcessScheduler(store, logger, driver, mode)
 	scheduler.Configure(options)
 	if err := scheduler.Start(); err != nil {
 		return nil, reportError(logger, "failed to start worker scheduler", err, "mode", mode)
@@ -728,7 +746,7 @@ func runWorkerUntilSignal(store *db.Store, logger *slog.Logger, mode string, opt
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
-	scheduler := engine.NewTenantDistributedScheduler(store, logger, "saas_worker")
+	scheduler := engine.NewTenantDistributedScheduler(store, logger, tenantWorkerActorID)
 	scheduler.Configure(options)
 	if err := scheduler.Start(); err != nil {
 		return reportError(logger, "failed to start tenant worker scheduler", err)

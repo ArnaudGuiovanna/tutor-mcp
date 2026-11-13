@@ -84,12 +84,9 @@ func TestPrincipalWriteTransactionFencesConcurrentRevocation(t *testing.T) {
 // writer connection; the tool transaction revalidates under its own lock.
 func TestRootPrincipalValidationUsesReadTransaction(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tutor.db")
+	copyMigratedSQLiteFile(t, path)
 	writer, err := OpenDB(path)
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := Migrate(writer); err != nil {
-		_ = writer.Close()
 		t.Fatal(err)
 	}
 	s, err := NewSQLiteStore(writer, path)

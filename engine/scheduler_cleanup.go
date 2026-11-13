@@ -8,6 +8,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"tutor-mcp/models"
 )
 
 // cleanupSQLState exposes only the bounded SQLSTATE code. Never log query text,
@@ -26,6 +28,23 @@ func cleanupSQLState(err error) string {
 		}
 	}
 	return "unknown"
+}
+
+// credentialRoutePurger is implemented by the database store. It is optional
+// so that test doubles of storeport.Store need not provide it.
+type credentialRoutePurger interface {
+	CleanupExpiredCredentialRoutes(context.Context, models.WorkerPrincipal) (int64, error)
+}
+
+// localMaintenanceWorker identifies the in-process (SQLite/hobby) scheduler,
+// which has no tenant worker identity, at worker-only maintenance boundaries.
+var localMaintenanceWorker = models.WorkerPrincipal{ActorID: "local-maintenance"}
+
+func (s *Scheduler) maintenanceWorker() models.WorkerPrincipal {
+	if s.worker.Validate() {
+		return s.worker
+	}
+	return localMaintenanceWorker
 }
 
 func (s *Scheduler) cleanupExpiredData() scheduledJobResult {
@@ -58,6 +77,19 @@ func (s *Scheduler) cleanupExpiredData() scheduledJobResult {
 		return result
 	} else if accountTokens > 0 {
 		s.logger.Info("scheduler: cleaned account tokens", "count", accountTokens)
+	}
+
+	// Routes go last among credentials: a refresh-token route is released only
+	// once the family-aware token cleanup above has deleted its token row.
+	if purger, ok := s.store.(credentialRoutePurger); ok {
+		routes, err := purger.CleanupExpiredCredentialRoutes(ctx, s.maintenanceWorker())
+		if err != nil {
+			result.recordFailure("cleanup_partial_failure")
+			s.logger.Error("scheduler: cleanup credential routes", "sqlstate", cleanupSQLState(err))
+			return result
+		} else if routes > 0 {
+			s.logger.Info("scheduler: cleaned credential routes", "count", routes)
+		}
 	}
 
 	oauthClients, err := s.store.CleanupExpiredOAuthClients(ctx)

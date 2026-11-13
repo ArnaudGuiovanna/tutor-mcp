@@ -605,6 +605,7 @@ Object.assign(english, {
  'Selon le système': 'Follow system',
  'Sombre': 'Dark',
  'Suivre la règle générale': 'Use general policy',
+ 'Règles par opération : {rules}': 'Per-operation rules: {rules}',
  'Suppression de mes données demandée depuis mon compte.': 'Data erasure requested from my account.',
  'Supprimer cette formation': 'Delete this course',
  'Supprimer mes données dans cette institution': 'Erase my data in this institution',

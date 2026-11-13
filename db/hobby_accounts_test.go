@@ -12,14 +12,13 @@ import (
 
 func newProfileTestStore(t *testing.T, profile string) *Store {
 	t.Helper()
-	database, err := OpenDB(filepath.Join(t.TempDir(), "data", "runtime.db"))
+	path := filepath.Join(t.TempDir(), "data", "runtime.db")
+	copyMigratedSQLiteFile(t, path)
+	database, err := OpenDB(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { database.Close() })
-	if err = Migrate(database); err != nil {
-		t.Fatal(err)
-	}
 	s := NewStore(database)
 	if err = s.EnsureInstallation(context.Background(), profile); err != nil {
 		t.Fatal(err)

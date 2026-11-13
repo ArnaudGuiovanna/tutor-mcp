@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tutor_client::{
     backend::Backend,
     discovery::AgentTarget,
-    permissions::{canonical_tool, ToolCallRegistry},
+    permissions::{canonical_tool, ToolCallRegistry, ToolOperation},
     workspace::{Settings, TutorSettings},
 };
 
@@ -134,9 +134,17 @@ async fn smoke() -> Result<(), String> {
             if event["method"] == "session/request_permission" {
                 // Only isolated Tutor MCP operations are authorized. Built-in
                 // terminal/filesystem tools and publication remain denied.
-                let tool = registry.request_tool(&event).unwrap_or("");
+                // Label with the operation so a destructive `<tool>.<operation>`
+                // (for example `manage_domain.delete`) is caught below.
+                let tool = match registry.request_tool(&event) {
+                    Some((name, ToolOperation::Selected(operation))) => {
+                        format!("{name}.{operation}")
+                    }
+                    Some((name, _)) => name.to_owned(),
+                    None => String::new(),
+                };
                 if !tool.is_empty() {
-                    tools.push(tool.to_owned());
+                    tools.push(tool.clone());
                     eprintln!(
                         "{}",
                         json!({"qualification":"permission","elapsedMs":started.elapsed().as_millis(),"name":tool})

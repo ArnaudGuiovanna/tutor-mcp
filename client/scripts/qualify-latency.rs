@@ -917,8 +917,11 @@ async fn qualify(options: Options) -> Result<(), String> {
             if event["method"] == "session/request_permission" {
                 // This benchmark authorizes one read-only tool on its disposable
                 // server. Every unrecognized operation is explicitly denied.
-                let allowed =
-                    context_read && registry.request_tool(&event) == Some("get_learner_state");
+                let allowed = context_read
+                    && matches!(
+                        registry.request_tool(&event),
+                        Some(("get_learner_state", _))
+                    );
                 let choice = allowed
                     .then(|| {
                         event["params"]["options"]

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 use super::*;
 use crate::learning_ui::{PreparedOutput, PreparedTurn};
-use crate::permissions::{PermissionDecision, PermissionPolicy};
+use crate::permissions::{PermissionDecision, PermissionPolicy, ToolOperation};
 
 pub(super) struct NativePermission {
     operation_id: String,
@@ -52,7 +52,17 @@ impl Backend {
             .cloned()
             .ok_or("Séance introuvable.")?;
         let (args, tools) = PreparedTurn::request(&conversation, text)?;
-        self.consent_native(&tools, binding, operation).await?;
+        // Consent addresses the prepared operation (`mode`), as the server's
+        // policy does, so `prepare_pedagogical_turn.activity` rules apply.
+        let keys = tools
+            .iter()
+            .map(|tool| match ToolOperation::of(tool, Some(&args)) {
+                ToolOperation::Selected(mode) => format!("{tool}.{mode}"),
+                _ => (*tool).to_owned(),
+            })
+            .collect::<Vec<_>>();
+        let keys = keys.iter().map(String::as_str).collect::<Vec<_>>();
+        self.consent_native(&keys, binding, operation).await?;
         operation.phase(TurnPhase::Context);
         let packet = self
             .pedagogical_tool("prepare_pedagogical_turn", args, conversation_id, binding)
@@ -156,8 +166,11 @@ impl Backend {
             .permission_policy
             .clone();
         let mut ask = Vec::new();
-        for tool in tools {
-            if !self.tutor.lock().await.tool_catalog.contains(*tool) {
+        // Entries are policy keys: a bare tool, or `<tool>.<operation>` for a
+        // merged tool. A remembered choice is stored under that same key.
+        for key in tools {
+            let (tool, selected) = ToolOperation::from_key(key);
+            if !self.tutor.lock().await.tool_catalog.contains(tool) {
                 return Err(format!(
                     "Le serveur ne propose pas l’opération pédagogique {tool}."
                 ));
@@ -169,15 +182,15 @@ impl Backend {
                         .as_ref()
                         .filter(|p| p.matches(origin, institution, agent))
                 })
-                .map(|p| p.tools.get(*tool).copied().unwrap_or(p.default_decision))
+                .map(|p| p.decide(tool, &selected))
                 .unwrap_or(PermissionDecision::Ask);
             match decision {
                 PermissionDecision::Deny => {
                     return Err(format!(
-                        "L’opération {tool} est refusée par vos autorisations MCP."
+                        "L’opération {key} est refusée par vos autorisations MCP."
                     ))
                 }
-                PermissionDecision::Ask => ask.push(*tool),
+                PermissionDecision::Ask => ask.push(*key),
                 PermissionDecision::Allow => {}
             }
         }

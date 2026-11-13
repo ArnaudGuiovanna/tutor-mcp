@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -52,7 +51,7 @@ func sessionIndexRuntimeStore(t *testing.T, admin *Store) *Store {
 		GRANT UPDATE(session_domain_digest,session_sort_key,session_indexed_version) ON narrative_objects TO ` + role); err != nil {
 		t.Fatal(err)
 	}
-	config, err := pgx.ParseConfig(os.Getenv("TUTOR_TEST_PG_DSN"))
+	config, err := pgx.ParseConfig(postgresTestStoreDSN(t, admin))
 	if err != nil {
 		t.Fatal(err)
 	}

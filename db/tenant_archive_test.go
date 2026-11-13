@@ -83,10 +83,11 @@ func TestPostgresTenantLogicalArchiveRestoresOneTenantAndRejectsTampering(t *tes
 	if err := source.queryRow(ctx, `SELECT current_schema()`).Scan(&sourceSchema); err != nil {
 		t.Fatal(err)
 	}
+	sourceDSN := postgresTestStoreDSN(t, source)
 	if err := source.root.Close(); err != nil {
 		t.Fatal(err)
 	}
-	admin, err := sql.Open("pgx", dsn)
+	admin, err := sql.Open("pgx", sourceDSN)
 	if err != nil {
 		t.Fatal(err)
 	}

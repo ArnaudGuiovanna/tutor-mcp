@@ -39,11 +39,9 @@ func (b *lockedBuffer) String() string {
 // does not wait for the writer.
 func TestTransactionStartWaitIsObservedPerPool(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "runtime.db")
+	copyMigratedSQLiteFile(t, path)
 	writer, err := OpenDB(path)
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := Migrate(writer); err != nil {
 		t.Fatal(err)
 	}
 	store, err := NewSQLiteStore(writer, path)

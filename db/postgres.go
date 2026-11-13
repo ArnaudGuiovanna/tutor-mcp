@@ -1695,6 +1695,7 @@ END $$;`,
 	{Version: "postgres_0080_cascade_oauth_client_approvals", Body: postgresCascadeOAuthClientApprovalsMigration},
 	{Version: "postgres_0081_drop_pending_signups", Body: dropPendingSignupsMigration},
 	{Version: "postgres_0082_drop_membership_mfa_and_invitations", Body: postgresDropMembershipMFAAndInvitationsMigration},
+	{Version: "postgres_0083_credential_route_purge", Body: postgresCredentialRoutePurgeMigration},
 }
 
 // OpenPostgres opens a PostgreSQL-backed *sql.DB via the pgx database/sql

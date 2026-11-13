@@ -213,8 +213,9 @@ func TestPostgresRollingWriterLearningScopeTriggers(t *testing.T) {
 	}
 	ctx := context.Background()
 	// Other packages migrate their own schemas in the same CI database. Keep
-	// another schema present so this gate must inspect only its own tables.
-	other := setupTestDB(t)
+	// another schema present in this database so this gate must inspect only
+	// its own tables.
+	other := setupTestPGSibling(t, s)
 	var schema, otherSchema string
 	if err := s.queryRow(ctx, `SELECT current_schema()`).Scan(&schema); err != nil {
 		t.Fatal(err)

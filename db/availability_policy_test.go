@@ -167,14 +167,13 @@ func TestWasAlertSentTodayUsesLearnerLocalCivilDay(t *testing.T) {
 }
 
 func TestReserveNotificationDeliveryConcurrentCap(t *testing.T) {
-	raw, err := OpenDB(filepath.Join(t.TempDir(), "availability-race.db"))
+	path := filepath.Join(t.TempDir(), "availability-race.db")
+	copyMigratedSQLiteFile(t, path)
+	raw, err := OpenDB(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = raw.Close() })
-	if err := Migrate(raw); err != nil {
-		t.Fatal(err)
-	}
 	ctx := context.Background()
 	if _, err := raw.ExecContext(ctx,
 		`INSERT INTO learners (id, email, password_hash, objective, created_at) VALUES ('L1','l1@test','h','o',?)`,

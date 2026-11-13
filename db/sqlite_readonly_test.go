@@ -15,12 +15,9 @@ import (
 func TestOpenDBReadOnlyDoesNotMutateMainDatabase(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "runtime ?# unicode-é.db")
+	copyMigratedSQLiteFile(t, path)
 	database, err := OpenDB(path)
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := Migrate(database); err != nil {
-		database.Close()
 		t.Fatal(err)
 	}
 	if _, err := database.Exec(

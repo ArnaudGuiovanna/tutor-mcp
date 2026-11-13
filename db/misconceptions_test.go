@@ -83,78 +83,179 @@ func setupTestDB(t *testing.T) *Store {
 	return NewStore(db)
 }
 
+// sqliteTestDBTemplateBytes returns the seeded setupTestDB template: the
+// package's single migrated database switched back to the rollback journal
+// that a plain sql.Open database uses, with learner 'L1' seeded.
 func sqliteTestDBTemplateBytes() ([]byte, error) {
 	sqliteTestDBTemplate.Do(func() {
-		dir, err := os.MkdirTemp("", "tutor-mcp-db-test-template-")
-		if err != nil {
-			sqliteTestDBTemplate.err = err
-			return
-		}
-		defer os.RemoveAll(dir)
-
-		path := filepath.Join(dir, "template.db")
-		raw, err := sql.Open("sqlite", path)
-		if err != nil {
-			sqliteTestDBTemplate.err = err
-			return
-		}
-		if err := Migrate(raw); err != nil {
-			_ = raw.Close()
-			sqliteTestDBTemplate.err = err
-			return
-		}
-		now := time.Now().UTC()
-		if _, err := raw.Exec(`INSERT INTO learners (id, email, password_hash, objective, created_at, email_verified_at)
-			VALUES ('L1', 'test@test.com', 'hash', 'test', ?, ?)`, now, now); err != nil {
-			_ = raw.Close()
-			sqliteTestDBTemplate.err = err
-			return
-		}
-		if err := NewStore(raw).EnsureRecoveryEnrollment(context.Background(), "L1"); err != nil {
-			_ = raw.Close()
-			sqliteTestDBTemplate.err = err
-			return
-		}
-		if err := raw.Close(); err != nil {
-			sqliteTestDBTemplate.err = err
-			return
-		}
-		sqliteTestDBTemplate.data, sqliteTestDBTemplate.err = os.ReadFile(path)
+		sqliteTestDBTemplate.data, sqliteTestDBTemplate.err = buildSeededSQLiteTemplate()
 	})
 	return sqliteTestDBTemplate.data, sqliteTestDBTemplate.err
 }
 
-// setupTestPG provisions a uniquely-named Postgres schema, migrates it, seeds
-// learner 'L1', and returns a Postgres-dialect Store scoped to that schema via
-// search_path. The schema is dropped on cleanup. The schema name is digits-only
-// (t_<n>) so it is always a valid, injection-safe identifier.
+func buildSeededSQLiteTemplate() ([]byte, error) {
+	migrated, err := sqliteMigratedTemplateBytes()
+	if err != nil {
+		return nil, err
+	}
+	dir, err := os.MkdirTemp("", "tutor-mcp-db-test-template-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(dir)
+	path := filepath.Join(dir, "template.db")
+	if err := os.WriteFile(path, migrated, 0o600); err != nil {
+		return nil, err
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, err
+	}
+	defer raw.Close()
+	// journal_mode is persisted in the file header; the template must open
+	// like the fresh sql.Open database setupTestDB historically migrated.
+	var mode string
+	if err := raw.QueryRow(`PRAGMA journal_mode=DELETE`).Scan(&mode); err != nil {
+		return nil, err
+	}
+	if mode != "delete" {
+		return nil, fmt.Errorf("SQLite template journal_mode=%q, want delete", mode)
+	}
+	now := time.Now().UTC()
+	if _, err := raw.Exec(`INSERT INTO learners (id, email, password_hash, objective, created_at, email_verified_at)
+		VALUES ('L1', 'test@test.com', 'hash', 'test', ?, ?)`, now, now); err != nil {
+		return nil, err
+	}
+	if err := NewStore(raw).EnsureRecoveryEnrollment(context.Background(), "L1"); err != nil {
+		return nil, err
+	}
+	if err := raw.Close(); err != nil {
+		return nil, err
+	}
+	return os.ReadFile(path)
+}
+
+var sqliteMigratedFileTemplate struct {
+	sync.Once
+	data []byte
+	err  error
+}
+
+// sqliteMigratedTemplateBytes migrates one SQLite database per package run
+// with OpenDB and Migrate (under the race detector a from-scratch SQLite
+// migration costs tens of seconds). Tests of migration behaviour keep
+// migrating their own databases.
+func sqliteMigratedTemplateBytes() ([]byte, error) {
+	sqliteMigratedFileTemplate.Do(func() {
+		dir, err := os.MkdirTemp("", "tutor-mcp-db-test-migrated-")
+		if err != nil {
+			sqliteMigratedFileTemplate.err = err
+			return
+		}
+		defer os.RemoveAll(dir)
+		templatePath := filepath.Join(dir, "template.db")
+		raw, err := OpenDB(templatePath)
+		if err != nil {
+			sqliteMigratedFileTemplate.err = err
+			return
+		}
+		if err := Migrate(raw); err != nil {
+			_ = raw.Close()
+			sqliteMigratedFileTemplate.err = err
+			return
+		}
+		// Closing the last connection checkpoints and removes the WAL, so
+		// the main file alone is the complete database (still in WAL mode).
+		if err := raw.Close(); err != nil {
+			sqliteMigratedFileTemplate.err = err
+			return
+		}
+		sqliteMigratedFileTemplate.data, sqliteMigratedFileTemplate.err = os.ReadFile(templatePath)
+	})
+	return sqliteMigratedFileTemplate.data, sqliteMigratedFileTemplate.err
+}
+
+// copyMigratedSQLiteFile writes a private copy of the package's migrated,
+// unseeded SQLite database to path (creating its directory) for tests that
+// open the file themselves with OpenDB or NewSQLiteStore, exactly as those
+// tests used to obtain by running OpenDB and Migrate per test.
+func copyMigratedSQLiteFile(t *testing.T, path string) {
+	t.Helper()
+	data, err := sqliteMigratedTemplateBytes()
+	if err != nil {
+		t.Fatalf("build migrated SQLite template: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("create SQLite copy directory: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("copy migrated SQLite template: %v", err)
+	}
+}
+
+// setupTestPG provisions an isolated, migrated Postgres schema, seeds learner
+// 'L1', and returns a Postgres-dialect Store scoped to that schema via
+// search_path. When the role may create databases the schema is the
+// t_template schema of a private copy of the package's migrated template
+// database (see postgres_test_template_test.go); otherwise a uniquely-named
+// t_<n> schema is created and migrated in the configured database. Either way
+// it is dropped on cleanup. Schema and database names are built from fixed
+// text and digits only, so they are always valid, injection-safe identifiers.
 func setupTestPG(t *testing.T, baseDSN string) *Store {
 	t.Helper()
+	ctx := context.Background()
 	n := testDBCounter.Add(1)
 	schema := fmt.Sprintf("t_%d", n)
 
-	admin, err := sql.Open("pgx", baseDSN)
+	admin, base, template, err := postgresTestTemplateDatabase(baseDSN)
 	if err != nil {
-		t.Fatalf("pg admin open: %v", err)
+		t.Fatalf("pg test template: %v", err)
 	}
-	if _, err := admin.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE"); err != nil {
-		admin.Close()
-		t.Fatalf("pg drop schema: %v", err)
-	}
-	if _, err := admin.Exec("CREATE SCHEMA " + schema); err != nil {
-		admin.Close()
-		t.Fatalf("pg create schema: %v", err)
+	var dsn string
+	var drop func() error
+	if template != "" {
+		dsn, drop, err = clonePostgresTestDatabase(ctx, admin, base, template, n)
+		if err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		if _, err := admin.Exec("DROP SCHEMA IF EXISTS " + schema + " CASCADE"); err != nil {
+			t.Fatalf("pg drop schema: %v", err)
+		}
+		if _, err := admin.Exec("CREATE SCHEMA " + schema); err != nil {
+			t.Fatalf("pg create schema: %v", err)
+		}
+		drop = func() error {
+			_, err := admin.Exec("DROP SCHEMA " + schema + " CASCADE")
+			return err
+		}
+		sep := "?"
+		if strings.Contains(baseDSN, "?") {
+			sep = "&"
+		}
+		dsn = baseDSN + sep + "search_path=" + schema
 	}
 
-	sep := "?"
-	if strings.Contains(baseDSN, "?") {
-		sep = "&"
-	}
-	db, err := sql.Open("pgx", baseDSN+sep+"search_path="+schema)
+	return openPostgresTestStore(t, dsn, template == "", drop)
+}
+
+// openPostgresTestStore opens a pool on dsn, migrates its search_path schema
+// when migrate is set, seeds learner 'L1' and returns the Store. drop runs on
+// cleanup after the pool is closed.
+func openPostgresTestStore(t *testing.T, dsn string, migrate bool, drop func() error) *Store {
+	t.Helper()
+	ctx := context.Background()
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
-		admin.Close()
+		_ = drop()
 		t.Fatalf("pg open: %v", err)
 	}
+	t.Cleanup(func() {
+		db.Close()
+		if err := drop(); err != nil {
+			t.Errorf("pg drop test schema: %v", err)
+		}
+	})
 	// Match OpenPostgres rather than database/sql's unbounded default. This
 	// makes the contention tests exercise queueing and connection reuse without
 	// exhausting PostgreSQL's global max_connections setting.
@@ -162,28 +263,19 @@ func setupTestPG(t *testing.T, baseDSN string) *Store {
 	db.SetMaxIdleConns(2)
 	db.SetConnMaxLifetime(30 * time.Minute)
 	db.SetConnMaxIdleTime(5 * time.Minute)
-	if err := migratePostgresTestSchema(context.Background(), db); err != nil {
-		db.Close()
-		admin.Close()
-		t.Fatalf("pg migrate: %v", err)
+	if migrate {
+		if err := migratePostgresTestSchema(ctx, db); err != nil {
+			t.Fatalf("pg migrate: %v", err)
+		}
 	}
 	now := time.Now().UTC()
 	if _, err := db.Exec(`INSERT INTO learners (id, email, password_hash, objective, created_at, email_verified_at) VALUES ('L1', 'test@test.com', 'hash', 'test', $1, $1)`, now); err != nil {
-		db.Close()
-		admin.Close()
 		t.Fatalf("pg seed L1: %v", err)
 	}
 	store := NewStoreWithDialect(db, DialectPostgres)
-	if err := store.EnsureRecoveryEnrollment(context.Background(), "L1"); err != nil {
-		db.Close()
-		admin.Close()
+	if err := store.EnsureRecoveryEnrollment(ctx, "L1"); err != nil {
 		t.Fatalf("pg seed L1 recovery enrollment: %v", err)
 	}
-	t.Cleanup(func() {
-		db.Close()
-		admin.Exec("DROP SCHEMA " + schema + " CASCADE")
-		admin.Close()
-	})
 	return store
 }
 
@@ -191,41 +283,74 @@ func setupTestPG(t *testing.T, baseDSN string) *Store {
 // and checksum ledger in one transaction. setupTestDB calls this for every
 // isolated business-test schema; replaying the production migrator's advisory
 // lock, lookup and transaction boundaries hundreds of times made the race CI
-// spend most of its budget provisioning fixtures. Dedicated migration tests
-// still call MigratePostgres and therefore retain coverage of those boundaries.
+// spend most of its budget provisioning fixtures. The statements are joined
+// once per package into a single script and sent in one simple-protocol round
+// trip, so each schema costs one server-side batch instead of hundreds of
+// client round trips. Dedicated migration tests still call MigratePostgres
+// and therefore retain coverage of those boundaries.
 func migratePostgresTestSchema(ctx context.Context, database *sql.DB) error {
+	script, err := postgresTestSchemaScript()
+	if err != nil {
+		return err
+	}
 	tx, err := database.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	for _, statement := range splitSQLStatements(postgresSchema) {
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("apply PostgreSQL test base schema: %w", err)
-		}
-	}
-	baseHash := sha256.Sum256([]byte(postgresSchema))
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO schema_migrations (version, checksum) VALUES ($1, $2)`,
-		"postgres_schema", hex.EncodeToString(baseHash[:]),
-	); err != nil {
-		return fmt.Errorf("record PostgreSQL test base schema: %w", err)
-	}
-	for _, migration := range postgresMigrations {
-		for _, statement := range splitSQLStatements(migration.Body) {
-			if _, err := tx.ExecContext(ctx, statement); err != nil && !migration.AlterIfNeeded {
-				return fmt.Errorf("apply PostgreSQL test migration %s: %w", migration.Version, err)
-			}
-		}
-		hash := sha256.Sum256([]byte(migration.Body))
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO schema_migrations (version, checksum) VALUES ($1, $2)`,
-			migration.Version, hex.EncodeToString(hash[:]),
-		); err != nil {
-			return fmt.Errorf("record PostgreSQL test migration %s: %w", migration.Version, err)
-		}
+	// No arguments: pgx uses the simple query protocol, which accepts the
+	// whole multi-statement script in one message.
+	if _, err := tx.ExecContext(ctx, script); err != nil {
+		return fmt.Errorf("apply PostgreSQL test schema script: %w", err)
 	}
 	return tx.Commit()
+}
+
+var postgresTestSchema struct {
+	sync.Once
+	script string
+	err    error
+}
+
+// postgresTestSchemaScript returns the base schema, every PostgreSQL
+// migration and the matching schema_migrations ledger as one SQL script. The
+// statements and checksums are exactly those the per-statement replay used.
+func postgresTestSchemaScript() (string, error) {
+	postgresTestSchema.Do(func() {
+		var b strings.Builder
+		appendStatements := func(body string) {
+			for _, statement := range splitSQLStatements(body) {
+				b.WriteString(statement)
+				b.WriteString(";\n")
+			}
+		}
+		ledger := make([]string, 0, len(postgresMigrations)+1)
+		record := func(version, body string) {
+			hash := sha256.Sum256([]byte(body))
+			ledger = append(ledger, "("+quotePostgresTestLiteral(version)+", '"+hex.EncodeToString(hash[:])+"')")
+		}
+		appendStatements(postgresSchema)
+		record("postgres_schema", postgresSchema)
+		for _, migration := range postgresMigrations {
+			if migration.AlterIfNeeded {
+				// A failed statement aborts a PostgreSQL transaction, so the
+				// replay could never tolerate one; refuse rather than guess.
+				postgresTestSchema.err = fmt.Errorf("PostgreSQL test schema script does not support AlterIfNeeded migration %s", migration.Version)
+				return
+			}
+			appendStatements(migration.Body)
+			record(migration.Version, migration.Body)
+		}
+		b.WriteString("INSERT INTO schema_migrations (version, checksum) VALUES\n")
+		b.WriteString(strings.Join(ledger, ",\n"))
+		b.WriteString(";\n")
+		postgresTestSchema.script = b.String()
+	})
+	return postgresTestSchema.script, postgresTestSchema.err
+}
+
+func quotePostgresTestLiteral(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 func insertInteraction(t *testing.T, store *Store, concept string, success bool, miscType, miscDetail string, createdAt time.Time) {

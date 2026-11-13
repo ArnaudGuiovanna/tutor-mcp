@@ -104,6 +104,14 @@ type tenantSchedulerStore interface {
 	RecordWorkerTenantRun(context.Context, models.WorkerPrincipal, models.TenantScope, string, string, string) error
 }
 
+// maintenanceTenantLister is implemented by stores that can enumerate every
+// tenant root regardless of lifecycle status. Only data-hygiene jobs use it:
+// under PostgreSQL FORCE ROW LEVEL SECURITY a suspended or closed tenant's
+// expired credentials are reachable only from a transaction scoped to it.
+type maintenanceTenantLister interface {
+	ListWorkerMaintenanceTenantScopes(context.Context, models.WorkerPrincipal, string, int) ([]models.TenantScope, string, error)
+}
+
 type scheduledJobResult struct {
 	FailureCode string
 }
@@ -238,6 +246,11 @@ func NewTenantDistributedScheduler(store storeport.Store, logger *slog.Logger, a
 	return s
 }
 
+// TenantScoped reports whether every database job runs inside one RLS
+// transaction per enumerated tenant (the PostgreSQL worker path) rather than
+// on the unscoped store.
+func (s *Scheduler) TenantScoped() bool { return s.tenantStore != nil }
+
 func (s *Scheduler) Start() error {
 	// OLM: once a day at 13h UTC. Replaces the previous critical-alerts
 	// (every 30 min) and review-reminders (3x/day) jobs — see
@@ -280,7 +293,7 @@ func (s *Scheduler) Start() error {
 	}
 	// Cleanup: hourly.
 	if err := s.schedule("cleanup", "0 * * * *", time.Hour,
-		s.scheduledTenantJob("cleanup", func(child *Scheduler) scheduledJobResult { return child.cleanupExpiredData() })); err != nil {
+		s.scheduledMaintenanceTenantJob("cleanup", func(child *Scheduler) scheduledJobResult { return child.cleanupExpiredData() })); err != nil {
 		return fmt.Errorf("add cleanup job: %w", err)
 	}
 	// Metacognitive alerts: every 30 minutes. Each alert kind is fired at

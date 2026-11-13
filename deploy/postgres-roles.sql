@@ -118,6 +118,11 @@ GRANT SELECT (updated_at) ON rate_limit_buckets TO tutor_worker;
 GRANT SELECT (last_attempt_at) ON login_failure_windows TO tutor_worker;
 GRANT SELECT (attempted_at) ON login_failures TO tutor_worker;
 GRANT INSERT ON oauth_dcr_audit TO tutor_worker;
+-- Expired credential routes are purged through a SECURITY DEFINER function
+-- (migration postgres_0083) scoped to the calling transaction's tenant, so
+-- the worker never needs to read token digests in refresh_tokens or routes.
+REVOKE ALL ON FUNCTION tutor_purge_expired_credential_routes() FROM PUBLIC, tutor_api, tutor_restore;
+GRANT EXECUTE ON FUNCTION tutor_purge_expired_credential_routes() TO tutor_worker;
 GRANT DELETE ON
     account_tokens, oauth_codes, oauth_clients, refresh_tokens,
     rate_limit_buckets, login_failure_windows, login_failures
