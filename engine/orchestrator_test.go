@@ -24,9 +24,6 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// orchTestDBCounter avoids collisions across in-memory DSNs.
-var orchTestDBCounter int
-
 type failActionHistoryStore struct{ storeport.Store }
 
 func (s *failActionHistoryStore) GetActionHistoryForConceptInDomain(context.Context, string, string, string, int) (models.ActionHistoryCounts, error) {
@@ -37,16 +34,7 @@ func (s *failActionHistoryStore) GetActionHistoryForConceptInDomain(context.Cont
 // learner already inserted. The orchestrator tests reuse this helper.
 func setupOrchStore(t *testing.T) *db.Store {
 	t.Helper()
-	orchTestDBCounter++
-	dsn := fmt.Sprintf("file:orch_%s_%d?mode=memory&cache=shared", t.Name(), orchTestDBCounter)
-	conn, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Migrate(conn); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = conn.Close() })
+	conn := migratedSQLiteCopy(t)
 	if _, err := conn.Exec(
 		`INSERT INTO learners (id, email, password_hash, objective, created_at) VALUES (?, ?, ?, ?, ?)`,
 		"L1", "test@test.com", "hash", "test", time.Now().UTC(),

@@ -6,8 +6,6 @@ package engine
 import (
 	"context"
 	"database/sql"
-	"fmt"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,20 +15,9 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-var motivationCounter int32
-
 func newMotivationStore(t *testing.T) (*sql.DB, *db.Store, string) {
 	t.Helper()
-	id := atomic.AddInt32(&motivationCounter, 1)
-	dsn := fmt.Sprintf("file:eng_motiv_%s_%d?mode=memory&cache=shared", t.Name(), id)
-	rawDB, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	t.Cleanup(func() { rawDB.Close() })
-	if err := db.Migrate(rawDB); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	rawDB := migratedSQLiteCopy(t)
 	learnerID := "L1"
 	if _, err := rawDB.Exec(
 		`INSERT INTO learners (id, email, password_hash, objective, created_at) VALUES (?, ?, ?, ?, ?)`,

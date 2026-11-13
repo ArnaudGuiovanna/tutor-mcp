@@ -8,7 +8,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,22 +17,11 @@ import (
 	"tutor-mcp/models"
 )
 
-var olmTestDSNCounter int64
-
 // newOLMTestStore opens a fresh in-memory SQLite database with migrations applied
 // and returns the wrapped Store + raw *sql.DB. Reused across olm_test.go.
 func newOLMTestStore(t *testing.T) (*db.Store, *sql.DB) {
 	t.Helper()
-	n := atomic.AddInt64(&olmTestDSNCounter, 1)
-	dsn := fmt.Sprintf("file:olm_%s_%d?mode=memory&cache=shared", t.Name(), n)
-	raw, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Migrate(raw); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { raw.Close() })
+	raw := migratedSQLiteCopy(t)
 	return db.NewStore(raw), raw
 }
 

@@ -6,7 +6,6 @@ package engine
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -19,32 +18,20 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// jobsCounter avoids dsn collisions across this file's tests.
-var jobsCounter int32
-
 // newJobsTestStore opens an isolated in-memory sqlite DB, runs migrations,
 // inserts a learner with a (caller-supplied) webhook URL, and returns the
 // store + learner ID.
 func newJobsTestStore(t *testing.T, webhookURL string) (*db.Store, string) {
 	t.Helper()
-	id := atomic.AddInt32(&jobsCounter, 1)
-	dsn := fmt.Sprintf("file:eng_jobs_%s_%d?mode=memory&cache=shared", t.Name(), id)
-	rawDB, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
+	rawDB := migratedSQLiteCopy(t)
 	// Match db.OpenDB's production SQLite configuration. A single connection
 	// serializes write transactions; allowing the test helper to open several
 	// connections makes concurrent scheduler claims fail spuriously with
 	// SQLITE_LOCKED instead of exercising the production claim CAS.
 	rawDB.SetMaxOpenConns(1)
-	t.Cleanup(func() { rawDB.Close() })
-	if err := db.Migrate(rawDB); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
 
 	learnerID := "L1"
-	_, err = rawDB.Exec(
+	_, err := rawDB.Exec(
 		`INSERT INTO learners (id, email, password_hash, objective, webhook_url, created_at, last_active, email_verified_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		learnerID, "test@example.com", "hash", "obj", webhookURL,
@@ -62,20 +49,11 @@ func newJobsTestStore(t *testing.T, webhookURL string) (*db.Store, string) {
 // insert fixtures directly without going through Store helpers.
 func rawTestSetup(t *testing.T, webhookURL string) (*sql.DB, *db.Store, string) {
 	t.Helper()
-	id := atomic.AddInt32(&jobsCounter, 1)
-	dsn := fmt.Sprintf("file:eng_jobs_%s_%d?mode=memory&cache=shared", t.Name(), id)
-	rawDB, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
+	rawDB := migratedSQLiteCopy(t)
 	rawDB.SetMaxOpenConns(1)
-	t.Cleanup(func() { rawDB.Close() })
-	if err := db.Migrate(rawDB); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
 
 	learnerID := "L1"
-	_, err = rawDB.Exec(
+	_, err := rawDB.Exec(
 		`INSERT INTO learners (id, email, password_hash, objective, webhook_url, created_at, last_active, email_verified_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		learnerID, "test@example.com", "hash", "obj", webhookURL,

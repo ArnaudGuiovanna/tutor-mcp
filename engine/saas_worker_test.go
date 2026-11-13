@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -54,14 +53,7 @@ func TestSaaSWorkerDeliversSignedHTTPSAndCompletesDurableState(t *testing.T) {
 	defer server.Close()
 
 	n := time.Now().UnixNano()
-	raw, err := sql.Open("sqlite", fmt.Sprintf("file:saas_worker_%d?mode=memory&cache=shared&_pragma=foreign_keys(1)", n))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer raw.Close()
-	if err := db.Migrate(raw); err != nil {
-		t.Fatal(err)
-	}
+	raw := migratedSQLiteCopy(t, "foreign_keys(1)")
 	store := db.NewStore(raw)
 	keyring, err := db.NewIntegrationSecretKeyring(
 		"webhooks:"+base64.StdEncoding.EncodeToString(make([]byte, 32)), "webhooks")
@@ -143,15 +135,7 @@ func TestSaaSWorkerDeliversSignedHTTPSAndCompletesDurableState(t *testing.T) {
 }
 
 func TestSaaSWorkerConsumesTenantDSARExportJob(t *testing.T) {
-	n := time.Now().UnixNano()
-	raw, err := sql.Open("sqlite", fmt.Sprintf("file:saas_dsar_worker_%d?mode=memory&cache=shared&_pragma=foreign_keys(1)", n))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer raw.Close()
-	if err := db.Migrate(raw); err != nil {
-		t.Fatal(err)
-	}
+	raw := migratedSQLiteCopy(t, "foreign_keys(1)")
 	now := time.Now().UTC()
 	if _, err := raw.Exec(`INSERT INTO learners
 		(id, email, password_hash, objective, created_at, email_verified_at)
