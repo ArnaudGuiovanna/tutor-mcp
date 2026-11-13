@@ -188,7 +188,10 @@ func setupTestPGSibling(t *testing.T, s *Store) *Store {
 // function removes the copy, terminating any connection a test leaked.
 func clonePostgresTestDatabase(ctx context.Context, admin *sql.DB, base *url.URL, template string, n int64) (string, func() error, error) {
 	database := fmt.Sprintf("%s_%d", template, n)
-	if _, err := admin.ExecContext(ctx, `CREATE DATABASE `+database+` TEMPLATE `+template+` STRATEGY FILE_COPY`); err != nil {
+	// WAL_LOG avoids the checkpoint FILE_COPY forces on every copy: on a
+	// disk-backed CI server those checkpoints starve the other packages'
+	// PostgreSQL tests running at the same time.
+	if _, err := admin.ExecContext(ctx, `CREATE DATABASE `+database+` TEMPLATE `+template+` STRATEGY WAL_LOG`); err != nil {
 		return "", nil, fmt.Errorf("pg clone template database: %w", err)
 	}
 	drop := func() error {

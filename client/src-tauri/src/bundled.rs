@@ -281,6 +281,9 @@ mod tests {
             .iter()
             .any(|(key, value)| key == "CODEX_PATH" && value.ends_with("codex.exe")));
         assert!(launch_from(root, "bundled:unknown", root.to_str().unwrap()).is_err());
+        // Same-length rewrites inside one coarse Windows clock tick can keep
+        // every timestamp; wait so the cached stamp must differ.
+        std::thread::sleep(std::time::Duration::from_millis(100));
         std::fs::write(root.join(runtime), b"changed").unwrap();
         assert!(launch_from(root, "bundled:codex", root.to_str().unwrap())
             .unwrap_err()
