@@ -1,27 +1,27 @@
 # Tutor Desktop 0.2.0
 
-Apprenez directement depuis Conversation. Vos formations personnelles sont
-privées, enregistrées et suivables dès le premier échange. Formations rassemble
-la bibliothèque, le programme, la progression et le partage.
+Learn directly from the "Conversation" screen. Your personal courses are
+private, saved and trackable from the very first exchange. "Formations" (Courses)
+brings together the library, the curriculum, progress and sharing.
 
-- Historique vertical, thème sombre, lecture en 20 px réglable de 16 à 24 px.
-- Message conservé avant connexion et repris une seule fois après réglage.
-- Formation active confirmée par le serveur pour chaque conversation.
-- Éditeur commun pour les modifications manuelles et les propositions de l’agent,
-  avec prévisualisation pédagogique et détection des conflits.
-- Copie privée lors du partage, validation des contributions par le propriétaire,
-  confidentialité nominative et conservation de la version des inscrits.
-- Permissions de contribution distinctes des droits administratifs.
+- Vertical history, dark theme, 20 px reading text adjustable from 16 to 24 px.
+- A message written before signing in is kept and resumed exactly once after setup.
+- The active course is confirmed by the server for each conversation.
+- A shared editor for manual edits and agent proposals, with a pedagogical
+  preview and conflict detection.
+- A private copy when sharing, contribution approval by the owner, privacy for
+  named recipients, and enrolled learners keep their version.
+- Contribution permissions are separate from administrative rights.
 
-Les clés, comptes, conversations et progressions existants sont conservés.
-Aucune formation existante n’est publiée automatiquement.
+Existing keys, accounts, conversations and progress are preserved.
+No existing course is published automatically.
 
-L’asset `Tutor_0.2.0_x64-setup.exe` est l’installeur Windows x64. Les sommes SHA-256
-et les rapports de qualification accompagnent la release. Les agents Codex et
-Claude sont inclus ; leur identification fournisseur reste séparée de Tutor.
+The `Tutor_0.2.0_x64-setup.exe` asset is the Windows x64 installer. SHA-256 checksums
+and qualification reports accompany the release. The Codex and Claude agents
+are included; their provider sign-in remains separate from Tutor.
 
-Le contrôle Windows installe le paquet, vérifie ses agents et son arbre
-UI Automation, la saisie et la navigation clavier. Il ne constitue pas un audit
-manuel complet avec Narrator.
+The Windows check installs the package and verifies its agents, its
+UI Automation tree, text input and keyboard navigation. It is not a full manual
+audit with Narrator.
 
-[Parcours, contrats et captures](https://github.com/ArnaudGuiovanna/tutor-mcp/blob/tutor-client-v0.2.0/docs/tutor-conversation-formations.md).
+[Flows, contracts and screenshots](https://github.com/ArnaudGuiovanna/tutor-mcp/blob/tutor-client-v0.2.0/docs/tutor-conversation-formations.md).

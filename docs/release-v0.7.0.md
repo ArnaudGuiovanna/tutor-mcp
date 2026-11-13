@@ -1,75 +1,75 @@
-# Tutor MCP v0.7.0 · Client ACP 0.0.1
+# Tutor MCP v0.7.0 · ACP Client 0.0.1
 
-**Apprendre tout au long de la vie. Progresser dans des communautés d’apprentissage.**
+**Lifelong learning. Growing within learning communities.**
 
-Tutor accompagne les envies, les projets et les changements de métier par des
-parcours personnels que l’on peut reprendre dans la durée. Le client ACP donne
-aux communautés un espace pour construire, examiner et partager des formations,
-tandis que chacun conserve son rythme et sa progression.
+Tutor supports aspirations, projects and career changes through personal
+learning paths that can be resumed over time. The ACP client gives communities
+a space to build, review and share courses, while everyone keeps their own pace
+and progress.
 
 ## Tutor MCP 0.7.0
 
-- Création immédiate de formations personnelles depuis la conversation,
-  bibliothèque unifiée, recherche et reprise explicite de la formation active.
-- Formations institutionnelles, invitations, contributions et validation des
-  versions. Les destinataires nominatifs restent protégés et les versions
-  publiées des apprenants restent immuables.
-- Gestion des programmes, des accès, des inscriptions et du suivi pédagogique.
-  Les auteurs peuvent partager une copie de leur conception sans publier leurs
-  conversations ni leur progression privée.
-- Progression individuelle, révisions et évaluations structurées. La calibration
-  collective est isolée par institution, version et concept ; elle exige
-  30 contributeurs ayant chacun cinq observations admissibles et exclut
-  l’historique privé.
-- Identités publiques et récupération, gestion des membres et effacement
-  institutionnel contrôlé. Les actions du compte sont signées localement et liées
-  à la session ; les droits administratifs ne sont pas confiés à l’agent.
-- Autorisations MCP persistantes, nettoyage PostgreSQL avec un worker à droits
-  minimaux, diagnostics sans contenu privé et abandon des connexions annulées
-  dont la protection de lecture ne peut être remise à zéro en toute sûreté.
+- Personal courses created immediately from the conversation, a unified
+  library, search and explicit resumption of the active course.
+- Institutional courses, invitations, contributions and version approval.
+  Named recipients remain protected and the published versions learners use
+  remain immutable.
+- Management of curricula, access, enrolments and pedagogical follow-up.
+  Authors can share a copy of their design without publishing their
+  conversations or their private progress.
+- Individual progress, reviews and structured assessments. Collective
+  calibration is isolated by institution, version and concept; it requires
+  30 contributors each with five eligible observations and excludes
+  private history.
+- Public identities and recovery, member management and controlled institutional
+  erasure. Account actions are signed locally and bound to the session;
+  administrative rights are not entrusted to the agent.
+- Persistent MCP permissions, PostgreSQL cleanup with a least-privilege worker,
+  diagnostics without private content, and abandonment of cancelled connections
+  whose read protection cannot be safely reset.
 
-## Client ACP 0.0.1 pour Windows x64
+## ACP Client 0.0.1 for Windows x64
 
-Le nouvel asset `Tutor_ACP_0.0.1_windows_x64-setup.exe` est l’installeur du client,
-avec Codex et Claude intégrés. Sa version de produit est réellement **0.0.1**.
+The new `Tutor_ACP_0.0.1_windows_x64-setup.exe` asset is the client installer,
+with Codex and Claude built in. Its product version really is **0.0.1**.
 
-- Conversation et formations, avec un espace Compte et des Paramètres organisés
-  en Agents, Institution, Membres et Ergonomie.
-- Interface française ou anglaise, thèmes clair/sombre/système, taille du texte,
-  interligne et réduction des animations conservés par compte.
-- Autorisations par outil, réglages de modèle et de réflexion proposés par
-  l’agent, activité textuelle et journal de réponse récupérable.
-- Archivage, restauration et suppression selon les droits du serveur ; retrait
-  d’un compte local distinct de l’effacement institutionnel.
+- Conversation and courses, with a "Compte" (Account) area and "Paramètres" (Settings) organised
+  into "Agents", "Institution", "Membres" (Members) and "Ergonomie" (Reading and appearance).
+- French or English interface, light/dark/system themes, text size, line spacing
+  and reduced motion kept per account.
+- Per-tool permissions, model and reasoning settings offered by the agent,
+  textual activity and a recoverable reply log.
+- Archiving, restoring and deleting according to the server's rights; removing
+  a local account is separate from institutional erasure.
 
-Cette numérotation ouvre la distribution du client ACP dans la release du
-serveur. Les préversions techniques `tutor-client-v0.2.x` et `tutor-client-v0.3.0`
-restent disponibles. L’identifiant de l’application et ses dossiers de données
-sont conservés : installez cette version par-dessus l’existante sans régénérer
-vos clés. Les sauvegardes exportées restent nécessaires pour la récupération.
+This numbering starts distributing the ACP client in the server release. The
+technical pre-releases `tutor-client-v0.2.x` and `tutor-client-v0.3.0` remain
+available. The application identifier and its data folders are preserved:
+install this version over the existing one without regenerating your keys.
+Exported backups are still required for recovery.
 
-## Téléchargements et vérifications
+## Downloads and verification
 
-Les six archives du serveur couvrent Linux, macOS et Windows, sur amd64 et arm64.
-Elles contiennent le binaire et ses notices originales. Les mêmes familles
-d’assets de notices que dans v0.6.1 sont également disponibles séparément, avec
-leur provenance et leurs sommes SHA-256. Les anciens assets ne sont pas modifiés.
+The six server archives cover Linux, macOS and Windows, on amd64 and arm64.
+They contain the binary and its original notices. The same families of notice
+assets as in v0.6.1 are also available separately, with their provenance and
+SHA-256 checksums. Older assets are not modified.
 
-`SHA256SUMS` vérifie tous les fichiers de cette release. Les rapports Windows
-documentent séparément le protocole ACP, le transport MCP natif, les agents
-embarqués et les interactions de l’application installée. Une négociation ACP
-ne prouve pas une génération de modèle ; l’UI Automation ne constitue pas un
-audit manuel de Narrator. La première vérification du paquet reste plus lente
-que les reconnexions dans la même application.
+`SHA256SUMS` verifies every file in this release. The Windows reports document
+separately the ACP protocol, the native MCP transport, the embedded agents and
+the interactions of the installed application. An ACP negotiation does not
+prove a model generation; UI Automation is not a manual Narrator audit. The
+first package check remains slower than reconnections within the same
+application.
 
-## Mise à jour du serveur
+## Server upgrade
 
-Depuis v0.6.1, cette version inclut des évolutions de schéma et de permissions.
-Sauvegardez la base et les clés ensemble. Pour une institution, exécutez le rôle
-migrator puis appliquez `deploy/postgres-roles.sql` avec le propriétaire de la base
-avant de redémarrer API et worker. Conservez les répertoires de données existants.
-Aucune formation existante n’est publiée automatiquement.
+Since v0.6.1, this version includes schema and permission changes. Back up the
+database and keys together. For an institution, run the migrator role, then
+apply `deploy/postgres-roles.sql` as the database owner before restarting the
+API and worker. Keep the existing data directories.
+No existing course is published automatically.
 
-Voir le [guide d’installation](https://github.com/ArnaudGuiovanna/tutor-mcp/blob/v0.7.0/docs/installation.md),
-le [client ACP](https://github.com/ArnaudGuiovanna/tutor-mcp/blob/v0.7.0/client/README.md)
-et les rapports joints pour les commandes et la portée des vérifications.
+See the [installation guide](https://github.com/ArnaudGuiovanna/tutor-mcp/blob/v0.7.0/docs/installation.md),
+the [ACP client](https://github.com/ArnaudGuiovanna/tutor-mcp/blob/v0.7.0/client/README.md)
+and the attached reports for the commands and the scope of the checks.

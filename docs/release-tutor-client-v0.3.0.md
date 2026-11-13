@@ -1,45 +1,44 @@
 # Tutor Desktop 0.3.0
 
-Tutor dispose désormais d'un écran Compte et de Paramètres avec quatre onglets :
-Agents, Institution, Membres et Ergonomie. Le choix Français/English change
-l'interface et la langue des prochaines réponses, sans traduire les conversations
-ou programmes déjà enregistrés. Les thèmes clair, sombre et système, la taille
-du texte, l'interligne et la réduction des animations sont conservés par compte.
+Tutor now has a "Compte" (Account) screen and "Paramètres" (Settings) with four tabs:
+"Agents", "Institution", "Membres" (Members) and "Ergonomie" (Reading and appearance). The Français/English choice changes
+the interface and the language of upcoming replies, without translating conversations
+or curricula already saved. Light, dark and system themes, text size, line spacing
+and reduced motion are kept per account.
 
-Les agents intégrés utilisent le même lancement Rust qualifié que l'application.
-Les chemins Windows Node sont corrigés et les vérifications du paquet inchangé
-sont mises en cache. Le streaming enregistre un journal incrémental récupérable
-au lieu de réécrire tout l'historique à chaque fragment. L'activité du tuteur est
-présentée en texte dans la conversation, suivant les événements réels.
+The built-in agents use the same qualified Rust launch path as the application.
+Windows Node paths are fixed and checks of an unchanged package are cached.
+Streaming writes a recoverable incremental log instead of rewriting the whole
+history on every chunk. The tutor's activity is shown as text in the conversation,
+following the actual events.
 
-Dans Agents, les autorisations MCP peuvent être conservées entre les
-conversations et redémarrages : autoriser, demander ou refuser par outil, ou
-autoriser tous les outils Tutor. La liste provient du serveur connecté. Ces choix
-restent liés au compte, à l'institution et à l'agent ; ils ne donnent aucun rôle
-supplémentaire. Un refus est aussi appliqué côté serveur.
+In "Agents", MCP permissions can be kept across conversations and restarts:
+allow, ask or deny per tool, or allow all Tutor tools. The list comes from the
+connected server. These choices stay tied to the account, the institution and
+the agent; they grant no additional role. A denial is also enforced server-side.
 
-Compte explique l'identité publique, la signature locale et la paire de
-récupération, avec une sauvegarde chiffrée. Il permet de retirer un compte de
-l'appareil ou de demander séparément l'effacement des données institutionnelles.
-Les membres, invitations, rôles et transferts de propriété utilisent les droits
-réels. Ces actions exigent une preuve signée localement, distincte du seul accès
-MCP confié à l'agent. Le dernier propriétaire reste protégé.
+"Compte" explains the public identity, local signing and the recovery pair,
+with an encrypted backup. It lets you remove an account from the device or
+separately request erasure of institutional data. Members, invitations, roles
+and ownership transfers use the actual rights. These actions require a locally
+signed proof, separate from the MCP access alone entrusted to the agent. The last
+owner remains protected.
 
-Les formations personnelles peuvent être archivées, restaurées ou supprimées.
-Les brouillons et publications disposent d'actions adaptées ; le retrait d'une
-publication conserve les versions et progressions des apprenants déjà inscrits.
-Le contrat MCP de sélection précise maintenant les champs réellement obligatoires,
-pour reprendre une formation existante sans créer de doublon.
+Personal courses can be archived, restored or deleted. Drafts and publications
+have suitable actions; withdrawing a publication keeps the versions and progress
+of learners already enrolled. The MCP selection contract now specifies which
+fields are actually required, so an existing course can be resumed without
+creating a duplicate.
 
-Le serveur corrige le nettoyage PostgreSQL avec le rôle worker limité et expose
-des durées et résultats MCP exploitables sans journaliser le contenu privé.
+The server fixes PostgreSQL cleanup with the restricted worker role and exposes
+usable MCP durations and results without logging private content.
 
-Installer `Tutor_0.3.0_x64-setup.exe` par-dessus la version précédente. Les clés,
-comptes, conversations et progressions existants sont conservés ; aucune
-réimportation ni régénération de clé n'est nécessaire pour la mise à jour.
+Install `Tutor_0.3.0_x64-setup.exe` over the previous version. Existing keys,
+accounts, conversations and progress are preserved; no re-import or key
+regeneration is needed for the update.
 
-Le [backlog avec critères de validation](https://github.com/ArnaudGuiovanna/tutor-mcp/blob/tutor-client-v0.3.0/docs/backlog-tutor-experience.yaml) distingue
-les changements, leurs preuves et la recette de distribution. Les rapports de
-qualification et sommes SHA-256 accompagnent la release. Une négociation ACP
-ou un audit UI Automation ne constitue pas à elle seule une séance avec un modèle
-ni un audit manuel complet de Narrator.
+The [backlog with acceptance criteria](https://github.com/ArnaudGuiovanna/tutor-mcp/blob/tutor-client-v0.3.0/docs/backlog-tutor-experience.yaml) distinguishes
+the changes, their evidence and the distribution acceptance test. Qualification
+reports and SHA-256 checksums accompany the release. An ACP negotiation or a
+UI Automation audit does not by itself constitute a session with a model, nor
+a full manual Narrator audit.

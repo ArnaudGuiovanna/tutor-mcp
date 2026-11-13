@@ -1,46 +1,46 @@
 # Tutor ACP 0.0.3 · Tutor MCP v0.7.2
 
-Cette release livre la finition du client ACP pour Windows : une fenêtre unifiée,
-une lecture plus confortable et un parcours de connexion regroupé.
+This release delivers the polish of the ACP client for Windows: a unified window,
+more comfortable reading and a consolidated connection flow.
 
-## Client ACP 0.0.3
+## ACP Client 0.0.3
 
-- Fenêtre sans barre de titre native, avec commandes personnalisées pour réduire,
-  agrandir, restaurer et fermer. Déplacement, double clic et redimensionnement
-  restent disponibles.
-- Espacements, marges, boutons et champs harmonisés ; hiérarchie des titres,
-  paragraphes, listes, citations et tableaux retravaillée.
-- Code avec retour à la ligne et copie fidèle, confirmation de copie et tableaux
-  adaptés aux petites fenêtres.
-- Saisie qui grandit avec le message, exemples qui préparent la conversation,
-  transitions discrètes et activité animée suivant les événements de l’agent.
-  Les préférences de réduction des animations restent prioritaires.
-- **Connexion et outils** regroupe Tutor, l’identité nécessaire, l’agent IA et
-  les permissions MCP persistantes. Les connexions établies se replient en résumés.
-- Choisir un agent ne rétablit plus une ancienne adresse Tutor. Changer la règle
-  générale des autorisations conserve les exceptions définies par outil.
-- La taille du texte se prévisualise immédiatement et s’enregistre au relâchement
-  du curseur ou après l’action au clavier.
+- Window without a native title bar, with custom controls to minimise,
+  maximise, restore and close. Dragging, double-clicking and resizing
+  remain available.
+- Harmonised spacing, margins, buttons and fields; reworked hierarchy of headings,
+  paragraphs, lists, quotes and tables.
+- Code with line wrapping and faithful copying, copy confirmation and tables
+  adapted to small windows.
+- An input box that grows with the message, examples that set up the conversation,
+  subtle transitions and animated activity that follows the agent's events.
+  Reduced-motion preferences still take precedence.
+- **"Connexion et outils" (Connection and tools)** groups Tutor, the required identity, the AI agent
+  and persistent MCP permissions. Established connections collapse into summaries.
+- Choosing an agent no longer restores an old Tutor address. Changing the
+  general permission rule keeps the exceptions defined per tool.
+- Text size previews immediately and is saved when the slider is released or
+  after the keyboard action.
 
-Télécharger **`Tutor_ACP_0.0.3_windows_x64-setup.exe`** et l’installer par-dessus
-la version précédente. La version de produit est réellement **0.0.3**.
-L’identifiant `fr.aguiovanna.tutor` et les emplacements des données sont conservés :
-les comptes, clés, conversations et réglages restent en place. Les adaptateurs
-Codex et Claude et leurs runtimes sont inclus, comme dans la version précédente.
+Download **`Tutor_ACP_0.0.3_windows_x64-setup.exe`** and install it over
+the previous version. The product version really is **0.0.3**.
+The `fr.aguiovanna.tutor` identifier and the data locations are preserved:
+accounts, keys, conversations and settings stay in place. The Codex and Claude
+adapters and their runtimes are included, as in the previous version.
 
-## Distribution et vérifications
+## Distribution and verification
 
-Les six archives de Tutor MCP v0.7.2 sont jointes pour conserver les téléchargements
-serveur de la release **Latest**. Le code du serveur et ses migrations sont
-inchangés depuis v0.7.1 ; cette livraison porte sur le client de bureau.
+The six Tutor MCP v0.7.2 archives are attached to keep the server downloads of
+the **Latest** release. The server code and its migrations are unchanged since
+v0.7.1; this delivery concerns the desktop client.
 
-Les rapports joints identifient le commit et les workflows ayant construit les
-fichiers. Le contrôle Windows installe réellement le client, exerce les commandes
-de fenêtre, la navigation au clavier, les langues et les thèmes, puis vérifie les
-réglages après fermeture et réouverture. Il utilise un profil de test hors ligne :
-il ne constitue pas une séance avec un modèle authentifié ni un audit manuel
-complet de Narrator.
+The attached reports identify the commit and the workflows that built the
+files. The Windows check actually installs the client, exercises the window
+controls, keyboard navigation, languages and themes, then verifies the
+settings after closing and reopening. It uses an offline test profile: it is
+neither a session with an authenticated model nor a full manual Narrator
+audit.
 
-`SHA256SUMS` couvre tous les assets à l’exception de lui-même. Les notices des
-dépendances sont incluses dans les distributions. Les détails de l’interface sont
-décrits dans la [fiche du client](https://github.com/ArnaudGuiovanna/tutor-mcp/blob/v0.7.2/client/docs/desktop-experience.md).
+`SHA256SUMS` covers every asset except itself. The dependency notices are
+included in the distributions. The interface details are described in the
+[client notes](https://github.com/ArnaudGuiovanna/tutor-mcp/blob/v0.7.2/client/docs/desktop-experience.md).

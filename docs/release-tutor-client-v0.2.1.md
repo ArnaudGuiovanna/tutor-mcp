@@ -1,21 +1,21 @@
 # Tutor Desktop 0.2.1
 
-Corrige « Permissions de session inconnues » lors de la connexion avec une clé
-publique. La version 0.2.0 demandait `formation:contribute`, puis refusait ce droit
-dans sa propre validation locale, avant tout appel au serveur.
+Fixes "Permissions de session inconnues" (Unknown session permissions) when signing in
+with a public key. Version 0.2.0 requested `formation:contribute`, then rejected that
+right in its own local validation, before any call to the server.
 
-Le client accepte maintenant les combinaisons de droits nécessaires au
-propriétaire, au formateur et à l’apprenant. Les droits inconnus, les doublons et
-les demandes non canoniques sont refusés avant toute signature. Les autorisations
-effectives restent contrôlées par le serveur ; le client n’ajoute aucun rôle.
+The client now accepts the combinations of rights needed by the owner, the
+instructor and the learner. Unknown rights, duplicates and non-canonical
+requests are rejected before anything is signed. Effective permissions remain
+enforced by the server; the client adds no role.
 
-Les tests utilisent la fonction de connexion appelée par l’interface, avec un
-serveur HTTP de test qui vérifie les signatures NIP-98, les droits demandés et
-la révocation de la session intermédiaire. Ils couvrent aussi le propriétaire
-sans profil apprenant et l’absence de délégation administrative automatique.
+The tests use the sign-in function called by the interface, with a test HTTP
+server that verifies NIP-98 signatures, the requested rights and the revocation
+of the intermediate session. They also cover an owner without a learner profile
+and the absence of automatic administrative delegation.
 
-Installer `Tutor_0.2.1_x64-setup.exe`, puis reconnecter le compte à Tutor.
-Les coffres, sauvegardes, clés, conversations et progressions existants sont
-conservés. Aucune réimportation ni régénération de clé n’est nécessaire.
+Install `Tutor_0.2.1_x64-setup.exe`, then reconnect the account to Tutor.
+Existing vaults, backups, keys, conversations and progress are preserved.
+No re-import or key regeneration is needed.
 
-Les sommes SHA-256 et les rapports Windows accompagnent cette release.
+SHA-256 checksums and Windows reports accompany this release.

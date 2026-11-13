@@ -1,53 +1,54 @@
 # Tutor ACP 0.0.4 · Tutor MCP v0.7.3
 
-Cette release ajoute des activités visuelles dans la conversation et un planning
-personnel des révisions, en s’appuyant sur le moteur pédagogique existant.
+This release adds visual activities in the conversation and a personal review
+schedule, building on the existing pedagogical engine.
 
-## Client ACP 0.0.4
+## ACP Client 0.0.4
 
-- Saisir `/` ouvre le choix **Quiz** ou **Flashcards**. Les commandes `/quiz` et
-  `/flashcards` acceptent aussi un sujet après leur nom.
-- Les quiz proposent des réponses cliquables, une validation puis une correction
-  expliquée. La tentative et sa rubrique sont préparées avant la réponse.
-- Les flashcards se retournent au clic et recueillent une autoévaluation :
-  **Pas retrouvé**, **Retrouvé avec effort**, **Retrouvé facilement**. Cette
-  déclaration reste distincte d’une réponse vérifiée dans un quiz.
-- **Planning**, dans la sidebar, permet d’activer les révisions par formation,
-  de choisir leur format et de consulter les échéances calculées par Tutor-MCP.
-  **Réviser maintenant** ouvre le chat et confirme la bonne formation avant de
-  démarrer l’activité.
-- Les préférences sont conservées par compte, connexion, institution et
-  formation. Désactiver une formation dans le Planning ne désactive pas le suivi
-  pédagogique du serveur.
-- Les réponses sont conservées après fermeture et protégées contre les doubles
-  envois. Les demandes hors ligne restent **À envoyer**. Retirer une réponse en
-  attente conserve un reçu local, sans enregistrement serveur ni nouvelle tentative.
-- Les activités invalides ou interrompues ne dévoilent pas leur correction.
-  La question reste visible à l’ouverture des cartes sur les petites fenêtres ;
-  souris, clavier, français/anglais et thèmes clair/sombre sont pris en charge.
+- Typing `/` opens the choice between **Quiz** and **Flashcards**. The `/quiz` and
+  `/flashcards` commands also accept a topic after their name.
+- Quizzes offer clickable answers, a submit step and then an explained
+  correction. The attempt and its rubric are prepared before the answer.
+- Flashcards flip on click and collect a self-assessment:
+  **"Pas retrouvé" (Did not recall)**, **"Retrouvé avec effort" (Recalled with effort)**,
+  **"Retrouvé facilement" (Recalled easily)**. This self-report remains distinct
+  from a verified answer in a quiz.
+- **"Planning" (Schedule)**, in the sidebar, lets you enable reviews per course,
+  choose their format and view the due dates computed by Tutor-MCP.
+  **"Réviser maintenant" (Review now)** opens the chat and confirms the right course before
+  starting the activity.
+- Preferences are kept per account, connection, institution and course.
+  Disabling a course in the schedule does not disable the server's pedagogical
+  tracking.
+- Answers are kept after closing and protected against double submission.
+  Offline requests remain **"À envoyer" (Ready to send)**. Withdrawing a pending answer
+  keeps a local receipt, with no server record and no new attempt.
+- Invalid or interrupted activities do not reveal their correction.
+  The question stays visible when cards open in small windows; mouse, keyboard,
+  French/English and light/dark themes are supported.
 
-## Installation Windows
+## Windows installation
 
-Télécharger **`Tutor_ACP_0.0.4_windows_x64-setup.exe`** et l’installer par-dessus
-la version précédente. L’identifiant `fr.aguiovanna.tutor`, les comptes, les clés,
-les conversations et les réglages existants sont conservés. Les adaptateurs
-Codex et Claude et leurs runtimes restent inclus.
+Download **`Tutor_ACP_0.0.4_windows_x64-setup.exe`** and install it over
+the previous version. The `fr.aguiovanna.tutor` identifier and the existing
+accounts, keys, conversations and settings are preserved. The Codex and Claude
+adapters and their runtimes remain included.
 
-## Distribution et vérifications
+## Distribution and verification
 
-Les six archives serveur de Tutor-MCP v0.7.3 et leurs notices sont jointes pour
-conserver les téléchargements habituels de la release **Latest**. Aucun code
-du serveur ni migration ne change depuis v0.7.2.
+The six Tutor-MCP v0.7.3 server archives and their notices are attached to
+keep the usual downloads of the **Latest** release. No server code or
+migration changes since v0.7.2.
 
-Les contrôles obligatoires sont exécutés sur `staging` avant la promotion de ce
-même commit vers `main`. Le workflow Windows construit, installe et démarre le
-client, vérifie son interface native et les adaptateurs ACP. Les rapports joints
-identifient le commit et les workflows ayant produit les fichiers.
+The required checks run on `staging` before that same commit is promoted to
+`main`. The Windows workflow builds, installs and starts the client, and
+verifies its native interface and the ACP adapters. The attached reports
+identify the commit and the workflows that produced the files.
 
-La qualification visuelle des nouvelles modalités utilise des données de test
-et couvre les deux thèmes, le clavier et les petites largeurs. Ces contrôles ne
-constituent pas une séance pédagogique avec un fournisseur IA authentifié ni
-une validation expérimentale de gains d’apprentissage.
+The visual qualification of the new modalities uses test data and covers both
+themes, the keyboard and narrow widths. These checks are neither a tutoring
+session with an authenticated AI provider nor an experimental validation of
+learning gains.
 
-`SHA256SUMS` couvre tous les assets à l’exception de lui-même. Les détails de
-l’utilisation sont disponibles dans le [guide du client](https://github.com/ArnaudGuiovanna/tutor-mcp/blob/v0.7.3/client/README.md).
+`SHA256SUMS` covers every asset except itself. Usage details are available in
+the [client guide](https://github.com/ArnaudGuiovanna/tutor-mcp/blob/v0.7.3/client/README.md).

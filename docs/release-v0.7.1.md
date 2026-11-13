@@ -1,54 +1,53 @@
-# Tutor MCP v0.7.1 · Client ACP 0.0.2
+# Tutor MCP v0.7.1 · ACP Client 0.0.2
 
-**Apprendre tout au long de la vie. Faire vivre des communautés d’apprentissage.**
+**Lifelong learning. Bringing learning communities to life.**
 
-Cette livraison apporte la nouvelle interface du client ACP pour Windows,
-alignée sur la charte fournie pour Tutor-MCP et tutor-mcp.dev.
+This delivery brings the new ACP client interface for Windows, aligned with the
+brand guidelines provided for Tutor-MCP and tutor-mcp.dev.
 
-## Client ACP 0.0.2
+## ACP Client 0.0.2
 
-- Nouvelle identité visuelle : fond bleu nuit `#0C131F`, accent `#3D8BFF`,
-  wordmark à curseur, navigation et bibliothèque plus compactes, nouvelle icône.
-- Polices Inter et JetBrains Mono embarquées : le client les utilise sans
-  téléchargement de polices depuis un service externe.
-- Palette de commandes **Ctrl+K** : recherche insensible aux accents, reprise
-  d’une conversation, accès aux formations, au compte et aux réglages, choix du thème.
-  Flèches et Entrée sélectionnent ; Échap ferme ; Tab reste dans le dialogue.
-- Thèmes sombre, clair et système et préférences de lecture conservés par compte.
-- Jauges de progression adaptées à la charte. Les valeurs proviennent du serveur
-  et les estimations restent distinctes des preuves de maîtrise.
+- New visual identity: midnight-blue background `#0C131F`, accent `#3D8BFF`,
+  cursor wordmark, more compact navigation and library, new icon.
+- Embedded Inter and JetBrains Mono fonts: the client uses them without
+  downloading fonts from an external service.
+- **Ctrl+K** command palette: accent-insensitive search, resuming a
+  conversation, access to courses, the account and settings, theme selection.
+  Arrow keys and Enter select; Esc closes; Tab stays within the dialog.
+- Dark, light and system themes and reading preferences kept per account.
+- Progress gauges adapted to the brand guidelines. The values come from the server
+  and estimates remain distinct from evidence of mastery.
 
-Le client conserve l’identifiant `fr.aguiovanna.tutor`. Installer cette version
-par-dessus l’existante conserve les dossiers des comptes, les clés et les échanges.
-Les sauvegardes d’identité restent nécessaires pour la récupération.
+The client keeps the `fr.aguiovanna.tutor` identifier. Installing this version
+over the existing one preserves the account folders, keys and exchanges.
+Identity backups are still required for recovery.
 
-Téléchargement : **`Tutor_ACP_0.0.2_windows_x64-setup.exe`**.
-La version de produit de l’application est réellement **0.0.2**.
-Les adaptateurs Codex et Claude et leurs runtimes restent inclus.
+Download: **`Tutor_ACP_0.0.2_windows_x64-setup.exe`**.
+The application's product version really is **0.0.2**.
+The Codex and Claude adapters and their runtimes remain included.
 
-## Bannière et documentation
+## Banner and documentation
 
-La bannière du README reprend les couleurs, le wordmark et les polices de la
-nouvelle charte. Les polices et leurs notices originales sont incluses dans le SVG.
-L’organisation du README et la démonstration existante sont conservées.
-Les sources du nouveau site fournies dans `ui/site` restent indépendantes de
-cette livraison du client ; cette release ne constitue pas un déploiement web.
+The README banner uses the colours, wordmark and fonts of the new brand
+guidelines. The fonts and their original notices are included in the SVG.
+The README's organisation and the existing demo are preserved.
+The sources of the new site provided in `ui/site` remain independent of this
+client delivery; this release is not a web deployment.
 
-## Distribution du serveur
+## Server distribution
 
-Les six distributions de **Tutor MCP v0.7.1** sont jointes pour que la release
-**Latest** continue aussi de servir les installateurs Linux, macOS et Windows.
-Elles contiennent leurs notices et disposent des mêmes suppléments de notices
-que v0.7.0. Aucune nouvelle migration n’est ajoutée depuis v0.7.0.
+The six distributions of **Tutor MCP v0.7.1** are attached so that the
+**Latest** release also keeps serving the Linux, macOS and Windows installers.
+They contain their notices and come with the same notice supplements as
+v0.7.0. No new migration has been added since v0.7.0.
 
-`SHA256SUMS` couvre tous les assets, à l’exception de lui-même. Les rapports de
-qualification relient les fichiers au commit et aux workflows utilisés.
+`SHA256SUMS` covers every asset except itself. The qualification reports link
+the files to the commit and the workflows used.
 
-## Portée des vérifications
+## Scope of the checks
 
-Les rapports Windows couvrent le lancement natif des agents embarqués, la
-persistance MCP directe, WSL2, l’application installée, la palette de commandes,
-les langues, les thèmes et la réouverture du même profil. Le profil UI Automation
-est hors ligne : ce contrôle ne revendique ni génération d’un modèle ni audit
-manuel de Narrator. Les résultats effectifs et les éventuelles reprises de
-workflow sont conservés dans les rapports joints.
+The Windows reports cover the native launch of the embedded agents, direct MCP
+persistence, WSL2, the installed application, the command palette, languages,
+themes and reopening the same profile. The UI Automation profile is offline:
+this check claims neither a model generation nor a manual Narrator audit. The
+actual results and any workflow reruns are kept in the attached reports.
