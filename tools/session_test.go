@@ -14,30 +14,47 @@ import (
 
 func TestStartLearningSession_IdempotentAndOwned(t *testing.T) {
 	store, deps := setupToolsTest(t)
-	first := callTool(t, deps, registerStartLearningSession, "L_owner", "start_learning_session", map[string]any{
-		"session_id": "sess_tool_key",
-	})
+	first := callTool(t, deps, registerStartLearningSession, "L_owner", "start_learning_session", map[string]any{})
 	if first.IsError {
 		t.Fatalf("first start: %q", resultText(first))
 	}
-	firstOut := decodeResult(t, first)
-	if firstOut["session_id"] != "sess_tool_key" {
-		t.Fatalf("unexpected canonical session: %v", firstOut)
+	sessionID, _ := decodeResult(t, first)["session_id"].(string)
+	if !strings.HasPrefix(sessionID, "sess_") || len(sessionID) < 20 {
+		t.Fatalf("session_id is not server-generated: %q", sessionID)
 	}
 	repeated := callTool(t, deps, registerStartLearningSession, "L_owner", "start_learning_session", map[string]any{
-		"session_id": "sess_tool_key",
+		"session_id": sessionID,
 	})
-	if repeated.IsError || decodeResult(t, repeated)["session_id"] != "sess_tool_key" {
-		t.Fatalf("idempotent start failed: %q", resultText(repeated))
+	if repeated.IsError || decodeResult(t, repeated)["session_id"] != sessionID {
+		t.Fatalf("idempotent resume failed: %q", resultText(repeated))
+	}
+	implicit := callTool(t, deps, registerStartLearningSession, "L_owner", "start_learning_session", map[string]any{})
+	if implicit.IsError || decodeResult(t, implicit)["session_id"] != sessionID {
+		t.Fatalf("active session was not resumed: %q", resultText(implicit))
 	}
 	attacker := callTool(t, deps, registerStartLearningSession, "L_attacker", "start_learning_session", map[string]any{
-		"session_id": "sess_tool_key",
+		"session_id": sessionID,
 	})
-	if !attacker.IsError {
-		t.Fatalf("attacker reused another learner's session: %v", decodeResult(t, attacker))
+	if !attacker.IsError || resultText(attacker) != "learning session not found" {
+		t.Fatalf("another learner's session was not reported as missing: error=%v %q", attacker.IsError, resultText(attacker))
 	}
-	if _, err := store.GetLearningSession(context.Background(), "L_attacker", "sess_tool_key"); err == nil {
+	if _, err := store.GetLearningSession(context.Background(), "L_attacker", sessionID); err == nil {
 		t.Fatal("attacker acquired the owner's session")
+	}
+}
+
+// A client may never choose a session identifier: an unknown ID is refused
+// instead of creating a session under it.
+func TestStartLearningSession_RejectsClientChosenIdentifier(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	res := callTool(t, deps, registerStartLearningSession, "L_owner", "start_learning_session", map[string]any{
+		"session_id": "sess_client_chosen",
+	})
+	if !res.IsError || resultText(res) != "learning session not found" {
+		t.Fatalf("client-chosen identifier was accepted: error=%v %q", res.IsError, resultText(res))
+	}
+	if _, err := store.GetLearningSession(context.Background(), "L_owner", "sess_client_chosen"); err == nil {
+		t.Fatal("a session was created under a client-chosen identifier")
 	}
 }
 
@@ -126,13 +143,13 @@ func TestImplementationIntentionTools_LifecycleAndOwnership(t *testing.T) {
 	}
 
 	attacker := callTool(t, deps, registerUpdateImplementationIntention, "L_attacker", "update_implementation_intention", map[string]any{
-		"id": id, "status": "cancelled",
+		"intention_id": id, "status": "cancelled",
 	})
 	if !attacker.IsError {
 		t.Fatal("attacker resolved owner's intention")
 	}
 	updated := callTool(t, deps, registerUpdateImplementationIntention, "L_owner", "update_implementation_intention", map[string]any{
-		"id": id, "status": "honored",
+		"intention_id": id, "status": "honored",
 	})
 	if updated.IsError {
 		t.Fatalf("resolve intention: %q", resultText(updated))

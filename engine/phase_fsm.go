@@ -27,15 +27,14 @@ type PhaseObservables struct {
 	// rationale. Qualified concept coverage still governs exit.
 	PhaseEntryEntropy float64
 
-	// DiagnosticItemsCount is retained as a compatibility name, but carries the
-	// number of distinct concepts covered by hint-free, attempt-linked,
-	// evaluated DIAGNOSTIC_ASSESSMENT interactions since PhaseChangedAt.
+	// DiagnosticItemsCount is the number of qualified (hint-free,
+	// attempt-linked, evaluated) DIAGNOSTIC_ASSESSMENT items applied to the
+	// adaptive placement since PhaseChangedAt.
 	DiagnosticItemsCount int
 
-	// DiagnosticCoverageTarget is min(domain concept count, NDiagnosticMax).
-	// Coverage is mandatory: entropy derived from repeated or unverified
-	// observations cannot end the diagnostic early.
-	DiagnosticCoverageTarget int
+	// PlacementUnclassified is the number of domain concepts whose placement
+	// is still ambiguous (see PlacementEstimate.Classified).
+	PlacementUnclassified int
 
 	// EstimatedGoalRelevant is the count of concepts that are
 	// *goal-relevant* (per cfg.GoalRelevantCutoff) AND have a BKT estimate
@@ -54,12 +53,6 @@ type PhaseObservables struct {
 	// Any such concept fires MAINTENANCE → INSTRUCTION; concepts between
 	// the exit and routing thresholds keep MAINTENANCE (hysteresis).
 	BelowExitGoalRelevant int
-
-	// GoalRelevantBelowRetention is true when at least one
-	// goal-relevant concept has FSRS retrievability strictly below
-	// cfg.RetentionRecallThreshold. Retained as an audit signal; forgetting
-	// creates a recall need without changing the acquisition phase.
-	GoalRelevantBelowRetention bool
 }
 
 // PhaseEvaluation is the FSM output: from-state, to-state, whether a
@@ -78,9 +71,9 @@ type PhaseEvaluation struct {
 //
 // Transitions (cf. docs/regulation-design/02-phase-controller.md §3) :
 //
-//   - DIAGNOSTIC → INSTRUCTION: qualified distinct-concept coverage reaches
-//     min(domain concepts, cfg.NDiagnosticMax). Entropy remains an audit signal
-//     but cannot bypass coverage.
+//   - DIAGNOSTIC → INSTRUCTION: the adaptive placement classified every
+//     concept, or its item budget cfg.NDiagnosticMax is spent. The entropy
+//     reduction since phase entry is reported for audit only.
 //
 //   - INSTRUCTION → MAINTENANCE :
 //     all goal-relevant concepts have an estimated PMastery above the routing
@@ -97,39 +90,34 @@ type PhaseEvaluation struct {
 func EvaluatePhase(current models.Phase, obs PhaseObservables, cfg PhaseConfig) PhaseEvaluation {
 	switch current {
 	case models.PhaseDiagnostic:
-		// Relative entropy criterion: only fire when we have a valid
-		// snapshot AND the reduction reaches the threshold.
-		hasSnapshot := obs.PhaseEntryEntropy > 0 && !math.IsNaN(obs.PhaseEntryEntropy)
-		entropyDelta := obs.PhaseEntryEntropy - obs.MeanEntropy
-		entropyExit := hasSnapshot && entropyDelta >= cfg.DeltaHThreshold
-		coverageTarget := obs.DiagnosticCoverageTarget
-		if coverageTarget <= 0 {
-			coverageTarget = cfg.NDiagnosticMax
+		// The entropy delta is an audit signal only: it is reported when a
+		// valid entry snapshot exists but never decides the transition.
+		entropyNote := "no entropy snapshot"
+		if obs.PhaseEntryEntropy > 0 && !math.IsNaN(obs.PhaseEntryEntropy) {
+			entropyNote = fmt.Sprintf("entropy delta %.3f bits", obs.PhaseEntryEntropy-obs.MeanEntropy)
 		}
-		coverageReached := coverageTarget > 0 && obs.DiagnosticItemsCount >= coverageTarget
-
-		if entropyExit && coverageReached {
+		budget := cfg.NDiagnosticMax
+		if obs.PlacementUnclassified == 0 {
 			return PhaseEvaluation{
 				From: current, To: models.PhaseInstruction, Transitioned: true,
 				Rationale: fmt.Sprintf(
-					"DIAGNOSTIC→INSTRUCTION: qualified concept coverage reached (%d/%d) and entropy reduction reached (%.3f >= %.3f bits)",
-					obs.DiagnosticItemsCount, coverageTarget, entropyDelta, cfg.DeltaHThreshold),
+					"DIAGNOSTIC→INSTRUCTION: adaptive placement classified every concept after %d items (%s)",
+					obs.DiagnosticItemsCount, entropyNote),
 			}
 		}
-		if coverageReached {
+		if budget > 0 && obs.DiagnosticItemsCount >= budget {
 			return PhaseEvaluation{
 				From: current, To: models.PhaseInstruction, Transitioned: true,
 				Rationale: fmt.Sprintf(
-					"DIAGNOSTIC→INSTRUCTION: qualified concept coverage reached (%d/%d distinct concepts)",
-					obs.DiagnosticItemsCount, coverageTarget),
+					"DIAGNOSTIC→INSTRUCTION: placement item budget spent (%d/%d), %d concept(s) left unclassified (%s)",
+					obs.DiagnosticItemsCount, budget, obs.PlacementUnclassified, entropyNote),
 			}
 		}
 		return PhaseEvaluation{
 			From: current, To: current, Transitioned: false,
 			Rationale: fmt.Sprintf(
-				"DIAGNOSTIC: delta=%.3f bits (threshold %.3f), qualified coverage=%d/%d concepts — stay",
-				entropyDelta, cfg.DeltaHThreshold,
-				obs.DiagnosticItemsCount, coverageTarget),
+				"DIAGNOSTIC: %d concept(s) unclassified, items %d/%d (%s) — stay",
+				obs.PlacementUnclassified, obs.DiagnosticItemsCount, budget, entropyNote),
 		}
 
 	case models.PhaseInstruction:

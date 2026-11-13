@@ -20,7 +20,7 @@ type GetAvailabilityModelParams struct{}
 
 type UpdateAvailabilityModelParams struct {
 	IdempotentMutationParams
-	ExpectedVersion        int                             `json:"expected_version" jsonschema:"version returned by get_availability_model; use 0 only when no persisted policy exists"`
+	ExpectedVersion        int                             `json:"expected_revision" jsonschema:"version returned by get_availability_model; use 0 only when no persisted policy exists"`
 	Timezone               string                          `json:"timezone" jsonschema:"valid IANA timezone, for example Europe/Paris or America/New_York"`
 	PreferredWindows       []models.TimeWindow             `json:"preferred_windows" jsonschema:"non-overlapping weekly local-time windows; empty means any time after consent"`
 	AvgSessionDuration     int                             `json:"avg_session_duration_minutes" jsonschema:"typical session duration, 5 to 240 minutes"`
@@ -33,7 +33,7 @@ type UpdateAvailabilityModelParams struct {
 }
 
 func registerGetAvailabilityModel(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name:        "get_availability_model",
 		Description: "Retrieve learner-owned availability, IANA timezone, weekly local-time windows, DND, notification consent/frequency/cap, accessibility accommodations and optimistic version.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params GetAvailabilityModelParams) (*mcp.CallToolResult, any, error) {
@@ -80,9 +80,9 @@ func registerGetAvailabilityModel(server *mcp.Server, deps *Deps) {
 }
 
 func registerUpdateAvailabilityModel(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name:        "update_availability_model",
-		Description: "Replace the authenticated learner's availability and accessibility policy. Uses expected_version to reject concurrent lost updates. Notification consent is explicit; DND and local weekly windows are enforced again at delivery time.",
+		Description: "Replace the authenticated learner's availability and accessibility policy. Uses expected_revision (the version read from get_availability_model) to reject concurrent lost updates. Notification consent is explicit; DND and local weekly windows are enforced again at delivery time.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params UpdateAvailabilityModelParams) (*mcp.CallToolResult, any, error) {
 		learnerID, err := getLearnerID(ctx)
 		if err != nil {
@@ -91,7 +91,7 @@ func registerUpdateAvailabilityModel(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 		if params.ExpectedVersion < 0 {
-			r, _ := errorResult("expected_version must be non-negative")
+			r, _ := errorResult("expected_revision must be non-negative")
 			return r, nil, nil
 		}
 		windowsJSON, err := json.Marshal(params.PreferredWindows)

@@ -248,7 +248,7 @@ type InitDomainParams struct {
 }
 
 func registerInitDomain(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name:        "init_domain",
 		Description: "Initialize a learning domain with its concepts and prerequisites. Does not destroy existing progress.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params InitDomainParams) (*mcp.CallToolResult, any, error) {
@@ -326,11 +326,8 @@ func registerInitDomain(server *mcp.Server, deps *Deps) {
 				domain.HighStakes = true
 			}
 
-			for _, concept := range params.Concepts {
-				cs := models.NewConceptStateInDomain(learnerID, domain.ID, concept)
-				if err := tx.InsertConceptStateIfNotExists(ctx, cs); err != nil {
-					return fmt.Errorf("initialize concept %q: %w", concept, err)
-				}
+			if err := initializeDomainConceptStates(ctx, tx, learnerID, domain.ID, params.Concepts); err != nil {
+				return fmt.Errorf("initialize concepts: %w", err)
 			}
 
 			if len(params.Details) > 0 {
@@ -426,7 +423,7 @@ func registerInitDomain(server *mcp.Server, deps *Deps) {
 		// [1] GoalDecomposer — instruct the LLM (versioned, structured,
 		// non-blocking per Q2). Only emitted when REGULATION_GOAL=on so
 		// pre-flag clients see no behavioural change.
-		if regulationGoalEnabled() {
+		if regulationGoalEnabled(deps) {
 			reason := fmt.Sprintf("Decompose the personal_goal against the %d concepts via set_goal_relevance to activate goal-aware routing.", len(params.Concepts))
 			if params.PersonalGoal == "" {
 				reason = "personal_goal is empty - set_goal_relevance remains optional; call it if you want to manually annotate relevance per concept."
@@ -448,7 +445,7 @@ func registerInitDomain(server *mcp.Server, deps *Deps) {
 type AddConceptsParams struct {
 	IdempotentMutationParams
 	DomainID        string                                 `json:"domain_id" jsonschema:"target domain ID"`
-	ExpectedVersion *int                                   `json:"expected_version" jsonschema:"current graph_version; stale revisions are rejected"`
+	ExpectedVersion *int                                   `json:"expected_revision" jsonschema:"current curriculum version (version from get_curriculum_snapshot); stale revisions are rejected"`
 	Concepts        []string                               `json:"concepts" jsonschema:"new concepts to add"`
 	Prerequisites   map[string][]string                    `json:"prerequisites" jsonschema:"new prerequisites (concept -> list of prerequisites). May include links to existing concepts."`
 	Details         map[string]CurriculumConceptDefinition `json:"details,omitempty" jsonschema:"optional outcomes, level, criteria, and description keyed by new concept name"`
@@ -457,9 +454,9 @@ type AddConceptsParams struct {
 }
 
 func registerAddConcepts(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name:        "add_concepts",
-		Description: "Add concepts through an immutable curriculum revision without destroying progress. Requires the latest expected_version; stale writers are rejected.",
+		Description: "Add concepts through an immutable curriculum revision without destroying progress. Requires expected_revision = the latest version from get_curriculum_snapshot; stale writers are rejected.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params AddConceptsParams) (*mcp.CallToolResult, any, error) {
 		learnerID, err := getLearnerID(ctx)
 		if err != nil {
@@ -473,7 +470,7 @@ func registerAddConcepts(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 		if params.ExpectedVersion == nil || *params.ExpectedVersion < 1 {
-			r, _ := errorResult("expected_version >= 1 is required")
+			r, _ := errorResult("expected_revision >= 1 is required")
 			return r, nil, nil
 		}
 
@@ -595,11 +592,8 @@ func registerAddConcepts(server *mcp.Server, deps *Deps) {
 			if err := tx.CompareAndSwapCurriculum(ctx, learnerID, domain.ID, *params.ExpectedVersion, next); err != nil {
 				return err
 			}
-			for _, concept := range params.Concepts {
-				cs := models.NewConceptStateInDomain(learnerID, domain.ID, concept)
-				if err := tx.InsertConceptStateIfNotExists(ctx, cs); err != nil {
-					return fmt.Errorf("initialize concept %q: %w", concept, err)
-				}
+			if err := initializeDomainConceptStates(ctx, tx, learnerID, domain.ID, params.Concepts); err != nil {
+				return fmt.Errorf("initialize concepts: %w", err)
 			}
 			return nil
 		})
@@ -629,7 +623,7 @@ func registerAddConcepts(server *mcp.Server, deps *Deps) {
 		// [1] GoalDecomposer — after add_concepts the graph_version has
 		// advanced; per OQ-1.1 existing relevance entries remain valid but
 		// the new concepts are uncovered. The LLM is invited to top-up.
-		if regulationGoalEnabled() && added > 0 {
+		if regulationGoalEnabled(deps) && added > 0 {
 			response["next_action"] = map[string]any{
 				"version":  1,
 				"tool":     "set_goal_relevance",

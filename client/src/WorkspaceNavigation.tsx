@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Icon } from './icons';
 import { t } from './i18n';
+import { LoadingState } from './LoadState';
 import { shortcutModifier } from './platform';
 import type { Conversation, Snapshot, Training } from './types';
 
@@ -34,8 +35,8 @@ export function TrainingColor({ name }: {name:string}) {
   return <span className={`training-color ${/\bgo\b/i.test(name) ? 'cyan' : ''}`} aria-hidden="true"/>;
 }
 
-export function WorkspaceNavigation({state,page,settingsPage,conversation,trainings,libraryError,locked,sidebarOpen,onNavigate,onNew,onConversation,onTraining,onSearch,onPractice}: {
-  state:Snapshot; page:string; settingsPage:boolean; conversation?:Conversation; trainings:Training[]; libraryError:boolean; locked:boolean; sidebarOpen:boolean;
+export function WorkspaceNavigation({state,page,settingsPage,conversation,trainings,libraryError,libraryLoading=false,onRetryLibrary,locked,sidebarOpen,onNavigate,onNew,onConversation,onTraining,onSearch,onPractice}: {
+  state:Snapshot; page:string; settingsPage:boolean; conversation?:Conversation; trainings:Training[]; libraryError:boolean; libraryLoading?:boolean; onRetryLibrary?:()=>void; locked:boolean; sidebarOpen:boolean;
   onNavigate:(page:'conversation'|'formations'|'planning'|'account'|'settings'|'agents')=>void; onNew:()=>void; onConversation:(id:string)=>void; onTraining:(id:string)=>void; onSearch:()=>void; onPractice:()=>void;
 }) {
   const modifier = shortcutModifier();
@@ -59,7 +60,9 @@ export function WorkspaceNavigation({state,page,settingsPage,conversation,traini
       <button className={`new-conversation ${page === 'conversation' && !conversation?.messages.length ? 'active' : ''}`} aria-label={t('Nouvelle conversation')} title={t('Nouvelle conversation ({shortcut} N)',{shortcut:modifier})} aria-keyshortcuts="Control+N Meta+N" disabled={locked} onClick={onNew}><Icon name="edit" size={16}/><span>{t('Nouvelle conversation')}</span><span className="shortcut" aria-hidden="true">{modifier} N</span></button>
       <section className="sidebar-section" aria-labelledby="sidebar-trainings"><h2 className="sidebar-caption" id="sidebar-trainings">{t('Formations')}</h2>
         {trainings.slice(0,5).map(training => <button key={training.id} className="sidebar-training" title={training.name} onClick={() => onTraining(training.id)}><TrainingColor name={training.name}/><span className="training-name">{training.name}</span><small>{t(training.progress?.some(item => item.last_review) ? 'En cours' : 'Nouveau')}</small></button>)}
-        {!trainings.length && <p className="sidebar-empty">{t(!state.tutorStatus.connected ? 'Vos formations après connexion' : libraryError ? 'Formations indisponibles' : 'Aucune formation suivie')}</p>}
+        {!trainings.length && (libraryLoading && state.tutorStatus.connected ? <LoadingState label="Lecture des formations…" skeleton={3} className="sidebar-skeleton"/>
+          : libraryError && state.tutorStatus.connected ? <div className="sidebar-empty sidebar-error" role="alert"><span>{t('Formations indisponibles')}</span>{onRetryLibrary && <button type="button" className="link-button" aria-label={t('Relire les formations')} onClick={onRetryLibrary}><Icon name="refresh" size={14}/>{t('Réessayer')}</button>}</div>
+          : <p className="sidebar-empty">{t(!state.tutorStatus.connected ? 'Vos formations après connexion' : 'Aucune formation suivie')}</p>)}
       </section>
       <section className="sidebar-recents" aria-labelledby="sidebar-recents"><h2 className="sidebar-caption" id="sidebar-recents">{t('Récents')}</h2>
         <nav className="conversation-history" aria-label={t('Historique des conversations')}>

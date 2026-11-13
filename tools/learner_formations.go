@@ -33,7 +33,7 @@ func registerLearnerFormationTools(server *mcp.Server, deps *Deps) {
 		{"list_available_formations", "List published formation cohorts accessible in your institution, their admission policy and available seats. Includes only your own enrollment status. Choose a cohort explicitly before joining.", false},
 		{"get_my_formations", "List your formation enrollments and admission requests, including historical enrollments. The current enrollment status is authoritative; use its domain_id to resume active learning.", true},
 	} {
-		addTool(server, &mcp.Tool{Name: entry.name, Description: entry.description}, func(ctx context.Context, _ *mcp.CallToolRequest, input LearnerFormationPageParams) (*mcp.CallToolResult, any, error) {
+		addTool(server, deps, &mcp.Tool{Name: entry.name, Description: entry.description}, func(ctx context.Context, _ *mcp.CallToolRequest, input LearnerFormationPageParams) (*mcp.CallToolResult, any, error) {
 			p, _ := auth.GetPrincipal(ctx)
 			s, ok := deps.Store.(storeport.LearnerFormationStore)
 			if !ok {
@@ -46,7 +46,7 @@ func registerLearnerFormationTools(server *mcp.Server, deps *Deps) {
 			return learnerFormationResult(deps, out, err)
 		})
 	}
-	addTool(server, &mcp.Tool{Name: "get_learner_formation", Description: "Read the published program, concepts and assessment criteria of an accessible formation cohort, plus your own enrollment. Drafts and other learners' progress are excluded."}, func(ctx context.Context, _ *mcp.CallToolRequest, input LearnerFormationParams) (*mcp.CallToolResult, any, error) {
+	addTool(server, deps, &mcp.Tool{Name: "get_learner_formation", Description: "Read the published program, concepts and assessment criteria of an accessible formation cohort, plus your own enrollment. Drafts and other learners' progress are excluded."}, func(ctx context.Context, _ *mcp.CallToolRequest, input LearnerFormationParams) (*mcp.CallToolResult, any, error) {
 		p, _ := auth.GetPrincipal(ctx)
 		s, ok := deps.Store.(storeport.LearnerFormationStore)
 		if !ok {
@@ -62,7 +62,7 @@ func registerLearnerFormationTools(server *mcp.Server, deps *Deps) {
 		{"join_formation", "Join a cohort after the learner explicitly chooses it. Open admission enrolls immediately; invitation requires a staff invitation; approval creates a pending request without consuming a seat. After approval, confirm with a new retry key. Rejoining the same cohort preserves history and domain_id.", false},
 		{"leave_formation", "Leave a formation cohort or cancel its pending admission request, only after the learner explicitly confirms. Releases the seat and archives the learning domain while preserving progress and history. Rejoining requires capacity and valid admission.", true},
 	} {
-		addTool(server, &mcp.Tool{Name: entry.name, Description: entry.description}, func(ctx context.Context, _ *mcp.CallToolRequest, input LearnerFormationMutationParams) (*mcp.CallToolResult, any, error) {
+		addTool(server, deps, &mcp.Tool{Name: entry.name, Description: entry.description}, func(ctx context.Context, _ *mcp.CallToolRequest, input LearnerFormationMutationParams) (*mcp.CallToolResult, any, error) {
 			if !validIdempotencyKey.MatchString(input.IdempotencyKey) {
 				r, _ := errorResult("a valid idempotency_key is required")
 				return r, nil, nil

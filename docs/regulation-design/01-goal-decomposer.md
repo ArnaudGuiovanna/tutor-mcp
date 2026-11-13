@@ -3,7 +3,7 @@
 > Composant 2/7 du pipeline de régulation. Produit le vecteur
 > `goal_relevance: map[concept]float64 ∈ [0,1]` qui matérialise la
 > promesse README *« calibrated in real time to the learner's mastery,
-> ability, affect, and personal goal »* (F-4.5).
+> ability, affect, and personal goal »*.
 >
 > Référence architecture : `docs/regulation-architecture.md` §3 [1],
 > §6 Q1, §6 Q2.
@@ -206,7 +206,7 @@ ALTER TABLE domains ADD COLUMN goal_relevance_version INTEGER NOT NULL DEFAULT 0
     domaines n'ont jamais eu de décomposition.
 
 Migration ajoutée à `db/migrations.go` (idempotent par convention via
-`_, _ = db.Exec(...)` du codebase, cf F-5.9 hors scope ici).
+`_, _ = db.Exec(...)` du codebase).
 
 ### Modèle Go
 
@@ -278,9 +278,9 @@ le comportement actuel (concepts indifférenciés). Pas de régression.
 - Pas de verrou : SQLite WAL sérialise l'UPDATE.
 - La prochaine lecture retourne le nouveau vecteur. Pas de cache
   in-memory à invalider.
-- Cohérent avec F-5.1 (lost-update sur record_interaction est un
-  problème distinct dans la dette différée — pour set_goal_relevance,
-  un seul UPDATE atomique suffit, pas de read-modify-write).
+- Pas de read-modify-write : pour set_goal_relevance, un seul UPDATE
+  atomique suffit (contrairement à record_interaction, qui regroupe sa
+  lecture-modification-écriture dans une transaction).
 
 ---
 
@@ -495,8 +495,8 @@ Réponse :
   C'est l'objectif Q6 : observer le comportement LLM avant de brancher.
 - Pas de surfaces d'observabilité dans cockpit/context (OQ-1.2 défaut
   A le mentionne mais reporte). Issue dérivée si demandée.
-- Pas de validation cyclique du graphe (F-4.6 reste dans la dette
-  différée).
+- Pas de validation cyclique du graphe (hors périmètre de ce
+  composant).
 
 ### 11.4 Test d'intégration goal-aware (réservé pour PR `[4]`)
 
@@ -519,7 +519,7 @@ Sera ajouté dans la PR `[4]`.
 | **Async** | Q2=B : init_domain retourne immédiatement, instruction non bloquante |
 | **Fallback** | uniforme (1.0 partout) si JSON vide, parse error ou stale |
 | **Hot-swap** | UPDATE atomique, pas de cache, last-writer-wins sur race |
-| **Findings résolus** | F-4.5 (sous flag ON, **et** sous condition `[4]` implémenté pour que le signal soit lu) |
+| **Problème résolu** | pondération par l'objectif personnel (sous flag ON, **et** sous condition `[4]` implémenté pour que le signal soit lu) |
 | **Tests** | ~6 fichiers de test, ~400 lignes |
 
 ---

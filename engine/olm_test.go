@@ -8,7 +8,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -304,61 +303,6 @@ func TestBuildOLMSnapshot_NotActionable_AllSolid(t *testing.T) {
 	}
 	if snap.FocusConcept != "" {
 		t.Errorf("FocusConcept=%q with no actionable, want empty", snap.FocusConcept)
-	}
-}
-
-func TestFormatOLMEmbed_FocusWarning(t *testing.T) {
-	snap := &OLMSnapshot{
-		DomainID:         "d1",
-		DomainName:       "Python for bio-info",
-		PersonalGoal:     "analyse your garden data",
-		Solid:            3,
-		InProgress:       2,
-		Fragile:          1,
-		NotStarted:       2,
-		FocusConcept:     "loops",
-		FocusReason:      "retention 50%",
-		FocusUrgency:     models.UrgencyWarning,
-		EvidenceProgress: 0.50,
-		KSTProgress:      0.50,
-		HasActionable:    true,
-	}
-	embed := FormatOLMEmbed(snap)
-	if embed.Title != "🧭 Current state" {
-		t.Errorf("Title=%q", embed.Title)
-	}
-	if !strings.Contains(embed.Description, "Python for bio-info") {
-		t.Errorf("Description missing domain name: %q", embed.Description)
-	}
-	if !strings.Contains(embed.Description, "loops") {
-		t.Errorf("Description missing focus concept: %q", embed.Description)
-	}
-	if !strings.Contains(embed.Description, "Current focus") {
-		t.Errorf("Description should use 'Current focus' for warning urgency: %q", embed.Description)
-	}
-	if !strings.Contains(embed.Description, "halfway there") {
-		t.Errorf("Description missing goal progress phrase: %q", embed.Description)
-	}
-	if embed.Color != 0xF5A623 {
-		t.Errorf("Color=%#x, want amber 0xF5A623", embed.Color)
-	}
-}
-
-func TestFormatOLMEmbed_FocusCriticalRedTitleAndColor(t *testing.T) {
-	snap := &OLMSnapshot{
-		DomainName:    "X",
-		Solid:         1,
-		FocusConcept:  "loops",
-		FocusReason:   "retention 25%",
-		FocusUrgency:  models.UrgencyCritical,
-		HasActionable: true,
-	}
-	embed := FormatOLMEmbed(snap)
-	if embed.Title != "🚨 State — one concept needs attention now" {
-		t.Errorf("Title=%q", embed.Title)
-	}
-	if embed.Color != 0xFF6B6B {
-		t.Errorf("Color=%#x, want red 0xFF6B6B", embed.Color)
 	}
 }
 

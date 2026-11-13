@@ -26,7 +26,7 @@ type UpdateLearnerProfileParams struct {
 }
 
 func registerUpdateLearnerProfile(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name:        "update_learner_profile",
 		Description: "Update learner-declared preferences (device, objective, language and affect baseline). Evidence-derived calibration and autonomy cannot be overwritten.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params UpdateLearnerProfileParams) (*mcp.CallToolResult, any, error) {
@@ -68,7 +68,7 @@ func registerUpdateLearnerProfile(server *mcp.Server, deps *Deps) {
 		profile := models.LearnerProfile{}
 		if learner.ProfileJSON != "" && learner.ProfileJSON != "{}" {
 			if err := json.Unmarshal([]byte(learner.ProfileJSON), &profile); err != nil {
-				deps.Logger.Error("stored learner profile is invalid", "err", err, "learner", learnerID)
+				deps.Logger.Error("stored learner profile is invalid", append(diagnosticErrorAttrs(err), "learner", learnerID)...)
 				r, _ := errorResult("stored learner profile is invalid")
 				return r, nil, nil
 			}

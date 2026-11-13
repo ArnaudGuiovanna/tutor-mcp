@@ -429,7 +429,7 @@ impl Workflow {
             Phase::ContextRequested => ("get_conversation_context", "context_requested"),
             Phase::ContextConfirmed => ("get_curriculum_snapshot", "context_confirmed"),
             Phase::CurriculumConfirmed => ("start_learning_session", "context_confirmed"),
-            Phase::SessionOpen => ("get_next_activity", "session_open"),
+            Phase::SessionOpen => ("prepare_pedagogical_turn", "session_open"),
             _ => return Err(Error::Phase),
         };
         let journal = store.journal();
@@ -443,7 +443,7 @@ impl Workflow {
                 .map_err(|_| Error::Receipt)?;
         }
         let arguments = if self.phase == Phase::SessionOpen {
-            json!({"intent":self.intent.wire()})
+            json!({"mode":"activity","intent":self.intent.wire()})
         } else {
             json!({})
         };
@@ -631,6 +631,7 @@ impl Workflow {
                 self.phase = Phase::SessionOpen;
             }
             Phase::SessionOpen => {
+                let payload = activity_decision(&payload)?;
                 let terminal_kind = match payload.pointer("/activity/type").and_then(Value::as_str)
                 {
                     Some("REST") => Some(TerminalKind::Rest),
@@ -638,10 +639,10 @@ impl Workflow {
                     _ => None,
                 };
                 if let Some(kind) = terminal_kind {
-                    self.terminal = Some(self.read_terminal(source, &payload, kind)?);
+                    self.terminal = Some(self.read_terminal(source, payload, kind)?);
                     self.phase = Phase::Terminal(kind);
                 } else {
-                    self.decision = Some(self.read_decision(source, &payload)?);
+                    self.decision = Some(self.read_decision(source, payload)?);
                     self.phase = Phase::DecisionConfirmed;
                 }
             }
@@ -659,7 +660,9 @@ impl Workflow {
     }
 
     fn check_activity_scope(&self, payload: &Value) -> Result<()> {
-        if payload["needs_domain_setup"] != false {
+        // The turn wrapper already proved needs_domain_setup is absent. The
+        // frozen decision itself no longer carries setup or root decision IDs.
+        if payload.get("needs_domain_setup").is_some() || payload.get("decision_id").is_some() {
             return Err(Error::Contract);
         }
         let session = self.session.as_ref().ok_or(Error::Phase)?;
@@ -690,18 +693,17 @@ impl Workflow {
         {
             return Err(Error::Scope);
         }
-        // tools/pedagogical_decision.go skips non-cognitive activities. The
-        // top-level map contains decision_id:""; omitempty contract fields
-        // contain no decision/policy/version/competency. Never fabricate them.
-        if payload.get("decision_id").and_then(Value::as_str) != Some("")
-            || [
-                "decision_id",
-                "policy_version",
-                "curriculum_version",
-                "competency",
-            ]
-            .iter()
-            .any(|key| contract.get(key).is_some())
+        // tools/pedagogical_decision.go skips non-cognitive activities: the
+        // omitempty contract fields contain no decision/policy/version/
+        // competency. Never fabricate them.
+        if [
+            "decision_id",
+            "policy_version",
+            "curriculum_version",
+            "competency",
+        ]
+        .iter()
+        .any(|key| contract.get(key).is_some())
         {
             return Err(Error::Contract);
         }
@@ -748,7 +750,7 @@ impl Workflow {
         let curriculum = self.curriculum.as_ref().ok_or(Error::Phase)?;
         let activity = &payload["activity"];
         let contract = &payload["pedagogical_contract"];
-        let id = text(payload, "decision_id")?;
+        let id = text(contract, "decision_id")?;
         let concept_key = text(activity, "concept")?;
         let activity_type = text(activity, "type")?;
         let expected_bkt = match activity_type {
@@ -761,8 +763,7 @@ impl Workflow {
             "DIAGNOSTIC_ASSESSMENT" | "MASTERY_CHALLENGE" | "TRANSFER_PROBE" => "observation_only",
             _ => return Err(Error::Contract),
         };
-        if text(contract, "decision_id")? != id
-            || text(contract, "target_concept")? != concept_key
+        if text(contract, "target_concept")? != concept_key
             || text(contract, "recommended_activity_type")? != activity_type
             || positive(contract, "curriculum_version")? != curriculum.version
         {
@@ -864,6 +865,21 @@ impl Workflow {
         self.check_scope(store, current_host, epoch)?;
         self.terminal.as_ref().ok_or(Error::Phase)
     }
+}
+
+/// prepare_pedagogical_turn(mode=activity) wraps the canonical engine decision
+/// in `decision`. A setup or selection answer carries no decision and is never
+/// treated as one.
+fn activity_decision(turn: &Value) -> Result<&Value> {
+    if turn["mode"] != "activity"
+        || turn.get("needs_domain_setup").is_some_and(|v| v != false)
+        || turn.get("needs_selection").is_some_and(|v| v != false)
+    {
+        return Err(Error::Contract);
+    }
+    turn.get("decision")
+        .filter(|decision| decision.is_object())
+        .ok_or(Error::Receipt)
 }
 
 fn authority_error(error: executor::Error) -> Error {

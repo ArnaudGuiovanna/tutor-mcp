@@ -102,16 +102,9 @@ func finishSafetyErasure(t *testing.T, s *Store, owner models.Principal, request
 func TestErasurePreservesSharedGlobalIdentityAndOtherMembership(t *testing.T) {
 	s := institutionTestStore(t)
 	original := formationStudent(t, s, "shared-erasure@example.test")
-	ownerScope := seedInstitutionOwner(t, s, "other-erasure", "owner-erasure@example.test")
+	ownerScope := seedInstitutionOwner(t, s, "other-erasure")
 	owner, _ := verifiedOwner(t, s, ownerScope)
-	_, token, err := s.CreateTenantInvitation(t.Context(), owner, "shared-erasure@example.test", []string{models.RoleLearner}, time.Now().Add(time.Hour))
-	if err != nil {
-		t.Fatal(err)
-	}
-	member, err := s.AcceptTenantInvitation(t.Context(), token, original.UserID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	member := addSharedLearnerMembership(t, s, owner.TenantID, original.UserID)
 	before, err := s.GetLocalUserByEmail(t.Context(), "shared-erasure@example.test")
 	if err != nil {
 		t.Fatal(err)
@@ -320,4 +313,33 @@ func TestErasureCompletesWithDeliveredPostgresWorkerPrivileges(t *testing.T) {
 		}
 	}
 	finishSafetyErasure(t, s, owner, request.ID)
+}
+
+// addSharedLearnerMembership gives an existing global user a learner
+// membership with its own learner profile in tenantID, the shape a user who
+// belongs to two organizations has.
+func addSharedLearnerMembership(t *testing.T, s *Store, tenantID, userID string) models.TenantMembership {
+	t.Helper()
+	membershipID, err := generateID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	member := models.TenantMembership{ID: membershipID, TenantID: tenantID, UserID: userID}
+	if err := s.withTenantControlTx(t.Context(), tenantID, userID, func(txs *Store) error {
+		if _, err := txs.exec(t.Context(), `INSERT INTO tenant_memberships
+			(id, tenant_id, user_id, learner_id, roles_json, status, version, created_at, updated_at)
+			VALUES (?, ?, ?, NULL, '["learner"]', 'active', 1, ?, ?)`, membershipID, tenantID, userID, now, now); err != nil {
+			return err
+		}
+		scope := models.TenantScope{TenantID: tenantID, UserID: userID, MembershipID: membershipID}
+		if err := txs.createInvitedLearnerProfile(t.Context(), scope, now); err != nil {
+			return err
+		}
+		return txs.queryRow(t.Context(), `SELECT learner_id FROM tenant_memberships WHERE tenant_id = ? AND id = ?`,
+			tenantID, membershipID).Scan(&member.LearnerID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return member
 }

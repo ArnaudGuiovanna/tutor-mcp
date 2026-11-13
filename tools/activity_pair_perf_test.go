@@ -69,7 +69,7 @@ func TestGetPendingAlertsThenNextActivityP95Budget(t *testing.T) {
 
 	p50 := percentileDuration(durations, 0.50)
 	p95 := percentileDuration(durations, 0.95)
-	t.Logf("get_pending_alerts + get_next_activity: active_learners=%d samples=%d warmup=%d p50=%s p95=%s budget=%s",
+	t.Logf("prepare_pedagogical_turn(activity): active_learners=%d samples=%d warmup=%d p50=%s p95=%s budget=%s",
 		activeLearners, samples, warmup, p50, p95, budget)
 	if p95 > budget {
 		t.Fatalf("paired tool p95 budget exceeded: p95=%s budget=%s active_learners=%d samples=%d",
@@ -279,8 +279,7 @@ func newAlertActivityPairCaller(tb testing.TB, deps *Deps) func(string) time.Dur
 	currentLearner.Store("")
 
 	server := mcp.NewServer(&mcp.Implementation{Name: "pair-perf", Version: "0.0.1"}, nil)
-	registerGetPendingAlerts(server, deps)
-	registerGetNextActivity(server, deps)
+	registerPreparePedagogicalTurn(server, deps)
 	server.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			if learnerID, _ := currentLearner.Load().(string); learnerID != "" {
@@ -306,30 +305,19 @@ func newAlertActivityPairCaller(tb testing.TB, deps *Deps) func(string) time.Dur
 	}
 	tb.Cleanup(func() { _ = session.Close() })
 
-	emptyArgs := json.RawMessage(`{}`)
+	activityArgs := json.RawMessage(`{"mode":"activity"}`)
 	return func(learnerID string) time.Duration {
 		currentLearner.Store(learnerID)
 		start := time.Now()
-		alerts, err := session.CallTool(ctx, &mcp.CallToolParams{
-			Name:      "get_pending_alerts",
-			Arguments: emptyArgs,
-		})
-		if err != nil {
-			tb.Fatalf("get_pending_alerts transport error for %s: %v", learnerID, err)
-		}
-		if alerts.IsError {
-			tb.Fatalf("get_pending_alerts for %s: %q", learnerID, resultText(alerts))
-		}
-
 		activity, err := session.CallTool(ctx, &mcp.CallToolParams{
-			Name:      "get_next_activity",
-			Arguments: emptyArgs,
+			Name:      "prepare_pedagogical_turn",
+			Arguments: activityArgs,
 		})
 		if err != nil {
-			tb.Fatalf("get_next_activity transport error for %s: %v", learnerID, err)
+			tb.Fatalf("prepare_pedagogical_turn transport error for %s: %v", learnerID, err)
 		}
 		if activity.IsError {
-			tb.Fatalf("get_next_activity for %s: %q", learnerID, resultText(activity))
+			tb.Fatalf("prepare_pedagogical_turn for %s: %q", learnerID, resultText(activity))
 		}
 		return time.Since(start)
 	}

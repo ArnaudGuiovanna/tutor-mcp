@@ -45,7 +45,7 @@ func seedDomain(t *testing.T, store interface {
 
 func TestArchiveDomain_NoAuth(t *testing.T) {
 	_, deps := setupToolsTest(t)
-	res := callTool(t, deps, registerArchiveDomain, "", "archive_domain", map[string]any{"domain_id": "d_x"})
+	res := callTool(t, deps, registerManageDomain, "", "manage_domain", map[string]any{"action": "archive", "domain_id": "d_x"})
 	if !res.IsError {
 		t.Fatalf("expected auth error")
 	}
@@ -56,7 +56,7 @@ func TestArchiveDomain_NoAuth(t *testing.T) {
 
 func TestArchiveDomain_MissingID(t *testing.T) {
 	_, deps := setupToolsTest(t)
-	res := callTool(t, deps, registerArchiveDomain, "L_owner", "archive_domain", map[string]any{
+	res := callTool(t, deps, registerManageDomain, "L_owner", "manage_domain", map[string]any{"action": "archive",
 		"domain_id": "",
 	})
 	if !res.IsError {
@@ -71,7 +71,7 @@ func TestArchiveDomain_HappyPath(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	d := makeOwnerDomain(t, store, "L_owner", "math")
 
-	res := callTool(t, deps, registerArchiveDomain, "L_owner", "archive_domain", map[string]any{
+	res := callTool(t, deps, registerManageDomain, "L_owner", "manage_domain", map[string]any{"action": "archive",
 		"domain_id": d.ID,
 	})
 	if res.IsError {
@@ -84,7 +84,7 @@ func TestArchiveDomain_HappyPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !got.Archived {
-		t.Fatalf("expected archived=true after archive_domain")
+		t.Fatalf("expected archived=true after manage_domain(action=archive)")
 	}
 }
 
@@ -92,7 +92,7 @@ func TestArchiveDomain_ForeignDomainRejected(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	d := makeOwnerDomain(t, store, "L_owner", "math")
 
-	res := callTool(t, deps, registerArchiveDomain, "L_attacker", "archive_domain", map[string]any{
+	res := callTool(t, deps, registerManageDomain, "L_attacker", "manage_domain", map[string]any{"action": "archive",
 		"domain_id": d.ID,
 	})
 	if !res.IsError {
@@ -111,7 +111,7 @@ func TestArchiveDomain_ForeignDomainRejected(t *testing.T) {
 
 func TestArchiveDomain_UnknownID(t *testing.T) {
 	_, deps := setupToolsTest(t)
-	res := callTool(t, deps, registerArchiveDomain, "L_owner", "archive_domain", map[string]any{
+	res := callTool(t, deps, registerManageDomain, "L_owner", "manage_domain", map[string]any{"action": "archive",
 		"domain_id": "nope",
 	})
 	if !res.IsError {
@@ -129,7 +129,7 @@ func TestUnarchiveDomain_HappyPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res := callTool(t, deps, registerUnarchiveDomain, "L_owner", "unarchive_domain", map[string]any{
+	res := callTool(t, deps, registerManageDomain, "L_owner", "manage_domain", map[string]any{"action": "unarchive",
 		"domain_id": d.ID,
 	})
 	if res.IsError {
@@ -144,7 +144,7 @@ func TestUnarchiveDomain_HappyPath(t *testing.T) {
 
 func TestUnarchiveDomain_MissingID(t *testing.T) {
 	_, deps := setupToolsTest(t)
-	res := callTool(t, deps, registerUnarchiveDomain, "L_owner", "unarchive_domain", map[string]any{
+	res := callTool(t, deps, registerManageDomain, "L_owner", "manage_domain", map[string]any{"action": "unarchive",
 		"domain_id": "",
 	})
 	if !res.IsError {
@@ -157,7 +157,7 @@ func TestUnarchiveDomain_ForeignRejected(t *testing.T) {
 	d := makeOwnerDomain(t, store, "L_owner", "math")
 	_ = store.ArchiveDomain(context.Background(), d.ID, "L_owner")
 
-	res := callTool(t, deps, registerUnarchiveDomain, "L_attacker", "unarchive_domain", map[string]any{
+	res := callTool(t, deps, registerManageDomain, "L_attacker", "manage_domain", map[string]any{"action": "unarchive",
 		"domain_id": d.ID,
 	})
 	if !res.IsError {
@@ -169,7 +169,7 @@ func TestDeleteDomain_RequiresConfirm(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	d := makeOwnerDomain(t, store, "L_owner", "math")
 
-	res := callTool(t, deps, registerDeleteDomain, "L_owner", "delete_domain", map[string]any{
+	res := callTool(t, deps, registerManageDomain, "L_owner", "manage_domain", map[string]any{"action": "delete",
 		"domain_id": d.ID,
 		"confirm":   false,
 	})
@@ -191,7 +191,7 @@ func TestDeleteDomain_HappyPath(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	d := makeOwnerDomain(t, store, "L_owner", "math")
 
-	res := callTool(t, deps, registerDeleteDomain, "L_owner", "delete_domain", map[string]any{
+	res := callTool(t, deps, registerManageDomain, "L_owner", "manage_domain", map[string]any{"action": "delete",
 		"domain_id": d.ID,
 		"confirm":   true,
 	})
@@ -209,7 +209,7 @@ func TestDeleteDomain_ForeignRejected(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	d := makeOwnerDomain(t, store, "L_owner", "math")
 
-	res := callTool(t, deps, registerDeleteDomain, "L_attacker", "delete_domain", map[string]any{
+	res := callTool(t, deps, registerManageDomain, "L_attacker", "manage_domain", map[string]any{"action": "delete",
 		"domain_id": d.ID,
 		"confirm":   true,
 	})
@@ -224,7 +224,7 @@ func TestDeleteDomain_ForeignRejected(t *testing.T) {
 
 func TestDeleteDomain_MissingID(t *testing.T) {
 	_, deps := setupToolsTest(t)
-	res := callTool(t, deps, registerDeleteDomain, "L_owner", "delete_domain", map[string]any{
+	res := callTool(t, deps, registerManageDomain, "L_owner", "manage_domain", map[string]any{"action": "delete",
 		"domain_id": "",
 		"confirm":   true,
 	})

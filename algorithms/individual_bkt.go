@@ -97,22 +97,6 @@ type IndividualBKTUpdateResult struct {
 	TransitionApplied bool
 }
 
-// BKTUpdateIndividualized applies a deterministic learner/concept adjustment
-// before delegating to the standard BKT update. An empty profile keeps the
-// existing BKT behaviour, including the current error-type heuristic.
-//
-// Deprecated: no production caller. The runtime updates mastery with fixed
-// parameters (BKTObserve/BKTTransition) and only uses BKTObserveIndividualized
-// to estimate an independent calibration source.
-func BKTUpdateIndividualized(state BKTState, profile IndividualBKTProfile, correct bool, errorType string) IndividualBKTUpdateResult {
-	result := BKTObserveIndividualized(state, profile, correct, errorType)
-	result.Params.PLearn = result.State.PLearn
-	result.Params.PForget = result.State.PForget
-	result.State = BKTTransition(result.State)
-	result.TransitionApplied = true
-	return result
-}
-
 // BKTObserveIndividualized uses the same observation parameters as a learning
 // update, but records only the posterior. Effective transition parameters are
 // zero; the state's adjusted transition parameters are retained, not erased.

@@ -20,7 +20,9 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     restart: unless-stopped
-    stop_grace_period: 40s
+    # Graceful HTTP drain = max(30s, MCP_TOOL_CALL_TIMEOUT_SECONDS + 10s), then
+    # cleanup; keep this above it (docs/configuration.md).
+    stop_grace_period: 50s
   caddy:
     image: caddy:2@sha256:9c1b76fb701c1f77383d3124d9f626e38bcf83bc1255ed47475d4f2420701d03
     environment:

@@ -16,7 +16,7 @@ type ValidateDomainGraphParams struct {
 }
 
 func registerValidateDomainGraph(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name:        "validate_domain_graph",
 		Description: "Audit the active domain graph deterministically and return structural quality issues plus a prompt the LLM can use to propose graph repairs.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params ValidateDomainGraphParams) (*mcp.CallToolResult, any, error) {
@@ -34,7 +34,7 @@ func registerValidateDomainGraph(server *mcp.Server, deps *Deps) {
 		domain, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
 		if err != nil || domain == nil {
 			if params.DomainID != "" {
-				deps.Logger.Error("validate_domain_graph: domain not found", "err", err, "learner", learnerID, "domain_id", params.DomainID)
+				deps.Logger.Error("validate_domain_graph: domain not found", append(diagnosticErrorAttrs(err), "learner", learnerID, "domain_id", params.DomainID)...)
 				r, _ := errorResult("domain not found")
 				return r, nil, nil
 			}

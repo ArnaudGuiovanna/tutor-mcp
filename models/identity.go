@@ -62,10 +62,8 @@ type TenantMembership struct {
 	Roles      []string
 	Status     string
 	Version    int64
-	// MFARequired marks roles that need a second factor at every sign-in.
-	MFARequired bool
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 type ExternalIdentity struct {
@@ -77,21 +75,6 @@ type ExternalIdentity struct {
 	EmailAtLink string
 	CreatedAt   time.Time
 	LastSeenAt  time.Time
-}
-
-type TenantInvitation struct {
-	ID                   string
-	TenantID             string
-	Email                string
-	NormalizedEmail      string
-	Roles                []string
-	Status               string
-	CreatedBy            string
-	CreatedAt            time.Time
-	ExpiresAt            time.Time
-	AcceptedAt           *time.Time
-	AcceptedUserID       string
-	AcceptedMembershipID string
 }
 
 type AuditEvent struct {

@@ -21,9 +21,9 @@ func TestDomainToolsAnswerForeignAndMissingIdentically(t *testing.T) {
 		register func(*mcp.Server, *Deps)
 		extra    map[string]any
 	}{
-		{"archive_domain", registerArchiveDomain, nil},
-		{"unarchive_domain", registerUnarchiveDomain, nil},
-		{"delete_domain", registerDeleteDomain, map[string]any{"confirm": true}},
+		{"manage_domain", registerManageDomain, map[string]any{"action": "archive"}},
+		{"manage_domain", registerManageDomain, map[string]any{"action": "unarchive"}},
+		{"manage_domain", registerManageDomain, map[string]any{"action": "delete", "confirm": true}},
 		{"set_domain_priority", registerSetDomainPriority, map[string]any{"rank": rank}},
 	}
 	for _, tool := range tools {

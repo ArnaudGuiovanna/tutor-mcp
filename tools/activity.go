@@ -20,11 +20,13 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-type GetNextActivityParams struct {
-	IdempotentMutationParams
-	DomainID   string `json:"domain_id,omitempty" jsonschema:"target domain ID; if absent, the learner's last active domain is used"`
-	DomainName string `json:"domain_name,omitempty" jsonschema:"target domain name when the learner names a subject but the domain_id is unknown"`
-	Intent     string `json:"intent,omitempty" jsonschema:"learner intent: auto or review. Use review when the learner asks to revise/review already studied material"`
+// nextActivityParams selects the domain and intent of one canonical activity
+// decision. prepare_pedagogical_turn(mode=activity) is its only MCP caller.
+type nextActivityParams struct {
+	IdempotencyKey string
+	DomainID       string
+	DomainName     string
+	Intent         string
 }
 
 func motivationDegradedComponentNames(err error) []string {
@@ -43,27 +45,14 @@ func motivationDegradedComponentNames(err error) []string {
 	return nil
 }
 
-func registerGetNextActivity(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{
-		Name: "get_next_activity",
-		Description: "Determine the next optimal activity for the learner and aggregate all routing context: metacognitive_mirror, tutor_mode, motivation_brief, active misconceptions. Accounts for the current session to avoid repeating the same concept. " +
-			"When to call: this is the main tool of the learning cycle; it already includes alert-aware routing, metacognitive_mirror, tutor_mode and motivation_brief. " +
-			"When NOT to call: if another tool just returned needs_domain_setup=true (follow the returned setup guidance first); do not call get_pending_alerts or get_metacognitive_mirror in the same turn unless the learner explicitly asks for those raw views. " +
-			"Precondition: a domain must exist; otherwise needs_domain_setup=true is returned with a setup_domain activity. " +
-			"Returns: {needs_domain_setup, session_id, domain_id, domain_name, intent, intent_status, activity, pedagogical_contract, goal_relevance_status, session_concepts_done, metacognitive_mirror, tutor_mode, active_misconceptions, known_misconception_types, motivation_brief, mastery_evidence, mastery_uncertainty, transfer_profile, degraded_components?}.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, params GetNextActivityParams) (*mcp.CallToolResult, any, error) {
-		return nextActivityResult(ctx, deps, params)
-	})
-}
-
-// nextActivityResult is the single canonical activity pipeline for both the
-// standalone MCP tool and the prepared pedagogical turn. Narrative maintenance
+// nextActivityResult is the single canonical activity pipeline behind
+// prepare_pedagogical_turn(mode=activity). Narrative maintenance
 // is deliberately excluded: it cannot delay the learner's next activity.
-func nextActivityResult(ctx context.Context, deps *Deps, params GetNextActivityParams) (*mcp.CallToolResult, any, error) {
+func nextActivityResult(ctx context.Context, deps *Deps, params nextActivityParams) (*mcp.CallToolResult, any, error) {
 	totalStart := time.Now()
 	learnerID, err := getLearnerID(ctx)
 	if err != nil {
-		logAuthFailure(deps, "get_next_activity", err)
+		logAuthFailure(deps, "prepare_pedagogical_turn", err)
 		r, _ := errorResult(err.Error())
 		return r, nil, nil
 	}
@@ -203,8 +192,8 @@ func nextActivityResult(ctx context.Context, deps *Deps, params GetNextActivityP
 	var degradedComponents []string
 	markDegraded := func(component string, err error) {
 		degradedComponents = append(degradedComponents, component)
-		deps.Logger.Warn("get_next_activity: optional component degraded",
-			"component", component, "err", err, "learner", learnerID, "domain", domain.ID)
+		deps.Logger.Warn("activity decision: optional component degraded",
+			append(diagnosticErrorAttrs(err), "component", component, "learner", learnerID, "domain", domain.ID)...)
 	}
 
 	// Route to next activity through the regulation pipeline, or through
@@ -240,7 +229,7 @@ func nextActivityResult(ctx context.Context, deps *Deps, params GetNextActivityP
 	}
 	orchestratorMs := time.Since(orchestratorStart).Milliseconds()
 	if orchErr != nil {
-		deps.Logger.Error("orchestrator failed", "err", orchErr, "learner", learnerID, "domain", domain.ID)
+		deps.Logger.Error("orchestrator failed", append(diagnosticErrorAttrs(orchErr), "learner", learnerID, "domain", domain.ID)...)
 		r, _ := errorResult("could not compute next activity")
 		return r, nil, nil
 	}
@@ -273,7 +262,7 @@ func nextActivityResult(ctx context.Context, deps *Deps, params GetNextActivityP
 		}
 	}
 
-	// Pipeline decision audit — one line per get_next_activity call.
+	// Pipeline decision audit - one line per prepared activity.
 	// Phase comes straight from the orchestrator (any FSM transition
 	// or NoFringe fallback already applied and persisted). The
 	// orchestrator now fails the tool call if a transition cannot be
@@ -341,11 +330,11 @@ func nextActivityResult(ctx context.Context, deps *Deps, params GetNextActivityP
 
 	// Persist & enqueue the mirror so it can be pushed proactively via
 	// the webhook queue (#59). Per-day dedup lives in EnqueueMirrorWebhook
-	// so a learner who hits get_next_activity multiple times in a day
+	// so a learner who prepares several activities in a day
 	// only sees one queued nudge.
 	if mirror != nil {
 		if _, _, err := engine.EnqueueMirrorWebhook(ctx, deps.Store, learnerID, mirror, time.Now().UTC()); err != nil {
-			deps.Logger.Warn("get_next_activity: mirror enqueue failed", "err", err, "learner", learnerID)
+			deps.Logger.Warn("activity decision: mirror enqueue failed", append(diagnosticErrorAttrs(err), "learner", learnerID)...)
 		}
 	}
 	mirrorMs := time.Since(mirrorStart).Milliseconds()
@@ -437,7 +426,7 @@ func nextActivityResult(ctx context.Context, deps *Deps, params GetNextActivityP
 		markDegraded("motivation_brief", motivationErr)
 		for _, component := range motivationDegradedComponentNames(motivationErr) {
 			degradedComponents = append(degradedComponents, component)
-			deps.Logger.Warn("get_next_activity: motivation component degraded",
+			deps.Logger.Warn("activity decision: motivation component degraded",
 				"component", component, "learner", learnerID, "domain", domain.ID)
 		}
 	}
@@ -446,7 +435,7 @@ func nextActivityResult(ctx context.Context, deps *Deps, params GetNextActivityP
 	// Keep the legacy opt-in's descriptive metrics visible, but do not
 	// remove help based on an unvalidated aggregate or changing coverage.
 	// A future fading policy must use task-specific independence evidence.
-	if regulationFadeEnabled() {
+	if deps.regulation().FadeDiagnostics {
 		autonomyMetrics := engine.ComputeAutonomyMetrics(engine.AutonomyInput{
 			Interactions:      allInteractions,
 			ConceptStates:     domainStates,
@@ -549,7 +538,6 @@ func nextActivityResult(ctx context.Context, deps *Deps, params GetNextActivityP
 	}
 
 	out := map[string]any{
-		"needs_domain_setup":        false,
 		"session_id":                learningSession.ID,
 		"domain_id":                 domain.ID,
 		"domain_name":               domain.Name,
@@ -566,11 +554,9 @@ func nextActivityResult(ctx context.Context, deps *Deps, params GetNextActivityP
 		"mastery_uncertainty":       masteryUncertainty,
 		"transfer_profile":          transferProfile,
 		"goal_relevance_status":     goalRelevanceStatus,
-		"pedagogical_contract":      contract,
-		// decision_id stays at the root: native clients read it there. The
-		// contract's llm_instruction, learner_explanation and audit_rationale
-		// are not repeated here; read them from pedagogical_contract.
-		"decision_id": contract.DecisionID,
+		// decision_id, llm_instruction, learner_explanation and
+		// audit_rationale live only in pedagogical_contract.
+		"pedagogical_contract": contract,
 	}
 	if episodicContextVisible(episodicContext) {
 		out["episodic_context"] = episodicContext
@@ -585,7 +571,7 @@ func nextActivityResult(ctx context.Context, deps *Deps, params GetNextActivityP
 	r, _ := jsonResult(out)
 	jsonMs := time.Since(jsonStart).Milliseconds()
 	if deps.Logger.Enabled(ctx, slog.LevelDebug) {
-		deps.Logger.Debug("get_next_activity timings",
+		deps.Logger.Debug("activity decision timings",
 			"learner", learnerID,
 			"domain", domain.ID,
 			"concepts", len(domain.Graph.Concepts),
@@ -636,7 +622,7 @@ func loadEpisodicContextForActivity(
 	); err == nil {
 		olmSnapshot = snap
 	} else if deps.Logger != nil {
-		deps.Logger.Warn("get_next_activity: OLM snapshot for memory context failed", "err", err, "learner", learnerID, "domain", domain.ID)
+		deps.Logger.Warn("activity decision: OLM snapshot for memory context failed", append(diagnosticErrorAttrs(err), "learner", learnerID, "domain", domain.ID)...)
 	}
 	view := &memory.OLMView{
 		FocusConcept:  focusConcept,
@@ -648,7 +634,7 @@ func loadEpisodicContextForActivity(
 	ec, err := memory.LoadContextForDomainContext(ctx, learnerID, domain.ID, focusConcept, view, alerts)
 	if err != nil {
 		if deps.Logger != nil {
-			deps.Logger.Warn("get_next_activity: episodic context load failed", "err", err, "learner", learnerID)
+			deps.Logger.Warn("activity decision: episodic context load failed", append(diagnosticErrorAttrs(err), "learner", learnerID)...)
 		}
 		return nil, olmSnapshot, err
 	}
@@ -823,9 +809,9 @@ func buildReasoningRequest(
 	if len(reasons) == 0 {
 		return nil
 	}
+	// The fixed task and constraints are in the server instructions and the
+	// tutor_mcp prompt (reasoningRequestSection); only the reasons vary.
 	return &models.ReasoningRequest{
-		Task:           memory.ReasoningRequestTask,
-		Constraints:    append([]string(nil), memory.ReasoningRequestConstraints...),
 		OutputRequired: "interpretation_brief+activity",
 		EnabledBecause: reasons,
 	}

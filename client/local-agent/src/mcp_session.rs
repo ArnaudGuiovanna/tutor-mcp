@@ -1102,15 +1102,13 @@ impl Transport for Lease {
     }
 }
 
-// These exact handlers were reviewed in tools/context.go, alerts.go, olm.go
-// and their DB/engine callees. This ONLY controls schema-cache retention; it
-// never marks an operation read-only for authorization, grants consent or
-// interprets a model-proposed tool. All other names invalidate conservatively.
+// These exact handlers were reviewed in tools/learner_state.go (overview:
+// context.go, progress: get_dashboard_state.go, model: olm) and their DB/engine
+// callees. This ONLY controls schema-cache retention; it never marks an
+// operation read-only for authorization, grants consent or interprets a
+// model-proposed tool. All other names invalidate conservatively.
 fn reviewed_catalog_read(name: &str, envelope: &Value) -> bool {
-    if !matches!(
-        name,
-        "get_learner_context" | "get_pending_alerts" | "get_olm_snapshot"
-    ) {
+    if name != "get_learner_state" {
         return false;
     }
     let Ok(payload) = crate::call_validation::result_payload(envelope) else {
@@ -1119,27 +1117,17 @@ fn reviewed_catalog_read(name: &str, envelope: &Value) -> bool {
     if payload.get("error").is_some() {
         return false;
     }
-    match name {
-        "get_learner_context" => {
-            payload.get("profile").is_some_and(Value::is_object)
-                && payload.get("domains").is_some_and(Value::is_array)
-                && payload
-                    .get("needs_domain_setup")
-                    .is_some_and(Value::is_boolean)
-        }
-        "get_pending_alerts" => {
-            payload.get("alerts").is_some_and(Value::is_array)
-                && payload.get("has_critical").is_some_and(Value::is_boolean)
-                && payload
-                    .get("needs_domain_setup")
-                    .is_some_and(Value::is_boolean)
-        }
-        "get_olm_snapshot" => {
-            payload.get("domain_id").is_some_and(Value::is_string)
-                || payload.get("domains").is_some_and(Value::is_array)
-        }
-        _ => false,
-    }
+    let overview = payload.get("profile").is_some_and(Value::is_object)
+        && payload.get("domains").is_some_and(Value::is_array)
+        && payload
+            .get("needs_domain_setup")
+            .is_some_and(Value::is_boolean);
+    let progress = payload.get("view").and_then(Value::as_str) == Some("progress")
+        && payload.get("alerts").is_some_and(Value::is_array)
+        && payload.get("has_critical").is_some_and(Value::is_boolean);
+    let model = payload.get("domain_id").is_some_and(Value::is_string)
+        || payload.get("domains").is_some_and(Value::is_array);
+    overview || progress || model
 }
 
 impl Drop for Lease {
@@ -1622,8 +1610,10 @@ mod tests {
             _ = std::future::ready(()) => {},
         }
         cancel.store(true, Ordering::Release);
+        // Cancellation ends the wait long before its 3 s deadline; the bound
+        // only guards against a hang and tolerates a loaded machine.
         assert_eq!(
-            tokio::time::timeout(Duration::from_millis(500), wait)
+            tokio::time::timeout(Duration::from_secs(10), wait)
                 .await
                 .unwrap()
                 .err(),
@@ -1807,10 +1797,10 @@ fn main() {
             if mode.starts_with("catalog_") {
                 let page=if line.contains("\"cursor\"") {
                     if mode=="catalog_notify_fetch" { send(r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#); }
-                    r#"{"tools":[{"name":"get_pending_alerts","inputSchema":{"type":"object","properties":{}}},{"name":"opaque_unreviewed","inputSchema":{"type":"object","properties":{}},"annotations":{"readOnlyHint":true}}]}"#.to_owned()
+                    r#"{"tools":[{"name":"get_misconceptions","inputSchema":{"type":"object","properties":{}}},{"name":"opaque_unreviewed","inputSchema":{"type":"object","properties":{}},"annotations":{"readOnlyHint":true}}]}"#.to_owned()
                 } else {
                     let kind=if changed.load(std::sync::atomic::Ordering::Acquire) { "integer" } else { "string" };
-                    format!(r#"{{"tools":[{{"name":"get_learner_context","inputSchema":{{"type":"object","properties":{{"flavor":{{"type":"{kind}"}}}}}}}}],"nextCursor":"p2"}}"#)
+                    format!(r#"{{"tools":[{{"name":"get_learner_state","inputSchema":{{"type":"object","properties":{{"flavor":{{"type":"{kind}"}}}}}}}}],"nextCursor":"p2"}}"#)
                 };
                 send(&format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{page}}}"#));
             } else { send(&format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"tools":[]}}}}"#)); }
@@ -1819,8 +1809,7 @@ fn main() {
         if line.contains("\"name\":\"hang\"") { record("hang_call"); loop { std::thread::sleep(Duration::from_secs(60)); } }
         record("call");
         let error=mode=="catalog_tool_error";
-        let payload=if line.contains("\"name\":\"get_learner_context\"") { r#"{"profile":{},"domains":[],"needs_domain_setup":false,"objective":"fixture"}"#.to_owned() }
-            else if line.contains("\"name\":\"get_pending_alerts\"") { r#"{"alerts":[],"has_critical":false,"needs_domain_setup":false}"#.to_owned() }
+        let payload=if line.contains("\"name\":\"get_learner_state\"") { r#"{"profile":{},"domains":[],"needs_domain_setup":false,"objective":"fixture"}"#.to_owned() }
             else { format!(r#"{{"pid":{pid}}}"#) };
         send(&format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"content":[],"isError":{error},"structuredContent":{payload}}}}}"#));
         if line.contains("\"name\":\"exit\"") { return; }
@@ -2188,7 +2177,11 @@ fn main() {
         assert!(CatalogPolicy::reviewed_stdio(Duration::from_secs(31)).is_err());
         assert!(CatalogPolicy::reviewed_stdio(Duration::from_secs(30)).is_ok());
         let payload = json!({"content":[],"structuredContent":{"profile":{},"domains":[],"needs_domain_setup":false}});
-        assert!(reviewed_catalog_read("get_learner_context", &payload));
+        assert!(reviewed_catalog_read("get_learner_state", &payload));
+        assert!(reviewed_catalog_read(
+            "get_learner_state",
+            &json!({"content":[],"structuredContent":{"view":"progress","alerts":[],"has_critical":false}})
+        ));
         for name in [
             "list_training_library",
             "get_training",
@@ -2198,7 +2191,7 @@ fn main() {
             assert!(!reviewed_catalog_read(name, &payload));
         }
         assert!(!reviewed_catalog_read(
-            "get_learner_context",
+            "get_learner_state",
             &json!({"content":[],"isError":true,"structuredContent":{}})
         ));
     }
@@ -2220,7 +2213,7 @@ fn main() {
         assert_eq!(entries.len(), 3);
         let before = lease.client.as_ref().unwrap().catalog_state();
         lease
-            .call_tool("get_learner_context", json!({}), None, &cancel)
+            .call_tool("get_learner_state", json!({}), None, &cancel)
             .await
             .unwrap();
         let after = lease.client.as_ref().unwrap().catalog_state();
@@ -2311,7 +2304,7 @@ fn main() {
                 );
                 ("opaque_unreviewed", CatalogMissReason::UnreviewedCall)
             } else {
-                ("get_learner_context", CatalogMissReason::ToolError)
+                ("get_learner_state", CatalogMissReason::ToolError)
             };
             let envelope = lease
                 .call_tool(name, json!({}), None, &cancel)
@@ -2450,7 +2443,7 @@ fn main() {
         let call = call_validation::validate_call(
             &catalog,
             "catalog-epoch",
-            "tutor/get_learner_context",
+            "tutor/get_learner_state",
             &json!({}),
             &fields,
             Uuid::new_v4(),
@@ -2482,7 +2475,7 @@ fn main() {
             .unwrap();
         assert_eq!(
             catalog
-                .resolve("catalog-epoch", "tutor/get_learner_context")
+                .resolve("catalog-epoch", "tutor/get_learner_state")
                 .unwrap()
                 .input_schema["properties"]["flavor"]["type"],
             "integer"
@@ -2655,7 +2648,7 @@ fn main() {
         assert!(!lease.require_catalog_refresh_after_approval());
         assert!(!lease.take_tools_changed());
         let reply = lease
-            .call_tool("get_learner_context", json!({}), None, &cancel)
+            .call_tool("get_learner_state", json!({}), None, &cancel)
             .await
             .unwrap();
         assert!(reply.is_object());
@@ -2731,7 +2724,7 @@ fn main() {
             let call = call_validation::validate_call(
                 &catalog,
                 binding,
-                "tutor/get_learner_context",
+                "tutor/get_learner_state",
                 &json!({}),
                 &fields,
                 Uuid::new_v4(),

@@ -70,9 +70,37 @@ func TestHandlerValidatedInputsAdvertiseEnums(t *testing.T) {
 	}
 }
 
+// The pedagogical turn's schema and handler accept exactly the same values:
+// the empty string (default) and the canonical names, never aliases.
+func TestPedagogicalTurnModeAndIntentSchemaMatchHandler(t *testing.T) {
+	_, deps := setupToolsTest(t)
+	schema := advertisedInputSchema(t, RegisterTools, deps, "prepare_pedagogical_turn")
+	for field, want := range map[string][]any{"mode": {"", "context", "activity"}, "intent": {"", "auto", "review"}} {
+		got, _ := schemaProperty(t, schema, field)["enum"].([]any)
+		if !slices.Equal(got, want) {
+			t.Fatalf("%s enum = %v, want %v", field, got, want)
+		}
+	}
+	for _, intent := range []string{"", "auto", "review"} {
+		if _, err := normalizeActivityIntent(intent); err != nil {
+			t.Fatalf("advertised intent %q refused: %v", intent, err)
+		}
+	}
+	for _, alias := range []string{"revise", "practice", "Review", " auto"} {
+		if _, err := normalizeActivityIntent(alias); err == nil {
+			t.Fatalf("handler accepts %q, which the schema refuses", alias)
+		}
+	}
+	for _, mode := range []string{"", "context", "activity"} {
+		if _, err := normalizePedagogicalTurnMode(mode); err != nil {
+			t.Fatalf("advertised mode %q refused: %v", mode, err)
+		}
+	}
+}
+
 func TestUpdateImplementationIntentionEnumRejectsInventedStatus(t *testing.T) {
 	_, deps := setupToolsTest(t)
-	res := callTool(t, deps, RegisterTools, "L_owner", "update_implementation_intention", map[string]any{"id": 1, "status": "done", "idempotency_key": "enum-intention"})
+	res := callTool(t, deps, RegisterTools, "L_owner", "update_implementation_intention", map[string]any{"intention_id": 1, "status": "done", "idempotency_key": "enum-intention"})
 	if !res.IsError || !strings.Contains(resultText(res), "honored") {
 		t.Fatalf("invented status was not rejected with the vocabulary: %q", resultText(res))
 	}

@@ -1,5 +1,16 @@
 # Institution service: phase 5 — badges
 
+> **Current state.** This phase plan predates the removal of the browser
+> surfaces: the institution console (`/console`, `/console/admin/`,
+> `/console/progress`), the learner portal (`/learn`), self-service signup and
+> email invitations no longer exist. Institutions are provisioned by the
+> operator with native key identities; members are managed through
+> `POST /api/client/v1/institution/actions`, formations, cohorts and admissions
+> through the `/admin/catalog` HTTP API, and staff read progress through the
+> MCP tools (`list_trainer_cohorts`, `get_learner_progress`,
+> `get_cohort_insights`, `get_cohort_statistics`). Passages below that named the
+> removed surfaces have been updated accordingly.
+
 Baseline: `b1d41f41bbad0406ec4f354863381db3a47e6268` on main and staging.
 
 ## Contract
@@ -26,7 +37,7 @@ Baseline: `b1d41f41bbad0406ec4f354863381db3a47e6268` on main and staging.
   indicate when supporting evidence is no longer valid/available. Evidence is
   never borrowed from another enrollment or version. New version enrollment
   earns its own badges. Completion does not close access to FSRS revision.
-- Learners read their own badges with `learner:read` and in `/learn`; staff
+- Learners read their own badges with `learner:read`; staff
   use `progress:read` and the existing live cohort authorization. Pagination,
   live membership/MFA checks, tenant RLS and generic errors apply. Badge data
   participates in learner erasure. No email or external notification is sent.

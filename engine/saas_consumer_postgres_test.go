@@ -11,9 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"tutor-mcp/db"
 	"tutor-mcp/models"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func TestSaaSConsumerPostgresRestrictedRuntimeDelivery(t *testing.T) {

@@ -5,6 +5,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"math"
 	"strings"
 	"testing"
@@ -145,7 +146,7 @@ func TestRecordInteraction_LinkedTransferScoreFollowsRubric(t *testing.T) {
 		"activity_type": "TRANSFER_PROBE",
 		"observable":    "Apply concept a in a new context.",
 		"task_text":     "Transfer task.",
-		"rubric_json":   `{"criteria":[{"id":"correctness","max_score":2},{"id":"reasoning","max_score":1}],"passing_score":2}`,
+		"rubric":        json.RawMessage(`{"criteria":[{"id":"correctness","max_score":2},{"id":"reasoning","max_score":1}],"passing_score":2}`),
 	})
 	if prepared.IsError {
 		t.Fatalf("prepare: %q", resultText(prepared))
@@ -163,7 +164,7 @@ func TestRecordInteraction_LinkedTransferScoreFollowsRubric(t *testing.T) {
 		"activity_type": "TRANSFER_PROBE", "success": true, "response_time_seconds": 20.0, "confidence": 0.7,
 		"attempt_id": attemptID, "evaluator_id": "host-test", "evaluation_method": "host_llm",
 		"transfer_dimension": "near", "transfer_score": 0.95,
-		"rubric_score_json": `{"criteria_scores":[{"id":"correctness","score":2,"evidence":"ok"},{"id":"reasoning","score":0.5,"evidence":"partial"}]}`,
+		"rubric_score": json.RawMessage(`{"criteria_scores":[{"id":"correctness","score":2,"evidence":"ok"},{"id":"reasoning","score":0.5,"evidence":"partial"}]}`),
 	}
 	res := callTool(t, deps, registerRecordInteraction, "L_owner", "record_interaction", args)
 	if !res.IsError || !strings.Contains(resultText(res), "transfer_score=0.83") {

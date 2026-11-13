@@ -52,8 +52,6 @@ type TenantLogicalRestoreResult struct {
 
 var tenantArchiveGlobalTables = []string{
 	"external_identities",
-	"mfa_credentials",
-	"mfa_recovery_codes",
 	"native_identities",
 	"native_identity_keys",
 	"oauth_clients",
@@ -139,8 +137,6 @@ func (s *Store) captureTenantLogicalArchive(ctx context.Context, tenantID string
 	globalPredicates := map[string]string{
 		"users":                `t.id IN (SELECT user_id FROM tenant_memberships WHERE tenant_id = ?)`,
 		"external_identities":  `t.user_id IN (SELECT user_id FROM tenant_memberships WHERE tenant_id = ?)`,
-		"mfa_credentials":      `t.user_id IN (SELECT user_id FROM tenant_memberships WHERE tenant_id = ?)`,
-		"mfa_recovery_codes":   `t.user_id IN (SELECT user_id FROM tenant_memberships WHERE tenant_id = ?)`,
 		"native_identities":    `t.user_id IN (SELECT user_id FROM tenant_memberships WHERE tenant_id = ?)`,
 		"native_identity_keys": `t.identity_id IN (SELECT n.id FROM native_identities n JOIN tenant_memberships tm ON tm.user_id=n.user_id WHERE tm.tenant_id = ?)`,
 		"plans":                `t.id IN (SELECT plan_id FROM tenant_subscriptions WHERE tenant_id = ?)`,

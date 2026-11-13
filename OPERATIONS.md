@@ -438,7 +438,7 @@ configured `--webhook-days` cutoff.
 
 ## Pipeline observability
 
-The regulation pipeline emits structured `level=INFO` log lines so each `get_next_activity` call leaves a trace. The four key event types:
+The regulation pipeline emits structured `level=INFO` log lines so each activity turn (`prepare_pedagogical_turn`, `mode="activity"`) leaves a trace. The four key event types:
 
 | Event | Source | Fields |
 |-------|--------|--------|
@@ -489,7 +489,7 @@ journalctl --user -u tutor-mcp --since "1 hour ago" \
 
 - **`route=review_override` spike** — learners are explicitly asking for review. If unexpected, inspect the surrounding chat/tool calls that set `intent=review`.
 - **`orchestrator failed` errors** — the regulation pipeline could not compute an activity. Look for the same `learner` and `domain` on the preceding `level=ERROR` line.
-- **No `pipeline decision` logs after a session starts** — the LLM isn't calling `get_next_activity`. Drift in the system prompt likely.
+- **No `pipeline decision` logs after a session starts** — the LLM isn't requesting activity turns (`prepare_pedagogical_turn`). Drift in the system prompt likely.
 - **No `interaction recorded` logs while exercises are happening** — the LLM is generating activities but not closing the loop with `record_interaction`. Cohérence-of-rule-3 problem in the system prompt.
 - **Repeated `phase fallback (NoFringe)` for the same domain** — the candidate pool is empty. Likely cause: missing `goal_relevance` on a domain where the strict contract is enforced (partial vector). Run `set_goal_relevance` to repair.
 

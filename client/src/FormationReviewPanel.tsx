@@ -1,4 +1,5 @@
 import { t } from './i18n';
+import { LoadingState } from './LoadState';
 import { useEffect, useRef, useState } from 'react';
 import type { ClientBridge } from './bridge';
 import type { FormationReview, FormationVersion } from './types';
@@ -49,7 +50,7 @@ export function FormationReviewPanel({ formationId, api, canPublish, busy, onClo
   return <section className="card formation-review" aria-label={t("Examen de la formation")}>
     <div className="section-heading"><h2 ref={heading} tabIndex={-1}>{detail?.formation.name || t('Examiner la formation')}</h2><button className="button secondary" disabled={busy} onClick={onClose}>{t("Fermer l’examen")}</button></div>
     {versions.length > 0 && <label className="field">{t("Version à examiner")}<select value={versionId} disabled={loading || busy} onChange={(event) => setVersionId(event.target.value)}>{versions.map((version) => <option key={version.id} value={version.id}>{t("Version")} {version.version} — {statusLabel(version.status)}</option>)}</select></label>}
-    {loading && <p role="status">{t("Lecture de la version et vérification du programme…")}</p>}
+    {loading && <LoadingState label="Lecture de la version et vérification du programme…"/>}
     {error && <p role="alert" className="notice error">{error}</p>}
     {detail && <>
       <p><strong>{t("État réel :")} {statusLabel(detail.version.status)}</strong> {t("· Version")} {detail.version.version} · {detail.concepts.length} {t("concepts")}</p>

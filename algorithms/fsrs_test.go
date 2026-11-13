@@ -112,7 +112,7 @@ func TestInitialStabilityDifficultyOutOfRange(t *testing.T) {
 
 func TestReviewCard(t *testing.T) {
 	now := time.Date(2026, 3, 27, 10, 0, 0, 0, time.UTC)
-	card := NewFSRSCard()
+	card := FSRSCard{State: New}
 
 	card = ReviewCard(card, Good, now)
 	if card.State != Review {
@@ -219,7 +219,7 @@ func TestNextRecallStabilityRatings(t *testing.T) {
 
 func TestReviewCardNewWithAgain(t *testing.T) {
 	now := time.Date(2026, 3, 27, 10, 0, 0, 0, time.UTC)
-	card := NewFSRSCard()
+	card := FSRSCard{State: New}
 	card = ReviewCard(card, Again, now)
 	if card.State != Learning {
 		t.Errorf("after Again on new card, state = %s, want Learning", card.State)

@@ -174,7 +174,7 @@ func TestBoundAssessmentRubricSurvivesEvaluationAndRequiresEvidence(t *testing.T
 	prepared := callTool(t, deps, registerPrepareAssessmentAttempt, "L_owner", "prepare_assessment_attempt", map[string]any{
 		"domain_id": domain.ID, "session_id": session.ID, "decision_id": decision.ID,
 		"concept": "a", "activity_type": "PRACTICE", "observable": "Apply concept a.",
-		"task_text": "Calculate the distance and justify the operation.", "rubric_json": definedAssessmentRubricJSON,
+		"task_text": "Calculate the distance and justify the operation.", "rubric": json.RawMessage(definedAssessmentRubricJSON),
 	})
 	if prepared.IsError {
 		t.Fatalf("prepare bound assessment: %s", resultText(prepared))
@@ -188,7 +188,7 @@ func TestBoundAssessmentRubricSurvivesEvaluationAndRequiresEvidence(t *testing.T
 		t.Fatalf("submit bound assessment: %s", resultText(submitted))
 	}
 	args := assessmentEvaluationArgs(domain.ID, session.ID, attemptID, true)
-	args["rubric_score_json"] = `{"criteria_scores":[{"id":"correctness","score":2},{"id":"reasoning","score":0.5,"evidence":"Partial justification."}]}`
+	args["rubric_score"] = json.RawMessage(`{"criteria_scores":[{"id":"correctness","score":2},{"id":"reasoning","score":0.5,"evidence":"Partial justification."}]}`)
 	rejected := callTool(t, deps, registerRecordInteraction, "L_owner", "record_interaction", args)
 	if !rejected.IsError || !strings.Contains(resultText(rejected), "evidence") {
 		t.Fatalf("bound assessment accepted a score without evidence: %s", resultText(rejected))
@@ -197,24 +197,23 @@ func TestBoundAssessmentRubricSurvivesEvaluationAndRequiresEvidence(t *testing.T
 	if err != nil || attempt.Status != models.AssessmentAttemptSubmitted {
 		t.Fatalf("rejected score consumed attempt: attempt=%+v err=%v", attempt, err)
 	}
-	validScores := assessmentEvaluationArgs(domain.ID, session.ID, attemptID, true)["rubric_score_json"].(string)
+	validScores := string(assessmentEvaluationArgs(domain.ID, session.ID, attemptID, true)["rubric_score"].(json.RawMessage))
 	initialState := models.NewConceptStateInDomain("L_owner", domain.ID, "a")
 	initialState.PMastery, initialState.Reps = 0.4, 2
 	if err := store.UpsertConceptState(ctx, initialState); err != nil {
 		t.Fatal(err)
 	}
 	for name, invalid := range map[string]string{
-		"duplicate criterion score": strings.Replace(validScores, `"score":2`, `"score":0,"score":2`, 1),
-		"numeric string":            strings.Replace(validScores, `"score":2`, `"score":"2"`, 1),
-		"score alias":               strings.Replace(validScores, `"criteria_scores"`, `"scores"`, 1),
-		"contradictory total":       strings.Replace(validScores, `"criteria_scores":`, `"total":0,"criteria_scores":`, 1),
-		"claimed trust":             strings.Replace(validScores, `"criteria_scores":`, `"trusted_evaluation":true,"criteria_scores":`, 1),
+		"numeric string":      strings.Replace(validScores, `"score":2`, `"score":"2"`, 1),
+		"score alias":         strings.Replace(validScores, `"criteria_scores"`, `"scores"`, 1),
+		"contradictory total": strings.Replace(validScores, `"criteria_scores":`, `"total":0,"criteria_scores":`, 1),
+		"claimed trust":       strings.Replace(validScores, `"criteria_scores":`, `"trusted_evaluation":true,"criteria_scores":`, 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if invalid == validScores {
 				t.Fatal("fixture did not create invalid scoring")
 			}
-			args["rubric_score_json"] = invalid
+			args["rubric_score"] = json.RawMessage(invalid)
 			rejected := callTool(t, deps, registerRecordInteraction, "L_owner", "record_interaction", args)
 			if !rejected.IsError {
 				t.Fatalf("invalid score accepted: %s", resultText(rejected))
@@ -280,7 +279,7 @@ func TestBoundAssessmentDecimalPassingRuleEndToEnd(t *testing.T) {
 			prepared := callTool(t, deps, registerPrepareAssessmentAttempt, "L_owner", "prepare_assessment_attempt", map[string]any{
 				"domain_id": domain.ID, "session_id": session.ID, "decision_id": decision.ID,
 				"concept": "a", "activity_type": "PRACTICE", "observable": "Apply the competency.",
-				"task_text": "Generated task.", "rubric_json": tc.rubric,
+				"task_text": "Generated task.", "rubric": json.RawMessage(tc.rubric),
 			})
 			if prepared.IsError {
 				t.Fatalf("prepare: %s", resultText(prepared))
@@ -291,7 +290,7 @@ func TestBoundAssessmentDecimalPassingRuleEndToEnd(t *testing.T) {
 				t.Fatalf("submit: %s", resultText(submitted))
 			}
 			args := assessmentEvaluationArgs(domain.ID, session.ID, attemptID, tc.passed)
-			args["rubric_score_json"] = tc.scores
+			args["rubric_score"] = json.RawMessage(tc.scores)
 			accepted := callTool(t, deps, registerRecordInteraction, "L_owner", "record_interaction", args)
 			if accepted.IsError {
 				t.Fatalf("evaluate: %s", resultText(accepted))

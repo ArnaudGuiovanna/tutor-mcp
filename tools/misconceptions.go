@@ -19,7 +19,7 @@ type GetMisconceptionsParams struct {
 }
 
 func registerGetMisconceptions(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name:        "get_misconceptions",
 		Description: "List misconceptions detected per concept, with their status (active/resolved) and frequency. Enables tracking of the learner's recurring confusions.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params GetMisconceptionsParams) (*mcp.CallToolResult, any, error) {
@@ -33,7 +33,7 @@ func registerGetMisconceptions(server *mcp.Server, deps *Deps) {
 		domain, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
 		if err != nil || domain == nil {
 			if params.DomainID != "" {
-				deps.Logger.Error("get_misconceptions: domain resolution failed", "err", err, "domain", params.DomainID)
+				deps.Logger.Error("get_misconceptions: domain resolution failed", append(diagnosticErrorAttrs(err), "domain", params.DomainID)...)
 				r, _ := errorResult(fmt.Sprintf("domain not found: %s", params.DomainID))
 				return r, nil, nil
 			}

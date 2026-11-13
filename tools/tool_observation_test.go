@@ -286,7 +286,7 @@ func TestToolObservationScopeRefusalsSDKAndHTTP(t *testing.T) {
 		t.Run(transport, func(t *testing.T) {
 			reader := toolMetricReader(t)
 			if transport == "http" {
-				h := OAuthScopeHTTPMiddleware("https://test.example", 4096, true, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("denied HTTP request entered SDK") }))
+				h := OAuthScopeHTTPMiddleware(&Deps{BaseURL: "https://test.example", OAuthGranularScopes: true}, 4096, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("denied HTTP request entered SDK") }))
 				w := httptest.NewRecorder()
 				h.ServeHTTP(w, scopedHTTPRequest(t, `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"record_interaction","arguments":{}}}`, models.OAuthScopeLearnerRead))
 				if w.Code != 403 {
@@ -294,7 +294,7 @@ func TestToolObservationScopeRefusalsSDKAndHTTP(t *testing.T) {
 				}
 			} else {
 				ctx := auth.WithOAuthScope(context.Background(), models.OAuthScopeLearnerRead)
-				h := toolCallObservationMiddleware(map[string]struct{}{"record_interaction": {}})(toolOAuthScopeMiddleware("", true)(func(context.Context, string, mcp.Request) (mcp.Result, error) {
+				h := toolCallObservationMiddleware(map[string]struct{}{"record_interaction": {}})(toolOAuthScopeMiddleware(&Deps{BaseURL: "", OAuthGranularScopes: true})(func(context.Context, string, mcp.Request) (mcp.Result, error) {
 					t.Error("scope denied reached handler")
 					return nil, nil
 				}))

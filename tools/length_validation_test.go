@@ -48,13 +48,13 @@ func TestRecordInteraction_RejectsOversizedConcept(t *testing.T) {
 	}
 }
 
-func TestRecordInteraction_RejectsOversizedRubricJSON(t *testing.T) {
+func TestRecordInteraction_RejectsOversizedRubric(t *testing.T) {
 	cases := []struct {
 		name  string
 		field string
 	}{
-		{name: "rubric_json", field: "rubric_json"},
-		{name: "rubric_score_json", field: "rubric_score_json"},
+		{name: "rubric", field: "rubric"},
+		{name: "rubric_score", field: "rubric_score"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -69,7 +69,11 @@ func TestRecordInteraction_RejectsOversizedRubricJSON(t *testing.T) {
 				"confidence":            0.5,
 				"notes":                 "",
 			}
-			args[tc.field] = strings.Repeat("x", maxLongTextLen+1)
+			huge := strings.Repeat("x", maxLongTextLen+1)
+			args[tc.field] = map[string]any{"criteria": []any{map[string]any{"id": "x", "max_score": 1, "description": huge}}}
+			if tc.field == "rubric_score" {
+				args[tc.field] = map[string]any{"criteria_scores": []any{map[string]any{"id": "x", "score": 1, "evidence": huge}}}
+			}
 
 			res := callTool(t, deps, registerRecordInteraction, "L_owner", "record_interaction", args)
 			if !res.IsError {
@@ -159,11 +163,11 @@ func TestTransferChallenge_RejectsOversizedFields(t *testing.T) {
 	}{
 		{
 			"concept_id",
-			map[string]any{"concept_id": strings.Repeat("c", maxShortLabelLen+1)},
+			map[string]any{"concept": strings.Repeat("c", maxShortLabelLen+1)},
 		},
 		{
 			"context_type",
-			map[string]any{"concept_id": "a", "context_type": strings.Repeat("x", maxShortLabelLen+1)},
+			map[string]any{"concept": "a", "context_type": strings.Repeat("x", maxShortLabelLen+1)},
 		},
 	}
 	for _, tc := range cases {
@@ -178,53 +182,11 @@ func TestTransferChallenge_RejectsOversizedFields(t *testing.T) {
 	}
 }
 
-func TestRecordTransferResult_RejectsOversizedFields(t *testing.T) {
-	cases := []struct {
-		name string
-		args map[string]any
-	}{
-		{
-			"concept_id",
-			map[string]any{
-				"concept_id":   strings.Repeat("c", maxShortLabelLen+1),
-				"context_type": "real_world",
-				"score":        0.5,
-			},
-		},
-		{
-			"context_type",
-			map[string]any{
-				"concept_id":   "a",
-				"context_type": strings.Repeat("x", maxShortLabelLen+1),
-				"score":        0.5,
-			},
-		},
-		{
-			"session_id",
-			map[string]any{
-				"concept_id":   "a",
-				"context_type": "real_world",
-				"session_id":   strings.Repeat("s", maxShortLabelLen+1),
-				"score":        0.5,
-			},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, deps := setupToolsTest(t)
-			res := callTool(t, deps, registerRecordTransferResult, "L_owner", "record_transfer_result", tc.args)
-			if !res.IsError {
-				t.Fatalf("expected length-cap rejection, got %q", resultText(res))
-			}
-		})
-	}
-}
-
 func TestFeynmanChallenge_RejectsOversizedConceptID(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	_ = makeOwnerDomain(t, store, "L_owner", "math")
 	res := callTool(t, deps, registerFeynmanChallenge, "L_owner", "feynman_challenge", map[string]any{
-		"concept_id": strings.Repeat("c", maxShortLabelLen+1),
+		"concept": strings.Repeat("c", maxShortLabelLen+1),
 	})
 	if !res.IsError {
 		t.Fatalf("expected length-cap rejection, got %q", resultText(res))
@@ -239,14 +201,14 @@ func TestCalibrationCheck_RejectsOversizedFields(t *testing.T) {
 		{
 			"concept_id",
 			map[string]any{
-				"concept_id":        strings.Repeat("c", maxShortLabelLen+1),
+				"concept":           strings.Repeat("c", maxShortLabelLen+1),
 				"predicted_mastery": 3.0,
 			},
 		},
 		{
 			"domain_id",
 			map[string]any{
-				"concept_id":        "a",
+				"concept":           "a",
 				"predicted_mastery": 3.0,
 				"domain_id":         strings.Repeat("d", maxShortLabelLen+1),
 			},

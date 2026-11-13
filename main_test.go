@@ -926,9 +926,9 @@ func TestStreamableHTTPClientCompletesTutoringLoop(t *testing.T) {
 		t.Fatalf("list tools: %v", err)
 	}
 	required := map[string]bool{
-		"init_domain":        false,
-		"get_next_activity":  false,
-		"record_interaction": false,
+		"init_domain":              false,
+		"prepare_pedagogical_turn": false,
+		"record_interaction":       false,
 	}
 	for _, tool := range listed.Tools {
 		if _, ok := required[tool.Name]; ok {
@@ -953,11 +953,11 @@ func TestStreamableHTTPClientCompletesTutoringLoop(t *testing.T) {
 		t.Fatalf("init_domain: result=%q err=%v logs=%q", callToolText(initResult), err, serverLogs.String())
 	}
 	activity, err := session.CallTool(ctx, &mcp.CallToolParams{
-		Name:      "get_next_activity",
-		Arguments: map[string]any{},
+		Name:      "prepare_pedagogical_turn",
+		Arguments: map[string]any{"mode": "activity"},
 	})
 	if err != nil || activity.IsError {
-		t.Fatalf("get_next_activity: result=%q err=%v", callToolText(activity), err)
+		t.Fatalf("prepare_pedagogical_turn: result=%q err=%v", callToolText(activity), err)
 	}
 	recorded, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name: "record_interaction",
@@ -1081,7 +1081,7 @@ func TestStatelessMCPProtocolsWorkAcrossIndependentRoundRobinNodes(t *testing.T)
 		if err != nil || initialized.IsError {
 			t.Fatalf("init_domain through node A: result=%q err=%v", callToolText(initialized), err)
 		}
-		dashboard, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "get_dashboard_state"})
+		dashboard, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "get_learner_state", Arguments: map[string]any{"view": "progress"}})
 		if err != nil || dashboard.IsError || !strings.Contains(callToolText(dashboard), "Modern Round Robin") {
 			t.Fatalf("dashboard through node B did not read node A state: result=%q err=%v", callToolText(dashboard), err)
 		}
@@ -1091,7 +1091,7 @@ func TestStatelessMCPProtocolsWorkAcrossIndependentRoundRobinNodes(t *testing.T)
 			{node: nodeA.name, method: "server/discover", protocol: "2026-07-28"},
 			{node: nodeB.name, method: "tools/list", protocol: "2026-07-28"},
 			{node: nodeA.name, method: "tools/call", name: "init_domain", protocol: "2026-07-28"},
-			{node: nodeB.name, method: "tools/call", name: "get_dashboard_state", protocol: "2026-07-28"},
+			{node: nodeB.name, method: "tools/call", name: "get_learner_state", protocol: "2026-07-28"},
 		}
 		if len(observations) < len(want) {
 			t.Fatalf("observed only %d requests, want at least %d: %+v", len(observations), len(want), observations)
@@ -1119,7 +1119,7 @@ func TestStatelessMCPProtocolsWorkAcrossIndependentRoundRobinNodes(t *testing.T)
 			postRawMCPRPC(t, client, nodeB, token, legacy, "notifications/initialized", `{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}`),
 			postRawMCPRPC(t, client, nodeA, token, legacy, "tools/list", `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`),
 			postRawMCPRPC(t, client, nodeB, token, legacy, "tools/call init_domain", `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"init_domain","arguments":{"name":"Legacy Round Robin","concepts":["stateless-legacy"],"prerequisites":{}}}}`),
-			postRawMCPRPC(t, client, nodeA, token, legacy, "tools/call get_dashboard_state", `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_dashboard_state","arguments":{}}}`),
+			postRawMCPRPC(t, client, nodeA, token, legacy, "tools/call get_learner_state", `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"get_learner_state","arguments":{"view":"progress"}}}`),
 		}
 		for _, response := range responses {
 			assertNoMCPSession(t, response)

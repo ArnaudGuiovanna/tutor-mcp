@@ -39,8 +39,8 @@ Environment variables read at boot:
 | `DATABASE_URL` | — | Postgres DSN, **required** when `DB_DRIVER=postgres`. Production requires `sslmode=verify-full` and an explicit `sslrootcert` CA. |
 | `DB_MAX_CONNS` | `10` | Postgres connection-pool size per instance (ignored on SQLite). Keep `DB_MAX_CONNS × instances < Postgres max_connections`. |
 | `SCHEDULER_MODE` | `inprocess` | `inprocess` (recommended) or `distributed` (fenced recoverable leases, heartbeat, retry and DLQ). For HTTP deployments, distributed mode requires PostgreSQL, PostgreSQL rate limits, and shared database narrative memory or disabled memory. Local stdio uses the durable lease implementation directly on SQLite. Unknown values fail at boot. |
-| `RATELIMIT_BACKEND` | `memory` | `memory` (per-instance, default) or `postgres`/`db` (shared rate-limit + login-failure store). The PostgreSQL backend requires `DB_DRIVER=postgres`; unknown values fail at boot. |
-| `BASE_URL` | `http://localhost:$PORT` | Public HTTP(S) origin. A trailing `/` is normalized; paths, credentials, query strings, fragments, and non-HTTP schemes fail at boot. Triggers HSTS when `https://`. |
+| `RATELIMIT_BACKEND` | `memory` | `memory` (per-instance, default) or `postgres`/`db` (shared rate-limit + login-failure store, including the native identity challenge budgets). The PostgreSQL backend requires `DB_DRIVER=postgres`; unknown values fail at boot. |
+| `BASE_URL` | `http://localhost:$PORT` | Public HTTP(S) origin. A trailing `/` is normalized; paths, credentials, query strings, fragments, and non-HTTP schemes fail at boot. Triggers HSTS when `https://`. Browser cookies use `__Host-` names (`Secure`, `Path=/`, no `Domain`); only an HTTP loopback origin (`localhost`, `127.0.0.1`, `::1`) uses unprefixed, non-`Secure` cookies for local development. |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | Enables OTLP traces and metrics; standard trace/metric endpoints, resource attributes, headers and TLS variables are also accepted. |
 | `TRUSTED_PROXY_CIDRS` | — | Comma-separated CIDRs of trusted reverse-proxies. **Required behind a public proxy** — without it every IP-rate-limit collapses under the proxy's loopback bucket. The client is the rightmost `X-Forwarded-For` address outside these networks, so list every proxy hop. Networks broader than /8 (IPv4) or /16 (IPv6, except `fc00::/7`) are refused. IPv6 clients are rate-limited per /64. |
@@ -50,7 +50,7 @@ Environment variables read at boot:
 | `MCP_MAX_REQUEST_BODY_BYTES` | `1048576` (1 MiB) | Maximum POST body accepted by `/mcp`; values from 1 byte through 64 MiB are accepted. Oversized declared or chunked bodies receive HTTP 413. |
 | `MCP_MAX_CONCURRENT` | `128` | Maximum in-flight authenticated MCP calls per process; overflow is rejected immediately. |
 | `MCP_MAX_CONCURRENT_PER_LEARNER` | `8` | Maximum in-flight MCP calls for one learner; cannot exceed the global limit. |
-| `MCP_TOOL_CALL_TIMEOUT_SECONDS` | `30` | Cooperative server deadline applied only to `tools/call` (1–600 seconds); discovery and long-lived transport responses are unaffected. |
+| `MCP_TOOL_CALL_TIMEOUT_SECONDS` | `30` | Cooperative server deadline applied only to `tools/call` (1–600 seconds); discovery and long-lived transport responses are unaffected. Also sets the shutdown drain (see [Graceful shutdown](#graceful-shutdown)). |
 | `ASSESSMENT_HOST_LLM_DEMONSTRATES` | `on` | `on` lets a host evaluation bound to a frozen pedagogical decision count as demonstrated evidence outside high-stakes domains; `off` requires server-side `deterministic`, `external_service` or `human_review` evidence. Only `on` and `off` are accepted. See [learning integrity](learning-integrity.md). |
 | `OAUTH_GRANULAR_SCOPES` | **`off`** *(opt-in)* | `on` publishes and issues per-tool `learner:read` / `learner:write` grants; `off` keeps the bounded legacy `learner` compatibility mode. Only `on` and `off` are accepted. Use the [two-phase rollout and rollback runbook](oauth-granular-scopes-rollout.md). |
 | `OAUTH_DCR_MODE` | `open` in development | `open`, `token`, or `disabled`. Production requires an explicit `token` or `disabled`; `disabled` removes `/register` from discovery and routing. See the [DCR production runbook](oauth-dcr-production.md). |
@@ -58,6 +58,7 @@ Environment variables read at boot:
 | `OAUTH_DCR_MAX_REGISTRATIONS_PER_IP_PER_DAY` | `500` | Per-client-IP budget for `POST /register` over a rolling day (1–1,000,000), refilled continuously. In `token` mode it applies only after Initial Access Token admission; with `RATELIMIT_BACKEND=postgres` the budget is shared across instances. Exhaustion receives HTTP 429. |
 | `OAUTH_CIMD_MODE` | `on` | Client ID Metadata Document policy. `on` resolves HTTPS `client_id` URLs on any public host; `off` disables CIMD and publishes `client_id_metadata_document_supported: false`; a comma-separated list of DNS hostnames (case-insensitive, no scheme, port, path, wildcard or IP literal) resolves only `client_id` URLs on exactly those hosts. Registered clients are unaffected. Invalid values fail at boot. |
 | `LEARNER_MAX_ACTIVE_DOMAINS` | `200` | Maximum active (non-archived, non-deleted) domains per learner (1–100,000), checked when a domain is created; archiving or deleting a domain frees a slot. Read by the HTTP server; local stdio mode uses the default. Invalid values fail at boot. |
+| `TUTOR_MCP_CONSOLIDATION_DELIVERY_TIMEOUT_MINUTES` | `30` | Minutes a delivered memory-consolidation request may stay unanswered before the scheduler requeues it (1–10,080). Read once at startup, also by local stdio mode; invalid values fail at boot. |
 | `SMTP_ADDR` / `SMTP_FROM` | — | SMTP endpoint and sender for verification/recovery. Delivery requires STARTTLS (TLS 1.2+); public account flows cannot complete when absent. Optional `SMTP_SERVER_NAME`, `SMTP_USERNAME`, `SMTP_PASSWORD`. |
 | `INTEGRATION_SECRET_KEYS` | — | Comma-separated `key_id:base64-32-byte-key` keyring used to encrypt webhook credentials and shared narrative memory at rest. Supply old and new keys during rotation. |
 | `INTEGRATION_SECRET_CURRENT_KEY_ID` | — | Key ID used for new envelopes; startup atomically re-encrypts legacy/old-key records. Required with `INTEGRATION_SECRET_KEYS`. |
@@ -70,7 +71,6 @@ Environment variables read at boot:
 | `TUTOR_MCP_MEMORY_MAX_LEARNER_BYTES` | `16777216` | Cumulative narrative-memory quota per learner. |
 | `TUTOR_MCP_MEMORY_MAX_FILES_PER_LEARNER` | `2048` | Maximum Markdown files per learner. |
 | `TUTOR_MCP_MEMORY_MAX_CONCURRENT_WRITES` | `32` | Maximum concurrent narrative writes per process; overflow receives backpressure. |
-| `REGULATION_THRESHOLD` | `on` | `off` reverts to legacy split thresholds (BKT 0.85 / KST 0.70 / Mid 0.80) |
 | `REGULATION_GOAL` | `on` | `off` hides `set_goal_relevance` / `get_goal_relevance` and drops the goal-aware prompt section |
 | `REGULATION_ACTION` / `_CONCEPT` / `_GATE` | `on` | `off` drops the system-prompt appendix only — the selector / gate logic always runs |
 | `REGULATION_FADE` | **`off`** *(compatibility flag)* | Strict literal `on` exposes descriptive autonomy metrics and `fade_status`; it does not withdraw help or change scheduling from an unvalidated composite score. |
@@ -83,6 +83,28 @@ replay of an already-used member revokes the family instead of issuing another
 access token. Granular OAuth scopes are an opt-in fleet-wide change; follow the
 [scope rollout runbook](oauth-granular-scopes-rollout.md) before enabling
 them.
+
+## Graceful shutdown
+
+On `SIGTERM` or `SIGINT` the API stops accepting connections and waits up to
+`max(30 s, MCP_TOOL_CALL_TIMEOUT_SECONDS + 10 s)` for in-flight requests, so a
+tool call can finish within its own deadline. It then flushes queued account
+e-mail, stops the in-process scheduler and limiters and closes the database.
+A supervisor must allow longer than the drain before it kills the process: the
+shipped systemd units (`TimeoutStopSec`) and Compose files
+(`stop_grace_period`) use 50 s for the default 30 s tool deadline. Raise them to
+at least `MCP_TOOL_CALL_TIMEOUT_SECONDS + 20 s` when you raise the deadline.
+A worker drains its scheduler before exiting.
+
+## Database pool metrics
+
+With OTLP metrics enabled, `tutor.db.connections{pool,state}`,
+`tutor.db.waits{pool}` and `tutor.db.wait.duration{pool}` describe each pool
+(`writer` and `reader` on SQLite, `shared` on PostgreSQL), and the histogram
+`tutor.db.acquire.duration{pool,outcome}` records how long each transaction
+took to start, including the wait for a pooled connection (and, on SQLite, for
+the writer lock). With `LOG_LEVEL=debug`, a start slower than 50 ms is also
+logged with its pool and the pool occupancy at that moment.
 
 Data lifecycle cleanup is opt-in and runs through a separate dry-run-first
 maintenance command; it is never triggered by server startup. See

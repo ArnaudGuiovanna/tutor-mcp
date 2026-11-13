@@ -7,7 +7,6 @@ package engine
 import (
 	"math"
 	"testing"
-	"time"
 	"tutor-mcp/algorithms"
 
 	"tutor-mcp/models"
@@ -19,113 +18,64 @@ func defaultCfg() PhaseConfig {
 
 // ─── DIAGNOSTIC → INSTRUCTION ──────────────────────────────────────────────
 
-func TestEvaluatePhase_DiagnosticToInstruction_EntropyReductionMet(t *testing.T) {
-	cfg := defaultCfg() // DeltaH=0.2, NMax=8
+func TestEvaluatePhase_DiagnosticToInstruction_PlacementClassifiedEverything(t *testing.T) {
 	obs := PhaseObservables{
-		MeanEntropy:              0.20,
-		PhaseEntryEntropy:        0.50, // delta = 0.30 >= 0.20
-		DiagnosticItemsCount:     3,
-		DiagnosticCoverageTarget: 3,
+		MeanEntropy:           0.45,
+		PhaseEntryEntropy:     0.50,
+		DiagnosticItemsCount:  3,
+		PlacementUnclassified: 0,
+	}
+	got := EvaluatePhase(models.PhaseDiagnostic, obs, defaultCfg())
+	if !got.Transitioned || got.To != models.PhaseInstruction {
+		t.Fatalf("expected transition once the placement is complete, got %+v", got)
+	}
+}
+
+func TestEvaluatePhase_DiagnosticToInstruction_ItemBudgetSpent(t *testing.T) {
+	cfg := defaultCfg()
+	obs := PhaseObservables{
+		DiagnosticItemsCount:  cfg.NDiagnosticMax,
+		PlacementUnclassified: 4,
 	}
 	got := EvaluatePhase(models.PhaseDiagnostic, obs, cfg)
 	if !got.Transitioned || got.To != models.PhaseInstruction {
-		t.Fatalf("expected transition to INSTRUCTION via entropy reduction, got %+v", got)
+		t.Fatalf("expected transition when the item budget is spent, got %+v", got)
 	}
 }
 
-func TestEvaluatePhase_DiagnosticToInstruction_NItemsMaxReached(t *testing.T) {
-	cfg := defaultCfg()
+func TestEvaluatePhase_Diagnostic_StaysWhileUnclassifiedAndBudgetLeft(t *testing.T) {
 	obs := PhaseObservables{
-		MeanEntropy:              0.45,
-		PhaseEntryEntropy:        0.50, // delta = 0.05 < 0.20
-		DiagnosticItemsCount:     8,
-		DiagnosticCoverageTarget: 8,
-	}
-	got := EvaluatePhase(models.PhaseDiagnostic, obs, cfg)
-	if !got.Transitioned || got.To != models.PhaseInstruction {
-		t.Fatalf("expected transition via NMax, got %+v", got)
-	}
-}
-
-func TestEvaluatePhase_DiagnosticToInstruction_NeitherCondition_Stays(t *testing.T) {
-	cfg := defaultCfg()
-	obs := PhaseObservables{
-		MeanEntropy:              0.45,
-		PhaseEntryEntropy:        0.50, // delta = 0.05 < 0.20
-		DiagnosticItemsCount:     3,
-		DiagnosticCoverageTarget: 8,
-	}
-	got := EvaluatePhase(models.PhaseDiagnostic, obs, cfg)
-	if got.Transitioned {
-		t.Fatalf("expected stay in DIAGNOSTIC, got transition: %+v", got)
-	}
-}
-
-func TestEvaluatePhase_DiagnosticEntropyCannotBypassConceptCoverage(t *testing.T) {
-	obs := PhaseObservables{
-		MeanEntropy:              0.10,
-		PhaseEntryEntropy:        0.50,
-		DiagnosticItemsCount:     1,
-		DiagnosticCoverageTarget: 4,
+		MeanEntropy:           0.05, // large entropy drop is audit-only
+		PhaseEntryEntropy:     0.50,
+		DiagnosticItemsCount:  3,
+		PlacementUnclassified: 2,
 	}
 	got := EvaluatePhase(models.PhaseDiagnostic, obs, defaultCfg())
 	if got.Transitioned {
-		t.Fatalf("entropy from repeated/unqualified observations bypassed coverage: %+v", got)
-	}
-}
-
-func TestBuildObservablesDiagnosticCoverageTargetIsAllUpToEight(t *testing.T) {
-	cfg := defaultCfg()
-	pf := &pipelineFixtures{StatesByConcept: map[string]*models.ConceptState{}}
-	for _, tc := range []struct {
-		concepts int
-		want     int
-	}{{concepts: 3, want: 3}, {concepts: 8, want: 8}, {concepts: 12, want: 8}} {
-		graph := make([]string, tc.concepts)
-		for index := range graph {
-			graph[index] = string(rune('A' + index))
-		}
-		domain := &models.Domain{Graph: models.KnowledgeSpace{Concepts: graph}}
-		got := buildObservables(domain, pf, cfg, time.Time{})
-		if got.DiagnosticCoverageTarget != tc.want {
-			t.Fatalf("concepts=%d target=%d, want %d", tc.concepts, got.DiagnosticCoverageTarget, tc.want)
-		}
-	}
-}
-
-func TestEvaluatePhase_Diagnostic_NoSnapshot_OnlyNMaxApplies(t *testing.T) {
-	cfg := defaultCfg()
-	// PhaseEntryEntropy=0 → no snapshot (legacy/corrupted). Only NMax.
-	obs := PhaseObservables{
-		MeanEntropy:              0.10, // very low — would normally trigger entropy criterion
-		PhaseEntryEntropy:        0,
-		DiagnosticItemsCount:     3,
-		DiagnosticCoverageTarget: 8,
-	}
-	got := EvaluatePhase(models.PhaseDiagnostic, obs, cfg)
-	if got.Transitioned {
-		t.Fatalf("expected stay (no snapshot, NMax not hit), got %+v", got)
-	}
-
-	// Same setup but NMax hit
-	obs.DiagnosticItemsCount = 8
-	got = EvaluatePhase(models.PhaseDiagnostic, obs, cfg)
-	if !got.Transitioned {
-		t.Fatalf("expected transition via NMax even without snapshot, got %+v", got)
+		t.Fatalf("entropy must not end the placement, got %+v", got)
 	}
 }
 
 func TestEvaluatePhase_Diagnostic_NaNSnapshot_TreatedAsAbsent(t *testing.T) {
-	cfg := defaultCfg()
 	obs := PhaseObservables{
-		MeanEntropy:              0.10,
-		PhaseEntryEntropy:        math.NaN(),
-		DiagnosticItemsCount:     5,
-		DiagnosticCoverageTarget: 8,
+		MeanEntropy:           0.10,
+		PhaseEntryEntropy:     math.NaN(),
+		DiagnosticItemsCount:  5,
+		PlacementUnclassified: 1,
 	}
-	got := EvaluatePhase(models.PhaseDiagnostic, obs, cfg)
+	got := EvaluatePhase(models.PhaseDiagnostic, obs, defaultCfg())
 	if got.Transitioned {
-		t.Fatalf("NaN snapshot should not trigger entropy criterion, got %+v", got)
+		t.Fatalf("NaN snapshot must not trigger a transition, got %+v", got)
+	}
+}
+
+func TestBuildObservablesReportsPlacementProgress(t *testing.T) {
+	graph := chainGraph(5)
+	placement := ReplayPlacement(graph, nil, []models.DiagnosticObservation{{Concept: "c"}}, 12)
+	pf := &pipelineFixtures{StatesByConcept: map[string]*models.ConceptState{}, Placement: placement}
+	got := buildObservables(&models.Domain{Graph: graph}, pf, defaultCfg())
+	if got.DiagnosticItemsCount != 1 || got.PlacementUnclassified != 2 {
+		t.Fatalf("items=%d unclassified=%d, want 1 and 2 (a, b)", got.DiagnosticItemsCount, got.PlacementUnclassified)
 	}
 }
 
@@ -169,19 +119,6 @@ func TestEvaluatePhase_Instruction_NoGoalRelevantConcepts_Stays(t *testing.T) {
 
 // ─── MAINTENANCE → INSTRUCTION ─────────────────────────────────────────────
 
-func TestEvaluatePhase_Maintenance_RetentionLowKeepsRecallInMaintenance(t *testing.T) {
-	cfg := defaultCfg()
-	obs := PhaseObservables{
-		EstimatedGoalRelevant:      1,
-		TotalGoalRelevant:          1,
-		GoalRelevantBelowRetention: true,
-	}
-	got := EvaluatePhase(models.PhaseMaintenance, obs, cfg)
-	if got.Transitioned || got.To != models.PhaseMaintenance {
-		t.Fatalf("recall need must not change the acquisition phase, got %+v", got)
-	}
-}
-
 func TestEvaluatePhase_MaintenanceToInstruction_AcquisitionGap(t *testing.T) {
 	got := EvaluatePhase(models.PhaseMaintenance, PhaseObservables{
 		EstimatedGoalRelevant: 1,
@@ -218,9 +155,7 @@ func TestEvaluatePhase_Maintenance_NoHysteresisConfigFallsBackToRoutingThreshold
 
 func TestEvaluatePhase_MaintenanceToInstruction_RetentionOK_Stays(t *testing.T) {
 	cfg := defaultCfg()
-	obs := PhaseObservables{
-		GoalRelevantBelowRetention: false,
-	}
+	obs := PhaseObservables{EstimatedGoalRelevant: 1, TotalGoalRelevant: 1}
 	got := EvaluatePhase(models.PhaseMaintenance, obs, cfg)
 	if got.Transitioned {
 		t.Fatalf("expected stay, got %+v", got)

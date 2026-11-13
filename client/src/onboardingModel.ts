@@ -5,15 +5,37 @@ import type { Snapshot } from './types';
 export type OnboardingStep = 1 | 2 | 3 | 'done';
 type SetupSnapshot = Pick<Snapshot, 'settings' | 'identity' | 'tutorStatus' | 'conversations'>;
 
+function origin(url: string): string {
+  try { return new URL(url.trim()).origin; } catch { return ''; }
+}
+
+/**
+ * A saved remote address alone does not prove a configured profile: a new
+ * setup stores it before the institution admits the key. Only persistent
+ * traces of a successful connection to that same server count:
+ * - `tutorConnectedOrigin`, written by the native layer after a successful
+ *   remote connection (optional: absent from older backends);
+ * - a tool permission policy, which requires the institution identity read
+ *   from that connected server.
+ */
+export function remoteConnectionKnown(snapshot: SetupSnapshot): boolean {
+  const settings = snapshot.settings;
+  const server = origin(settings.tutor.url);
+  if (settings.tutor.mode !== 'remote' || !server) return false;
+  if (settings.tutorConnectedOrigin && origin(settings.tutorConnectedOrigin) === server) return true;
+  const policy = settings.permissionPolicy;
+  return !!policy && policy.origin === server && !!policy.institutionId;
+}
+
 /**
  * Profiles configured before the guided setup existed must not be blocked by
  * it: an agent was chosen and Tutor is local, already used, or a remote server
- * address was saved.
+ * was already reached successfully.
  */
 export function legacySetupComplete(snapshot: SetupSnapshot): boolean {
   const tutor = snapshot.settings.tutor;
   return !!snapshot.settings.targetId
-    && (tutor.mode === 'local' || snapshot.conversations.length > 0 || (tutor.mode === 'remote' && !!tutor.url.trim()));
+    && (tutor.mode === 'local' || snapshot.conversations.length > 0 || remoteConnectionKnown(snapshot));
 }
 
 export function accountReady(snapshot: SetupSnapshot): boolean {

@@ -101,7 +101,7 @@ type BriefInput struct {
 // Hidi-Renninger phase label.
 //
 // individualInterestMasteryThreshold is *not* a BKT mastery threshold and intentionally bypasses
-// algorithms.MasteryBKT() / REGULATION_THRESHOLD. It is an empirical bound
+// algorithms.MasteryBKT(). It is an empirical bound
 // for the "individual interest" phase from Hidi & Renninger 2006 (Four-Phase
 // Model of Interest Development), which is conceptually orthogonal to the
 // runtime's notion of "concept BKT-mastered". Coupling them was rejected in
@@ -237,12 +237,6 @@ func affectIsNegative(a *models.AffectState, now time.Time) bool {
 	return false
 }
 
-// ComposeBrief builds a MotivationBrief from the given signals and the chosen kind.
-// The caller is responsible for persisting Domain.LastValueAxis when kind == competence_value.
-func ComposeBrief(in BriefInput, kind, pickedAxis string) *models.MotivationBrief {
-	return composeBrief(in, kind, pickedAxis, nil, false)
-}
-
 func composeBrief(in BriefInput, kind, pickedAxis string, framings *models.DomainValueFramings, framingsLoaded bool) *models.MotivationBrief {
 	if kind == "" {
 		return &models.MotivationBrief{Kind: ""}
@@ -355,10 +349,20 @@ func parseDomainValueFramings(domain *models.Domain) (*models.DomainValueFraming
 // MotivationEngine wires SelectBrief / ComposeBrief to the persistence layer and
 // handles side effects (e.g., rotating the domain's last_value_axis).
 type MotivationEngine struct {
-	store storeport.Store
+	store MotivationStore
 }
 
-func NewMotivationEngine(store storeport.Store) *MotivationEngine {
+// MotivationStore is the persistence surface of MotivationEngine: concept
+// state and activity signals, the latest affect, and the domain's value-axis
+// rotation.
+type MotivationStore interface {
+	storeport.DomainStore
+	storeport.ConceptStateStore
+	storeport.ActivityStatsStore
+	storeport.MetacognitionStore
+}
+
+func NewMotivationEngine(store MotivationStore) *MotivationEngine {
 	return &MotivationEngine{store: store}
 }
 

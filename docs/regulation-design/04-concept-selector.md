@@ -9,6 +9,19 @@
 > Référence architecture : `docs/regulation-architecture.md` §3 [4],
 > Q5 (frange externe), Q6 (ordre).
 
+>
+> **État courant (2026-11).** Ce document reste un dossier de conception
+> historique. Écarts avec le code actuel :
+>
+> - le point d'entrée est `SelectConceptAtWithContext(phase, states, graph,
+>   goalRelevance, now, SelectionContext)` ; les wrappers `SelectConcept` et
+>   `SelectConceptAt` ont été supprimés ;
+> - la frange externe est calculée par `externalFringeVerified` (§4.1) ;
+> - DIAGNOSTIC n'utilise plus l'info-gain : la sélection est le placement
+>   adaptatif de `engine/placement.go` (§4.4). `BKTInfoGain` et
+>   `algorithms/bkt_info_gain.go` ont été supprimés ; seule `BinaryEntropy`
+>   subsiste (`algorithms/entropy.go`) pour le signal d'audit de la phase.
+
 ---
 
 ## 1. Nature du composant
@@ -58,8 +71,9 @@ fait qu'inclure ou retirer l'appendix explicatif dans `tools/prompt.go`.
 | Source | Champ | Phases utilisatrices |
 |--------|-------|----------------------|
 | `goal_relevance` (lu via `[1]`) | `map[string]float64` ou `nil` | INSTRUCTION (multiplicateur), MAINTENANCE (multiplicateur), DIAGNOSTIC (option — voir OQ-4.2) |
-| BKT mastery | `cs.PMastery` | INSTRUCTION (filtre fringe + score), MAINTENANCE (filtre mastered), DIAGNOSTIC (entrée info-gain) |
-| BKT params | `cs.PSlip`, `cs.PGuess` | DIAGNOSTIC (info-gain bayésien) |
+| BKT mastery | `cs.PMastery` | INSTRUCTION (filtre fringe + score), MAINTENANCE (filtre mastered), DIAGNOSTIC (exclusion des états NaN uniquement) |
+| BKT params | `cs.PSlip`, `cs.PGuess` | DIAGNOSTIC (vraisemblance des observations rejouées par le placement) |
+| Observations diagnostiques qualifiées | interactions + tentatives évaluées | DIAGNOSTIC (rejeu du placement) |
 | KST prereqs | `graph.Prerequisites` | INSTRUCTION (calcul fringe externe) |
 | FSRS state | `cs.Stability`, `cs.ElapsedDays`, `cs.CardState` | MAINTENANCE (urgence = 1 − retention) |
 | Seuils unifiés | `algorithms.MasteryBKT()`, `MasteryKST()` | INSTRUCTION (filtre fringe), définition « mastered » pour MAINTENANCE |
@@ -105,8 +119,8 @@ courante »*. C'est un **signal**, pas une **erreur** :
   (apprenant a tout maîtrisé) — `[2]` doit basculer en MAINTENANCE.
 - En **MAINTENANCE** : aucun concept maîtrisé (apprenant débute) —
   `[2]` doit basculer en INSTRUCTION.
-- En **DIAGNOSTIC** : aucune ambiguïté informative (P(L) saturé à 0
-  ou 1 partout) — `[2]` peut transiter selon le contexte.
+- En **DIAGNOSTIC** : aucun concept non classé dans le pool éligible —
+  le placement est terminé ou le gate a tout filtré.
 
 Le caller (l'orchestrateur `[2]`) interprète `NoFringe` comme
 une *suggestion de transition de phase*, pas comme un échec d'API.
@@ -121,8 +135,11 @@ double pour clarifier l'intention. Le caller checke `NoFringe`
 
 ### 4.1 Calcul de la frange externe (helper privé)
 
+Implémentation actuelle : `externalFringeVerified(states, graph, verified)`
+dans `engine/concept_selector.go`.
+
 ```
-externalFringe(states, graph):
+externalFringeVerified(states, graph, verified):
     stateByConcept = map[concept] → state
     fringe = []
     for concept in graph.Concepts:
@@ -133,15 +150,17 @@ externalFringe(states, graph):
             mastery = cs.PMastery
 
         if mastery >= MasteryBKT():
-            continue                               // déjà maîtrisé
+            continue                               // estimation déjà haute
 
-        prereqs = graph.Prerequisites[concept]
         prereqs_ok = true
-        for p in prereqs:
+        for p in graph.Prerequisites[concept]:
             cs_p = stateByConcept[p]
-            mp = 0  // si pas de state → mastery=0 → prereq non satisfait
-            if cs_p != nil && !math.IsNaN(cs_p.PMastery):
-                mp = cs_p.PMastery
+            mp = 0  // pas de state → prereq non satisfait
+            if cs_p != nil:
+                if math.IsNaN(cs_p.PMastery): prereqs_ok = false; break
+                // un prérequis sans succès vérifié (tentative évaluée
+                // réussie ou succès FSRS espacé) compte au plus 0.84
+                mp = PrerequisiteRoutingMastery(p, cs_p, verified)
             if mp < MasteryKST():
                 prereqs_ok = false
                 break
@@ -149,7 +168,7 @@ externalFringe(states, graph):
             continue
 
         fringe.append((concept, mastery))
-    return fringe
+    return fringe trié alphabétiquement   // tie-break OQ-4.4
 ```
 
 Notes :
@@ -158,16 +177,16 @@ Notes :
   (apprenant pas encore exposé) est traité `mastery=0`. Cohérent avec
   la sémantique KST : un concept *peut être appris* dès que ses prereqs
   sont satisfaits, qu'il y ait eu une interaction ou non.
-- NaN dans `cs.PMastery` exclut le concept de la frange (NaN < 0.85
-  est `false` en Go, mais `>= MasteryKST()` aussi est false → un prereq
-  NaN ferme la frange en aval). Comportement conservateur : on ne
-  pousse pas un concept dont l'état est corrompu.
+- NaN dans `cs.PMastery` exclut le concept de la frange, et un
+  prérequis NaN ferme la frange en aval. Comportement conservateur : on
+  ne pousse pas un concept dont l'état est corrompu.
+- `verified == nil` désactive le plafond des prérequis non vérifiés.
 
 ### 4.2 INSTRUCTION
 
 ```
 INSTRUCTION(states, graph, goalRelevance):
-    fringe = externalFringe(states, graph)
+    fringe = externalFringeVerified(states, graph, verified)
     if len(fringe) == 0:
         return {NoFringe: true, Phase: INSTRUCTION,
                 Rationale: "tous concepts maîtrisés ou prereqs absents"}
@@ -227,59 +246,53 @@ théorique : `mastery >= 0.85` mais jamais reviewé FSRS — devrait pas
 arriver), tous les scores sont 0 ; le tie-break alphabétique pousse
 le premier. Acceptable comme dégénéré.
 
-### 4.4 DIAGNOSTIC (info-gain bayésien)
+### 4.4 DIAGNOSTIC (placement adaptatif)
+
+La conception initiale (argmax de `BKTInfoGain` sur les concepts non
+saturés, tie-break alphabétique) a été remplacée : tous les concepts
+partent du même P(L)=0.1, donc l'info-gain était identique partout et
+l'ordre devenait alphabétique ; un diagnostic réussi ne montait qu'à
+0.33 (moins qu'une pratique réussie) et rien n'était propagé dans le
+graphe.
+
+Implémentation actuelle (`engine/placement.go`, `selectDiagnostic`) :
 
 ```
-DIAGNOSTIC(states, graph, goalRelevance):
-    candidates = []
-    for cs in states:
-        if cs == nil || math.IsNaN(cs.PMastery): continue
-        if cs.PMastery <= 0.05 || cs.PMastery >= 0.95: continue  // saturés
-        candidates.append(cs)
+Placement = ReplayPlacement(domainGraph, states, observations, budget)
+    // chaque concept part de PlacementPrior = 0.5
+    for obs in observations qualifiées (sans indice, liée à une tentative
+                                        évaluée, depuis l'entrée en phase):
+        BKTObserve(obs.concept, obs.success)          // item direct
+        if obs.success: BKTObserve(ancêtres(obs.concept), true)
+        else:           BKTObserve(descendants(obs.concept), false)
 
-    if len(candidates) == 0:
-        return {NoFringe: true, Phase: DIAGNOSTIC, ...}
+classé(c) = itemsDirects(c) >= 2
+         || (observé(c) && (P(c) <= 0.15 || P(c) >= 0.85))
 
-    bestConcept = ""
-    bestScore   = -1
-    for cs in candidates sorted alphabetically by Concept:
-        ig = BKTInfoGain(cs)            // algorithms/bkt_info_gain.go
-        score = ig                       // pas de × goal_relevance par défaut
-        if score > bestScore:
-            bestScore = score
-            bestConcept = cs.Concept
-
-    return {Concept: bestConcept, Score: bestScore, Phase: DIAGNOSTIC,
-            Rationale: fmt.Sprintf("max info-gain=%.3f sur %d candidats", ig, len(candidates))}
+DIAGNOSTIC(pool, placement):
+    candidats = non classés ∩ pool (gate), hors états NaN
+    trier par (profondeur de prérequis, nom)
+    d* = profondeur du médian inférieur
+    parmi les candidats de profondeur d*, argmax du nombre d'ancêtres et
+    de descendants encore non classés ; tie-break alphabétique
 ```
 
-#### Formule `BKTInfoGain`
-
-```go
-// algorithms/bkt_info_gain.go
-//
-// BKTInfoGain returns the expected reduction in entropy of P(L|concept)
-// after observing the next response under the BKT generative model.
-// Formula:
-//
-//   H(p)             = -p log2(p) - (1-p) log2(1-p)
-//   P(correct)       = P(L)·(1-P(S)) + (1-P(L))·P(G)
-//   P(L | correct)   = P(L)·(1-P(S)) / P(correct)
-//   P(L | incorrect) = P(L)·P(S)     / (1 - P(correct))
-//   E[H(post)]       = P(correct)·H(P(L|correct)) +
-//                      (1-P(correct))·H(P(L|incorrect))
-//   InfoGain         = H(P(L)) - E[H(post)]
-//
-// Range: [0, 1]. Peaks near P(L)=0.5 (max uncertainty); approaches 0
-// at the saturation edges. Pure function — testable in isolation.
-func BKTInfoGain(cs *models.ConceptState) float64 { ... }
-```
-
-Tests indépendants en `algorithms/bkt_info_gain_test.go`. Ils vivent
-à côté du câblage runtime afin que la formule reste validée
-isolément. (OQ-4.2 = A.)
-
----
+- La profondeur est la longueur du plus long chemin de prérequis sous le
+  concept (racines = 0) ; les cycles ne comptent pas.
+- Une réussite place le concept testé et ses prérequis, un échec le
+  concept et ce qui en dépend : c'est une dichotomie sur la profondeur.
+- Les mises à jour d'observation à slip/guess fixes commutent : le
+  rejeu ne dépend pas de l'ordre des réponses.
+- `goal_relevance` reste ignoré (décision A1 ci-dessous) : le placement
+  situe l'apprenant sur tout le graphe.
+- La phase se termine quand tout est classé ou quand le budget
+  `PhaseConfig.NDiagnosticMax` (12 items qualifiés) est atteint
+  (`EvaluatePhase`). L'entropie n'est plus qu'un signal d'audit.
+- `ApplyPlacementEstimates` écrit les estimations du placement (P(L)
+  seulement, jamais les champs FSRS) pour les concepts dont toute
+  l'évidence vient du placement ; il doit être appelé par
+  `record_interaction` dans la transaction d'un DIAGNOSTIC_ASSESSMENT lié
+  à une tentative.
 
 ## 5. Cas dégénérés
 
@@ -326,23 +339,24 @@ TestSelectConcept_Maintenance_NewCardSkippedAsZeroUrgency
 TestSelectConcept_Maintenance_TieBreakAlphabetical
 ```
 
-### 6.3 Unit — DIAGNOSTIC
+### 6.3 Unit — DIAGNOSTIC (placement)
 
 ```go
-TestSelectConcept_Diagnostic_PicksMaxInfoGain
-TestSelectConcept_Diagnostic_NoFringe_AllSaturated
-TestSelectConcept_Diagnostic_IgnoresGoalRelevance  // confirme OQ-4.2 default
+// engine/placement_test.go
+TestPlacementSingleSuccessBeatsColdPrior
+TestPlacementFailureClassifiesAfterOneItem
+TestPlacementPropagatesSuccessToAncestorsAndFailureToDescendants
+TestPlacementNextConceptBisectsTheChain
+TestPlacementCompletesOnClassificationOrBudget
+TestSelectDiagnosticUsesPlacementAndDomainGraph
+// engine/orchestrator_test.go
+TestOrchestrate_AdaptivePlacementBisectsPrerequisiteChain
+TestApplyPlacementEstimatesPropagatesWithoutCreatingCards
 ```
 
 ### 6.4 Unit — info-gain (algorithms/)
 
-```go
-TestBKTInfoGain_PeaksAtPL0_5
-TestBKTInfoGain_NearZeroAtSaturationLow
-TestBKTInfoGain_NearZeroAtSaturationHigh
-TestBKTInfoGain_NonNegative
-TestBKTInfoGain_RespectsSlipGuess  // info-gain ↓ avec P(S),P(G) ↑
-```
+Supprimé avec `BKTInfoGain`.
 
 ### 6.5 Unit — helper `relevance()`
 
@@ -437,6 +451,9 @@ masqué par un défaut. Le coût d'un crash bien typé est inférieur au
 coût d'un comportement silencieusement dégradé.
 
 ### OQ-4.2 — Implémenter info-gain dans `[4]` ou différer en `[2]` ?
+
+> Remplacée par le placement adaptatif (§4.4). La sous-décision A1
+> (ignorer `goal_relevance` en DIAGNOSTIC) est conservée.
 
 **A.** Implémenter `BKTInfoGain` dans `algorithms/bkt_info_gain.go`
 + tests isolés + branche DIAGNOSTIC dans `SelectConcept`. Bénéfice :
@@ -628,10 +645,9 @@ les trois cas dégénérés :
 | Action | Fichier | Notes |
 |--------|---------|-------|
 | **Création** | `models/regulation.go` | type `Phase` + constantes (`PhaseInstruction`, `PhaseDiagnostic`, `PhaseMaintenance`). Sera consommé aussi par `[2]`. |
-| **Création** | `engine/concept_selector.go` | `SelectConcept`, `Selection`, `externalFringe`, helper `relevance` (~280 lignes) |
+| **Création** | `engine/concept_selector.go` | `SelectConcept`, `Selection`, frange externe (aujourd'hui `externalFringeVerified`), helper `relevance` (~280 lignes) |
 | **Création** | `engine/concept_selector_test.go` | ~380 lignes (3 phases + degenerate + tie-break) |
-| **Création** | `algorithms/bkt_info_gain.go` | `BKTInfoGain` — fonction pure (~60 lignes) |
-| **Création** | `algorithms/bkt_info_gain_test.go` | ~100 lignes |
+| **Création** (supprimé depuis) | `algorithms/bkt_info_gain.go` | `BKTInfoGain` — remplacé par `engine/placement.go` |
 | **Modif** | `tools/prompt.go` | `regulationConceptEnabled()` + `conceptSelectorAppendix` |
 | **Câblage courant** | `engine/orchestrator.go` | l'orchestrateur appelle `SelectConcept`; `REGULATION_CONCEPT` reste limité à l'appendix prompt |
 
@@ -643,7 +659,6 @@ les trois cas dégénérés :
       accesseurs, pas de literal)
 - [ ] Aucun literal `0.85` ou `0.70` couplé à `mastery` dans
       `engine/concept_selector.go` (drift test `[7]` passe)
-- [ ] InfoGain : peak vérifié à P(L)=0.5, ≈0 aux saturations
 - [ ] Tests OQ-4.3 (uncovered concept default) présents et verts
 - [ ] Tests d'oscillation/dégénérescence (NaN, empty, all-mastered) verts
 
@@ -665,16 +680,16 @@ les trois cas dégénérés :
 | Aspect | Décision |
 |--------|----------|
 | **Signature** | `SelectConcept(phase, states, graph, goalRelevance) Selection` — quasi pure |
-| **3 branches** | INSTRUCTION (argmax `gr × (1-m)` sur frange), MAINTENANCE (argmax `(1-R) × gr` sur mastered), DIAGNOSTIC (argmax `BKTInfoGain` sur non-saturés) |
+| **3 branches** | INSTRUCTION (argmax `gr × (1-m)` sur frange), MAINTENANCE (argmax `(1-R) × gr` sur mastered), DIAGNOSTIC (placement adaptatif : médian de profondeur parmi les non classés) |
 | **Signal NoFringe** | Distinct de l'erreur ; suggère bascule de phase à `[2]` |
 | **Frange externe** | OQ-4.1 = A pour (a) ; phase invalide → erreur explicite + slog.Error (signature `(Selection, error)`) |
-| **Info-gain** | OQ-4.2 = A (algorithms/, testé isolé, non câblé). Sub : A1 v1 — pas de mult goal_relevance en DIAGNOSTIC, à ré-arbitrer avec données réelles |
+| **DIAGNOSTIC** | Info-gain (OQ-4.2 = A) remplacé par le placement adaptatif. Sub A1 conservée : pas de goal_relevance en DIAGNOSTIC |
 | **Concept manquant goal_rel** | OQ-4.3 = **B'** (exclusion + re-décomposition forcée via NoFringe) |
 | **Tie-break** | OQ-4.4 = A (alphabétique). Test alpha/beta/gamma à scores égaux requis |
 | **MAINTENANCE urgency** | OQ-4.5 = A (`1 - retention`). Note v2 : dérivée `elapsed/stability` possible |
 | **INSTRUCTION formula** | OQ-4.6 = A (confirmer `gr × (1 - mastery)`). Tests dégénérés : `gr≈0`, `mastery≈BKT`, frange normale |
 | **Flag** | `REGULATION_CONCEPT=off` retire seulement l'appendix prompt ; `SelectConcept` reste exécuté par l'orchestrateur |
-| **Findings résolus** | F-3.X (validation empirique de [1]) ; pose la fondation de `[2]` qui consommera `Phase` |
+| **Problèmes résolus** | validation empirique de [1] ; pose la fondation de `[2]` qui consommera `Phase` |
 
 ---
 

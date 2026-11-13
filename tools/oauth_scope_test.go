@@ -46,15 +46,15 @@ func TestAddToolEnforcesGranularOAuthScopes(t *testing.T) {
 			var readCalls, writeCalls, readWriteCalls int
 			server := mcp.NewServer(&mcp.Implementation{Name: "scope-test", Version: "0"}, nil)
 			registerProbe := func(name string, calls *int) {
-				addTool(server, &mcp.Tool{Name: name}, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
+				addTool(server, nil, &mcp.Tool{Name: name}, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
 					*calls++
 					result, _ := jsonResult(map[string]bool{"called": true})
 					return result, map[string]bool{"called": true}, nil
 				})
 			}
-			registerProbe("get_pending_alerts", &readCalls)
+			registerProbe("get_learner_state", &readCalls)
 			registerProbe("record_interaction", &writeCalls)
-			registerProbe("get_next_activity", &readWriteCalls)
+			registerProbe("get_memory_state", &readWriteCalls)
 			server.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
 				return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 					ctx = context.WithValue(ctx, auth.LearnerIDKey, "scope-learner")
@@ -84,9 +84,9 @@ func TestAddToolEnforcesGranularOAuthScopes(t *testing.T) {
 				}
 				return result
 			}
-			readResult := call("get_pending_alerts")
+			readResult := call("get_learner_state")
 			writeResult := call("record_interaction")
-			readWriteResult := call("get_next_activity")
+			readWriteResult := call("get_memory_state")
 			if readResult.IsError == tc.wantRead {
 				t.Fatalf("read IsError=%v, want success=%v; body=%q", readResult.IsError, tc.wantRead, resultText(readResult))
 			}
@@ -181,7 +181,7 @@ func TestToolOAuthScopeMiddlewareDefersUnknownToolToSDK(t *testing.T) {
 	ctx := context.WithValue(context.Background(), auth.LearnerIDKey, "unknown-tool-learner")
 	ctx = auth.WithOAuthScope(ctx, models.OAuthScopeLearnerRead)
 	req := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "tool_that_does_not_exist"}}
-	if _, err := toolOAuthScopeMiddleware("https://test.example", true)(next)(ctx, "tools/call", req); err != nil {
+	if _, err := toolOAuthScopeMiddleware(&Deps{BaseURL: "https://test.example", OAuthGranularScopes: true, Regulation: RegulationFlagsFromEnv()})(next)(ctx, "tools/call", req); err != nil {
 		t.Fatalf("middleware: %v", err)
 	}
 	if !called {
@@ -199,7 +199,7 @@ func TestToolOAuthScopeMiddlewareDefersDisabledToolToSDK(t *testing.T) {
 	ctx := context.WithValue(context.Background(), auth.LearnerIDKey, "disabled-tool-learner")
 	ctx = auth.WithOAuthScope(ctx, models.OAuthScopeLearnerRead)
 	req := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "set_goal_relevance"}}
-	if _, err := toolOAuthScopeMiddleware("https://test.example", true)(next)(ctx, "tools/call", req); err != nil {
+	if _, err := toolOAuthScopeMiddleware(&Deps{BaseURL: "https://test.example", OAuthGranularScopes: true, Regulation: RegulationFlagsFromEnv()})(next)(ctx, "tools/call", req); err != nil {
 		t.Fatalf("middleware: %v", err)
 	}
 	if !called {

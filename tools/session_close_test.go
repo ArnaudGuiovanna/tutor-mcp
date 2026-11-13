@@ -188,8 +188,8 @@ func TestRecordSessionClose_InstructionMentionsOLM(t *testing.T) {
 		t.Fatalf("recap_brief missing or wrong shape: %+v", out)
 	}
 	instruction, _ := recap["instruction"].(string)
-	if !strings.Contains(instruction, "get_olm_snapshot") {
-		t.Errorf("instruction should mention get_olm_snapshot: %q", instruction)
+	if !strings.Contains(instruction, "get_learner_state(view=model)") {
+		t.Errorf("instruction should mention get_learner_state(view=model): %q", instruction)
 	}
 	if !strings.Contains(instruction, "olm:") {
 		t.Errorf("instruction should mention 'olm:' kind: %q", instruction)

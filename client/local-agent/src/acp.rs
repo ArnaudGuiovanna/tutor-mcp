@@ -2199,12 +2199,12 @@ mod tests {
                 }
                 let result = match request["method"].as_str().unwrap() {
                     "tools/list" => json!({"tools":[{
-                        "name":"get_pending_alerts", "description":"Consulter les alertes en attente",
-                        "inputSchema":{"type":"object","properties":{"domain_id":{"type":"string"}},"additionalProperties":false}
+                        "name":"get_learner_state", "description":"Consulter les alertes en attente",
+                        "inputSchema":{"type":"object","properties":{"domain_id":{"type":"string"},"view":{"type":"string"}},"additionalProperties":false}
                     }]}),
                     "tools/call" => {
-                        assert_eq!(request["params"]["name"], "get_pending_alerts");
-                        assert_eq!(request["params"]["arguments"], json!({"domain_id":"verified-domain"}));
+                        assert_eq!(request["params"]["name"], "get_learner_state");
+                        assert_eq!(request["params"]["arguments"], json!({"domain_id":"verified-domain","view":"progress"}));
                         json!({"content":[],"structuredContent":{"alerts":["Une révision est disponible."]}})
                     }
                     _ => panic!("unexpected MCP method"),
@@ -2280,11 +2280,11 @@ mod tests {
                     permission_count += 1;
                     assert_eq!(
                         message["params"]["toolCall"]["rawInput"]["tool"],
-                        "get_pending_alerts"
+                        "get_learner_state"
                     );
                     assert_eq!(
                         message["params"]["toolCall"]["rawInput"]["arguments"],
-                        json!({"domain_id":"verified-domain"})
+                        json!({"domain_id":"verified-domain","view":"progress"})
                     );
                     assert!(!server
                         .observed
@@ -2302,7 +2302,7 @@ mod tests {
                             text.push_str(update["content"]["text"].as_str().unwrap())
                         }
                         "tool_call" | "tool_call_update" => {
-                            assert_eq!(update["title"], "get_pending_alerts");
+                            assert_eq!(update["title"], "get_learner_state");
                             terminal = update["status"].as_str().unwrap().to_owned();
                         }
                         _ => panic!("unexpected update"),
@@ -3111,7 +3111,7 @@ mod tests {
                 controls: 0,
                 observation: Arc::new(Mutex::new(TurnObservation::new())),
             };
-            output.tool_update(json!({"sessionUpdate":"tool_call","toolCallId":"fixture","title":"get_pending_alerts","status":"pending"})).unwrap();
+            output.tool_update(json!({"sessionUpdate":"tool_call","toolCallId":"fixture","title":"get_learner_state","status":"pending"})).unwrap();
             output.approve("fixture", json!({"sessionId":"session"}))
         });
         assert!(matches!(rx.recv().await, Some(StreamItem::ToolUpdate(_))));

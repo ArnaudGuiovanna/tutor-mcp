@@ -7,13 +7,13 @@ func TestComputeFrontier(t *testing.T) {
 		Concepts:      []string{"A", "B", "C", "D"},
 		Prerequisites: map[string][]string{"B": {"A"}, "C": {"A", "B"}, "D": {"C"}},
 	}
-	mastery := map[string]float64{"A": 0.8, "B": 0.1, "C": 0.0, "D": 0.0}
+	mastery := map[string]float64{"A": 0.9, "B": 0.1, "C": 0.0, "D": 0.0}
 	frontier := ComputeFrontier(graph, mastery)
 	if len(frontier) != 1 || frontier[0] != "B" {
 		t.Errorf("frontier = %v, want [B]", frontier)
 	}
 
-	mastery["B"] = 0.75
+	mastery["B"] = 0.85
 	frontier = ComputeFrontier(graph, mastery)
 	if len(frontier) != 1 || frontier[0] != "C" {
 		t.Errorf("frontier = %v, want [C]", frontier)

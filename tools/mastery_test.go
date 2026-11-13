@@ -187,7 +187,7 @@ func TestMasteryReadyAlertAndCheckMasteryShareTrustedTransferFailure(t *testing.
 	if before.IsError || decodeResult(t, before)["mastery_ready"] != true {
 		t.Fatalf("trusted passing transfer baseline should be ready: %s", resultText(before))
 	}
-	alertsBefore := callTool(t, deps, registerGetPendingAlerts, "L_owner", "get_pending_alerts", map[string]any{"domain_id": domain.ID})
+	alertsBefore := callLearnerView(t, deps, "L_owner", "progress", map[string]any{"domain_id": domain.ID})
 	if alertsBefore.IsError || !resultHasAlertType(t, alertsBefore, string(models.AlertMasteryReady), "calc") {
 		t.Fatalf("MASTERY_READY missing before trusted failure: %s", resultText(alertsBefore))
 	}
@@ -213,7 +213,7 @@ func TestMasteryReadyAlertAndCheckMasteryShareTrustedTransferFailure(t *testing.
 	if profile["readiness_label"] != "blocked" {
 		t.Fatalf("trusted failure profile=%v, want blocked", profile)
 	}
-	alertsAfter := callTool(t, deps, registerGetPendingAlerts, "L_owner", "get_pending_alerts", map[string]any{"domain_id": domain.ID})
+	alertsAfter := callLearnerView(t, deps, "L_owner", "progress", map[string]any{"domain_id": domain.ID})
 	if alertsAfter.IsError {
 		t.Fatalf("get_pending_alerts after failure: %s", resultText(alertsAfter))
 	}
@@ -244,7 +244,7 @@ func TestCheckMastery_AcceptsLegacyConceptID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res := callTool(t, deps, registerCheckMastery, "L_owner", "check_mastery", map[string]any{"concept_id": "legacy_calc"})
+	res := callTool(t, deps, registerCheckMastery, "L_owner", "check_mastery", map[string]any{"concept": "legacy_calc"})
 	if res.IsError {
 		t.Fatalf("did not expect error for legacy concept_id, got %q", resultText(res))
 	}

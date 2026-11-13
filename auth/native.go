@@ -5,8 +5,10 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -156,6 +158,15 @@ func nativeNonce(value string) bool {
 	return true
 }
 
+// newOpaqueToken returns 256 random bits for a single-use bearer value.
+func newOpaqueToken() (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
 func nativeTokenHash(value string) string {
 	hash := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(hash[:])
@@ -240,11 +251,35 @@ func nativeIdentityMatches(identity *models.NativeIdentity, tenant, signer, acti
 	return identity.PublicKey == signer
 }
 
+// SetRateLimitBackend moves both challenge budgets to the shared backend
+// (RATELIMIT_BACKEND=postgres) so every API instance draws from one bucket
+// per key. The budgets themselves are unchanged. Call it during startup,
+// before requests are served; nil restores the process-local buckets.
+func (s *NativeIdentityServer) SetRateLimitBackend(backend RateLimitBackend) {
+	if s == nil {
+		return
+	}
+	s.challengeIPLimiter.SetBackend(backend)
+	s.challengeIdentityLimiter.SetBackend(backend)
+}
+
+// Stop releases the challenge limiters' background cleanup. It is safe to
+// call more than once.
+func (s *NativeIdentityServer) Stop() {
+	if s == nil {
+		return
+	}
+	s.challengeIPLimiter.Stop()
+	s.challengeIdentityLimiter.Stop()
+}
+
 func (s *NativeIdentityServer) allowChallenge(ip, publicKey string) bool {
 	if s.challengeIPLimiter == nil || s.challengeIdentityLimiter == nil {
 		return true
 	}
-	return s.challengeIdentityLimiter.Allow(ip+"\x00"+publicKey) && s.challengeIPLimiter.Allow(ip)
+	// "|" never occurs in an IP literal or an encoded public key, and unlike
+	// NUL it is storable in a shared PostgreSQL TEXT bucket key.
+	return s.challengeIdentityLimiter.Allow(ip+"|"+publicKey) && s.challengeIPLimiter.Allow(ip)
 }
 
 func (s *NativeIdentityServer) HandleChallenge(w http.ResponseWriter, r *http.Request) {

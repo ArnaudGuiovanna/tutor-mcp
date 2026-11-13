@@ -96,7 +96,7 @@ func TestRateLimitMiddleware_SpoofedForwardedPrefixSharesBucket(t *testing.T) {
 	}))
 	statuses := make([]int, 0, 6)
 	for i := 0; i < 6; i++ {
-		r := httptest.NewRequest(http.MethodPost, "/console/login", nil)
+		r := httptest.NewRequest(http.MethodPost, "/authorize", nil)
 		r.RemoteAddr = "127.0.0.1:50000"
 		spoofed := net.IPv4(203, 0, 113, byte(i+1)).String()
 		r.Header.Set("X-Forwarded-For", spoofed+", 198.51.100.42")

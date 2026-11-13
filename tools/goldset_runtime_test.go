@@ -85,7 +85,7 @@ func TestRuntimeGoldsetStatic(t *testing.T) {
 					prepared := callTool(t, deps, registerPrepareAssessmentAttempt, "L_owner", "prepare_assessment_attempt", map[string]any{
 						"domain_id": domain.ID, "concept": goldsetConcept,
 						"activity_type": record.ActivityType, "observable": "Goldset observable response",
-						"task_text": "Frozen goldset task", "rubric_json": goldsetRubricJSON(),
+						"task_text": "Frozen goldset task", "rubric": json.RawMessage(goldsetRubricJSON()),
 					})
 					if prepared.IsError {
 						t.Fatalf("%s: prepare record %d failed: %s", scenario.Name, i, resultText(prepared))
@@ -103,7 +103,7 @@ func TestRuntimeGoldsetStatic(t *testing.T) {
 					args["session_id"] = sessionID
 					args["evaluator_id"] = "goldset-host-v1"
 					args["evaluation_method"] = "host_llm"
-					args["rubric_score_json"] = goldsetRubricScoreJSON(record.Success)
+					args["rubric_score"] = json.RawMessage(goldsetRubricScoreJSON(record.Success))
 				}
 				if record.ActivityType == string(models.ActivityTransferProbe) {
 					args["transfer_dimension"] = "far"

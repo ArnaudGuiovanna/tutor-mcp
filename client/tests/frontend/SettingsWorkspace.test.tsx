@@ -26,8 +26,8 @@ describe('Compte et paramètres persistants',()=>{
  it('conserve les autorisations réelles dans la portée du compte, serveur et agent',async()=>{
   const state=initialState(true);state.settings.tutor.mode='remote';state.settings.tutor.url='https://institution.example/';state.settings.setupCompleted=true;const fixture=client(state);
   vi.mocked(fixture.api.tutorOverview).mockResolvedValue({identity:{tenantId:'tenant-1',userId:'u',membershipId:'member-1'},context:{},formations:{},availableFormations:{}});
-  vi.mocked(fixture.api.listMcpTools).mockResolvedValue({tools:[{name:'get_next_activity',description:'Next activity'},{name:'record_interaction'}]});await settings(fixture.api);
-  await userEvent.click(screen.getByText('Autorisations par outil'));await screen.findByText('get_next_activity');await userEvent.selectOptions(screen.getByLabelText('Règle pour les outils Tutor'),'allow');
+  vi.mocked(fixture.api.listMcpTools).mockResolvedValue({tools:[{name:'get_learner_state',description:'Next activity'},{name:'record_interaction'}]});await settings(fixture.api);
+  await userEvent.click(screen.getByText('Autorisations par outil'));await screen.findByText('get_learner_state');await userEvent.selectOptions(screen.getByLabelText('Règle pour les outils Tutor'),'allow');
   await waitFor(()=>expect(fixture.getState().settings.permissionPolicy).toEqual({origin:'https://institution.example',institutionId:'tenant-1',agentId:state.settings.targetId,defaultDecision:'allow',tools:{}}));
   await userEvent.selectOptions(screen.getByLabelText('Autorisation pour record_interaction'),'deny');await waitFor(()=>expect(fixture.getState().settings.permissionPolicy?.tools.record_interaction).toBe('deny'));
   await userEvent.click(screen.getByRole('tab',{name:'Ergonomie'}));await userEvent.click(screen.getByRole('tab',{name:'Connexion et outils'}));expect((await screen.findByLabelText('Règle pour les outils Tutor')as HTMLSelectElement).value).toBe('allow');
@@ -53,8 +53,8 @@ describe('Compte et paramètres persistants',()=>{
 
 describe('Activité textuelle du tuteur',()=>{
  it('suit les appels réels puis la rédaction sans dépliant',()=>{
-  const view=render(<TutorActivity tools={[{id:'tool-1',title:'tutor/get_next_activity',status:'in_progress'}]} streaming={false} permission={false} preparing=""/>);expect(screen.getByRole('status').textContent).toContain('Je prépare la prochaine activité…');expect(document.querySelector('details')).toBeNull();
-  view.rerender(<TutorActivity tools={[{id:'tool-1',title:'tutor/get_next_activity',status:'completed'}]} streaming permission={false} preparing=""/>);expect(screen.getByRole('status').textContent).toContain('Je rédige la réponse…');
+  const view=render(<TutorActivity tools={[{id:'tool-1',title:'tutor/prepare_pedagogical_turn',status:'in_progress'}]} streaming={false} permission={false} preparing=""/>);expect(screen.getByRole('status').textContent).toContain('Je prépare la prochaine activité…');expect(document.querySelector('details')).toBeNull();
+  view.rerender(<TutorActivity tools={[{id:'tool-1',title:'tutor/prepare_pedagogical_turn',status:'completed'}]} streaming permission={false} preparing=""/>);expect(screen.getByRole('status').textContent).toContain('Je rédige la réponse…');
   view.rerender(<TutorActivity tools={[]} streaming={false} permission preparing=""/>);expect(screen.getByRole('status').textContent).toContain('Votre autorisation est attendue.');
  });
  it('conserve les paramètres des messages traduits',()=>{setInterfaceLanguage('en');expect(t('{count} apprenant(s) inscrit(s) conservent leur version.',{count:4})).toBe('4 enrolled learner(s) keep their version.');expect(english['Langue de Tutor']).toBe('Tutor language');});
@@ -117,7 +117,7 @@ it('connecte Tutor avec l’agent déjà lancé et règle les outils sur le mêm
  await user.selectOptions(screen.getByLabelText('Règle pour les outils Tutor'),'allow');
  await waitFor(()=>expect(fixture.getState().settings.permissionPolicy).toMatchObject({origin:'https://new.example',institutionId:'tenant-1',agentId:state.settings.targetId,defaultDecision:'allow'}));
  expect(screen.getByRole('tab',{name:'Connexion et outils'}).getAttribute('aria-selected')).toBe('true');
- await user.click(screen.getByRole('tab',{name:'Institution'}));expect(screen.queryByLabelText('Adresse de Tutor')).toBeNull();
+ await user.click(screen.getByRole('tab',{name:'Institution'}));expect(screen.queryByRole('textbox',{name:'Adresse de Tutor'})).toBeNull();
  await user.click(screen.getByRole('button',{name:'Gérer la connexion et les outils'}));expect(screen.getByRole('tab',{name:'Connexion et outils'}).getAttribute('aria-selected')).toBe('true');
 });
 

@@ -4,7 +4,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"tutor-mcp/auth"
@@ -43,13 +42,13 @@ func TestTenantToolReadRoutesAreExplicitAndEnforced(t *testing.T) {
 		"list_formations", "list_formation_versions", "review_formation_version",
 		"get_training_groups", "get_my_badges", "get_learner_badges", "list_trainer_cohorts", "get_cohort_insights", "get_cohort_statistics", "get_learner_progress",
 		"list_available_formations", "get_my_formations", "get_learner_formation", "get_formation_version",
-		"get_pending_alerts", "check_mastery", "get_learner_context", "get_availability_model", "get_olm_snapshot", "get_pedagogical_snapshots",
+		"check_mastery", "get_learner_state", "get_availability_model", "get_pedagogical_snapshots",
 		"get_decision_replay_summary", "validate_domain_graph", "get_autonomy_metrics", "feynman_challenge", "transfer_challenge", "read_raw_session",
-		"get_misconceptions", "list_implementation_intentions", "get_dashboard_state", "get_goal_relevance",
+		"get_misconceptions", "list_implementation_intentions", "get_goal_relevance",
 		// trainingPolicy only reads when it is not setting the policy.
 		"get_training_policy",
 	}
-	writers := []string{"get_curriculum_snapshot", "get_memory_state", "get_next_activity", "get_metacognitive_mirror"}
+	writers := []string{"get_curriculum_snapshot", "get_memory_state", "prepare_pedagogical_turn"}
 	if len(readOnlyTools) != len(readers) {
 		t.Fatal("review the explicit read-only tool inventory")
 	}
@@ -61,9 +60,6 @@ func TestTenantToolReadRoutesAreExplicitAndEnforced(t *testing.T) {
 			deps.Institution = true
 			ownerScope := models.LegacyPrincipal("L_owner").TenantScope()
 			if _, err := persistence.SetMembershipAuthorization(t.Context(), ownerScope, models.MembershipStatusActive, []string{models.RoleOwner, models.RoleLearner}); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := persistence.RecordMembershipMFAVerification(t.Context(), ownerScope, time.Now()); err != nil {
 				t.Fatal(err)
 			}
 			owner, err := persistence.GetPrincipalForLearner(t.Context(), "L_owner", []string{models.OAuthScopeLearner})
@@ -107,7 +103,9 @@ func TestTenantToolReadRoutesAreExplicitAndEnforced(t *testing.T) {
 						case "get_formation_version", "review_formation_version":
 							args["version_id"] = "missing"
 						case "get_training_groups":
-							args["id"] = "formation:missing"
+							args["training_id"] = "formation:missing"
+						case "prepare_pedagogical_turn":
+							args["mode"] = "activity"
 						case "list_formation_versions":
 							args["formation_id"] = "missing"
 						}

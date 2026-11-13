@@ -7,27 +7,27 @@ import (
 	"testing"
 )
 
-func TestGetOLMSnapshot_NoAuth(t *testing.T) {
+func TestLearnerModelView_NoAuth(t *testing.T) {
 	_, deps := setupToolsTest(t)
-	res := callTool(t, deps, registerGetOLMSnapshot, "", "get_olm_snapshot", map[string]any{})
+	res := callLearnerView(t, deps, "", "model", nil)
 	if !res.IsError {
 		t.Fatalf("expected auth error")
 	}
 }
 
-func TestGetOLMSnapshot_NoActiveDomain(t *testing.T) {
+func TestLearnerModelView_NoActiveDomain(t *testing.T) {
 	_, deps := setupToolsTest(t)
-	res := callTool(t, deps, registerGetOLMSnapshot, "L_owner", "get_olm_snapshot", map[string]any{})
-	if !res.IsError {
-		t.Fatalf("expected error for learner with no domain, got %q", resultText(res))
+	res := callLearnerView(t, deps, "L_owner", "model", nil)
+	if res.IsError || decodeResult(t, res)["needs_domain_setup"] != true {
+		t.Fatalf("expected needs_domain_setup for learner with no domain, got %q", resultText(res))
 	}
 }
 
-func TestGetOLMSnapshot_HappyPath(t *testing.T) {
+func TestLearnerModelView_HappyPath(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	d := makeOwnerDomain(t, store, "L_owner", "math")
 
-	res := callTool(t, deps, registerGetOLMSnapshot, "L_owner", "get_olm_snapshot", map[string]any{
+	res := callLearnerView(t, deps, "L_owner", "model", map[string]any{
 		"domain_id": d.ID,
 	})
 	if res.IsError {
@@ -45,14 +45,12 @@ func TestGetOLMSnapshot_HappyPath(t *testing.T) {
 	}
 }
 
-func TestGetOLMSnapshot_GlobalScope(t *testing.T) {
+func TestLearnerModelView_GlobalScope(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	makeOwnerDomain(t, store, "L_owner", "math")
 	makeOwnerDomain(t, store, "L_owner", "anglais")
 
-	res := callTool(t, deps, registerGetOLMSnapshot, "L_owner", "get_olm_snapshot", map[string]any{
-		"scope": "global",
-	})
+	res := callLearnerView(t, deps, "L_owner", "model_all_domains", nil)
 	if res.IsError {
 		t.Fatalf("error: %q", resultText(res))
 	}

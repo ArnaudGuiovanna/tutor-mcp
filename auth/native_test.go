@@ -686,3 +686,37 @@ func TestNativeChallengeBudgetAdmitsIntensiveLegitimateUse(t *testing.T) {
 		}
 	}
 }
+
+// With RATELIMIT_BACKEND=postgres both challenge budgets live in the shared
+// backend, under their own namespaces and with storable bucket keys.
+func TestNativeChallengeBudgetsUseSharedBackend(t *testing.T) {
+	server, _, key, _ := newNativeTestServer(t, false)
+	backend := &recordingRateLimitBackend{}
+	server.SetRateLimitBackend(backend)
+	raw, _ := json.Marshal(map[string]string{
+		"tenant_id": server.options.InstitutionID, "public_key": nativeTestPub(key), "action": "session",
+		"scope": models.OAuthScopeLearnerRead,
+	})
+	request := httptest.NewRequest(http.MethodPost, server.endpoint("challenge"), bytes.NewReader(raw))
+	request.Header.Set("Content-Type", "application/json")
+	request.RemoteAddr = "198.51.100.40:4000"
+	recorder := httptest.NewRecorder()
+	server.HandleChallenge(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("challenge status=%d", recorder.Code)
+	}
+	want := []string{
+		"native_challenge_identity:198.51.100.40|" + nativeTestPub(key),
+		"native_challenge_ip:198.51.100.40",
+	}
+	if strings.Join(backend.keys, ",") != strings.Join(want, ",") {
+		t.Fatalf("shared bucket keys=%q, want %q", backend.keys, want)
+	}
+	for _, k := range backend.keys {
+		if strings.ContainsRune(k, 0) {
+			t.Fatalf("bucket key %q is not storable as PostgreSQL text", k)
+		}
+	}
+	server.Stop()
+	server.Stop() // idempotent
+}

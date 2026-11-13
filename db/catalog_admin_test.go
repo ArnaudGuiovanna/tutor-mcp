@@ -5,6 +5,9 @@ package db
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 
 	"tutor-mcp/models"
@@ -122,5 +125,53 @@ func TestCatalogAdminPaginationEnrollmentAndReport(t *testing.T) {
 	report, err := s.GetCohortReport(ctx, owner, cohort.ID)
 	if err != nil || report.EnrollmentCount != 1 || report.ActiveCount != 1 || report.AverageMastery != 0.8 {
 		t.Fatalf("report=%#v err=%v", report, err)
+	}
+}
+
+// Module and concept metadata are JSON objects end to end: stored as one
+// object column, read back as objects, with the concept pedagogy exposed only
+// through its typed fields.
+func TestFormationMetadataRoundTripsAsObjects(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+	owner := ownerLearnerPrincipal(t, s)
+	_, version, err := s.CreateFormationDraft(ctx, owner, "Metadata formation", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddFormationModule(ctx, owner, version.ID, models.FormationModuleInput{
+		StableKey: "m", Title: "M", Metadata: map[string]any{"color": "blue", "weight": 12345678901234567},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddFormationConcept(ctx, owner, version.ID, models.FormationConceptInput{
+		ModuleStableKey: "m", StableKey: "c", Label: "C", Description: "Describe",
+		Metadata: map[string]any{"source": "syllabus"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddFormationConcept(ctx, owner, version.ID, models.FormationConceptInput{
+		ModuleStableKey: "m", StableKey: "d", Label: "D", Metadata: map[string]any{"description": "hidden"},
+	}); err == nil {
+		t.Fatal("a pedagogy key inside metadata was accepted")
+	}
+	detail, err := s.GetFormationVersion(ctx, owner, version.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := detail.Modules[0].Metadata
+	if module["color"] != "blue" || fmt.Sprint(module["weight"]) != "12345678901234567" {
+		t.Fatalf("module metadata=%#v", module)
+	}
+	concept := detail.Concepts[0]
+	if concept.Metadata["source"] != "syllabus" || len(concept.Metadata) != 1 || concept.Description != "Describe" {
+		t.Fatalf("concept metadata=%#v description=%q", concept.Metadata, concept.Description)
+	}
+	if detail.Version.Metadata == nil || len(detail.Version.Metadata) != 0 {
+		t.Fatalf("version metadata=%#v", detail.Version.Metadata)
+	}
+	encoded, err := json.Marshal(detail)
+	if err != nil || !strings.Contains(string(encoded), `"metadata":{"color":"blue","weight":12345678901234567}`) || strings.Contains(string(encoded), "metadata_json") {
+		t.Fatalf("detail JSON=%s err=%v", encoded, err)
 	}
 }

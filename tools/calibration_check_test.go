@@ -63,28 +63,6 @@ func TestCalibrationCheck_HappyPath(t *testing.T) {
 	}
 }
 
-func TestCalibrationCheck_AcceptsLegacyConceptID(t *testing.T) {
-	store, deps := setupToolsTest(t)
-	seedDomain(t, store, "L_owner", "legacy_calc")
-
-	res := callTool(t, deps, registerCalibrationCheck, "L_owner", "calibration_check", map[string]any{
-		"concept_id":        "legacy_calc",
-		"predicted_mastery": 3.0,
-	})
-	if res.IsError {
-		t.Fatalf("got %q", resultText(res))
-	}
-	out := decodeResult(t, res)
-	pid, _ := out["prediction_id"].(string)
-	rec, err := store.GetCalibrationRecord(context.Background(), pid, "L_owner")
-	if err != nil {
-		t.Fatalf("GetCalibrationRecord: %v", err)
-	}
-	if rec.ConceptID != "legacy_calc" {
-		t.Fatalf("expected legacy concept_id to be recorded, got %q", rec.ConceptID)
-	}
-}
-
 func TestCalibrationCheck_RejectsOutOfRangePredictedMastery(t *testing.T) {
 	store, deps := setupToolsTest(t)
 

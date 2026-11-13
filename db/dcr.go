@@ -23,13 +23,6 @@ const dcrRegistrationLockID int64 = 0x7475746f72444352
 
 var dcrTokenIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
-func dcrRegistrationSecretAAD(clientID, fingerprint string) []byte {
-	return []byte(fmt.Sprintf(
-		"tutor-mcp\x00oauth_clients\x00registration_secret\x00%d:%s\x00%d:%s",
-		len(clientID), clientID, len(fingerprint), fingerprint,
-	))
-}
-
 func validateDCRToken(token models.DCRInitialAccessToken) error {
 	if !dcrTokenIDPattern.MatchString(token.TokenID) {
 		return fmt.Errorf("DCR token ID must use 1..64 safe characters")
@@ -359,11 +352,11 @@ func (s *Store) RegisterDynamicOAuthClient(ctx context.Context, registration mod
 		if _, err := txs.exec(ctx,
 			`INSERT INTO oauth_clients
 			    (client_id, client_name, redirect_uris, client_secret_hash, expires_at,
-			     registration_fingerprint, registration_token_id, registration_secret_ciphertext)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			     registration_fingerprint, registration_token_id)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			registration.CandidateClientID, registration.ClientName, registration.RedirectURIsJSON,
 			registration.CandidateClientSecretHash, registration.ExpiresAt.UTC(),
-			fingerprint, registration.TokenID, "",
+			fingerprint, registration.TokenID,
 		); err != nil {
 			return fmt.Errorf("create dynamic OAuth client: %w", err)
 		}
@@ -419,8 +412,9 @@ const dcrEvictionCandidates = 5
 // registration time; newExpiry is the expiry the incoming client would get.
 //
 // Dependent rows live in tenant-scoped tables that this global transaction
-// may not see. Each attempt therefore runs in a savepoint: a candidate that
-// still has a referencing row is skipped instead of aborting the transaction.
+// may not see. PostgreSQL removes hidden consents through the cascading
+// foreign key; each attempt still runs in a savepoint so that a candidate kept
+// by any other referencing row is skipped instead of aborting the transaction.
 func (s *Store) evictOldestProvisionalOAuthClient(ctx context.Context, now, newExpiry time.Time) (bool, error) {
 	rows, err := s.query(ctx,
 		`SELECT c.client_id, c.registration_token_id FROM oauth_clients c
@@ -468,8 +462,10 @@ func (s *Store) evictOldestProvisionalOAuthClient(ctx context.Context, now, newE
 	return false, nil
 }
 
-// deleteOAuthClientInSavepoint removes one client and its dependent
-// credentials atomically. The client row is deleted only when condition
+// deleteOAuthClientInSavepoint removes one client and the dependent
+// credentials this transaction can see, atomically. Under PostgreSQL
+// row-level security a global transaction sees no tenant's codes or refresh
+// tokens; see CleanupExpiredOAuthClients for why the survivors stay unusable. The client row is deleted only when condition
 // (a fixed SQL predicate over oauth_clients) still holds. It reports false,
 // with the savepoint rolled back, when nothing was deleted or a remaining
 // foreign-key reference prevents the deletion.

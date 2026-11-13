@@ -4,6 +4,13 @@
 > `engine/router.go` sont des traces du chemin de migration supprimé. Le
 > runtime supporté utilise le pipeline permanent de
 > `engine/orchestrator.go`.
+>
+> **État actuel :** le profil « legacy » et la variable
+> `REGULATION_THRESHOLD` ont été supprimés. Les trois accesseurs
+> (`MasteryBKT`, `MasteryKST`, `MasteryMid`) renvoient la constante
+> `algorithms.MasteryThreshold = 0.85` ; aucun seuil n'est lu dans
+> l'environnement. Les sections ci-dessous décrivant la bascule sont
+> historiques.
 
 > Composant 1/7 du pipeline de régulation. Refacto pure + flag de
 > bascule sémantique. Aucune logique runtime nouvelle ; débloque la
@@ -25,7 +32,7 @@ fonction-de-décision. C'est :
    - **Legacy** (défaut) : `BKT=0.85`, `KST=0.70`, `Mid=0.80` — préserve
      l'état actuel du runtime, fait passer tous les tests existants.
    - **Unifié** (`REGULATION_THRESHOLD=on`) : `BKT=KST=Mid=0.85` —
-     résout F-2.3, F-3.10, F-1.8.
+     supprime les seuils de maîtrise incompatibles.
 3. Un **chantier de refactor** qui remplace 11 sites du codebase par
    des appels à cette API.
 
@@ -99,8 +106,7 @@ Nouveau fichier : **`algorithms/thresholds.go`**.
 //   - "legacy"  (default): BKT=0.85, KST=0.70, Mid=0.80
 //   - "unified" (REGULATION_THRESHOLD=on): BKT=KST=Mid=0.85
 //
-// The bascule resolves audit findings F-1.8, F-2.3, F-3.10 (multiple
-// incompatible mastery thresholds) — see docs/audit-report.md.
+// The bascule removes multiple incompatible mastery thresholds.
 //
 // Promotion of "unified" to default is gated on eval/VERDICT_THRESHOLD.md
 // matching or exceeding the baseline eval/VERDICT.md on V3.
@@ -207,7 +213,7 @@ un sous-flag ré-introduirait la pathologie.
 | `REGULATION_THRESHOLD=""` (string vide) | Legacy | id. |
 | Env supprimée mid-process | Bascule à legacy au prochain appel | Acceptable pour dev ; en prod, env stable au boot. |
 | `mastery = 0.85` exactement | `MasteryBKT()` retourne `≥ 0.85` true | Comparaison `>=`, pas `>`. |
-| `mastery = NaN` (cf F-1.3) | Comparaison NaN ≥ 0.85 → `false` | Reste cohérent avec comportement actuel. Hors scope (issue dédiée). |
+| `mastery = NaN` (division par zéro BKT) | Comparaison NaN ≥ 0.85 → `false` | Reste cohérent avec comportement actuel. Hors scope (issue dédiée). |
 
 ### 5.1 Risque de drift partiel pendant la PR
 
@@ -452,7 +458,7 @@ de 3 sites).
 | **Modif** | `db/store.go` | -1 const, 1 ligne refactor |
 | **Modif** | `eval/synthetic/simulator.go` | -1 const, 1 site refactor |
 | **Modif** | `eval/synthetic/learner.go` | comment update |
-| **Doc** | commit message | cite F-1.8, F-2.3, F-3.10 + lien design doc |
+| **Doc** | commit message | lien design doc |
 
 Total ~12 fichiers touchés, ~280 lignes nettes ajoutées (gros morceau =
 les tests).
@@ -465,7 +471,7 @@ les tests).
       whitelist)
 - [ ] `tools/prompt.go` non modifié (pas de promesses ITS révisées
       avant rollout — Theme E hors scope)
-- [ ] commit message cite F-1.8, F-2.3, F-3.10 et lie ce design doc
+- [ ] commit message lie ce design doc
 - [ ] aucune fixture de test existante modifiée
 
 ### 9.3 Post-merge — promotion default (PR séparée)
@@ -488,7 +494,7 @@ que le harness n'a pas validé.
 | **Sites refactorés** | 12 prod + 2 eval = 14 |
 | **Anti-drift** | Test meta-greppant les literals, whitelist explicite |
 | **Promotion default** | Conditionnée à eval/VERDICT_THRESHOLD.md sur V1, V3, V4 |
-| **Findings résolus** | F-1.8, F-2.3, F-3.10 (sous flag ON) |
+| **Problème résolu** | seuils de maîtrise incompatibles (sous flag ON) |
 
 ---
 

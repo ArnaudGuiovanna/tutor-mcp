@@ -239,7 +239,7 @@ mod tests {
 
     fn registered() -> ToolCallRegistry {
         let mut registry = ToolCallRegistry::default();
-        registry.observe(&json!({"method":"session/update","params":{"sessionId":"session1","update":{"sessionUpdate":"tool_call","toolCallId":"call1","title":"anything","rawInput":{"server":"tutor","tool":"get_next_activity","arguments":{"private":"not retained"}},"status":"pending"}}}));
+        registry.observe(&json!({"method":"session/update","params":{"sessionId":"session1","update":{"sessionUpdate":"tool_call","toolCallId":"call1","title":"anything","rawInput":{"server":"tutor","tool":"get_learner_state","arguments":{"private":"not retained"}},"status":"pending"}}}));
         registry
     }
 
@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn persisted_consent_is_bounded_to_origin_institution_agent_and_real_tool() {
-        let names = BTreeSet::from(["get_next_activity".into()]);
+        let names = BTreeSet::from(["get_learner_state".into()]);
         let context = PermissionContext {
             origin: "https://school.example",
             institution_id: "institution1",
@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn revocation_refusal_and_session_reuse_do_not_inherit_an_allow() {
-        let names = BTreeSet::from(["get_next_activity".into()]);
+        let names = BTreeSet::from(["get_learner_state".into()]);
         let context = PermissionContext {
             origin: "https://school.example",
             institution_id: "institution1",
@@ -321,14 +321,14 @@ mod tests {
         );
         policy
             .tools
-            .insert("get_next_activity".into(), PermissionDecision::Deny);
+            .insert("get_learner_state".into(), PermissionDecision::Deny);
         assert_eq!(
             automatic_outcome(Some(&policy), &context, &registry, &request("session1")),
             Some(json!({"outcome":"selected","optionId":"reject"}))
         );
         policy
             .tools
-            .insert("get_next_activity".into(), PermissionDecision::Ask);
+            .insert("get_learner_state".into(), PermissionDecision::Ask);
         assert!(
             automatic_outcome(Some(&policy), &context, &registry, &request("session1")).is_none()
         );
@@ -341,7 +341,7 @@ mod tests {
 
     #[test]
     fn titles_and_mcp_questions_never_authorize_tools() {
-        let names = BTreeSet::from(["get_next_activity".into()]);
+        let names = BTreeSet::from(["get_learner_state".into()]);
         let context = PermissionContext {
             origin: "https://school.example",
             institution_id: "institution1",
@@ -349,7 +349,7 @@ mod tests {
             known_tools: &names,
         };
         let mut request = request("session1");
-        request["params"]["toolCall"]["title"] = json!("mcp.tutor.get_next_activity");
+        request["params"]["toolCall"]["title"] = json!("mcp.tutor.get_learner_state");
         assert!(automatic_outcome(
             Some(&policy()),
             &context,
@@ -363,7 +363,7 @@ mod tests {
 
     #[test]
     fn claude_requires_canonical_server_metadata_and_an_offered_one_call_option() {
-        let names = BTreeSet::from(["get_next_activity".into()]);
+        let names = BTreeSet::from(["get_learner_state".into()]);
         let context = PermissionContext {
             origin: "https://school.example",
             institution_id: "institution1",
@@ -371,7 +371,7 @@ mod tests {
             known_tools: &names,
         };
         let mut request = request("session1");
-        request["params"]["toolCall"]["_meta"] = json!({"claudeCode":{"toolName":"mcp__tutor__get_next_activity","mcpServer":{"name":"tutor","source":"sdk"}}});
+        request["params"]["toolCall"]["_meta"] = json!({"claudeCode":{"toolName":"mcp__tutor__get_learner_state","mcpServer":{"name":"tutor","source":"sdk"}}});
         assert!(automatic_outcome(
             Some(&policy()),
             &context,

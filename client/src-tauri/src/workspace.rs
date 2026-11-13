@@ -86,6 +86,11 @@ pub struct Settings {
     pub review_plans: std::collections::BTreeMap<String, crate::learning_ui::ReviewPlan>,
     /// Set once the first-run setup has been completed. Serialized as `setupCompleted`.
     pub setup_completed: bool,
+    /// Origin (as `validate_origin` normalizes it) of the last successful
+    /// remote Tutor connection. Written by the native backend only; kept
+    /// after a disconnection, cleared when the saved Tutor URL changes origin.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tutor_connected_origin: String,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -100,6 +105,7 @@ impl Default for Settings {
             permission_policy: None,
             review_plans: Default::default(),
             setup_completed: false,
+            tutor_connected_origin: String::new(),
         }
     }
 }
@@ -200,6 +206,11 @@ pub struct Workspace {
     pub intents: Vec<LearningIntent>,
     pub conversations: Vec<Conversation>,
     pub active_conversation_id: Option<String>,
+    /// Harness sessions that missed turns of their conversation's other
+    /// session (MCP vs private output) and must receive recent history with
+    /// their next prompt. Native bookkeeping, never sent to the UI.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub stale_agent_sessions: std::collections::BTreeSet<String>,
 }
 
 impl Default for Workspace {
@@ -211,6 +222,7 @@ impl Default for Workspace {
             intents: vec![],
             conversations: vec![],
             active_conversation_id: None,
+            stale_agent_sessions: Default::default(),
         }
     }
 }

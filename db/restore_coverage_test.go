@@ -19,7 +19,7 @@ var restoreChecksumExempt = map[string]string{
 	"cohort_statistics": "derived snapshot", "cohort_concept_statistics": "derived snapshot", "cohort_badge_statistics": "derived snapshot",
 	"usage_rollups": "derived from usage_events, which is checksummed",
 	// Short-lived credentials and sessions: a restore must not resurrect them.
-	"account_tokens": "transient credential", "console_sessions": "transient credential", "login_challenges": "transient credential",
+	"account_tokens": "transient credential", "login_challenges": "transient credential",
 	"native_challenges": "transient signature challenge, excluded from archives", "native_sessions": "transient native grant, excluded from archives",
 	"oauth_codes": "transient credential", "refresh_tokens": "transient credential", "learner_approved_clients": "re-consented after restore",
 	"tool_call_idempotency": "transient replay cache",
@@ -28,7 +28,7 @@ var restoreChecksumExempt = map[string]string{
 	"webhook_delivery_transitions": "delivery log", "scheduled_alerts": "queue", "pending_consolidations": "queue",
 	"worker_tenant_runs": "operational log", "narrative_mutations": "journal; narrative_objects is checksummed",
 	// Routing, control-plane, commercial and compliance records with their own audit trail.
-	"credential_tenant_routes": "routing digest", "invitation_tenant_routes": "routing digest", "service_account_routes": "routing digest",
+	"credential_tenant_routes": "routing digest", "service_account_routes": "routing digest",
 	"support_access_routes": "routing digest", "service_accounts": "control plane", "support_access_grants": "control plane",
 	"federated_identity_links": "control plane", "tenant_identity_providers": "control plane", "tenant_domains": "control plane",
 	"tenant_integrations": "control plane", "tenant_integration_secret_versions": "secrets, restored from the keyring",
@@ -36,7 +36,7 @@ var restoreChecksumExempt = map[string]string{
 	"entitlement_reservations": "commercial", "usage_corrections": "commercial", "billing_provider_events": "commercial",
 	"tenant_retention_policies": "compliance", "retention_legal_holds": "compliance", "tenant_dsar_requests": "compliance",
 	"tenant_dsar_phases": "compliance", "tenant_restore_manifests": "the manifest itself", "audit_events": "append-only audit trail",
-	"catalog_admin_mutations": "audit-like journal", "tenant_invitations": "transient invitation",
+	"catalog_admin_mutations": "audit-like journal",
 	// Identifier mappings and per-learner records that are rebuilt from checksummed rows.
 	"legacy_concept_mappings": "identifier mapping", "legacy_concept_sources": "identifier mapping", "legacy_domain_enrollments": "identifier mapping",
 	"curriculum_concepts": "identities of checksummed curriculum_versions", "curriculum_metadata_ids": "identities of checksummed curriculum_versions",

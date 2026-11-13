@@ -11,7 +11,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"tutor-mcp/adminapi"
 	"tutor-mcp/auth"
@@ -87,9 +86,6 @@ func TestCatalogReplayRechecksPermissionsForEveryMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := s.SetMembershipAuthorization(ctx, other.TenantScope(), models.MembershipStatusActive, []string{models.RolePedagogyManager}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.RecordMembershipMFAVerification(ctx, other.TenantScope(), time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	other, err = s.GetPrincipalForLearner(ctx, otherLearner.ID, []string{models.OAuthScopeLearner})

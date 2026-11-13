@@ -32,14 +32,13 @@ type LoginFailureBackend = storeport.LoginFailureBackend
 // Email is the bucket key (case-folded by the caller). Successful logins call
 // Reset to clear the history.
 type LoginFailureTracker struct {
-	mu                   sync.Mutex
-	fails                map[string]*loginFailureBucket
-	lru                  *list.List
-	lastPrune            time.Time
-	threshold            int
-	window               time.Duration
-	backend              LoginFailureBackend // optional shared store; nil = in-memory only
-	secondFactorAttempts map[string]secondFactorAttemptWindow
+	mu        sync.Mutex
+	fails     map[string]*loginFailureBucket
+	lru       *list.List
+	lastPrune time.Time
+	threshold int
+	window    time.Duration
+	backend   LoginFailureBackend // optional shared store; nil = in-memory only
 }
 
 type loginFailureBucket struct {

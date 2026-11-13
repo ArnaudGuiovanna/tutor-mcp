@@ -68,7 +68,7 @@ impl PreparedTurn {
             if !matches!(
                 packet["selection_reason"].as_str(),
                 Some("missing" | "not_found" | "ambiguous")
-            ) || !packet["activity"].is_null()
+            ) || !packet["decision"].is_null()
             {
                 return Err(INVALID.into());
             }
@@ -88,7 +88,7 @@ impl PreparedTurn {
             return Err(INVALID.into());
         }
         // Name matching belongs to the authorized server resolver, including Unicode.
-        let expected = match packet["activity"]["activity"]["type"].as_str() {
+        let expected = match packet["decision"]["activity"]["type"].as_str() {
             Some("NEW_CONCEPT") => "instruction",
             Some(
                 "RECALL_EXERCISE"
@@ -166,11 +166,11 @@ impl PreparedTurn {
     }
 
     pub(super) fn resume_prompt(&self) -> String {
-        let common = "La formation et la décision pédagogique sont DÉJÀ confirmées par le serveur. Ne fais AUCUN appel outil, ne sélectionne rien, ne relis rien et ne déclare aucun progrès. Respecte activity.pedagogical_contract et la présentation imposée. Une seule formulation courte adaptée à la demande. Les identifiants viennent du paquet, jamais de l’historique.";
+        let common = "La formation et la décision pédagogique sont DÉJÀ confirmées par le serveur. Ne fais AUCUN appel outil, ne sélectionne rien, ne relis rien et ne déclare aucun progrès. Respecte decision.pedagogical_contract et la présentation imposée. Une seule formulation courte adaptée à la demande. Les identifiants viennent du paquet, jamais de l’historique.";
         let format = match self.packet["presentation"].as_str() {
-            Some("assessment") => "Émets exactement un bloc tutor-activity JSON strict sans prose extérieure : version:1, id unique, kind:exercise, trainingId/domainId de conversation, concept de activity.activity, sessionId/decisionId de activity, question (consigne ouverte), activityType exact et rubricJson (chaîne JSON). Rubrique : criteria:[{id,description,max_score,anchors?:[{score,description}]}], passing_score, answer_key ; conserve les critères du contrat et leurs identifiants. TRANSFER_PROBE exige transferDimension autorisée. Ne fournis aucun attemptId : le client figera la consigne et la rubrique avant affichage. Aucun champ options, correctOptionId, answer ou explanation. La solution reste uniquement dans rubricJson. Maximum 12Ko de consigne,16KiB de rubrique,48KiB de bloc.",
-            Some("instruction") => "Émets exactement un bloc tutor-introduction JSON strict : {version:1,trainingId,domainId,concept,sessionId,decisionId,body}. Identifiants de conversation et activity exacts ; body est une courte introduction explicative (12000 octets maximum), avec un exemple utile suivant le contrat. Pas de quiz imposé, de tentative ou d’évaluation ; cette instruction n’est pas une preuve de réussite.",
-            _ => "Émets exactement un bloc tutor-guidance JSON strict : {version:1,trainingId,domainId,concept,sessionId,decisionId,body}. Copie les identifiants de conversation et activity ; concept/sessionId/decisionId absents du paquet deviennent des chaînes vides. body est un conseil court conforme à la décision (pause, fin de séance ou configuration). Ne prétends pas avoir fermé une séance, créé un domaine ou inscrit l’apprenant : aucune de ces opérations n’a été exécutée ici.",
+            Some("assessment") => "Émets exactement un bloc tutor-activity JSON strict sans prose extérieure : version:1, id unique, kind:exercise, trainingId/domainId de conversation, concept de decision.activity, sessionId de decision.session_id, decisionId de decision.pedagogical_contract.decision_id, question (consigne ouverte), activityType exact et rubricJson (objet rubrique encodé en chaîne JSON). Rubrique : criteria:[{id,description,max_score,anchors?:[{score,description}]}], passing_score, answer_key ; conserve les critères du contrat et leurs identifiants. TRANSFER_PROBE exige transferDimension autorisée. Ne fournis aucun attemptId : le client figera la consigne et la rubrique avant affichage. Aucun champ options, correctOptionId, answer ou explanation. La solution reste uniquement dans rubricJson. Maximum 12Ko de consigne,16KiB de rubrique,48KiB de bloc.",
+            Some("instruction") => "Émets exactement un bloc tutor-introduction JSON strict : {version:1,trainingId,domainId,concept,sessionId,decisionId,body}. Identifiants exacts de conversation et de decision (sessionId = decision.session_id, decisionId = decision.pedagogical_contract.decision_id) ; body est une courte introduction explicative (12000 octets maximum), avec un exemple utile suivant le contrat. Pas de quiz imposé, de tentative ou d’évaluation ; cette instruction n’est pas une preuve de réussite.",
+            _ => "Émets exactement un bloc tutor-guidance JSON strict : {version:1,trainingId,domainId,concept,sessionId,decisionId,body}. Copie les identifiants de conversation et de decision (sessionId = decision.session_id, decisionId = decision.pedagogical_contract.decision_id) ; concept/sessionId/decisionId absents du paquet deviennent des chaînes vides. body est un conseil court conforme à la décision (pause, fin de séance ou configuration). Ne prétends pas avoir fermé une séance, créé un domaine ou inscrit l’apprenant : aucune de ces opérations n’a été exécutée ici.",
         };
         format!("{common}\n{format}")
     }
@@ -202,7 +202,7 @@ impl PreparedTurn {
             "tutor-guidance"
         };
         let content = payload::<Introduction>(text, tag)?.ok_or(INVALID)?;
-        let decision = &self.packet["activity"];
+        let decision = &self.packet["decision"];
         if content.version != 1
             || !context_matches(
                 &self.packet["conversation"],
@@ -211,7 +211,10 @@ impl PreparedTurn {
             )
             || content.concept != decision["activity"]["concept"].as_str().unwrap_or("")
             || content.session_id != decision["session_id"].as_str().unwrap_or("")
-            || content.decision_id != decision["decision_id"].as_str().unwrap_or("")
+            || content.decision_id
+                != decision["pedagogical_contract"]["decision_id"]
+                    .as_str()
+                    .unwrap_or("")
             || !bounded(&content.body, 12000)
             || (instruction
                 && (!bounded(&content.concept, 512)

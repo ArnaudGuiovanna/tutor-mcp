@@ -26,6 +26,17 @@ func requiredOAuthScopesForCall(call *mcp.CallToolRequest) ([]string, bool, erro
 		}
 		return []string{models.OAuthScopeLearnerRead}, true, nil
 	}
+	if trainingTools[call.Params.Name].actionSelected {
+		// preview reads; propose/save and lifecycle changes write.
+		read, err := trainingCallReadOnly(call)
+		if err != nil {
+			return nil, true, err
+		}
+		if read {
+			return []string{models.OAuthScopeLearnerRead}, true, nil
+		}
+		return []string{models.OAuthScopeLearnerWrite}, true, nil
+	}
 	scopes, known := requiredOAuthScopesForTool(call.Params.Name)
 	return scopes, known, nil
 }

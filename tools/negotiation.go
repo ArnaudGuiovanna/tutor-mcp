@@ -40,7 +40,7 @@ type tradeoff struct {
 }
 
 func registerLearningNegotiation(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name:        "learning_negotiation",
 		Description: "Expose the session plan with rationale. The learner can propose an alternative - the system accepts or explains the trade-offs.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params LearningNegotiationParams) (*mcp.CallToolResult, any, error) {
@@ -95,7 +95,7 @@ func registerLearningNegotiation(server *mcp.Server, deps *Deps) {
 		domain, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
 		if err != nil || domain == nil {
 			if params.DomainID != "" {
-				deps.Logger.Error("learning_negotiation: domain not found by id", "err", err, "learner", learnerID, "domain_id", params.DomainID)
+				deps.Logger.Error("learning_negotiation: domain not found by id", append(diagnosticErrorAttrs(err), "learner", learnerID, "domain_id", params.DomainID)...)
 				r, _ := errorResult("domain not found")
 				return r, nil, nil
 			}
@@ -137,20 +137,24 @@ func registerLearningNegotiation(server *mcp.Server, deps *Deps) {
 
 		mastery := masteryByConcept(domainStates)
 
-		// Same orchestrator path as get_next_activity, so the system_plan
+		// Same orchestrator path as prepare_pedagogical_turn(mode=activity), so the system_plan
 		// shown to the learner during negotiation matches what would be
 		// served on the next activity request.
 		now := time.Now().UTC()
-		systemActivity, orchErr := engine.Orchestrate(ctx, deps.Store, engine.OrchestratorInput{
+		orchInput := engine.OrchestratorInput{
 			LearnerID:   learnerID,
 			DomainID:    domain.ID,
 			Now:         now,
 			PreviewOnly: true,
 			Config:      engine.NewDefaultPhaseConfig(),
 			Logger:      deps.Logger,
-		})
+		}
+		if scope, scopeErr := pedagogicalScope(ctx, learnerID); scopeErr == nil {
+			orchInput.DecisionScope = scope
+		}
+		systemActivity, orchErr := engine.Orchestrate(ctx, deps.Store, orchInput)
 		if orchErr != nil {
-			deps.Logger.Error("learning_negotiation: orchestrator failed", "err", orchErr, "learner", learnerID)
+			deps.Logger.Error("learning_negotiation: orchestrator failed", append(diagnosticErrorAttrs(orchErr), "learner", learnerID)...)
 			r, _ := errorResult("could not compute system plan")
 			return r, nil, nil
 		}
@@ -277,7 +281,7 @@ func registerLearningNegotiation(server *mcp.Server, deps *Deps) {
 				ov := buildLearningNegotiationOverride(params, domain.ID, systemActivity, domainStates, concept, now)
 				id, err := PersistLearningNegotiationOverride(ctx, deps.Store, learnerID, &ov, now)
 				if err != nil {
-					deps.Logger.Error("learning_negotiation: failed to persist override", "err", err, "learner", learnerID, "domain", domain.ID)
+					deps.Logger.Error("learning_negotiation: failed to persist override", append(diagnosticErrorAttrs(err), "learner", learnerID, "domain", domain.ID)...)
 					r, _ := errorResult("could not persist negotiated override")
 					return r, nil, nil
 				}

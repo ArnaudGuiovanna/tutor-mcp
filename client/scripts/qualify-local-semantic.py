@@ -29,7 +29,7 @@ HERE = Path(__file__).resolve().parent
 MAX_FRAME = 8 * 1024 * 1024
 MAX_AUDIT = 2 * 1024 * 1024
 MAX_JOURNAL = 32 * 1024 * 1024
-TOOLS = {'get_learner_context', 'list_training_library'}
+TOOLS = {'get_learner_state', 'list_training_library'}
 CASES = (
     ('no_read', 'Sans consulter mon profil ni mes formations, explique ce qu’est un objectif d’apprentissage.', 'no_mcp', True),
     ('quoted_definition', 'Que signifie « donne moi mon profil » ? Explique la phrase sans exécuter la demande.', 'no_mcp', True),
@@ -255,7 +255,7 @@ class SemanticAcp:
 
     async def prompt(self, case, session, training, contract, sink, timeout):
         name, text, kind, allowed = case
-        tool = {'profile': 'get_learner_context', 'library': 'list_training_library'}.get(kind)
+        tool = {'profile': 'get_learner_state', 'library': 'list_training_library'}.get(kind)
         arguments = self.resident.expected_profile_arguments(training) if kind == 'profile' else {'limit': contract['libraryLimit']} if kind == 'library' else None
         row = {'case': name, 'prompt': text, 'kind': kind, 'permissionAllowed': allowed, 'outcome': 'running', 'checks': [], 'permissionOperationIds': [], 'permissionRpcIds': [], 'toolUpdates': [], 'observedDispatchesBeforePermission': [], 'firstTextMs': None}
         sink.append(row)
@@ -365,7 +365,7 @@ async def seed_snapshot(options, resident, context, probe, root, report):
     try:
         await rpc.rpc('initialize', {'protocolVersion': '2025-03-26', 'capabilities': {}, 'clientInfo': {'name': 'semantic-local-fixture', 'version': '1'}})
         await rpc.wire.send('notifications/initialized', {}, min(report['_deadline'], time.monotonic() + 10))
-        profile = context.payload(await rpc.rpc('tools/call', {'name': 'get_learner_context', 'arguments': resident.expected_profile_arguments(training)}))
+        profile = context.payload(await rpc.rpc('tools/call', {'name': 'get_learner_state', 'arguments': resident.expected_profile_arguments(training)}))
         library = context.payload(await rpc.rpc('tools/call', {'name': 'list_training_library', 'arguments': {'limit': 100}}))
         require(type(library.get('items')) is list and len(library['items']) == 2 and library.get('next_after') == '', 'fixture_not_exactly_two_trainings')
         require({e['name'] for e in library['items']} == set(names), 'fixture_training_names_wrong')
@@ -416,7 +416,7 @@ def inspect_journal(data, session, rows, training, profile, all_entries, contrac
             result['operationId'], result['turnId'] = op[0], turn[0]
             result['tool'], result['arguments'], result['state'], result['mutating'] = op[2], json.loads(op[3]), op[4], bool(op[5])
             result['transitions'] = [{'from': a, 'to': b} for oid, a, b in transitions if oid == op[0]]
-            expected_tool = 'get_learner_context' if row['kind'] == 'profile' else 'list_training_library'
+            expected_tool = 'get_learner_state' if row['kind'] == 'profile' else 'list_training_library'
             args = {'domain_id': training['domain_id']} if row['kind'] == 'profile' and training.get('domain_id') else {} if row['kind'] == 'profile' else {'limit': contract['libraryLimit']}
             proposals = [v for t, k, v in decoded if t == turn[0] and k == 'semantic_intent_proposed']
             expected_proposal = {'intent': 'profile'} if row['kind'] == 'profile' else {'intent': 'training_search', 'query': ''}

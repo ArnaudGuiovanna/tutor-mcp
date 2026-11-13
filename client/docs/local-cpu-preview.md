@@ -27,7 +27,7 @@ comme tuteur autonome. Une réponse libre n'est jamais une évaluation validée.
   l'élève seulement si `has_critical` et `needs_domain_setup` valent `false`.
   Un indicateur absent ou mal formé bloque cette deuxième lecture.
 - « Donne-moi mon profil », « recherche mon profil ou ma formation » ou `/profil`
-  lisent `get_learner_context`, avec les permissions ACP. Rust affiche les champs
+  lisent `get_learner_state`, avec les permissions ACP. Rust affiche les champs
   exacts de profil et l’objectif ; le modèle ne les reformule pas. L’absence de
   domaine n’interdit pas de lire son profil.
 - « Affiche ma formation » ou `/formation` affichent la formation active du

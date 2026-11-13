@@ -70,7 +70,7 @@ type RecordSessionCloseParams struct {
 }
 
 func registerRecordSessionClose(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name:        "record_session_close",
 		Description: "Idempotently close the durable learning session, optionally record its implementation intention (if-then), and return structured recap and summary signals.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params RecordSessionCloseParams) (*mcp.CallToolResult, any, error) {
@@ -115,7 +115,7 @@ func registerRecordSessionClose(server *mcp.Server, deps *Deps) {
 		}
 		if err != nil || domain == nil {
 			if params.DomainID != "" {
-				deps.Logger.Error("record_session_close: domain not found by id", "err", err, "learner", learnerID, "domain_id", params.DomainID)
+				deps.Logger.Error("record_session_close: domain not found by id", append(diagnosticErrorAttrs(err), "learner", learnerID, "domain_id", params.DomainID)...)
 				r, _ := errorResult("domain not found")
 				return r, nil, nil
 			}
@@ -311,9 +311,9 @@ func buildRecapBrief(ctx context.Context, deps *Deps, learnerID, sessionID strin
 	instruction := "Close the session in 2-3 sentences. Mention a tangible win or a good attempt. " +
 		"If prompt_for_implementation_intention is true, ask a concrete question like 'When and where will you practice next?' " +
 		"and wait for the answer to call record_session_close again with implementation_intention. " +
-		"Then call get_olm_snapshot to retrieve the learner's structured cognitive state, " +
+		"Then call get_learner_state(view=model) to retrieve the learner's structured cognitive state, " +
 		"and call queue_webhook_message 3 times: daily_motivation for tomorrow at 8h UTC (warm, tied to personal_goal) ; " +
-		"olm:<domain_id> for tomorrow at 13h UTC using the structured brief field (why_now + learning_gain + open_loop + next_action, content must MATCH get_olm_snapshot, no pep talk) ; " +
+		"olm:<domain_id> for tomorrow at 13h UTC using the structured brief field (why_now + learning_gain + open_loop + next_action, content must MATCH that learner model, no pep talk) ; " +
 		"daily_recap for tomorrow at 21h UTC (gentle recap). " +
 		"Messages must be user-friendly, concrete, learner-facing, and oriented toward learning gain. No raw KPIs, no internal tool names."
 

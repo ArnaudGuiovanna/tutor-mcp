@@ -187,8 +187,10 @@ describe('Planning screen', () => {
     const props = setup();
     vi.mocked(props.api.trainingAction).mockRejectedValueOnce(new Error('Tutor indisponible')).mockResolvedValueOnce({ items: [], next_after: '' });
     render(<ReviewPlanning {...props} />);
-    expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Tutor indisponible');
-    await userEvent.click(screen.getByRole('button', { name: 'Actualiser le planning' }));
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('Le planning est momentanément indisponible.');
+    expect(alert.textContent).toContain('Tutor indisponible');
+    await userEvent.click(screen.getByRole('button', { name: 'Réessayer' }));
     expect(await screen.findByRole('heading', { name: 'Votre planning se remplira avec vos apprentissages' })).toBeTruthy();
     expect(screen.queryByRole('alert')).toBeNull();
   });

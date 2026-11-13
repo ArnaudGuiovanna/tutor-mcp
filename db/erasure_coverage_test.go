@@ -41,14 +41,8 @@ var erasureRetainedByDesign = map[string]string{
 var identityOutsideTenantErasure = map[string]string{
 	"native_identities":        "global public-key identity shared across organizations; tenant challenges/sessions are erased",
 	"users":                    "global account identity shared across organizations",
-	"mfa_credentials":          "second factor of the global account",
-	"mfa_recovery_codes":       "second factor of the global account",
-	"user_password_resets":     "short-lived reset digest of the global account",
 	"external_identities":      "federated login link of the global account",
 	"federated_identity_links": "federated login link of the global account",
-	"console_sessions":         "staff console session, expiring, no learner content",
-	"pending_signups":          "institution founder sign-up request, expiring, not learner data",
-	"tenant_invitations":       "the erased member's invitation address is replaced by scrub_learner",
 }
 
 func TestEveryIdentityTableIsErasedOrExplicitlyRetained(t *testing.T) {
@@ -89,59 +83,6 @@ func TestEveryIdentityTableIsErasedOrExplicitlyRetained(t *testing.T) {
 	}
 	if len(missing) != 0 {
 		t.Fatalf("tables identifying a person are neither erased nor justified: %v", missing)
-	}
-}
-
-// The erased member's invitation record held their real address; other
-// invitations of the organization are left alone.
-func TestErasureScrubsTheErasedMembersInvitationAddress(t *testing.T) {
-	c := newStatisticsCohort(t)
-	c.add(t, .5)
-	c.add(t, .5)
-	victim, bystander := c.members[0], c.members[1]
-	now := time.Now().UTC()
-	for _, invitation := range []struct{ id, email, membership string }{
-		{"inv-victim", "victim.real@example.test", victim.MembershipID},
-		{"inv-bystander", "bystander.real@example.test", bystander.MembershipID},
-	} {
-		if _, err := c.s.exec(t.Context(), `INSERT INTO tenant_invitations
-			(id, token_hash, tenant_id, email, normalized_email, roles_json, status, created_by, created_at, expires_at,
-			 accepted_at, accepted_user_id, accepted_membership_id)
-			VALUES (?, ?, ?, ?, ?, '["learner"]', 'accepted', 'owner', ?, ?, ?, 'user', ?)`,
-			invitation.id, "hash-"+invitation.id, c.owner.TenantID, invitation.email, invitation.email,
-			now, now.Add(time.Hour), now, invitation.membership); err != nil {
-			t.Fatal(err)
-		}
-	}
-	request, err := c.s.RequestTenantDSAR(t.Context(), c.owner, victim.LearnerID, "erase", "learner request")
-	if err != nil {
-		t.Fatal(err)
-	}
-	worker := models.WorkerPrincipal{ActorID: "invitation-erasure-worker"}
-	scope := c.owner.TenantScope()
-	scope.UserID, scope.MembershipID = "worker_"+worker.ActorID, "worker_process"
-	done := false
-	for batch := 0; batch < 200 && !done; batch++ {
-		if done, _, err = c.s.ProcessTenantDSARErasureBatch(t.Context(), scope, worker, request.ID, 50, now); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if !done {
-		t.Fatal("erasure did not finish")
-	}
-	address := func(id string) (string, string) {
-		t.Helper()
-		var email, normalized string
-		if err := c.s.queryRow(t.Context(), `SELECT email, normalized_email FROM tenant_invitations WHERE id = ?`, id).Scan(&email, &normalized); err != nil {
-			t.Fatal(err)
-		}
-		return email, normalized
-	}
-	if email, normalized := address("inv-victim"); email == "victim.real@example.test" || normalized == "victim.real@example.test" {
-		t.Fatalf("erased member's invitation still holds the address: %s / %s", email, normalized)
-	}
-	if email, _ := address("inv-bystander"); email != "bystander.real@example.test" {
-		t.Fatalf("another member's invitation was changed: %s", email)
 	}
 }
 

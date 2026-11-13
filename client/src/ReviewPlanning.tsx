@@ -6,6 +6,7 @@ import { errorMessage } from './model';
 import type { Training } from './types';
 import { loadReviewTrainings, reviewGroup, reviewPreference, reviewTimestamp, scheduledReviews } from './reviewPlanningModel';
 import type { ReviewFormat, ReviewGroup, ReviewPlanPreference } from './reviewPlanningModel';
+import { LoadError, LoadingState } from './LoadState';
 import './reviewPlanning.css';
 
 export interface ReviewPlanningProps {
@@ -30,7 +31,7 @@ export function ReviewPlanning({ api, scope, preferences, connected, busy, refre
   const [loaded, setLoaded] = useState<LoadedTrainings>();
   const [loading, setLoading] = useState(false);
   const [retry, setRetry] = useState(0);
-  const [error, setError] = useState<{ scope: string; message: string }>();
+  const [error, setError] = useState<{ scope: string; message: string; read?: boolean }>();
   const [saving, setSaving] = useState<{ scope: string; trainingId: string }>();
   const [saved, setSaved] = useState<{ scope: string; message: string }>();
   const [now, setNow] = useState(() => new Date());
@@ -70,7 +71,7 @@ export function ReviewPlanning({ api, scope, preferences, connected, busy, refre
     void loadReviewTrainings(api, isCurrent).then(trainings => {
       if (isCurrent()) setLoaded({ scope, refreshKey, trainings });
     }).catch(reason => {
-      if (isCurrent()) setError({ scope, message: errorMessage(reason) });
+      if (isCurrent()) setError({ scope, message: errorMessage(reason), read: true });
     }).finally(() => { if (isCurrent()) setLoading(false); });
     return () => { requestVersion.current++; };
   }, [api, scope, connected, refreshKey, retry]);
@@ -144,9 +145,11 @@ export function ReviewPlanning({ api, scope, preferences, connected, busy, refre
     </header>
     <p className="review-planning-intro">{t('Un clic sur une révision ouvre votre conversation et démarre l’activité.')}</p>
     {!connected ? <p role="status" className="review-empty">{t('Connectez Tutor dans les paramètres pour retrouver vos révisions.')}</p> : <>
-      {error?.scope === scope && <p role="alert" className="notice error">{t(error.message)}</p>}
+      {error?.scope === scope && (error.read
+        ? <LoadError message="Le planning est momentanément indisponible." detail={error.message} busy={busy} onRetry={() => setRetry(value => value + 1)}/>
+        : <p role="alert" className="notice error">{t(error.message)}</p>)}
       {saved?.scope === scope && <p role="status" className="review-save-status">{saved.message}</p>}
-      {loading && <p role="status" className="review-empty">{t('Lecture du planning…')}</p>}
+      {loading && <LoadingState label="Lecture du planning…" className="review-loading"/>}
       {!loading && loaded?.scope === scope && loaded.refreshKey === refreshKey && !trainings.length && <div className="review-empty"><h3>{t('Votre planning se remplira avec vos apprentissages')}</h3><p>{t('Commencez une formation dans Conversation ou rejoignez une formation pour retrouver ses révisions ici.')}</p></div>}
       {!loading && trainings.length > 0 && <>
         <p className="review-planning-note">{t('Activez les formations à retrouver ici. Les dates viennent de Tutor-MCP ; désactiver ce planning conserve votre suivi pédagogique.')}</p>

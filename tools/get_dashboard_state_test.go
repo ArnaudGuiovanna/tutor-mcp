@@ -5,12 +5,20 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
 	"tutor-mcp/db"
 	"tutor-mcp/engine"
 	"tutor-mcp/models"
+)
+
+// The progress view loads the evidence of every domain with one statement per
+// evidence kind only when the SQL store keeps the batched reads.
+var (
+	_ engine.DomainEvidenceReader = (*db.Store)(nil)
+	_ learnerBatchStore           = (*db.Store)(nil)
 )
 
 // TestGetDashboardState_NoActiveDomain_UsesCanonicalShape asserts that when a
@@ -21,7 +29,7 @@ import (
 // regardless of which tool it called.
 func TestGetDashboardState_NoActiveDomain_UsesCanonicalShape(t *testing.T) {
 	_, deps := setupToolsTest(t)
-	res := callTool(t, deps, registerGetDashboardState, "L_owner", "get_dashboard_state", map[string]any{})
+	res := callLearnerView(t, deps, "L_owner", "progress", map[string]any{})
 	if res.IsError {
 		t.Fatalf("expected canonical (non-error) payload, got error: %q", resultText(res))
 	}
@@ -65,7 +73,7 @@ func TestGetDashboardState_ColorEnumIsEnglish(t *testing.T) {
 		t.Fatalf("seed concept state: %v", err)
 	}
 
-	res := callTool(t, deps, registerGetDashboardState, "L_owner", "get_dashboard_state", map[string]any{
+	res := callLearnerView(t, deps, "L_owner", "progress", map[string]any{
 		"domain_id": d.ID,
 	})
 	if res.IsError {
@@ -123,7 +131,7 @@ func TestGetDashboardState_DoesNotLabelHighEstimateAsMasteredProgress(t *testing
 		t.Fatal(err)
 	}
 
-	res := callTool(t, deps, registerGetDashboardState, "L_owner", "get_dashboard_state", map[string]any{
+	res := callLearnerView(t, deps, "L_owner", "progress", map[string]any{
 		"domain_id": domain.ID,
 	})
 	if res.IsError {
@@ -133,7 +141,7 @@ func TestGetDashboardState_DoesNotLabelHighEstimateAsMasteredProgress(t *testing
 	if out["total_estimated"] != float64(1) || out["total_demonstrated"] != float64(0) {
 		t.Fatalf("unexpected global evidence counts: %v", out)
 	}
-	if out["total_mastered"] != float64(0) || out["global_progress_percent"] != float64(0) {
+	if out["global_progress_percent"] != float64(0) {
 		t.Fatalf("high BKT estimate was mislabeled as mastered progress: %v", out)
 	}
 	if out["global_estimated_progress_percent"] != float64(50) {
@@ -144,7 +152,7 @@ func TestGetDashboardState_DoesNotLabelHighEstimateAsMasteredProgress(t *testing
 		t.Fatalf("domains=%T %#v", out["domains"], out["domains"])
 	}
 	dashboard := domains[0].(map[string]any)
-	if dashboard["mastered_count"] != float64(0) || dashboard["demonstrated_count"] != float64(0) || dashboard["estimated_count"] != float64(1) {
+	if dashboard["demonstrated_count"] != float64(0) || dashboard["estimated_count"] != float64(1) {
 		t.Fatalf("unexpected domain evidence counts: %v", dashboard)
 	}
 	concepts := dashboard["concepts"].([]any)
@@ -189,8 +197,8 @@ func seedDecisionBoundHostEvaluation(t *testing.T, store *db.Store, deps *Deps, 
 	prepared := callTool(t, deps, registerPrepareAssessmentAttempt, "L_owner", "prepare_assessment_attempt", map[string]any{
 		"domain_id": domain.ID, "session_id": session.ID, "decision_id": decision.ID,
 		"concept": "a", "activity_type": "MASTERY_CHALLENGE", "observable": "Apply the competency.",
-		"task_text":   "Generated task.",
-		"rubric_json": `{"criteria":[{"id":"x","description":"Defined criterion.","max_score":1},{"id":"y","description":"Second criterion.","max_score":1}],"passing_score":1.2}`,
+		"task_text": "Generated task.",
+		"rubric":    json.RawMessage(`{"criteria":[{"id":"x","description":"Defined criterion.","max_score":1},{"id":"y","description":"Second criterion.","max_score":1}],"passing_score":1.2}`),
 	})
 	if prepared.IsError {
 		t.Fatalf("prepare: %s", resultText(prepared))
@@ -203,7 +211,7 @@ func seedDecisionBoundHostEvaluation(t *testing.T, store *db.Store, deps *Deps, 
 	args := assessmentEvaluationArgs(domain.ID, session.ID, attemptID, true)
 	// Only assessment activity types can demonstrate; routine practice cannot.
 	args["activity_type"] = "MASTERY_CHALLENGE"
-	args["rubric_score_json"] = `{"criteria_scores":[{"id":"x","score":1,"evidence":"Observed."},{"id":"y","score":1,"evidence":"Observed."}]}`
+	args["rubric_score"] = json.RawMessage(`{"criteria_scores":[{"id":"x","score":1,"evidence":"Observed."},{"id":"y","score":1,"evidence":"Observed."}]}`)
 	accepted := callTool(t, deps, registerRecordInteraction, "L_owner", "record_interaction", args)
 	if accepted.IsError {
 		t.Fatalf("evaluate: %s", resultText(accepted))
@@ -212,7 +220,7 @@ func seedDecisionBoundHostEvaluation(t *testing.T, store *db.Store, deps *Deps, 
 
 func dashboardDemonstrated(t *testing.T, deps *Deps) (float64, float64) {
 	t.Helper()
-	res := callTool(t, deps, registerGetDashboardState, "L_owner", "get_dashboard_state", map[string]any{})
+	res := callLearnerView(t, deps, "L_owner", "progress", map[string]any{})
 	if res.IsError {
 		t.Fatalf("dashboard: %s", resultText(res))
 	}

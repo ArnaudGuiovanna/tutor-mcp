@@ -124,9 +124,13 @@ type PedagogicalContract struct {
 	LLMInstruction          string                   `json:"llm_instruction"`
 }
 
+// ReasoningRequest asks the host model for an interpretation_brief before it
+// generates the activity. The fixed task and constraints are documented once
+// in the server instructions and the tutor_mcp prompt; responses carry only
+// the per-decision reasons.
 type ReasoningRequest struct {
-	Task           string   `json:"task"`
-	Constraints    []string `json:"constraints"`
+	Task           string   `json:"task,omitempty"`
+	Constraints    []string `json:"constraints,omitempty"`
 	OutputRequired string   `json:"output_required"`
 	EnabledBecause []string `json:"enabled_because,omitempty"`
 }

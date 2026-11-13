@@ -220,7 +220,7 @@ async def relay(options):
                     elif method == 'tools/list':
                         event('catalog_request')
                     else:
-                        event('profile_dispatch' if value.get('params', {}).get('name') == 'get_learner_context' else 'unexpected_tool_dispatch')
+                        event('profile_dispatch' if value.get('params', {}).get('name') == 'get_learner_state' else 'unexpected_tool_dispatch')
                 process.stdin.write(line)
                 await process.stdin.drain()
         async def outgoing():
@@ -255,7 +255,7 @@ async def relay(options):
 
 
 def expected_profile_arguments(training):
-    """Reviewed live get_learner_context schema accepts the verified domain."""
+    """Reviewed live get_learner_state schema accepts the verified domain."""
     domain = training.get('domain_id')
     return {'domain_id': domain} if isinstance(domain, str) and domain else {}
 
@@ -292,7 +292,7 @@ class Acp:
                 if method == 'session/request_permission':
                     params = value.get('params', {})
                     raw = params.get('toolCall', {}).get('rawInput', {})
-                    self.probe.require(params.get('sessionId') == session and raw.get('server') == 'tutor' and raw.get('tool') == 'get_learner_context' and raw.get('arguments') == expected_profile_arguments(training), 'permission_not_expected_read')
+                    self.probe.require(params.get('sessionId') == session and raw.get('server') == 'tutor' and raw.get('tool') == 'get_learner_state' and raw.get('arguments') == expected_profile_arguments(training), 'permission_not_expected_read')
                     operation_id = params.get('toolCall', {}).get('toolCallId')
                     self.probe.require(type(operation_id) is str and 0 < len(operation_id) <= 128 and not any(ord(char) < 32 for char in operation_id) and value.get('id') == 'permission:' + operation_id, 'permission_operation_id_mismatch')
                     dispatched = audit_delta(before, audit_counts(self.audit, self.probe)).get('profile_dispatch', 0)
@@ -319,7 +319,7 @@ class Acp:
                         chunks.append(piece)
                         self.probe.require(sum(len(p.encode()) for p in chunks) <= self.probe.MAX_TEXT, 'answer_budget_exceeded')
                     else:
-                        self.probe.require(update.get('sessionUpdate') in ('tool_call', 'tool_call_update') and update.get('title') == 'get_learner_context', 'unexpected_update')
+                        self.probe.require(update.get('sessionUpdate') in ('tool_call', 'tool_call_update') and update.get('title') == 'get_learner_state', 'unexpected_update')
                         operation_id = update.get('toolCallId')
                         self.probe.require(type(operation_id) is str and 0 < len(operation_id) <= 128, 'tool_update_operation_id_missing')
                         row['toolUpdates'].append({'operationId': operation_id, 'status': update.get('status')})

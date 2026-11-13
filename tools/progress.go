@@ -37,7 +37,7 @@ type LearnerProgressParams struct {
 }
 
 func registerProgressTools(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{Name: "list_trainer_cohorts", Description: "Discover published institutional cohorts you are authorized to follow as staff, including archived cohorts. Requires progress:read. Follow next_after to list all cohorts; choose one before reading progress."}, func(ctx context.Context, _ *mcp.CallToolRequest, input LearnerFormationPageParams) (*mcp.CallToolResult, any, error) {
+	addTool(server, deps, &mcp.Tool{Name: "list_trainer_cohorts", Description: "Discover published institutional cohorts you are authorized to follow as staff, including archived cohorts. Requires progress:read. Follow next_after to list all cohorts; choose one before reading progress."}, func(ctx context.Context, _ *mcp.CallToolRequest, input LearnerFormationPageParams) (*mcp.CallToolResult, any, error) {
 		p, _ := auth.GetPrincipal(ctx)
 		s, ok := deps.Store.(storeport.ProgressStore)
 		if !ok {
@@ -49,7 +49,7 @@ func registerProgressTools(server *mcp.Server, deps *Deps) {
 		out, err := s.ListTrainerCohorts(ctx, p, input.After, input.Limit)
 		return progressToolResult(deps, out, err)
 	})
-	addTool(server, &mcp.Tool{Name: "get_cohort_insights", Description: "Read an authorized cohort's named learner roster, evidence-based attention signals and concept mastery estimates. Roster and concept lists have independent cursors. Concept averages require five observed active learners. Generate the requested synthesis in the client using synthesis_guidance; this tool returns observations, never a diagnosis or certification."}, func(ctx context.Context, _ *mcp.CallToolRequest, input CohortInsightsParams) (*mcp.CallToolResult, any, error) {
+	addTool(server, deps, &mcp.Tool{Name: "get_cohort_insights", Description: "Read an authorized cohort's named learner roster, evidence-based attention signals and concept mastery estimates. Roster and concept lists have independent cursors. Concept averages require five observed active learners. Generate the requested synthesis in the client using synthesis_guidance; this tool returns observations, never a diagnosis or certification."}, func(ctx context.Context, _ *mcp.CallToolRequest, input CohortInsightsParams) (*mcp.CallToolResult, any, error) {
 		p, _ := auth.GetPrincipal(ctx)
 		s, ok := deps.Store.(storeport.ProgressStore)
 		if !ok {
@@ -61,7 +61,7 @@ func registerProgressTools(server *mcp.Server, deps *Deps) {
 		out, err := s.GetCohortInsights(ctx, p, input.CohortID, input.After, input.ConceptAfter, input.Limit)
 		return progressToolResult(deps, out, err)
 	})
-	addTool(server, &mcp.Tool{Name: "get_cohort_statistics", Description: "Read the anonymous worker-computed statistics of an authorized cohort: learner counts, mean and median mastery estimates, completion, badge holder counts and per-concept distribution. Requires progress:read. A null value with status insufficient_data is suppressed to protect learners (fewer than five, or a small complementary group): never estimate or subtract it. Statistics are a snapshot refreshed about hourly; respect status, stale and computed_at. Follow next_concept_after for all concepts and write the synthesis in the client using synthesis_guidance."}, func(ctx context.Context, _ *mcp.CallToolRequest, input CohortStatisticsParams) (*mcp.CallToolResult, any, error) {
+	addTool(server, deps, &mcp.Tool{Name: "get_cohort_statistics", Description: "Read the anonymous worker-computed statistics of an authorized cohort: learner counts, mean and median mastery estimates, completion, badge holder counts and per-concept distribution. Requires progress:read. A null value with status insufficient_data is suppressed to protect learners (fewer than five, or a small complementary group): never estimate or subtract it. Statistics are a snapshot refreshed about hourly; respect status, stale and computed_at. Follow next_concept_after for all concepts and write the synthesis in the client using synthesis_guidance."}, func(ctx context.Context, _ *mcp.CallToolRequest, input CohortStatisticsParams) (*mcp.CallToolResult, any, error) {
 		p, _ := auth.GetPrincipal(ctx)
 		s, ok := deps.Store.(storeport.StatisticsStore)
 		if !ok {
@@ -73,7 +73,7 @@ func registerProgressTools(server *mcp.Server, deps *Deps) {
 		out, err := s.GetCohortStatistics(ctx, p, input.CohortID, input.ConceptAfter, input.Limit)
 		return progressToolResult(deps, out, err)
 	})
-	addTool(server, &mcp.Tool{Name: "get_learner_progress", Description: "Read one learner's progress for an exact authorized enrollment: concepts, reviews, evidence counts and the ten most recent session summaries. Historical enrollments stay bound to their own cohort/version. Private chats, answers and affect are excluded. Follow next_after for all concepts and use synthesis_guidance to write a grounded staff synthesis in the client."}, func(ctx context.Context, _ *mcp.CallToolRequest, input LearnerProgressParams) (*mcp.CallToolResult, any, error) {
+	addTool(server, deps, &mcp.Tool{Name: "get_learner_progress", Description: "Read one learner's progress for an exact authorized enrollment: concepts, reviews, evidence counts and the ten most recent session summaries. Historical enrollments stay bound to their own cohort/version. Private chats, answers and affect are excluded. Follow next_after for all concepts and use synthesis_guidance to write a grounded staff synthesis in the client."}, func(ctx context.Context, _ *mcp.CallToolRequest, input LearnerProgressParams) (*mcp.CallToolResult, any, error) {
 		p, _ := auth.GetPrincipal(ctx)
 		s, ok := deps.Store.(storeport.ProgressStore)
 		if !ok {

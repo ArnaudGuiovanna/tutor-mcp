@@ -43,16 +43,13 @@ func TestNativeMigrationPreservesHistoricalRowsAndForeignKeys(t *testing.T) {
 	if _, err := raw.Exec(`INSERT INTO external_identities(id,user_id,provider,issuer,subject,email_at_link,created_at,last_seen_at) VALUES('external-old','historical','old','https://old.test','subject','historical@example.test',?,?)`, now, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := raw.Exec(`INSERT INTO console_sessions(token_hash,user_id,tenant_id,membership_id,membership_version,created_at,last_seen_at,expires_at) VALUES('old-console','historical','tenant_legacy','membership_legacy_historical',1,?,?,?)`, now, now, now.Add(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := raw.Exec(`PRAGMA foreign_keys=ON`); err != nil {
 		t.Fatal(err)
 	}
 	if err := Migrate(raw); err != nil {
 		t.Fatal(err)
 	}
-	for _, query := range []string{`SELECT COUNT(*) FROM users WHERE id='historical' AND email='historical@example.test' AND password_hash='old-password' AND identity_mode='email'`, `SELECT COUNT(*) FROM learners WHERE id='historical' AND objective='learning objective' AND profile_json='{"name":"Existing"}'`, `SELECT COUNT(*) FROM external_identities WHERE id='external-old'`, `SELECT COUNT(*) FROM console_sessions WHERE token_hash='old-console'`} {
+	for _, query := range []string{`SELECT COUNT(*) FROM users WHERE id='historical' AND email='historical@example.test' AND password_hash='old-password' AND identity_mode='email'`, `SELECT COUNT(*) FROM learners WHERE id='historical' AND objective='learning objective' AND profile_json='{"name":"Existing"}'`, `SELECT COUNT(*) FROM external_identities WHERE id='external-old'`} {
 		var count int
 		if err := raw.QueryRow(query).Scan(&count); err != nil || count != 1 {
 			t.Fatalf("historical row changed: count=%d err=%v query=%s", count, err, query)

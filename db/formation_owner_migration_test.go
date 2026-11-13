@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"testing"
-	"time"
 
 	"tutor-mcp/models"
 )
@@ -21,10 +20,7 @@ func TestPostgresFormationOwnerBackfillRespectsForcedRLS(t *testing.T) {
 	ctx := t.Context()
 	want := map[string]string{}
 	for i := range 2 {
-		scope := seedInstitutionOwner(t, s, fmt.Sprintf("backfill-%d", i), fmt.Sprintf("owner%d@backfill.test", i))
-		if _, err := s.RecordMembershipMFAVerification(ctx, scope, time.Now().UTC()); err != nil {
-			t.Fatal(err)
-		}
+		scope := seedInstitutionOwner(t, s, fmt.Sprintf("backfill-%d", i))
 		p, err := s.GetPrincipal(ctx, scope, []string{models.OAuthScopeLearner})
 		if err != nil {
 			t.Fatal(err)

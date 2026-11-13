@@ -21,14 +21,7 @@ type BKTState struct {
 const bktEpsilon = 1e-9
 
 // Mastery thresholds are exposed via accessors in thresholds.go (MasteryBKT,
-// MasteryKST, MasteryMid). The bascule REGULATION_THRESHOLD=on collapses
-// them to a single 0.85 — see docs/regulation-design/07-threshold-resolver.md.
-
-// BKTUpdate preserves the traditional observation-plus-transition update for
-// an opportunity to learn. Measurement-only callers must use BKTObserve.
-func BKTUpdate(state BKTState, correct bool) BKTState {
-	return BKTTransition(BKTObserve(state, correct))
-}
+// MasteryKST, MasteryMid), all equal to the unified MasteryThreshold (0.85).
 
 // BKTObserve updates the posterior from the response alone. PLearn and PForget
 // are preserved as parameters but do not affect this measurement. Separating
@@ -71,46 +64,6 @@ func BKTTransition(state BKTState) BKTState {
 	result := state
 	result.PMastery = clamp(state.PMastery*(1-state.PForget)+(1-state.PMastery)*state.PLearn, 0, 1)
 	return result
-}
-
-// BKTUpdateHeuristicSlipByErrorType adjusts BKT slip/guess parameters based on
-// the error type before applying a standard BKT update. NOTE: this is a
-// PROJECT-SPECIFIC HEURISTIC, not part of canonical BKT (Corbett & Anderson
-// 1995, "Knowledge Tracing: Modeling the Acquisition of Procedural
-// Knowledge"). The literature treats slip and guess as fixed per-skill
-// parameters; ramping them per-observation by an externally-supplied error
-// label has no source in the BKT corpus and is a heuristic introduced here.
-// The function is named to keep the deviation explicit at every call-site.
-//
-// SYNTAX_ERROR: careless mistake — higher slip, less penalizing to mastery.
-// KNOWLEDGE_GAP: genuine lack of understanding — lower guess, more penalizing.
-// LOGIC_ERROR or empty: standard BKT update (no heuristic ramp).
-//
-// The returned (slipUsed, guessUsed) values are the parameters the heuristic
-// fed into BKTUpdate for this observation; callers should log them to the
-// interaction audit trail so the run can be replayed deterministically.
-//
-// Deprecated: no production caller. Interactions update mastery with the
-// fixed declared parameters; error_type is stored for audit and calibration
-// only and no longer changes slip/guess at update time.
-func BKTUpdateHeuristicSlipByErrorType(state BKTState, correct bool, errorType string) (next BKTState, slipUsed, guessUsed float64) {
-	if correct || errorType == "" {
-		return BKTUpdate(state, correct), state.PSlip, state.PGuess
-	}
-
-	adjusted := state
-	switch errorType {
-	case "SYNTAX_ERROR":
-		// Syntax errors indicate carelessness, not lack of knowledge.
-		// Temporarily boost PSlip to reduce mastery penalty.
-		adjusted.PSlip = clamp(state.PSlip+0.15, 0, 0.5)
-	case "KNOWLEDGE_GAP":
-		// Genuine knowledge gap — reduce PGuess to penalize more.
-		adjusted.PGuess = clamp(state.PGuess-0.10, 0.05, 0.5)
-	}
-	// LOGIC_ERROR uses standard parameters
-
-	return BKTUpdate(adjusted, correct), adjusted.PSlip, adjusted.PGuess
 }
 
 func BKTIsMastered(state BKTState) bool {

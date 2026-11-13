@@ -8,7 +8,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"strings"
 	"time"
 
 	"tutor-mcp/models"
@@ -51,32 +50,6 @@ func (s *Store) ListFormationAdmissions(ctx context.Context, actor models.Princi
 		return rows.Err()
 	})
 	return out, err
-}
-
-// Resolve only an explicitly supplied learner address after cohort authorization.
-// Formation managers do not receive a directory of unrelated memberships.
-func (s *Store) FindFormationLearner(ctx context.Context, actor models.Principal, cohortID, email string) (string, error) {
-	var id string
-	err := s.WithTenantTx(ctx, actor.TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {
-		txs := scoped.(*Store)
-		if _, err := txs.formationAccess(txCtx, actor, "cohort", cohortID, models.PermissionCohortManage, false); err != nil {
-			return err
-		}
-		var rolesJSON string
-		if err := txs.queryRow(txCtx, `SELECT tm.id, tm.roles_json FROM tenant_memberships tm JOIN users u ON u.id = tm.user_id
- WHERE tm.tenant_id = ? AND tm.status = 'active' AND u.status = 'active' AND u.email = ?`, actor.TenantID, strings.ToLower(strings.TrimSpace(email))).Scan(&id, &rolesJSON); err != nil {
-			return storeport.ErrInvalidPrincipal
-		}
-		var roles []string
-		if err := json.Unmarshal([]byte(rolesJSON), &roles); err != nil {
-			return err
-		}
-		if !containsRole(roles, models.RoleLearner) {
-			return storeport.ErrInvalidPrincipal
-		}
-		return nil
-	})
-	return id, err
 }
 
 func (s *Store) DecideFormationAdmission(ctx context.Context, actor models.Principal, key, cohortID, membershipID, decision string, expectedVersion int64) (*models.FormationAdmission, bool, error) {

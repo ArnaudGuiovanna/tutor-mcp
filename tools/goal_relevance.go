@@ -16,16 +16,15 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"os"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // regulationGoalEnabled gates registration and execution of both
 // set_goal_relevance and get_goal_relevance. Default-on, opt-out via
-// REGULATION_GOAL=off — same convention as REGULATION_THRESHOLD.
-func regulationGoalEnabled() bool {
-	return os.Getenv("REGULATION_GOAL") != "off"
+// REGULATION_GOAL=off (read once at startup into Deps.Regulation).
+func regulationGoalEnabled(deps *Deps) bool {
+	return !deps.regulation().GoalDisabled
 }
 
 const (
@@ -42,10 +41,10 @@ type SetGoalRelevanceParams struct {
 }
 
 func registerSetGoalRelevance(server *mcp.Server, deps *Deps) {
-	if !regulationGoalEnabled() {
+	if !regulationGoalEnabled(deps) {
 		return
 	}
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name: "set_goal_relevance",
 		Description: "Decompose the learner's personal_goal against the domain's concepts. " +
 			"For each concept, provide a score in 0..1: 1.0 = central to the goal, " +
@@ -81,7 +80,7 @@ func registerSetGoalRelevance(server *mcp.Server, deps *Deps) {
 		domain, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
 		if err != nil || domain == nil {
 			if params.DomainID != "" {
-				deps.Logger.Error("set_goal_relevance: domain not found by id", "err", err, "learner", learnerID, "domain_id", params.DomainID)
+				deps.Logger.Error("set_goal_relevance: domain not found by id", append(diagnosticErrorAttrs(err), "learner", learnerID, "domain_id", params.DomainID)...)
 				r, _ := errorResult("domain not found")
 				return r, nil, nil
 			}
@@ -98,7 +97,7 @@ func registerSetGoalRelevance(server *mcp.Server, deps *Deps) {
 		}
 		for k := range params.Relevance {
 			if !known[k] {
-				r, _ := errorResult(fmt.Sprintf("unknown concept %q - not present in domain %q (call get_learner_context to see the concept list)", k, domain.ID))
+				r, _ := errorResult(fmt.Sprintf("unknown concept %q - not present in domain %q (call get_curriculum_snapshot to see the concept list)", k, domain.ID))
 				return r, nil, nil
 			}
 		}
@@ -133,7 +132,7 @@ func registerSetGoalRelevance(server *mcp.Server, deps *Deps) {
 		var degradedComponents []string
 		var staleAfterSet any
 		if err != nil {
-			deps.Logger.Warn("set_goal_relevance: updated domain readback degraded", "err", err, "learner", learnerID, "domain", domain.ID)
+			deps.Logger.Warn("set_goal_relevance: updated domain readback degraded", append(diagnosticErrorAttrs(err), "learner", learnerID, "domain", domain.ID)...)
 			degradedComponents = append(degradedComponents, "updated_domain_readback")
 			fresh = domain
 			staleAfterSet = nil
@@ -182,10 +181,10 @@ type GetGoalRelevanceParams struct {
 }
 
 func registerGetGoalRelevance(server *mcp.Server, deps *Deps) {
-	if !regulationGoalEnabled() {
+	if !regulationGoalEnabled(deps) {
 		return
 	}
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name: "get_goal_relevance",
 		Description: "Read the stored relevance vector for a domain and the list of concepts not yet covered. " +
 			"Observation tool: use to decide whether to complete with set_goal_relevance (e.g. after add_concepts).",
@@ -200,7 +199,7 @@ func registerGetGoalRelevance(server *mcp.Server, deps *Deps) {
 		domain, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
 		if err != nil || domain == nil {
 			if params.DomainID != "" {
-				deps.Logger.Error("get_goal_relevance: domain not found by id", "err", err, "learner", learnerID, "domain_id", params.DomainID)
+				deps.Logger.Error("get_goal_relevance: domain not found by id", append(diagnosticErrorAttrs(err), "learner", learnerID, "domain_id", params.DomainID)...)
 				r, _ := errorResult("domain not found")
 				return r, nil, nil
 			}

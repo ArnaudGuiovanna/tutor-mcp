@@ -5,43 +5,43 @@ import (
 	"testing"
 )
 
-func TestBKTUpdateIndividualizedEmptyProfileMatchesExistingBKT(t *testing.T) {
+func TestBKTObserveIndividualizedEmptyProfileUsesErrorTypeObservationParams(t *testing.T) {
 	base := BKTState{PMastery: 0.5, PLearn: 0.3, PForget: 0.05, PSlip: 0.1, PGuess: 0.2}
 
 	tests := []struct {
 		name      string
 		correct   bool
 		errorType string
+		wantSlip  float64
+		wantGuess float64
 	}{
-		{name: "correct", correct: true, errorType: ""},
-		{name: "incorrect", correct: false, errorType: ""},
-		{name: "syntax error", correct: false, errorType: "SYNTAX_ERROR"},
-		{name: "knowledge gap", correct: false, errorType: "KNOWLEDGE_GAP"},
-		{name: "logic error", correct: false, errorType: "LOGIC_ERROR"},
+		{name: "correct", correct: true, errorType: "SYNTAX_ERROR", wantSlip: 0.1, wantGuess: 0.2},
+		{name: "incorrect", correct: false, errorType: "", wantSlip: 0.1, wantGuess: 0.2},
+		{name: "syntax error", correct: false, errorType: "SYNTAX_ERROR", wantSlip: 0.25, wantGuess: 0.2},
+		{name: "knowledge gap", correct: false, errorType: "KNOWLEDGE_GAP", wantSlip: 0.1, wantGuess: 0.1},
+		{name: "logic error", correct: false, errorType: "LOGIC_ERROR", wantSlip: 0.1, wantGuess: 0.2},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			wantState, wantSlip, wantGuess := BKTUpdateHeuristicSlipByErrorType(base, tc.correct, tc.errorType)
-			got := BKTUpdateIndividualized(base, IndividualBKTProfile{}, tc.correct, tc.errorType)
-
-			if !approxEqual(got.State.PMastery, wantState.PMastery, 1e-9) {
-				t.Fatalf("PMastery = %f, want %f", got.State.PMastery, wantState.PMastery)
+			got := BKTObserveIndividualized(base, IndividualBKTProfile{}, tc.correct, tc.errorType)
+			if !approxEqual(got.Params.PSlip, tc.wantSlip, 1e-9) || !approxEqual(got.Params.PGuess, tc.wantGuess, 1e-9) {
+				t.Fatalf("params = %+v, want slip=%f guess=%f", got.Params, tc.wantSlip, tc.wantGuess)
 			}
-			if !approxEqual(got.Params.PLearn, base.PLearn, 1e-9) {
-				t.Errorf("PLearn used = %f, want %f", got.Params.PLearn, base.PLearn)
+			adjusted := base
+			adjusted.PSlip, adjusted.PGuess = tc.wantSlip, tc.wantGuess
+			want := BKTObserve(adjusted, tc.correct).PMastery
+			if !approxEqual(got.State.PMastery, want, 1e-9) {
+				t.Fatalf("PMastery = %f, want %f", got.State.PMastery, want)
 			}
-			if !approxEqual(got.Params.PSlip, wantSlip, 1e-9) {
-				t.Errorf("PSlip used = %f, want %f", got.Params.PSlip, wantSlip)
-			}
-			if !approxEqual(got.Params.PGuess, wantGuess, 1e-9) {
-				t.Errorf("PGuess used = %f, want %f", got.Params.PGuess, wantGuess)
+			if !approxEqual(got.State.PLearn, base.PLearn, 1e-9) || got.TransitionApplied {
+				t.Fatalf("empty profile changed learning parameters or applied a transition: %+v", got)
 			}
 		})
 	}
 }
 
-func TestBKTUpdateIndividualizedContrastingProfiles(t *testing.T) {
+func TestBKTObserveIndividualizedContrastingProfiles(t *testing.T) {
 	base := BKTState{PMastery: 0.45, PLearn: 0.25, PForget: 0.05, PSlip: 0.12, PGuess: 0.2}
 	strong := IndividualBKTProfile{
 		Observations:       50,
@@ -62,14 +62,14 @@ func TestBKTUpdateIndividualizedContrastingProfiles(t *testing.T) {
 		Stability:          0.1,
 	}
 
-	gotStrong := BKTUpdateIndividualized(base, strong, true, "")
-	gotFragile := BKTUpdateIndividualized(base, fragile, true, "")
+	gotStrong := BKTObserveIndividualized(base, strong, true, "")
+	gotFragile := BKTObserveIndividualized(base, fragile, true, "")
 
 	if gotStrong.Params.PSlip >= base.PSlip {
 		t.Errorf("strong stable profile should lower slip: got %f base %f", gotStrong.Params.PSlip, base.PSlip)
 	}
-	if gotStrong.Params.PLearn <= base.PLearn {
-		t.Errorf("strong stable profile should raise learn cautiously: got %f base %f", gotStrong.Params.PLearn, base.PLearn)
+	if gotStrong.State.PLearn <= base.PLearn {
+		t.Errorf("strong stable profile should raise learn cautiously: got %f base %f", gotStrong.State.PLearn, base.PLearn)
 	}
 	if gotStrong.Params.PGuess >= base.PGuess {
 		t.Errorf("strong stable profile should lower guess: got %f base %f", gotStrong.Params.PGuess, base.PGuess)
@@ -77,8 +77,8 @@ func TestBKTUpdateIndividualizedContrastingProfiles(t *testing.T) {
 	if gotFragile.Params.PSlip <= base.PSlip {
 		t.Errorf("fragile profile should raise slip: got %f base %f", gotFragile.Params.PSlip, base.PSlip)
 	}
-	if gotFragile.Params.PLearn >= base.PLearn {
-		t.Errorf("fragile profile should lower learn: got %f base %f", gotFragile.Params.PLearn, base.PLearn)
+	if gotFragile.State.PLearn >= base.PLearn {
+		t.Errorf("fragile profile should lower learn: got %f base %f", gotFragile.State.PLearn, base.PLearn)
 	}
 	if gotFragile.Params.PGuess <= base.PGuess {
 		t.Errorf("fragile profile should raise guess: got %f base %f", gotFragile.Params.PGuess, base.PGuess)
@@ -89,7 +89,7 @@ func TestBKTUpdateIndividualizedContrastingProfiles(t *testing.T) {
 	}
 }
 
-func TestBKTUpdateIndividualizedClampsAndAvoidsNaN(t *testing.T) {
+func TestBKTObserveIndividualizedClampsAndAvoidsNaN(t *testing.T) {
 	state := BKTState{
 		PMastery: math.NaN(),
 		PLearn:   math.Inf(1),
@@ -108,12 +108,12 @@ func TestBKTUpdateIndividualizedClampsAndAvoidsNaN(t *testing.T) {
 		AvgResponseTimeSecs: math.NaN(),
 	}
 
-	got := BKTUpdateIndividualized(state, profile, false, "KNOWLEDGE_GAP")
+	got := BKTObserveIndividualized(state, profile, false, "KNOWLEDGE_GAP")
 
 	assertFiniteBKTState(t, got.State)
 	assertFiniteParams(t, got.Params)
-	if got.Params.PLearn < 0 || got.Params.PLearn > 1 {
-		t.Errorf("PLearn out of bounds: %f", got.Params.PLearn)
+	if got.State.PLearn < 0 || got.State.PLearn > 1 {
+		t.Errorf("PLearn out of bounds: %f", got.State.PLearn)
 	}
 	if got.Params.PSlip < 0 || got.Params.PSlip > individualBKTMaxSlip {
 		t.Errorf("PSlip out of bounds: %f", got.Params.PSlip)
@@ -123,7 +123,7 @@ func TestBKTUpdateIndividualizedClampsAndAvoidsNaN(t *testing.T) {
 	}
 }
 
-func TestBKTUpdateIndividualizedDeterministic(t *testing.T) {
+func TestBKTObserveIndividualizedDeterministic(t *testing.T) {
 	state := BKTState{PMastery: 0.42, PLearn: 0.28, PForget: 0.04, PSlip: 0.11, PGuess: 0.21}
 	profile := IndividualBKTProfile{
 		Observations:       17,
@@ -135,15 +135,15 @@ func TestBKTUpdateIndividualizedDeterministic(t *testing.T) {
 		Stability:          0.61,
 	}
 
-	first := BKTUpdateIndividualized(state, profile, false, "LOGIC_ERROR")
-	second := BKTUpdateIndividualized(state, profile, false, "LOGIC_ERROR")
+	first := BKTObserveIndividualized(state, profile, false, "LOGIC_ERROR")
+	second := BKTObserveIndividualized(state, profile, false, "LOGIC_ERROR")
 
 	if first != second {
 		t.Fatalf("individualized BKT update is not deterministic: first=%+v second=%+v", first, second)
 	}
 }
 
-func TestBKTUpdateIndividualizedNoNaNOnDegenerateBKTInputs(t *testing.T) {
+func TestBKTObserveIndividualizedNoNaNOnDegenerateBKTInputs(t *testing.T) {
 	tests := []struct {
 		name    string
 		state   BKTState
@@ -163,7 +163,7 @@ func TestBKTUpdateIndividualizedNoNaNOnDegenerateBKTInputs(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := BKTUpdateIndividualized(tc.state, IndividualBKTProfile{}, tc.correct, "")
+			got := BKTObserveIndividualized(tc.state, IndividualBKTProfile{}, tc.correct, "")
 			assertFiniteBKTState(t, got.State)
 			assertFiniteParams(t, got.Params)
 		})

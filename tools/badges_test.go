@@ -26,9 +26,6 @@ func TestInstitutionBadgesRealInteractionAndFSRS(t *testing.T) {
 	if _, err := s.SetMembershipAuthorization(ctx, owner.TenantScope(), models.MembershipStatusActive, []string{models.RoleOwner}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.RecordMembershipMFAVerification(ctx, owner.TenantScope(), time.Now()); err != nil {
-		t.Fatal(err)
-	}
 	owner, err = s.GetPrincipalForLearner(ctx, "L_attacker", []string{models.OAuthScopeLearner})
 	if err != nil {
 		t.Fatal(err)

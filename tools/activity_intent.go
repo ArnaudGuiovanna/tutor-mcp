@@ -31,18 +31,24 @@ type activityDomainSelectionError struct {
 func (e *activityDomainSelectionError) Error() string { return e.message }
 
 func normalizeActivityIntent(raw string) (string, error) {
-	token := compactToken(raw)
-	switch token {
-	case "", "auto":
+	switch raw {
+	case "", activityIntentAuto:
 		return activityIntentAuto, nil
-	case "review", "revise", "revision", "reviser", "practice", "practise":
+	case activityIntentReview:
 		return activityIntentReview, nil
 	default:
 		return "", fmt.Errorf("unsupported intent %q: allowed values are auto, review", raw)
 	}
 }
 
-func resolveActivityDomain(ctx context.Context, store storeport.Store, learnerID, domainID, domainName string) (*models.Domain, error) {
+// activityDomainStore resolves the domain of an activity request: by ID, by
+// name, or by the most critical retention need across the learner's domains.
+type activityDomainStore interface {
+	storeport.DomainStore
+	storeport.ConceptStateStore
+}
+
+func resolveActivityDomain(ctx context.Context, store activityDomainStore, learnerID, domainID, domainName string) (*models.Domain, error) {
 	if storeport.ConversationID(ctx) != "" {
 		return resolveDomain(ctx, store, learnerID, domainID)
 	}
@@ -97,9 +103,9 @@ func resolveActivityDomain(ctx context.Context, store storeport.Store, learnerID
 }
 
 // resolveCriticalRetentionDomain selects the active domain containing the most
-// urgent reviewed card. States are loaded per domain because concept labels
-// are not learner-global identities.
-func resolveCriticalRetentionDomain(ctx context.Context, store storeport.Store, learnerID string) (*models.Domain, error) {
+// urgent reviewed card. States are grouped per domain because concept labels
+// are not learner-global identities; one batched read serves every domain.
+func resolveCriticalRetentionDomain(ctx context.Context, store activityDomainStore, learnerID string) (*models.Domain, error) {
 	domains, err := store.GetDomainsByLearner(ctx, learnerID, false)
 	if err != nil {
 		return nil, err
@@ -111,12 +117,12 @@ func resolveCriticalRetentionDomain(ctx context.Context, store storeport.Store, 
 	var bestDomain *models.Domain
 	bestRetention := 1.0
 	now := time.Now().UTC()
+	statesByDomain, err := conceptStatesByDomains(ctx, store, learnerID, domains)
+	if err != nil {
+		return nil, err
+	}
 	for _, d := range domains {
-		states, err := store.GetConceptStatesByDomain(ctx, learnerID, d.ID)
-		if err != nil {
-			return nil, err
-		}
-		for _, cs := range states {
+		for _, cs := range statesByDomain[d.ID] {
 			if cs == nil || cs.CardState == "new" {
 				continue
 			}

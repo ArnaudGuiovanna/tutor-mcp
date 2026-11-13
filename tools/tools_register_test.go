@@ -44,8 +44,6 @@ func TestRegisterTools_Smoke(t *testing.T) {
 
 	want := []string{
 		"start_learning_session",
-		"get_pending_alerts",
-		"get_next_activity",
 		"prepare_pedagogical_turn",
 		"record_interaction",
 		"record_learning_event",
@@ -53,10 +51,9 @@ func TestRegisterTools_Smoke(t *testing.T) {
 		"submit_assessment_attempt",
 		"cancel_assessment_attempt",
 		"check_mastery",
-		"get_learner_context",
+		"get_learner_state",
 		"get_availability_model",
 		"update_availability_model",
-		"get_olm_snapshot",
 		"get_pedagogical_snapshots",
 		"get_decision_replay_summary",
 		"init_domain",
@@ -69,10 +66,8 @@ func TestRegisterTools_Smoke(t *testing.T) {
 		"calibration_check",
 		"record_calibration_result",
 		"get_autonomy_metrics",
-		"get_metacognitive_mirror",
 		"feynman_challenge",
 		"transfer_challenge",
-		"record_transfer_result",
 		"learning_negotiation",
 		"set_domain_priority",
 		"mark_domain_high_stakes",
@@ -81,15 +76,12 @@ func TestRegisterTools_Smoke(t *testing.T) {
 		"get_memory_state",
 		"claim_memory_maintenance",
 		"commit_memory_maintenance",
-		"archive_domain",
-		"unarchive_domain",
-		"delete_domain",
+		"manage_domain",
 		"get_misconceptions",
 		"record_session_close",
 		"list_implementation_intentions",
 		"update_implementation_intention",
 		"queue_webhook_message",
-		"get_dashboard_state",
 		"set_goal_relevance",
 		"get_goal_relevance",
 	}
@@ -193,8 +185,8 @@ func TestRegisterTools_Smoke(t *testing.T) {
 			t.Errorf("%s missing independent contribution scheme", name)
 		}
 	}
-	if deleteTool := registered["delete_domain"]; deleteTool.Annotations.DestructiveHint == nil || !*deleteTool.Annotations.DestructiveHint {
-		t.Error("delete_domain must be marked destructive")
+	if domainTool := registered["manage_domain"]; domainTool.Annotations.DestructiveHint == nil || !*domainTool.Annotations.DestructiveHint {
+		t.Error("manage_domain must be marked destructive")
 	}
 	if recordTool := registered["record_interaction"]; recordTool.Annotations.DestructiveHint == nil || *recordTool.Annotations.DestructiveHint {
 		t.Error("record_interaction must be marked additive/non-destructive")
@@ -203,18 +195,17 @@ func TestRegisterTools_Smoke(t *testing.T) {
 		t.Error("queue_webhook_message must be marked open-world")
 	}
 	assertToolSafetyHints(t, registered["learning_negotiation"], false, true, false)
-	assertToolSafetyHints(t, registered["get_metacognitive_mirror"], false, false, true)
 	assertToolSafetyHints(t, registered["get_curriculum_snapshot"], false, false, false)
 	assertToolSafetyHints(t, registered["get_memory_state"], false, false, false)
-	// get_next_activity can enqueue the same proactive mirror webhook as the
-	// explicit mirror tool, so its open-world hint must remain consistent.
-	assertToolSafetyHints(t, registered["get_next_activity"], false, false, true)
+	// An activity turn can enqueue the proactive mirror webhook.
+	assertToolSafetyHints(t, registered["prepare_pedagogical_turn"], false, false, true)
 	// Training reads need only a read grant and change nothing the caller can
 	// observe; they must not ask hosts for a destructive-action approval.
-	for _, name := range []string{"get_training", "list_training_library", "get_training_policy", "find_training_members", "preview_training_edit", "preview_training_lifecycle"} {
+	for _, name := range []string{"get_training", "list_training_library", "get_training_policy", "find_training_members", "get_learner_state"} {
 		assertToolSafetyHints(t, registered[name], true, false, false)
 	}
-	assertToolSafetyHints(t, registered["save_training_edit"], false, true, false)
+	assertToolSafetyHints(t, registered["edit_training"], false, true, false)
+	assertToolSafetyHints(t, registered["manage_training_lifecycle"], false, true, false)
 }
 
 func TestRegisterTools_LegacyRolloutAdvertisesOnlyBundle(t *testing.T) {
@@ -238,8 +229,8 @@ func TestRegisterTools_LegacyRolloutAdvertisesOnlyBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(listed.Tools) != 49+len(trainingTools) {
-		t.Fatalf("listed tools=%d, want %d", len(listed.Tools), 49+len(trainingTools))
+	if len(listed.Tools) != 41+len(trainingTools) {
+		t.Fatalf("listed tools=%d, want %d", len(listed.Tools), 41+len(trainingTools))
 	}
 	for _, tool := range listed.Tools {
 		encoded, err := json.Marshal(tool.Meta["securitySchemes"])

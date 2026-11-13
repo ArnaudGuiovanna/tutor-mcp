@@ -41,9 +41,8 @@ var validIdempotencyKey = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}
 // effect when an MCP transport retries after an ambiguous disconnect.
 var idempotentWriteTools = map[string]bool{
 	"commit_memory_maintenance":       true,
-	"prepare_pedagogical_turn":        true, // activity mode only; context never reserves a key
+	"prepare_pedagogical_turn":        true, // activity mode only; context never reserves a key; opens/touches a session and may enqueue a mirror
 	"start_learning_session":          true,
-	"get_next_activity":               true, // opens/touches a session and may enqueue a mirror
 	"record_interaction":              true,
 	"prepare_assessment_attempt":      true,
 	"submit_assessment_attempt":       true,
@@ -57,14 +56,11 @@ var idempotentWriteTools = map[string]bool{
 	"learning_negotiation":            true,
 	"set_domain_priority":             true,
 	"update_learner_memory":           true,
-	"archive_domain":                  true,
-	"unarchive_domain":                true,
-	"delete_domain":                   true,
+	"manage_domain":                   true,
 	"record_session_close":            true,
 	"update_implementation_intention": true,
 	"queue_webhook_message":           true,
 	"set_goal_relevance":              true,
-	"record_transfer_result":          true,
 	"update_availability_model":       true,
 	"mark_domain_high_stakes":         true,
 	"publish_curriculum_revision":     true,
@@ -138,7 +134,7 @@ func idempotencyMiddleware(deps *Deps) mcp.Middleware {
 			toolResult, isToolResult := result.(*mcp.CallToolResult)
 			if callErr != nil || !isToolResult || toolResult == nil || toolResult.IsError {
 				if abortErr := deps.Store.AbortIdempotencyKey(ctx, learnerID, call.Params.Name, key, requestHash); abortErr != nil && deps.Logger != nil {
-					deps.Logger.Error("abort idempotency reservation", "err", abortErr, "tool", call.Params.Name, "learner", learnerID)
+					deps.Logger.Error("abort idempotency reservation", append(diagnosticErrorAttrs(abortErr), "tool", call.Params.Name, "learner", learnerID)...)
 				}
 				return result, callErr
 			}
@@ -152,7 +148,7 @@ func idempotencyMiddleware(deps *Deps) mcp.Middleware {
 			); completeErr != nil && deps.Logger != nil {
 				// Never release an ambiguous successful write: leaving the claim in
 				// processing sacrifices availability but prevents a duplicate.
-				deps.Logger.Error("complete idempotency reservation", "err", completeErr, "tool", call.Params.Name, "learner", learnerID)
+				deps.Logger.Error("complete idempotency reservation", append(diagnosticErrorAttrs(completeErr), "tool", call.Params.Name, "learner", learnerID)...)
 			}
 			return result, nil
 		}

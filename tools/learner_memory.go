@@ -70,7 +70,7 @@ type UpdateLearnerMemoryParams struct {
 }
 
 func registerUpdateLearnerMemory(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name:        "update_learner_memory",
 		Description: "Write learner memory markdown files for session summaries, concept notes, pending observations, stable memory, or archives.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params UpdateLearnerMemoryParams) (*mcp.CallToolResult, any, error) {
@@ -165,7 +165,7 @@ type ReadRawSessionParams struct {
 }
 
 func registerReadRawSession(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name:        "read_raw_session",
 		Description: "Read one raw learner memory session by timestamp, including parsed YAML frontmatter and markdown body.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params ReadRawSessionParams) (*mcp.CallToolResult, any, error) {
@@ -208,7 +208,7 @@ func registerReadRawSession(server *mcp.Server, deps *Deps) {
 }
 
 func registerGetMemoryState(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name:        "get_memory_state",
 		Description: "Inspect learner memory file counts, sizes, session bounds, consolidation lag, and recent narrative signal status.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params struct{}) (*mcp.CallToolResult, any, error) {

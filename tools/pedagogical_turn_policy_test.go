@@ -53,7 +53,7 @@ func TestPedagogicalTurnModeEnforcesScopeTransactionAndReplay(t *testing.T) {
 			in := map[string]any{"conversation_id": selected.ConversationID, "mode": test.mode, "idempotency_key": "policy-once"}
 			raw, _ := json.Marshal(in)
 			req := &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: "prepare_pedagogical_turn", Arguments: raw}}
-			handler := toolOAuthScopeMiddleware("", true)(toolTenantTransactionMiddleware(deps)(idempotencyMiddleware(deps)(func(ctx context.Context, _ string, _ mcp.Request) (mcp.Result, error) {
+			handler := toolOAuthScopeMiddleware(&Deps{BaseURL: "", OAuthGranularScopes: true})(toolTenantTransactionMiddleware(deps)(idempotencyMiddleware(deps)(func(ctx context.Context, _ string, _ mcp.Request) (mcp.Result, error) {
 				return jsonResult(map[string]any{"executed": true})
 			})))
 			beforeR, beforeW := wrapped.reads, wrapped.writes

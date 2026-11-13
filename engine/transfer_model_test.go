@@ -20,7 +20,7 @@ func TestTransferDimensionsStableNames(t *testing.T) {
 		TransferDimensionCreative,
 	}
 
-	if got := TransferDimensions(); !reflect.DeepEqual(got, want) {
+	if got := append([]TransferDimension(nil), canonicalTransferDimensions...); !reflect.DeepEqual(got, want) {
 		t.Fatalf("TransferDimensions() = %v, want %v", got, want)
 	}
 
@@ -45,17 +45,18 @@ func TestBuildTransferProfile_NoTransfer(t *testing.T) {
 	if profile.Attempts != 0 || profile.GlobalScore != 0 || profile.ObservedScore != 0 || profile.Coverage != 0 {
 		t.Fatalf("unexpected empty profile metrics: %+v", profile)
 	}
-	assertTransferDimensions(t, "missing", profile.MissingDimensions, TransferDimensions())
+	assertTransferDimensions(t, "missing", profile.MissingDimensions, append([]TransferDimension(nil), canonicalTransferDimensions...))
 	assertTransferDimensions(t, "weakest", profile.WeakestDimensions, nil)
-	if len(profile.DimensionSummaries) != len(TransferDimensions()) {
-		t.Fatalf("DimensionSummaries len = %d, want %d", len(profile.DimensionSummaries), len(TransferDimensions()))
+	if len(profile.DimensionSummaries) != len(append([]TransferDimension(nil), canonicalTransferDimensions...)) {
+		t.Fatalf("DimensionSummaries len = %d, want %d", len(profile.DimensionSummaries), len(append([]TransferDimension(nil), canonicalTransferDimensions...)))
 	}
 }
 
 func TestBuildTrustedTransferProfileMarksPrevalidatedEvidence(t *testing.T) {
-	profile := BuildTrustedTransferProfile("calc", []*models.TransferRecord{
+	profile := BuildTrustedTransferProfileAt("calc", []*models.TransferRecord{
 		{ConceptID: "calc", ContextType: "near", Score: 0.9},
-	})
+	}, time.Time{})
+
 	if profile.EvidenceTrust != TransferEvidenceTrusted {
 		t.Fatalf("EvidenceTrust = %q, want %q", profile.EvidenceTrust, TransferEvidenceTrusted)
 	}

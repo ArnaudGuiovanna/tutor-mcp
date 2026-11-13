@@ -25,7 +25,7 @@ type GetDecisionReplaySummaryParams struct {
 }
 
 func registerGetDecisionReplaySummary(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name:        "get_decision_replay_summary",
 		Description: "Build an offline replay summary from stored pedagogical snapshots: model-estimate deltas, suspicious jumps, missing rubric evidence, transfer-after-estimate gaps, and malformed snapshot JSON.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params GetDecisionReplaySummaryParams) (*mcp.CallToolResult, any, error) {
@@ -49,7 +49,7 @@ func registerGetDecisionReplaySummary(server *mcp.Server, deps *Deps) {
 		if domainID != "" {
 			domain, err := resolveDomain(ctx, deps.Store, learnerID, domainID)
 			if err != nil || domain == nil {
-				deps.Logger.Error("get_decision_replay_summary: domain not found", "err", err, "learner", learnerID, "domain_id", params.DomainID)
+				deps.Logger.Error("get_decision_replay_summary: domain not found", append(diagnosticErrorAttrs(err), "learner", learnerID, "domain_id", params.DomainID)...)
 				r, _ := errorResult("domain not found")
 				return r, nil, nil
 			}

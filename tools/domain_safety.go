@@ -16,7 +16,7 @@ type MarkDomainHighStakesParams struct {
 }
 
 func registerMarkDomainHighStakes(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name:        "mark_domain_high_stakes",
 		Description: "Apply the one-way high-stakes safety classification to an owned active domain. Demonstrated claims and intrusive suggestions then require a trusted human-reviewed evaluation; no external evaluator is created or assumed.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params MarkDomainHighStakesParams) (*mcp.CallToolResult, any, error) {
@@ -48,7 +48,7 @@ func registerMarkDomainHighStakes(server *mcp.Server, deps *Deps) {
 			// The one-way safety classification is already durable. Fail closed
 			// for the derived permissions and retain a successful mutation result
 			// so idempotency middleware never releases this completed write.
-			deps.Logger.Warn("mark_domain_high_stakes: human-review readback degraded", "err", err, "learner", learnerID, "domain", domain.ID)
+			deps.Logger.Warn("mark_domain_high_stakes: human-review readback degraded", append(diagnosticErrorAttrs(err), "learner", learnerID, "domain", domain.ID)...)
 			r, _ := jsonResult(map[string]any{
 				"domain_id":                       domain.ID,
 				"high_stakes":                     true,

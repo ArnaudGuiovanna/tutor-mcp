@@ -1,6 +1,6 @@
 import { t, useTranslation, setInterfaceLanguage } from './i18n';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { CSSProperties, ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import { bridge } from './bridge';
 import type { ClientBridge } from './bridge';
 import { Icon } from './icons';
@@ -9,6 +9,8 @@ import { AccountMenu } from './AccountMenu';
 import { Connections } from './Connections';
 import { TrainingWorkspace } from './TrainingWorkspace';
 import { SettingsWorkspace, defaultAppearance } from './SettingsWorkspace';
+import type { SettingsTab } from './SettingsWorkspace';
+import { LoadError, LoadingState } from './LoadState';
 import { WindowChrome } from './WindowChrome';
 import { CommandPalette } from './CommandPalette';
 import { StudyComposer } from './StudyComposer';
@@ -36,12 +38,16 @@ import { agentReconnect, chunkFromEvent, displayDate, errorMessage, failureText,
 import { HarnessStatus, limitLabel, useAgentLimit } from './HarnessStatus';
 import type { AgentLoss } from './HarnessStatus';
 import type { AgentConnection, AgentTarget, Conversation, ConversationContext, PermissionRequest, Settings, Snapshot, ToolActivity, Training, TutorOverview } from './types';
+import { acceptTurnEvent, eventForTurn, turnLimitFollowUp, turnLimitFromEvent, turnLimitFromResult, turnLockReason } from './turnEvents';
+import type { TurnLimit, TurnSessionState } from './turnEvents';
 
 type Page = 'conversation' | 'formations' | 'planning' | 'account' | 'settings' | 'agents' | 'institution' | 'members' | 'ergonomics';
 const labels: Record<Page, string> = { conversation: 'Conversation', formations: 'Formations', planning: 'Planning', account: 'Mon compte', settings: 'Paramètres', agents: 'Connexion et outils', institution: 'Institution', members: 'Membres', ergonomics: 'Ergonomie' };
 const settingsPages: Page[] = ['settings', 'agents', 'institution', 'members', 'ergonomics'];
 const empty: Snapshot = { settings: { targetId: '', cwd: '', tutor: { mode: 'remote', activity: 'auto', url: '', command: 'tutor-mcp', args: ['--local'] } }, identity: { exists: false, backupConfirmed: false, needsBackup: false }, intents: [], conversations: [], tutorStatus: { connected: false, label: 'Tutor non connecté' }, agentConnected: false };
-type ActiveTurn = {cancelled:boolean; controller:AbortController; conversationId?:string; operationId?:string; promptOperationId?:string; completedOperations?:Set<string>; text?:string; promptSent?:boolean};
+type ActiveTurn = {cancelled:boolean; controller:AbortController; conversationId?:string; operationId?:string; promptOperationId?:string; completedOperations?:Set<string>; text?:string; promptSent?:boolean;
+  /** Turn identity its harness events must carry, set once its conversation is known. */
+  sessions?:TurnSessionState};
 /** A model turn that failed on its own: shown with that turn, never as a global banner. */
 export type TurnError = {conversationId?:string; message:string; retryText:string};
 type PendingAgentLaunch = {scope:string; promise:Promise<AgentConnection>};
@@ -74,6 +80,8 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   const launchedScope = useRef<string | undefined>(undefined);
   const [agentLoss, setAgentLoss] = useState<AgentLoss>();
   const [turnError, setTurnError] = useState<TurnError>();
+  const [turnLimit, setTurnLimit] = useState<TurnLimit>();
+  // Harness sessions seen in snapshots or turns: their late events never reach another conversation.
   const [overviewValue, setOverview] = useState<TutorOverview | null>(null);
   const [overviewBinding, setOverviewBinding] = useState('');
   const [overviewFailure, setOverviewFailure] = useState(false);
@@ -113,6 +121,9 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   const limit = useAgentLimit(state.agentStatus);
   const sendBlockedReason = limit ? t('Envoi suspendu : {reason}.', {reason:limitLabel(limit.kind, limit.until)}) : '';
   const locked = !!busy || !!pending || sending.current || autoConnecting;
+  // During a model turn, native connection and configuration changes are refused at once.
+  const turnActive = turnStartedAt !== undefined;
+  const turnLockText = turnActive ? t(turnLockReason) : '';
   const connectionScope = reviewScope(state, null);
   const overview = overviewBinding === connectionScope ? overviewValue : null;
   const planningScope = reviewScope(state, overview);
@@ -134,7 +145,7 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
     stateRef.current = next; setState(next); setActiveId(next.activeConversationId); setNewConversation(false);
     setOverview(null); setConnection(null); setDraft(''); setAttachments([]); setPending(undefined); pendingRef.current = undefined; sending.current = false;
     setStream(''); setWriting(false); setProviderStatus(''); setPermissions([]); setTools([]); toolEvents.current=[]; setTrainingId(undefined); setLibraryEpoch(value => value + 1);
-    setShareOpen(false); setResumeHidden(false); setTrainingPanel(false); setTurnError(undefined); setAgentLoss(undefined);
+    setShareOpen(false); setResumeHidden(false); setTrainingPanel(false); setTurnError(undefined); setTurnLimit(undefined); setAgentLoss(undefined);
     setNotice(next.profileSwitchWarning ? t(next.profileSwitchWarning) : ''); setPreparing(''); setPage('conversation');
   }
 
@@ -149,10 +160,7 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
     register(api.listenState(next => {
       if (!live || (next.profileEpoch || 0) < (stateRef.current.profileEpoch || 0)) return;
       if (next.profile?.id && stateRef.current.profile?.id && next.profile.id !== stateRef.current.profile.id) applyProfile(next);
-      else {
-        // ACP can emit its first chunk immediately after replacing the session.
-        stateRef.current = next; setState(next);
-      }
+      else { stateRef.current = next; setState(next); }
     }));
     register(api.listenTutor(status => { if (live) setState(previous => ({ ...previous, tutorStatus: status })); }));
     register(api.listenAgent(event => {
@@ -177,7 +185,15 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
       }
       if (event.type === 'turn_error') {
         const turn = activeTurn.current;
-        if (turn && !turn.cancelled && text(event.message)) setTurnError({conversationId:turn.conversationId, message:text(event.message), retryText:turn.text || ''});
+        if (turn && !turn.cancelled && text(event.message) && eventForTurn(event, turn.conversationId, turn.sessions?.turnId)) setTurnError({conversationId:turn.conversationId, message:text(event.message), retryText:turn.text || ''});
+        return;
+      }
+      if (event.type === 'turn_limit') {
+        // Attached to its turn; a late event only completes the notice already shown from the send result.
+        const reached = turnLimitFromEvent(event); if (!reached) return;
+        const turn = activeTurn.current;
+        if (turn && !turn.cancelled && turn.conversationId === reached.conversationId) setTurnLimit(previous => previous?.conversationId === reached.conversationId ? {...previous,...reached,messageId:previous.messageId} : reached);
+        else setTurnLimit(previous => previous?.conversationId === reached.conversationId ? {...previous,...reached,messageId:previous.messageId} : previous);
         return;
       }
       if (event.type === 'turn_phase') {
@@ -205,8 +221,15 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
       const permission = permissionFromEvent(event,toolEvents.current);
       if (permission) { setWriting(false); setProviderStatus(''); setPage('conversation'); setPermissions(previous => previous.some(item => JSON.stringify(item.id) === JSON.stringify(permission.id)) ? previous : [...previous, permission]); return; }
       if (!pendingRef.current) return;
-      const expected = stateRef.current.conversations.find(item => item.id === pendingRef.current)?.agentSessionId;
-      const received = text(record(event.params).sessionId); if (expected && received && expected !== received) return;
+      // Session events of the running turn name its conversation and turn;
+      // an untagged session event belongs to no running turn.
+      const turn = activeTurn.current;
+      const received = text(record(event.params).sessionId);
+      if (received || typeof event.conversationId === 'string') {
+        const sessions = turn?.sessions;
+        if (!turn || turn.cancelled || !sessions || sessions.conversationId !== pendingRef.current) return;
+        if (!acceptTurnEvent(event, sessions)) return;
+      }
       if (event.type === 'provider_status') {
         setWriting(false);
         setProviderStatus(event.severity === 'warning' ? text(event.message) : '');
@@ -385,7 +408,7 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
     let promptCompleted=false;
     activeTurn.current=turn;setTurnStartedAt(startedAt);setResponseRender(undefined);
     let accepted = alreadyQueued;
-    sending.current = true; setError(''); setNotice(''); setTurnError(undefined); setProviderStatus(''); setPreparing(t('Je prépare votre séance…'));
+    sending.current = true; setError(''); setNotice(''); setTurnError(undefined); setTurnLimit(undefined); setProviderStatus(''); setPreparing(t('Je prépare votre séance…'));
     setStream('');setWriting(false);setTools([]);toolEvents.current=[];setPage('conversation');
     try {
       if (!alreadyQueued) {
@@ -406,12 +429,16 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
       }
       checkTurn(turn);
       for (const message of next.messages) if (message.role === 'assistant') previousAssistantIds.add(message.id);
+      turn.sessions = {conversationId:next.id};
       pendingRef.current = next.id; setPending(next.id); setPreparing('');
       setState(previous => ({...previous,conversations:previous.conversations.map(item=>item.id===next.id?{...item,messages:[...item.messages,{id:crypto.randomUUID(),role:'user',text:value.trim(),status:'complete',createdAt:new Date().toISOString()}]}:item)}));
       turn.promptSent=true;
       const result = await api.sendPrompt(next.id, value.trim());
       promptCompleted = result.stopReason !== 'cancelled';
       if (activeTurn.current === turn && result.stopReason === 'cancelled') setNotice(t('Réponse interrompue. Vos échanges et votre progression sont conservés.'));
+      // The same notice as the turn_limit event, which may arrive before or after this result.
+      const reached = turnLimitFromResult(next.id, result);
+      if (reached && activeTurn.current === turn && !turn.cancelled) setTurnLimit(previous => previous?.conversationId === next.id ? previous : reached);
     } catch (reason) {
       if (activeTurn.current === turn) {
         if (turn.cancelled || reason === cancelledTurn) {
@@ -431,6 +458,8 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
           if (activeTurn.current === turn) {
             setState(next);stateRef.current=next;
             const completed = next.conversations.find(item=>item.id===turn.conversationId)?.messages.at(-1);
+            if (completed?.role === 'assistant' && !previousAssistantIds.has(completed.id))
+              setTurnLimit(previous => previous && previous.conversationId === turn.conversationId && !previous.messageId ? {...previous,messageId:completed.id} : previous);
             if (promptCompleted && !turn.cancelled && turn.conversationId && completed?.role==='assistant' && completed.status==='complete'
               && !completed.privateOutput && !completed.canRetryCommit && !previousAssistantIds.has(completed.id)) {
               setResponseRender({conversationId:turn.conversationId,assistantMessageId:completed.id,startedAt,operationId:turn.promptOperationId});
@@ -532,7 +561,7 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   }
 
   async function discuss(id: string) {
-    await dispatch(t('Je souhaite modifier le programme de la formation {id}. Lis son état réel avec get_training, puis prépare une proposition ciblée avec preview_training_edit et propose_training_edit. Je l’examinerai et la retoucherai dans le même éditeur avant validation. Demande-moi le changement souhaité si je ne l’ai pas encore précisé.',{id}), conversation);
+    await dispatch(t('Je souhaite modifier le programme de la formation {id}. Lis son état réel avec get_training, puis prépare une proposition ciblée avec edit_training(action=preview) puis edit_training(action=propose). Je l’examinerai et la retoucherai dans le même éditeur avant validation. Demande-moi le changement souhaité si je ne l’ai pas encore précisé.',{id}), conversation);
   }
 
   async function configureTutor(settings: Settings, authoring: boolean) {
@@ -547,6 +576,7 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
   }
 
   const settingsPage = settingsPages.includes(page);
+  function retryOverview() { setError(''); setOverviewAttempt(value => value + 1); }
   useEffect(() => {
     const onKey = (event:KeyboardEvent) => {
       if (setupOpenRef.current || event.isComposing || event.altKey || !(event.ctrlKey || event.metaKey)) return;
@@ -600,15 +630,15 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
       return [...refreshed.values()];
     });
   }, [api]);
-  function connections(section:'account'|'agents'|'institution',sectionBusy=locked){return <Connections key={`${state.profile?.id}:${section}`} section={section} settings={state.settings} targets={targets} connected={state.agentConnected} connecting={autoConnecting || launchPending} agentStatus={state.agentStatus} tutorStatus={state.tutorStatus} connection={state.agentConnected ? state.agentConnection ?? connection : null} identity={state.identity} api={api} busy={sectionBusy}
+  function connections(section:'account'|'agents'|'institution',sectionBusy=locked){return <Connections key={`${state.profile?.id}:${section}`} section={section} settings={state.settings} targets={targets} connected={state.agentConnected} connecting={autoConnecting || launchPending} agentStatus={state.agentStatus} tutorStatus={state.tutorStatus} connection={state.agentConnected ? state.agentConnection ?? connection : null} identity={state.identity} api={api} busy={sectionBusy} turnLockReason={turnLockText}
     onIdentityAction={(label,action)=>perform(label,async()=>{await action();saved(await api.loadState());return true;}).then(result=>result===true)}
     onDiscover={()=>void perform('Recherche des installations…',async()=>setTargets(await api.discoverAgents()))}
     onSave={settings=>void perform('Enregistrement des réglages…',async()=>saved(await api.saveSettings(settings)))}
     onConnect={(target,settings)=>void perform('Connexion à votre agent…',async()=>{const restoreLocal=stateRef.current.tutorStatus.connected && settings.tutor.mode==='local';agentPaused.current=false;setAgentLoss(undefined);await api.saveSettings(settings);setConnection(await api.connectAgent(target,settings.cwd));try{if(restoreLocal)await api.tutorOverview();}finally{saved(await api.loadState());}})}
     onAuthenticate={method=>void perform('Identification auprès du fournisseur…',async()=>{await api.authenticateAgent(method);saved(await api.loadState());})}
-    onDisconnectAgent={()=>void perform('Déconnexion…',async()=>{agentPaused.current=true;setAgentLoss(undefined);await api.disconnectAgent();setConnection(null);saved(await api.loadState());})}
+    onDisconnectAgent={()=>{if(activeTurn.current){setError(t(turnLockReason));return;}void perform('Déconnexion…',async()=>{agentPaused.current=true;setAgentLoss(undefined);await api.disconnectAgent();setConnection(null);saved(await api.loadState());});}}
     onConnectTutor={(settings,authoring)=>void configureTutor(settings,authoring)}
-    onDisconnectTutor={()=>void perform('Déconnexion de Tutor…',async()=>{agentPaused.current=true;saved(await api.disconnectTutor());})}/>;}
+    onDisconnectTutor={()=>{if(activeTurn.current){setError(t(turnLockReason));return;}void perform('Déconnexion de Tutor…',async()=>{agentPaused.current=true;saved(await api.disconnectTutor());});}}/>;}
   if (loading) return <div className="app-shell loading-shell"><WindowChrome /><div className="loading-screen" role="status"><span className="spinner" />{t("Ouverture de Tutor…")}</div></div>;
   if (loadError) return <div className="app-shell loading-shell"><WindowChrome /><div className="load-error" role="alert"><h1>{t('Tutor n’a pas pu ouvrir votre espace.')}</h1><p>{t(loadError)}</p><button className="button primary" onClick={() => void retryLoad()}>{t('Réessayer')}</button></div></div>;
   if (setupOpen) return <Onboarding key={state.profile?.id || 'profile'} api={api} snapshot={state} review={setupSession === 'review'} targets={targets}
@@ -616,11 +646,11 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
     onFinished={() => { agentPaused.current = false; launchedScope.current = undefined; setSetupSession(false); setPage('conversation'); }}
     onExit={() => setSetupSession(false)}
     onProfile={next => { applyProfile(next); setSetupSession(onboardingStep(next) === 'done' ? false : 'auto'); }}/>;
-  return <div className={`app-shell ${sidebar.open ? '' : 'sidebar-collapsed'}`} style={{ '--reading-size': `${appearance.fontSize}px`, '--reading-line-height':String(appearance.lineHeight) } as CSSProperties}>
+  return <div className={`app-shell ${sidebar.open ? '' : 'sidebar-collapsed'}`} data-reading-size={appearance.fontSize} data-reading-line-height={appearance.lineHeight}>
     <WindowChrome sidebarOpen={sidebar.open} onToggleSidebar={sidebar.toggle}/>
     <a className="skip-link" href="#main-content">{t("Aller au contenu principal")}</a>
     {sidebar.overlay && <button className="sidebar-scrim" aria-label={t('Fermer la barre latérale')} tabIndex={-1} onClick={sidebar.closeOverlay}/>}
-    <WorkspaceNavigation state={state} page={page} settingsPage={settingsPage} conversation={conversation} trainings={library.items} libraryError={library.error} locked={locked || !!state.pendingMessage} sidebarOpen={sidebar.open}
+    <WorkspaceNavigation state={state} page={page} settingsPage={settingsPage} conversation={conversation} trainings={library.items} libraryError={library.error || (state.tutorStatus.connected && !overview && overviewFailure)} libraryLoading={library.loading || (state.tutorStatus.connected && !overview && !overviewFailure)} onRetryLibrary={overview ? library.retry : retryOverview} locked={locked || !!state.pendingMessage} sidebarOpen={sidebar.open}
       onNavigate={value=>{setPage(value);if(value==='formations')setTrainingId(undefined);sidebar.closeOverlay();}}
       onNew={()=>void openNewConversation()} onConversation={id=>void openConversation(id)} onTraining={id=>{setTrainingId(id);setPage('formations');}}
       onSearch={()=>setPaletteOpen(true)} onPractice={()=>{setPage('conversation');setPracticeMenu(value=>value+1);}}/>
@@ -643,20 +673,20 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
       {launchPending && turnStartedAt===undefined && <div className="notice" role="status"><span className="spinner" />{t('La connexion à l’agent continue en arrière-plan.')}</div>}
       {state.pendingMessage && !pending && <section className="outbox" aria-label={t("Message à envoyer")}><div><strong>{t("À envoyer")}</strong><p>{visibleStudyText(state.pendingMessage.text)}</p></div><div className="button-row"><button className="button secondary" disabled={locked} onClick={() => void perform('Retrait du message…', async () => { if (!structuredOutbox) {setDraft(visibleStudyText(state.pendingMessage!.text));setAttachments(messageAttachments(state.pendingMessage!.text));} setState(await api.queuePrompt(null)); setPage('conversation'); })}>{structuredOutbox ? t("Retirer") : t("Modifier")}</button><button className="button primary" disabled={locked || (!!limit && state.tutorStatus.connected && agentReady)} aria-describedby={limit && state.tutorStatus.connected && agentReady ? 'outbox-blocked-reason' : undefined} onClick={() => { if (!state.tutorStatus.connected) setPage('agents'); else if (!agentReady) setPage('agents'); else void dispatch(state.pendingMessage!.text, state.conversations.find(item => item.id === state.pendingMessage!.conversationId), true); }}>{state.tutorStatus.connected && agentReady ? t("Envoyer le message conservé") : t("Terminer la connexion")}</button>{limit && <span id="outbox-blocked-reason" className="visually-hidden">{sendBlockedReason}</span>}</div></section>}
       {page === 'conversation' && <section className="conversation-panel" aria-label={t("Conversation avec votre tuteur")}>
-        <ConversationMessages key={`${state.profile?.id}:${conversation?.id}`} conversation={conversation} responseRender={responseRender} streamText={stream} streaming={!!pending} toolActivity={tools} turnError={turnError?.conversationId === conversation?.id ? turnError : undefined} onRetryTurn={value=>void dispatch(value,conversation)} activity={turnStartedAt !== undefined ? <TutorActivity startedAt={turnStartedAt} tools={tools} streaming={writing} permission={!!permissions.length} preparing={preparing} providerStatus={providerStatus}/> : undefined} disabled={locked || !!state.pendingMessage || !!limit} pendingText={state.pendingMessage?.conversationId === conversation?.id ? state.pendingMessage?.text : undefined} openLink={api.openExternalLink} onDelivery={api.acknowledgeLearningDelivery} onRetryCommit={value=>void dispatch(value,conversation)} onRespond={respondToActivity} onContinue={continueActivity} onResumeChoice={request=>void dispatch(resumeRequestText(request),conversation)} onHint={requestHint} />
+        <ConversationMessages key={`${state.profile?.id}:${conversation?.id}`} conversation={conversation} responseRender={responseRender} streamText={stream} streaming={!!pending} toolActivity={tools} turnError={turnError?.conversationId === conversation?.id ? turnError : undefined} onRetryTurn={value=>void dispatch(value,conversation)} turnLimit={turnLimit && turnLimit.conversationId === conversation?.id ? turnLimit : undefined} onContinueTurn={()=>void dispatch(t(turnLimitFollowUp),conversation)} activity={turnStartedAt !== undefined ? <TutorActivity startedAt={turnStartedAt} tools={tools} streaming={writing} permission={!!permissions.length} preparing={preparing} providerStatus={providerStatus}/> : undefined} disabled={locked || !!state.pendingMessage || !!limit} pendingText={state.pendingMessage?.conversationId === conversation?.id ? state.pendingMessage?.text : undefined} openLink={api.openExternalLink} onDelivery={api.acknowledgeLearningDelivery} onRetryCommit={value=>void dispatch(value,conversation)} onRespond={respondToActivity} onContinue={continueActivity} onResumeChoice={request=>void dispatch(resumeRequestText(request),conversation)} onHint={requestHint} />
         {permissions.map((permission,index) => <PermissionCard key={JSON.stringify(permission.id)} permission={permission} disabled={permissionBusy || index > 0} onAnswer={optionId => void (async () => { setPermissionBusy(true); try { await api.answerPermission(permission.id,optionId); setPermissions(previous => previous.filter(item => JSON.stringify(item.id) !== JSON.stringify(permission.id))); } catch (reason) { setError(errorMessage(reason)); } finally { setPermissionBusy(false); } })()} />)}
         <div className="conversation-compose">
-        <HarnessStatus connected={state.agentConnected} reconnect={reconnect} limit={limit} loss={agentLoss} busy={locked} onReconnect={()=>void reconnectAgent()}/>
+        <HarnessStatus connected={state.agentConnected} reconnect={reconnect} limit={limit} loss={agentLoss} busy={locked} blockedReason={turnLockText} onReconnect={()=>void reconnectAgent()}/>
         {home && !resumeHidden && resumeTraining && <ResumeTraining training={resumeTraining} disabled={locked || !!state.pendingMessage} onResume={()=>void learn(resumeTraining)} onDismiss={()=>setResumeHidden(true)}/>}
         <StudyComposer key={`${state.profile?.id}:${newConversation?'new':conversation?.id}`} attachments={attachments} onAttachments={setAttachments} home={home} trainingName={activeTraining?.name} trainings={library.items} onChooseTraining={item=>void chooseTraining(item)} onOpenLibrary={()=>{setTrainingId(undefined);setPage('formations');}} mode={currentActivity?.type==='activity'?currentActivity.activity.kind:undefined} menuRequest={practiceMenu}
           exercise={pendingExercise ? {target:composerTarget,onTarget:setComposerTarget,onHint:()=>requestHint(pendingExercise),hintDisabled:locked || !!state.pendingMessage} : undefined} draft={draft} onChange={setDraft} disabled={turnStartedAt !== undefined || !!state.pendingMessage} canSend={!locked && (!!draft.trim() || !!attachments.length) && !state.pendingMessage} sendBlockedReason={sendBlockedReason} pending={turnStartedAt !== undefined} onSend={sendDraft} onCancel={() => void stopTurn()} />
         {home && <p className="composer-disclaimer">{t('L’IA peut se tromper. Vérifiez les points importants.')}</p>}
         </div>
       </section>}
-      {page === 'planning' && (state.tutorStatus.connected && !overview ? <div className="page-content"><p role="status">{t(overviewFailure ? 'Le planning est momentanément indisponible.' : 'Lecture du planning…')}</p>{overviewFailure && <button className="button secondary" disabled={locked} onClick={() => {setError(''); setOverviewAttempt(value => value + 1);}}>{t('Réessayer')}</button>}</div> : <ReviewPlanning key={planningScope} api={api} scope={planningScope} preferences={state.settings.reviewPlans || {}} connected={state.tutorStatus.connected} busy={locked || !!state.pendingMessage} refreshKey={libraryEpoch} onPreference={saveReviewPreference} onStart={startReview}/>)}
+      {page === 'planning' && (state.tutorStatus.connected && !overview ? <div className="page-content">{overviewFailure ? <LoadError message="Le planning est momentanément indisponible." busy={locked} onRetry={retryOverview}/> : <LoadingState label="Lecture du planning…"/>}</div> : <ReviewPlanning key={planningScope} api={api} scope={planningScope} preferences={state.settings.reviewPlans || {}} connected={state.tutorStatus.connected} busy={locked || !!state.pendingMessage} refreshKey={libraryEpoch} onPreference={saveReviewPreference} onStart={startReview}/>)}
       {page === 'formations' && <TrainingWorkspace key={`${state.profile?.id}:${state.settings.tutor.url}:${overview?.identity?.tenantId}:${state.tutorStatus.connected}`} api={api} connected={state.tutorStatus.connected} epoch={libraryEpoch} initialId={trainingId} canCreate={overview?.identity?.roles?.includes('owner') === true} busy={locked} onLearn={learn} onDiscuss={discuss} onConnect={() => setPage('agents')} />}
       {page==='account'&&<div className="settings-content"><AccountMenu key={state.profile?.id} snapshot={state} overview={overview} busy={locked} api={api} onSelect={id=>void perform('Changement de compte…',async()=>applyProfile(await api.selectProfile(id)))} onCreate={label=>void perform('Création du compte…',async()=>{applyProfile(await api.createProfile(label));await api.createIdentity();saved(await api.loadState());setPage('account');setSetupSession('auto');})} onRename={label=>void perform('Enregistrement du nom…',async()=>saved(await api.renameProfile(label)))} onDelete={id=>void perform('Retrait du compte…',async()=>{applyProfile(await api.deleteProfile(id,id));setPage('account');})}/>{connections('account')}</div>}
-      {settingsPage&&<div className="settings-content"><SettingsWorkspace key={`${state.profile?.id}:${page}`} api={api} snapshot={state} overview={overview} busy={locked} initialTab={page==='settings'?'agents':page as 'agents'|'institution'|'members'|'ergonomics'} renderConnection={connections} onSaved={saved} onLocalModelReady={localModelReady} onRestartSetup={locked ? undefined : () => setSetupSession('review')}/></div>}
+      {settingsPage&&<div className="settings-content"><SettingsWorkspace key={state.profile?.id} api={api} snapshot={state} overview={overview} busy={locked} turnLockReason={turnLockText} tab={page==='settings'?'agents':page as SettingsTab} onTabChange={setPage} renderConnection={connections} onSaved={saved} onLocalModelReady={localModelReady} onRestartSetup={locked ? undefined : () => setSetupSession('review')}/></div>}
 
       {shareOpen && conversation && <ShareConversation conversation={conversation} onClose={()=>setShareOpen(false)}/>}
       {trainingPanel && page === 'conversation' && <WorkspaceTrainingPanel api={api} id={activeTraining?.training_id} scope={planningScope} onClose={()=>setTrainingPanel(false)} onOpenLibrary={()=>{setTrainingId(activeTraining?.training_id);setPage('formations');}}/>}
@@ -666,8 +696,8 @@ export default function App({ api = bridge }: { api?: ClientBridge }) {
 
 function Notice({ children,kind,onDismiss }: { children: ReactNode;kind:'error'|'info';onDismiss:()=>void }) { return <div className={`notice ${kind}`} role={kind === 'error' ? 'alert' : 'status'}><div>{children}</div><button className="icon-button" aria-label={t("Fermer le message")} onClick={onDismiss}><Icon name="close" size={16} /></button></div>; }
 
-function ConversationMessages({ conversation,streamText,streaming,activity,toolActivity,disabled,openLink,onDelivery,onRetryCommit,onRespond,onContinue,onHint,onResumeChoice,responseRender,turnError,onRetryTurn }: {
-  turnError?:TurnError;onRetryTurn:(text:string)=>void;
+function ConversationMessages({ conversation,streamText,streaming,activity,toolActivity,disabled,openLink,onDelivery,onRetryCommit,onRespond,onContinue,onHint,onResumeChoice,responseRender,turnError,onRetryTurn,turnLimit,onContinueTurn }: {
+  turnError?:TurnError;onRetryTurn:(text:string)=>void;turnLimit?:TurnLimit;onContinueTurn:()=>void;
   responseRender?:PendingResponseRender;conversation?: Conversation;streamText:string;streaming:boolean;activity?:ReactNode;toolActivity:ToolActivity[];disabled:boolean;pendingText?:string;openLink:ClientBridge['openExternalLink'];
   onDelivery:ClientBridge['acknowledgeLearningDelivery'];onRetryCommit:(text:string)=>void;onResumeChoice:(request:ResumeRequest)=>void;
   onRespond:(activity:LearningActivity,response:LearningResponse)=>Promise<boolean>;onContinue:(activity:LearningActivity)=>void;onHint:(activity:LearningActivity)=>void;
@@ -700,6 +730,9 @@ function ConversationMessages({ conversation,streamText,streaming,activity,toolA
     .flatMap(message => parseLearningContent(message.text, {complete:true}).filter(segment => segment.type === 'activity').map(segment => ({messageId:message.id, activity:segment.activity})));
   const lastActivity = allActivities[0];
   const lastActivityIndex = messages.findIndex(message => message.id === lastActivity?.messageId);
+  // The limit notice belongs to its assistant message; before that message is known, it follows the conversation.
+  const limitMessage = turnLimit?.messageId ? messages.find(message => message.id === turnLimit.messageId) : undefined;
+  const limitNotice = turnLimit && <TurnLimitNotice limit={turnLimit.limit} disabled={disabled || streaming} onContinue={onContinueTurn}/>;
   const continued = lastActivityIndex >= 0 && messages.slice(lastActivityIndex + 1).some(message => message.role === 'user' && (parseStudyRequest(message.text) || parseResumeRequest(message.text)));
   useEffect(() => { nearEnd.current = true; shownActivity.current = undefined; setUnread(false); end.current?.scrollIntoView?.({block:'nearest'}); },[conversation?.id]);
   useEffect(() => {
@@ -757,16 +790,22 @@ function ConversationMessages({ conversation,streamText,streaming,activity,toolA
       const instructionContent = message.learningDelivery?.kind === 'instruction' ? parseLearningContent(visible,{complete:message.status==='complete'}) : [];
       const proseInstruction = instructionContent.some(segment=>segment.type==='text' && !!segment.text.trim()) && instructionContent.every(segment=>segment.type==='text');
       const changed = context?.training_id && context.training_id !== messages[index - 1]?.trainingContext?.training_id;
-      return <article className={`message ${message.role}`} key={message.id}>{timing && validRender && <ResponseRendered timing={timing}/>} {conversation && message.status === 'complete' && !message.privateOutput && (message.learningDelivery?.kind === 'feedback' || proseInstruction) && !message.learningDelivery?.recorded && <DeliveryAcknowledgment conversationId={conversation.id} messageId={message.id} onDelivery={onDelivery}/>}{message.role === 'assistant' && index === messages.length - 1 && <ToolActivityLines tools={toolActivity}/>}{changed && <p className="training-turn">{context.name}</p>}<p className="message-label visually-hidden">{message.role === 'user' ? t("Vous") : message.role === 'assistant' ? t("Tutor") : t("Information")}</p><div className="message-text">{message.role === 'assistant' ? assistantContent(visible, message.status === 'complete', message.id, context) : <><MessageBody text={visibleStudyText(visible)} openLink={openLink}/>{messageAttachments(visible).map((file,i)=><details className="message-attachment" key={i}><summary><Icon name="book" size={14}/>{file.name}</summary><pre>{file.content}</pre></details>)}</>}{message.status === 'streaming' && <span className="streaming-cursor" aria-hidden="true" />}</div>{message.status === 'interrupted' && <p className="message-interrupted">{t("Réponse interrompue — les éléments affichés peuvent être incomplets.")}</p>}{(message.canRetryCommit || (message.privateOutput && ['error','interrupted'].includes(message.status))) && messages[index-1]?.role === 'user' && <button className="workspace-outline" disabled={disabled} onClick={()=>onRetryCommit(messages[index-1].text)}>{t(message.canRetryCommit ? 'Réessayer l’enregistrement' : 'Réessayer la réponse')}</button>}{message.status === 'error' && <p className="message-interrupted">{t("La réponse n’a pas été confirmée comme terminée.")}</p>}</article>;
+      return <article className={`message ${message.role}`} key={message.id}>{timing && validRender && <ResponseRendered timing={timing}/>} {conversation && message.status === 'complete' && !message.privateOutput && (message.learningDelivery?.kind === 'feedback' || proseInstruction) && !message.learningDelivery?.recorded && <DeliveryAcknowledgment conversationId={conversation.id} messageId={message.id} onDelivery={onDelivery}/>}{message.role === 'assistant' && index === messages.length - 1 && <ToolActivityLines tools={toolActivity}/>}{changed && <p className="training-turn">{context.name}</p>}<p className="message-label visually-hidden">{message.role === 'user' ? t("Vous") : message.role === 'assistant' ? t("Tutor") : t("Information")}</p><div className="message-text">{message.role === 'assistant' ? assistantContent(visible, message.status === 'complete', message.id, context) : <><MessageBody text={visibleStudyText(visible)} openLink={openLink}/>{messageAttachments(visible).map((file,i)=><details className="message-attachment" key={i}><summary><Icon name="book" size={14}/>{file.name}</summary><pre>{file.content}</pre></details>)}</>}{message.status === 'streaming' && <span className="streaming-cursor" aria-hidden="true" />}</div>{limitMessage?.id === message.id ? limitNotice : message.status === 'interrupted' && <p className="message-interrupted">{t("Réponse interrompue — les éléments affichés peuvent être incomplets.")}</p>}{(message.canRetryCommit || (message.privateOutput && ['error','interrupted'].includes(message.status))) && messages[index-1]?.role === 'user' && <button className="workspace-outline" disabled={disabled} onClick={()=>onRetryCommit(messages[index-1].text)}>{t(message.canRetryCommit ? 'Réessayer l’enregistrement' : 'Réessayer la réponse')}</button>}{message.status === 'error' && <p className="message-interrupted">{t("La réponse n’a pas été confirmée comme terminée.")}</p>}</article>;
     })}
     {!!toolActivity.length && messages.at(-1)?.role !== 'assistant' && <div className="conversation-activity"><ToolActivityLines tools={toolActivity}/></div>}
     {!!streamText && messages.at(-1)?.role !== 'assistant' && <article className="message assistant"><p className="message-label visually-hidden">{t("Tutor")}</p><div className="message-text">{assistantContent(streamText, false)}</div></article>}
+    {turnLimit && !limitMessage && !streaming && limitNotice}
     {turnError && !streaming && <div className="turn-error"><p role="alert">{t('La réponse a échoué : {message}', {message:t(turnError.message)})}</p>{turnError.retryText && <button type="button" className="workspace-outline" disabled={disabled} onClick={()=>onRetryTurn(turnError.retryText)}>{t('Réessayer')}</button>}</div>}
     {activity && <div className="conversation-activity">{activity}</div>}
     <p className="visually-hidden" role="status">{announcement}</p>
     {unread && <button className="button secondary jump-to-latest" onClick={() => { nearEnd.current = true; setUnread(false); end.current?.scrollIntoView?.({block:'nearest'}); }}>{t("Aller aux derniers messages")}</button>}
     <div ref={end} />
   </div>;
+}
+
+/** A calm notice: the turn stopped at its action budget, and the learner may let the tutor continue. */
+function TurnLimitNotice({limit,disabled,onContinue}:{limit:number;disabled:boolean;onContinue:()=>void}) {
+  return <div className="turn-limit" role="status"><p>{t('Le tuteur a atteint la limite de {limit} actions pour cette réponse.',{limit})} {t('Vous pouvez lui demander de poursuivre.')}</p><button type="button" className="workspace-outline" disabled={disabled} onClick={onContinue}>{t('Continuer')}</button></div>;
 }
 
 function DeliveryAcknowledgment({conversationId,messageId,onDelivery}:{conversationId:string;messageId:string;onDelivery:ClientBridge['acknowledgeLearningDelivery']}) {
@@ -796,7 +835,7 @@ export function TutorActivity({tools,streaming,permission,preparing,providerStat
  let message=preparing||t('J’attends la réponse de l’agent…');
  if(permission)message=t('Votre autorisation est attendue.');
  else if(providerStatus)message=providerStatus;
- else if(!preparing&&active){message=/next_activity|assessment|curriculum/.test(name)?t('Je prépare la prochaine activité…'):/progress|interaction|mastery|learner_context/.test(name)?t('Je consulte votre progression…'):/training|domain|formation|library/.test(name)?t('Je retrouve votre formation…'):t('Je consulte le serveur Tutor…');}
+ else if(!preparing&&active){message=/pedagogical_turn|assessment|curriculum/.test(name)?t('Je prépare la prochaine activité…'):/progress|interaction|mastery|learner_state/.test(name)?t('Je consulte votre progression…'):/training|domain|formation|library/.test(name)?t('Je retrouve votre formation…'):t('Je consulte le serveur Tutor…');}
  else if(!preparing&&streaming)message=t('Je rédige la réponse…');else if(!preparing&&latest?.status==='failed')message=t('Un outil a rencontré une erreur. Le tuteur examine le résultat…');
  const phase=useRef({message,startedAt:performance.now()});if(phase.current.message!==message)phase.current={message,startedAt:performance.now()};
  const elapsed=(start:number)=>Math.max(0,Math.floor((now-start)/1000));

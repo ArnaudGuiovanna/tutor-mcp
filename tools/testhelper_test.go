@@ -65,6 +65,9 @@ func setupToolsTest(t *testing.T) (*db.Store, *Deps) {
 	deps := &Deps{
 		Store:  store,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		// Tests that t.Setenv a REGULATION_* switch before setup see it,
+		// as a server started with that environment would.
+		Regulation: RegulationFlagsFromEnv(),
 	}
 	return store, deps
 }
@@ -229,4 +232,65 @@ func decodeResult(t *testing.T, res *mcp.CallToolResult) map[string]any {
 	}
 	_ = json.Unmarshal([]byte(txt), &out)
 	return out
+}
+
+// registerGetNextActivity registers the activity entry point. The canonical
+// decision is reached through prepare_pedagogical_turn(mode=activity); see
+// callNextActivity.
+func registerGetNextActivity(server *mcp.Server, deps *Deps) {
+	registerPreparePedagogicalTurn(server, deps)
+}
+
+// callNextActivity prepares an activity turn and returns a result whose text
+// and structured content are the turn's canonical decision, so tests can read
+// the decision fields at the root. Errors and turns without a decision
+// (needs_domain_setup) are returned unchanged.
+func callNextActivity(t *testing.T, deps *Deps, learnerID string, args map[string]any) *mcp.CallToolResult {
+	t.Helper()
+	return nextActivityFromTurn(t, callTool(t, deps, registerPreparePedagogicalTurn, learnerID, "prepare_pedagogical_turn", activityTurnArgs(args)))
+}
+
+func activityTurnArgs(args map[string]any) map[string]any {
+	merged := map[string]any{"mode": "activity"}
+	for key, value := range args {
+		merged[key] = value
+	}
+	return merged
+}
+
+func nextActivityFromTurn(t *testing.T, res *mcp.CallToolResult) *mcp.CallToolResult {
+	t.Helper()
+	if res == nil || res.IsError {
+		return res
+	}
+	var turn map[string]any
+	if err := json.Unmarshal([]byte(resultText(res)), &turn); err != nil {
+		t.Fatalf("decode prepared turn: %v", err)
+	}
+	decision, ok := turn["decision"].(map[string]any)
+	if !ok {
+		return res
+	}
+	raw, err := json.Marshal(decision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: string(raw)}}, StructuredContent: decision}
+}
+
+// callLearnerView calls get_learner_state with the given view.
+func callLearnerView(t *testing.T, deps *Deps, learnerID, view string, args map[string]any) *mcp.CallToolResult {
+	t.Helper()
+	merged := map[string]any{"view": view}
+	for key, value := range args {
+		merged[key] = value
+	}
+	return callTool(t, deps, registerGetLearnerState, learnerID, "get_learner_state", merged)
+}
+
+// decisionIDOf reads the decision ID of an activity decision payload.
+func decisionIDOf(decision map[string]any) string {
+	contract, _ := decision["pedagogical_contract"].(map[string]any)
+	id, _ := contract["decision_id"].(string)
+	return id
 }

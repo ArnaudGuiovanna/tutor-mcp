@@ -93,7 +93,7 @@ async def run(options):
                     message = await wire.receive(deadline)
                     if message.get("method") == "session/request_permission":
                         approvals += 1
-                        probe.require(message["params"]["toolCall"]["rawInput"]["tool"] == "get_learner_context", "unexpected_tool_permission")
+                        probe.require(message["params"]["toolCall"]["rawInput"]["tool"] == "get_learner_state", "unexpected_tool_permission")
                         choices = message["params"]["options"]
                         choice = next(c for c in choices if c["kind"] == ("allow_once" if allowed else "reject_once"))
                         response = {"jsonrpc": "2.0", "id": message["id"], "result": {"outcome": {"outcome": "selected", "optionId": choice["optionId"]}}}

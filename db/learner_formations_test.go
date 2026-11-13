@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"tutor-mcp/internal/testsupport"
 	"tutor-mcp/models"
 	storeport "tutor-mcp/store"
 )
@@ -270,9 +271,6 @@ func TestLearnerFormationAdmissionAssignmentRecheckedOnReplay(t *testing.T) {
 	if _, err := s.SetMembershipAuthorization(ctx, manager.TenantScope(), models.MembershipStatusActive, []string{models.RolePedagogyManager}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.RecordMembershipMFAVerification(ctx, manager.TenantScope(), time.Now()); err != nil {
-		t.Fatal(err)
-	}
 	manager, err := s.GetPrincipalForLearner(ctx, manager.LearnerID, []string{models.OAuthScopeFormationWrite})
 	if err != nil {
 		t.Fatal(err)
@@ -300,18 +298,10 @@ func TestLearnerFormationAdmissionAssignmentRecheckedOnReplay(t *testing.T) {
 func TestLearnerFormationCrossTenantWithRealMemberships(t *testing.T) {
 	s := institutionTestStore(t)
 	ctx := t.Context()
-	owner, _ := verifiedOwner(t, s, seedInstitutionOwner(t, s, "first", "owner@first.test"))
+	owner, _ := verifiedOwner(t, s, seedInstitutionOwner(t, s, "first"))
 	_, cohort := seedFormationBridge(t, s, owner)
-	secondOwner, _ := verifiedOwner(t, s, seedInstitutionOwner(t, s, "second", "owner@second.test"))
-	_, token, err := s.CreateTenantInvitation(ctx, secondOwner, "learner@second.test", []string{models.RoleLearner}, time.Now().Add(time.Hour))
-	if err != nil {
-		t.Fatal(err)
-	}
-	m, err := s.AcceptTenantInvitationWithNewUser(ctx, models.InvitationCredential{Token: token}, "hash")
-	if err != nil {
-		t.Fatal(err)
-	}
-	student, err := s.GetPrincipal(ctx, models.TenantScope{TenantID: m.TenantID, UserID: m.UserID, MembershipID: m.ID, LearnerID: m.LearnerID}, []string{models.OAuthScopeLearner})
+	secondOwner, _ := verifiedOwner(t, s, seedInstitutionOwner(t, s, "second"))
+	student, err := s.GetPrincipal(ctx, testsupport.Scope(testsupport.ProvisionMember(t, s, secondOwner.TenantID, "Learner", models.RoleLearner)), []string{models.OAuthScopeLearner})
 	if err != nil {
 		t.Fatal(err)
 	}

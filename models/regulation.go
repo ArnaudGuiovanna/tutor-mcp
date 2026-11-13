@@ -28,9 +28,9 @@ const (
 	// mastery).
 	PhaseInstruction Phase = "INSTRUCTION"
 
-	// PhaseDiagnostic — uncertainty-reduction phase. Eligible pool is
-	// concepts with non-saturated P(L). Score: BKT info-gain (pure,
-	// no goal_relevance multiplier in v1 — cf. OQ-4.2 sub A1).
+	// PhaseDiagnostic — adaptive placement phase. The next cold item
+	// targets the median-depth unclassified concept of the prerequisite
+	// graph (engine/placement.go); goal_relevance is ignored.
 	PhaseDiagnostic Phase = "DIAGNOSTIC"
 
 	// PhaseMaintenance — review phase. Eligible pool is mastered

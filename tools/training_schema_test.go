@@ -42,7 +42,7 @@ func TestTrainingSelectionSchemaAndRetryKeepConfirmedTraining(t *testing.T) {
 	if err := json.Unmarshal([]byte(resultText(created)), &domain); err != nil || domain.ID == "" {
 		t.Fatalf("created domain: %s %v", resultText(created), err)
 	}
-	args := map[string]any{"id": "personal:" + domain.ID, "conversation_id": "compact-schema", "expected_selection": 0, "key": "compact-schema-select"}
+	args := map[string]any{"training_id": "personal:" + domain.ID, "conversation_id": "compact-schema", "expected_selection": 0, "idempotency_key": "compact-schema-select"}
 	for range 2 {
 		selected := callTool(t, deps, RegisterTools, "L_owner", "select_conversation_training", args)
 		if selected.IsError {
@@ -61,12 +61,12 @@ func TestTrainingSelectionSchemaAndRetryKeepConfirmedTraining(t *testing.T) {
 
 func TestTrainingEditSchemaRetainsProgrammeAndMutationKey(t *testing.T) {
 	_, deps := setupToolsTest(t)
-	for _, name := range []string{"propose_training_edit", "save_training_edit", "share_training"} {
+	for _, name := range []string{"edit_training", "share_training"} {
 		schema := advertisedInputSchema(t, registerTrainingTools, deps, name)
-		if len(schemaProperty(t, schema, "document")) == 0 || len(schemaProperty(t, schema, "key")) == 0 {
+		if len(schemaProperty(t, schema, "document")) == 0 || len(schemaProperty(t, schema, "idempotency_key")) == 0 {
 			t.Fatalf("%s lost its edit or retry contract", name)
 		}
-		if _, ok := schemaProperty(t, schema, "key")["minLength"]; !ok {
+		if _, ok := schemaProperty(t, schema, "idempotency_key")["minLength"]; !ok {
 			t.Fatalf("%s no longer requires a nonempty retry key", name)
 		}
 	}
@@ -89,7 +89,7 @@ func trainingTestDomain(t *testing.T, deps *Deps, key string) string {
 
 func TestTrainingEditDocumentSchemaIsCompactAndOptional(t *testing.T) {
 	_, deps := setupToolsTest(t)
-	for _, name := range []string{"preview_training_edit", "propose_training_edit", "save_training_edit", "share_training"} {
+	for _, name := range []string{"edit_training", "share_training"} {
 		schema := advertisedInputSchema(t, registerTrainingTools, deps, name)
 		document := schemaProperty(t, schema, "document")
 		raw, err := json.Marshal(document)
@@ -115,7 +115,7 @@ func TestTrainingEditDocumentSchemaIsCompactAndOptional(t *testing.T) {
 func TestTrainingEditAcceptsFullAndMinimalDocuments(t *testing.T) {
 	_, deps := setupToolsTest(t)
 	id := trainingTestDomain(t, deps, "document-roundtrip")
-	read := callTool(t, deps, RegisterTools, "L_owner", "get_training", map[string]any{"id": id})
+	read := callTool(t, deps, RegisterTools, "L_owner", "get_training", map[string]any{"training_id": id})
 	if read.IsError {
 		t.Fatal(resultText(read))
 	}
@@ -129,7 +129,7 @@ func TestTrainingEditAcceptsFullAndMinimalDocuments(t *testing.T) {
 		t.Fatalf("get_training no longer returns computed fields: %v", training)
 	}
 	for name, document := range map[string]any{"full": full, "minimal": map[string]any{"curriculum": full["curriculum"]}} {
-		preview := callTool(t, deps, RegisterTools, "L_owner", "preview_training_edit", map[string]any{"id": id, "expected_revision": revision, "document": document})
+		preview := callTool(t, deps, RegisterTools, "L_owner", "edit_training", map[string]any{"action": "preview", "training_id": id, "expected_revision": revision, "document": document})
 		if preview.IsError {
 			t.Fatalf("%s document rejected: %s", name, resultText(preview))
 		}
@@ -139,7 +139,7 @@ func TestTrainingEditAcceptsFullAndMinimalDocuments(t *testing.T) {
 func TestTrainingErrorsNameTheCorrectableReason(t *testing.T) {
 	_, deps := setupToolsTest(t)
 	id := trainingTestDomain(t, deps, "training-errors")
-	read := callTool(t, deps, RegisterTools, "L_owner", "get_training", map[string]any{"id": id})
+	read := callTool(t, deps, RegisterTools, "L_owner", "get_training", map[string]any{"training_id": id})
 	var doc struct {
 		Training struct {
 			Revision string `json:"revision"`
@@ -153,9 +153,10 @@ func TestTrainingErrorsNameTheCorrectableReason(t *testing.T) {
 		args map[string]any
 		want string
 	}{
-		{"preview_training_edit", map[string]any{"id": id, "expected_revision": doc.Training.Revision}, "training action rejected: document is required"},
-		{"get_training", map[string]any{"id": "personal:missing"}, "training action rejected: training not found or not available to this account; search with list_training_library"},
-		{"preview_training_lifecycle", map[string]any{"id": id, "decision": "withdraw_training"}, "training action rejected: this account is not permitted"},
+		{"edit_training", map[string]any{"action": "preview", "training_id": id, "expected_revision": doc.Training.Revision}, "training action rejected: document is required"},
+		{"get_training", map[string]any{"training_id": "personal:missing"}, "training action rejected: training not found or not available to this account; search with list_training_library"},
+		{"manage_training_lifecycle", map[string]any{"action": "withdraw", "training_id": id, "preview": true}, "training action rejected: this account is not permitted"},
+		{"manage_training_lifecycle", map[string]any{"action": "archive", "training_id": id, "expected_revision": doc.Training.Revision, "confirm": true}, "idempotency_key is required"},
 	} {
 		result := callTool(t, deps, RegisterTools, "L_owner", tc.tool, tc.args)
 		if !result.IsError || !strings.HasPrefix(resultText(result), tc.want) {
@@ -166,7 +167,7 @@ func TestTrainingErrorsNameTheCorrectableReason(t *testing.T) {
 
 func TestTrainingEnumsAdvertiseStoreVocabulary(t *testing.T) {
 	_, deps := setupToolsTest(t)
-	for tool, field := range map[string]string{"list_training_library": "filter", "share_training": "audience", "decide_training": "decision", "preview_training_lifecycle": "decision"} {
+	for tool, field := range map[string]string{"list_training_library": "filter", "share_training": "audience", "decide_training": "decision", "edit_training": "action", "manage_training_lifecycle": "action"} {
 		values, _ := schemaProperty(t, advertisedInputSchema(t, registerTrainingTools, deps, tool), field)["enum"].([]any)
 		if len(values) == 0 {
 			t.Fatalf("%s.%s advertises no enum", tool, field)

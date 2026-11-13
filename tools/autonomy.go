@@ -18,7 +18,7 @@ type GetAutonomyMetricsParams struct {
 }
 
 func registerGetAutonomyMetrics(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name:        "get_autonomy_metrics",
 		Description: "Descriptive learning rates, prediction accuracy and observation counts. The legacy summary score is not a validated autonomy measure; missing evidence is explicit.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params GetAutonomyMetricsParams) (*mcp.CallToolResult, any, error) {

@@ -23,7 +23,6 @@ const (
 type GraphIssueSeverity string
 
 const (
-	GraphIssueInfo     GraphIssueSeverity = "info"
 	GraphIssueWarning  GraphIssueSeverity = "warning"
 	GraphIssueCritical GraphIssueSeverity = "critical"
 )

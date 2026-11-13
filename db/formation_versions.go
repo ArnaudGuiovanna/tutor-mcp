@@ -85,10 +85,16 @@ func (s *Store) loadFormationVersion(ctx context.Context, tenantID, versionID st
 	v := &d.Version
 	v.TenantID = tenantID
 	var published sql.NullTime
+	var versionMetadata string
 	if err := s.queryRow(ctx, `SELECT id, formation_id, version, status, metadata_json, created_by, created_at, published_at
-	 FROM formation_versions WHERE tenant_id = ? AND id = ?`, tenantID, versionID).Scan(&v.ID, &v.FormationID, &v.Version, &v.Status, &v.MetadataJSON, &v.CreatedBy, &v.CreatedAt, &published); err != nil {
+	 FROM formation_versions WHERE tenant_id = ? AND id = ?`, tenantID, versionID).Scan(&v.ID, &v.FormationID, &v.Version, &v.Status, &versionMetadata, &v.CreatedBy, &v.CreatedAt, &published); err != nil {
 		return nil, err
 	}
+	metadata, err := decodeFormationMetadata(versionMetadata)
+	if err != nil {
+		return nil, err
+	}
+	v.Metadata = metadata
 	if published.Valid {
 		v.PublishedAt = &published.Time
 	}
@@ -104,7 +110,12 @@ func (s *Store) loadFormationVersion(ctx context.Context, tenantID, versionID st
 	}
 	for rows.Next() {
 		var m models.FormationModule
-		if err := rows.Scan(&m.ID, &m.StableKey, &m.Title, &m.Position, &m.MetadataJSON); err != nil {
+		var raw string
+		if err := rows.Scan(&m.ID, &m.StableKey, &m.Title, &m.Position, &raw); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if m.Metadata, err = decodeFormationMetadata(raw); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -123,11 +134,12 @@ func (s *Store) loadFormationVersion(ctx context.Context, tenantID, versionID st
 	}
 	for rows.Next() {
 		var c models.FormationConcept
-		if err := rows.Scan(&c.ID, &c.ModuleStableKey, &c.StableKey, &c.Label, &c.Position, &c.MetadataJSON); err != nil {
+		var raw string
+		if err := rows.Scan(&c.ID, &c.ModuleStableKey, &c.StableKey, &c.Label, &c.Position, &raw); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		if err := decodeFormationPedagogy(&c.FormationConceptInput); err != nil {
+		if err := decodeFormationPedagogy(&c.FormationConceptInput, raw); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -183,11 +195,63 @@ type formationPedagogy struct {
 	Criteria    []models.CurriculumCriterion `json:"criteria,omitempty"`
 }
 
-func decodeFormationPedagogy(c *models.FormationConceptInput) error {
+// maxFormationMetadataBytes bounds the encoded free-form metadata object of a
+// formation version, module or concept.
+const maxFormationMetadataBytes = 65536
+
+// formationPedagogyKeys are stored in a concept's metadata column next to its
+// free-form metadata but exposed only through the typed concept fields.
+var formationPedagogyKeys = [...]string{"description", "level", "outcomes", "criteria"}
+
+// encodeFormationMetadata returns the stored form of a free-form metadata
+// object ("{}" when absent).
+func encodeFormationMetadata(metadata map[string]any) (string, error) {
+	if metadata == nil {
+		return "{}", nil
+	}
+	raw, err := json.Marshal(metadata)
+	if err != nil {
+		return "", storeport.Invalid("metadata must be a JSON object")
+	}
+	if len(raw) > maxFormationMetadataBytes {
+		return "", storeport.Invalid("metadata exceeds %d bytes", maxFormationMetadataBytes)
+	}
+	return string(raw), nil
+}
+
+// decodeFormationMetadata parses a stored metadata object, keeping numbers
+// exact.
+func decodeFormationMetadata(raw string) (map[string]any, error) {
+	metadata := map[string]any{}
+	if raw == "" {
+		return metadata, nil
+	}
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&metadata); err != nil || metadata == nil {
+		return nil, fmt.Errorf("invalid stored formation metadata")
+	}
+	return metadata, nil
+}
+
+// decodeFormationPedagogy splits a stored concept metadata object into the
+// typed pedagogy fields and the remaining free-form metadata.
+func decodeFormationPedagogy(c *models.FormationConceptInput, raw string) error {
 	var p formationPedagogy
-	if err := json.Unmarshal([]byte(c.MetadataJSON), &p); err != nil {
+	if raw == "" {
+		raw = "{}"
+	}
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
 		return fmt.Errorf("invalid concept metadata: %w", err)
 	}
+	metadata, err := decodeFormationMetadata(raw)
+	if err != nil {
+		return err
+	}
+	for _, key := range formationPedagogyKeys {
+		delete(metadata, key)
+	}
+	c.Metadata = metadata
 	c.Description, c.Level, c.Outcomes, c.Criteria = p.Description, p.Level, p.Outcomes, p.Criteria
 	if c.Level == "" {
 		c.Level = models.CurriculumLevelUnspecified
@@ -195,47 +259,50 @@ func decodeFormationPedagogy(c *models.FormationConceptInput) error {
 	return nil
 }
 
-func normalizeFormationConcept(input *models.FormationConceptInput) error {
-	if len(input.StableKey) > 200 || strings.TrimSpace(input.StableKey) != input.StableKey || input.StableKey == "" || strings.ContainsAny(input.StableKey, "\x00\r\n") || len(input.Label) > 500 || len(input.MetadataJSON) > 65536 || len(input.Prerequisites) > 500 {
-		return fmt.Errorf("concept fields exceed their limits or contain an invalid key")
+// normalizeFormationConcept validates a concept input and returns the stored
+// form of its metadata: the free-form object merged with the typed pedagogy.
+func normalizeFormationConcept(input *models.FormationConceptInput) (string, error) {
+	if len(input.StableKey) > 200 || strings.TrimSpace(input.StableKey) != input.StableKey || input.StableKey == "" || strings.ContainsAny(input.StableKey, "\x00\r\n") || len(input.Label) > 500 || len(input.Prerequisites) > 500 {
+		return "", fmt.Errorf("concept fields exceed their limits or contain an invalid key")
 	}
-	if input.MetadataJSON == "" {
-		input.MetadataJSON = "{}"
-	}
-	var metadata map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(input.MetadataJSON), &metadata); err != nil || metadata == nil {
-		return fmt.Errorf("metadata must be a JSON object")
-	}
-	if input.Description == "" && input.Level == "" && input.Outcomes == nil && input.Criteria == nil {
-		if err := decodeFormationPedagogy(input); err != nil {
-			return err
+	for _, key := range formationPedagogyKeys {
+		if _, reserved := input.Metadata[key]; reserved {
+			return "", storeport.Invalid("metadata.%s is reserved; use the concept %s field", key, key)
 		}
+	}
+	if _, err := encodeFormationMetadata(input.Metadata); err != nil {
+		return "", err
 	}
 	if input.Level == "" {
 		input.Level = models.CurriculumLevelUnspecified
 	}
 	if len(input.Description) > 16000 || len(input.Outcomes) > 100 || len(input.Criteria) > 100 {
-		return fmt.Errorf("concept pedagogy exceeds its limits")
+		return "", fmt.Errorf("concept pedagogy exceeds its limits")
 	}
 	concept := models.CurriculumConcept{ID: "validation", Key: input.StableKey, Label: input.Label, Description: input.Description, Level: input.Level, Outcomes: input.Outcomes, Criteria: input.Criteria, Status: models.CurriculumConceptActive}
 	if !validCurriculumLevel(input.Level) {
-		return fmt.Errorf("invalid concept level")
+		return "", fmt.Errorf("invalid concept level")
 	}
 	if err := validateCurriculumMetadataIDs(concept); err != nil {
-		return err
+		return "", err
 	}
-	encoded, _ := json.Marshal(formationPedagogy{input.Description, input.Level, input.Outcomes, input.Criteria})
-	var fields map[string]json.RawMessage
-	_ = json.Unmarshal(encoded, &fields)
-	for _, key := range []string{"description", "level", "outcomes", "criteria"} {
-		delete(metadata, key)
+	encoded, err := json.Marshal(formationPedagogy{input.Description, input.Level, input.Outcomes, input.Criteria})
+	if err != nil {
+		return "", err
 	}
-	for key, value := range fields {
-		metadata[key] = value
+	var stored map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &stored); err != nil {
+		return "", err
 	}
-	raw, err := json.Marshal(metadata)
-	input.MetadataJSON = string(raw)
-	return err
+	for key, value := range input.Metadata {
+		raw, err := json.Marshal(value)
+		if err != nil {
+			return "", storeport.Invalid("metadata must be a JSON object")
+		}
+		stored[key] = raw
+	}
+	raw, err := json.Marshal(stored)
+	return string(raw), err
 }
 
 // ReplaceFormationContent replaces a draft atomically, permitting arbitrary
@@ -315,12 +382,16 @@ func (s *Store) CloneFormationVersion(ctx context.Context, actor models.Principa
 		if err != nil {
 			return err
 		}
+		versionMetadata, err := encodeFormationMetadata(source.Version.Metadata)
+		if err != nil {
+			return err
+		}
 		id, err := generateID()
 		if err != nil {
 			return err
 		}
 		_, err = txs.exec(txCtx, `INSERT INTO formation_versions (id, tenant_id, formation_id, version, status, metadata_json, created_by, created_at)
-		 SELECT ?, ?, ?, MAX(version)+1, 'draft', ?, ?, ? FROM formation_versions WHERE tenant_id = ? AND formation_id = ?`, id, actor.TenantID, f.ID, source.Version.MetadataJSON, actor.UserID, time.Now().UTC(), actor.TenantID, f.ID)
+		 SELECT ?, ?, ?, MAX(version)+1, 'draft', ?, ?, ? FROM formation_versions WHERE tenant_id = ? AND formation_id = ?`, id, actor.TenantID, f.ID, versionMetadata, actor.UserID, time.Now().UTC(), actor.TenantID, f.ID)
 		if err != nil {
 			return err
 		}

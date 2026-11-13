@@ -9,12 +9,12 @@ package tools
 const ServerInstructions = `Tutor MCP keeps the learner model (mastery, retention, evidence) and chooses what to practise next; you write the content and talk to the learner in their language. Tool results are in English.
 
 Learning loop:
-1. Context: call get_learner_context (bound native conversations: prepare_pedagogical_turn). If a result says needs_domain_setup=true, break the learner's goal into concepts and call init_domain once. Never create a second domain for a subject that already exists; pass its domain_id.
+1. Context: call get_learner_state (bound native conversations: prepare_pedagogical_turn). If a result says needs_domain_setup=true, break the learner's goal into concepts and call init_domain once. Never create a second domain for a subject that already exists; pass its domain_id.
 2. Session: call start_learning_session and reuse its session_id until it is closed or expires.
-3. Activity: call get_next_activity(domain_id). Follow pedagogical_contract (llm_instruction, constraints, allowed_variants); keep audit_rationale internal.
+3. Activity: call prepare_pedagogical_turn(mode="activity", domain_id, idempotency_key). Follow decision.pedagogical_contract (llm_instruction, constraints, allowed_variants); keep audit_rationale internal. When it has a reasoning_request, first write a 2-3 sentence interpretation_brief (a hypothesis about the learner's state from the supplied traces, without inventing facts) and pass it to record_interaction.
 4. Present one activity. Before showing a graded task, freeze it with prepare_assessment_attempt(decision_id), then store the learner's answer with submit_assessment_attempt before grading.
 5. Record: call record_interaction (with attempt_id when prepared) before the next activity; call record_learning_event after delivering feedback or instruction.
 6. Close: record_affect, then record_session_close(session_id).
 
-idempotency_key (key on training tools): use a fresh value for each logical mutation; reuse it only to retry the identical call after a transport failure.
+idempotency_key: use a fresh value for each logical mutation; reuse it only to retry the identical call after a transport failure.
 The tutor_mcp prompt holds the full protocol.`

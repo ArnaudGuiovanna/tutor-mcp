@@ -43,12 +43,12 @@ it('retrouve le titre d’une permission MCP corrélée à un appel précédent'
 });
 
 it('mesure chaque outil depuis son premier événement et fige sa durée terminale',()=>{
-  const first=mergeToolActivity([],{id:'a',title:'get_next_activity',status:'pending'},1000);
+  const first=mergeToolActivity([],{id:'a',title:'prepare_pedagogical_turn',status:'pending'},1000);
   const running=mergeToolActivity(first,{id:'a',title:'',status:'in_progress'},2000);
-  expect(running[0]).toMatchObject({startedAt:1000,title:'get_next_activity'});
+  expect(running[0]).toMatchObject({startedAt:1000,title:'prepare_pedagogical_turn'});
   const completed=mergeToolActivity(running,{id:'a',title:'',status:'completed'},4000);
   const late=mergeToolActivity(completed,{id:'a',title:'',status:'in_progress'},9000);
   expect(late[0]).toMatchObject({status:'completed',startedAt:1000,completedAt:4000});
-  const next=mergeToolActivity(late,{id:'b',title:'get_learner_context',status:'in_progress'},10000);
+  const next=mergeToolActivity(late,{id:'b',title:'get_learner_state',status:'in_progress'},10000);
   expect(next[1]).toMatchObject({startedAt:10000});expect(next[1].completedAt).toBeUndefined();
 });

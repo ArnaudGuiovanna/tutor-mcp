@@ -9,11 +9,12 @@ import (
 	"time"
 
 	"tutor-mcp/models"
+	storeport "tutor-mcp/store"
 )
 
 func TestGetPendingAlerts_NoAuth(t *testing.T) {
 	_, deps := setupToolsTest(t)
-	res := callTool(t, deps, registerGetPendingAlerts, "", "get_pending_alerts", map[string]any{})
+	res := callLearnerView(t, deps, "", "progress", map[string]any{})
 	if !res.IsError {
 		t.Fatalf("expected auth error")
 	}
@@ -21,7 +22,7 @@ func TestGetPendingAlerts_NoAuth(t *testing.T) {
 
 func TestGetPendingAlerts_NoDataReturnsEmpty(t *testing.T) {
 	_, deps := setupToolsTest(t)
-	res := callTool(t, deps, registerGetPendingAlerts, "L_owner", "get_pending_alerts", map[string]any{})
+	res := callLearnerView(t, deps, "L_owner", "progress", map[string]any{})
 	if res.IsError {
 		t.Fatalf("got %q", resultText(res))
 	}
@@ -41,7 +42,7 @@ func TestGetPendingAlerts_NoDataReturnsEmpty(t *testing.T) {
 func TestGetPendingAlerts_FilterByDomain(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	d := makeOwnerDomain(t, store, "L_owner", "math")
-	res := callTool(t, deps, registerGetPendingAlerts, "L_owner", "get_pending_alerts", map[string]any{
+	res := callLearnerView(t, deps, "L_owner", "progress", map[string]any{
 		"domain_id": d.ID,
 	})
 	if res.IsError {
@@ -75,7 +76,7 @@ func TestGetPendingAlerts_NoActiveDomain_ReturnsCleanEmpty(t *testing.T) {
 		t.Fatalf("seed orphan state: %v", err)
 	}
 
-	res := callTool(t, deps, registerGetPendingAlerts, "L_owner", "get_pending_alerts", map[string]any{})
+	res := callLearnerView(t, deps, "L_owner", "progress", map[string]any{})
 	if res.IsError {
 		t.Fatalf("got %q", resultText(res))
 	}
@@ -126,7 +127,7 @@ func TestGetPendingAlerts_WiresMetacognitiveAlerts(t *testing.T) {
 		t.Fatalf("upsert affect s2: %v", err)
 	}
 
-	res := callTool(t, deps, registerGetPendingAlerts, "L_owner", "get_pending_alerts", map[string]any{})
+	res := callLearnerView(t, deps, "L_owner", "progress", map[string]any{})
 	if res.IsError {
 		t.Fatalf("got %q", resultText(res))
 	}
@@ -231,7 +232,7 @@ func TestGetPendingAlerts_MultipleActiveDomains_FiltersOutOrphanAndTombstone(t *
 
 	// Call with no domain_id — handler should aggregate concepts from
 	// ALL active domains and ignore "ghost".
-	res := callTool(t, deps, registerGetPendingAlerts, "L_owner", "get_pending_alerts", map[string]any{})
+	res := callLearnerView(t, deps, "L_owner", "progress", map[string]any{})
 	if res.IsError {
 		t.Fatalf("got %q", resultText(res))
 	}
@@ -260,5 +261,86 @@ func TestGetPendingAlerts_MultipleActiveDomains_FiltersOutOrphanAndTombstone(t *
 	// needs_domain_setup must be false when active domains exist.
 	if got, _ := out["needs_domain_setup"].(bool); got {
 		t.Errorf("expected needs_domain_setup=false when active domains exist, got true")
+	}
+}
+
+func TestLearnerProgressRejectsArchivedDomainIDAndNeverAlertsOnArchived(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	active, err := store.CreateDomain(context.Background(), "L_owner", "active", "", models.KnowledgeSpace{Concepts: []string{"a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archived, err := store.CreateDomain(context.Background(), "L_owner", "archived", "", models.KnowledgeSpace{Concepts: []string{"old"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for domainID, concept := range map[string]string{active.ID: "a", archived.ID: "old"} {
+		state := orphanForgettingState("L_owner", concept)
+		state.DomainID = domainID
+		if err := store.InsertConceptStateIfNotExists(context.Background(), state); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.ArchiveDomain(context.Background(), archived.ID, "L_owner"); err != nil {
+		t.Fatal(err)
+	}
+
+	res := callLearnerView(t, deps, "L_owner", "progress", map[string]any{"domain_id": archived.ID})
+	if !res.IsError || resultText(res) != "domain not found" {
+		t.Fatalf("archived domain served without include_archived: %q", resultText(res))
+	}
+
+	alertDomains := func(out map[string]any) map[string]bool {
+		seen := map[string]bool{}
+		alerts, _ := out["alerts"].([]any)
+		for _, a := range alerts {
+			if m, ok := a.(map[string]any); ok {
+				id, _ := m["domain_id"].(string)
+				seen[id] = true
+			}
+		}
+		return seen
+	}
+	explicit := callLearnerView(t, deps, "L_owner", "progress", map[string]any{"domain_id": archived.ID, "include_archived": true})
+	if !explicit.IsError {
+		t.Fatal("include_archived widened an explicit domain_id lookup")
+	}
+
+	all := callLearnerView(t, deps, "L_owner", "progress", map[string]any{"include_archived": true})
+	if all.IsError {
+		t.Fatalf("aggregate include_archived refused: %q", resultText(all))
+	}
+	out := decodeResult(t, all)
+	if domains, _ := out["domains"].([]any); len(domains) != 2 {
+		t.Fatalf("aggregate progress lost the archived domain: %v", out["domains"])
+	}
+	seen := alertDomains(out)
+	if seen[archived.ID] || !seen[active.ID] {
+		t.Fatalf("alerts must come from active domains only: %v", out["alerts"])
+	}
+}
+
+func TestLearnerProgressDomainMustMatchConversationTraining(t *testing.T) {
+	s, deps, ctx, p, selectedDomain, selected := pedagogicalTurnFixture(t)
+	other, err := s.CreateDomain(ctx, p.LearnerID, "Other course", "", models.KnowledgeSpace{Concepts: []string{"x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound := storeport.WithConversation(ctx, selected.ConversationID)
+	res, _, _ := learnerProgressResult(bound, deps, GetDashboardStateParams{DomainID: other.ID})
+	if !res.IsError {
+		t.Fatal("progress served a domain other than the conversation's selected training")
+	}
+	res, _, _ = learnerProgressResult(bound, deps, GetDashboardStateParams{DomainID: selectedDomain.ID})
+	if res.IsError {
+		t.Fatalf("selected training refused: %q", resultText(res))
+	}
+	// Without a domain_id the view stays the learner-wide overview.
+	res, _, _ = learnerProgressResult(bound, deps, GetDashboardStateParams{})
+	if res.IsError {
+		t.Fatalf("overview refused: %q", resultText(res))
+	}
+	if domains, _ := decodeResult(t, res)["domains"].([]any); len(domains) != 2 {
+		t.Fatalf("overview domains = %v", domains)
 	}
 }

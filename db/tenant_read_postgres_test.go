@@ -5,10 +5,10 @@ import (
 	"errors"
 	"os"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"tutor-mcp/internal/testsupport"
 	"tutor-mcp/models"
 	storeport "tutor-mcp/store"
 )
@@ -18,16 +18,8 @@ func TestTenantReadPostgresReadOnlyRLSAndPoolReset(t *testing.T) {
 		t.Skip("TUTOR_TEST_PG_DSN not configured")
 	}
 	admin := narrativeTestStore(t)
-	owner, _ := verifiedOwner(t, admin, seedInstitutionOwner(t, admin, "read-b", "owner@read-b.test"))
-	_, token, err := admin.CreateTenantInvitation(t.Context(), owner, "learner@read-b.test", []string{models.RoleLearner}, time.Now().Add(time.Hour))
-	if err != nil {
-		t.Fatal(err)
-	}
-	membership, err := admin.AcceptTenantInvitationWithNewUser(t.Context(), models.InvitationCredential{Token: token}, "hash")
-	if err != nil {
-		t.Fatal(err)
-	}
-	b := models.TenantScope{TenantID: membership.TenantID, UserID: membership.UserID, MembershipID: membership.ID, LearnerID: membership.LearnerID}
+	owner := seedInstitutionOwner(t, admin, "read-b")
+	b := testsupport.Scope(testsupport.ProvisionMember(t, admin, owner.TenantID, "Learner", models.RoleLearner))
 	runtime := sessionIndexRuntimeStore(t, admin)
 	var role string
 	if err := runtime.root.QueryRow(`SELECT current_user`).Scan(&role); err != nil {

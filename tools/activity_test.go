@@ -8,6 +8,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -46,7 +47,7 @@ func (s *failingActivityDomainStore) GetDomainsByLearner(context.Context, string
 
 func TestGetNextActivity_NoAuth(t *testing.T) {
 	_, deps := setupToolsTest(t)
-	res := callTool(t, deps, registerGetNextActivity, "", "get_next_activity", map[string]any{})
+	res := callNextActivity(t, deps, "", map[string]any{})
 	if !res.IsError {
 		t.Fatalf("expected auth error")
 	}
@@ -57,13 +58,13 @@ func TestGetNextActivity_AuthFailureLoggedAtInfo(t *testing.T) {
 	var buf bytes.Buffer
 	deps.Logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	res := callTool(t, deps, registerGetNextActivity, "", "get_next_activity", map[string]any{})
+	res := callNextActivity(t, deps, "", map[string]any{})
 	if !res.IsError {
 		t.Fatalf("expected auth error")
 	}
 
 	logs := buf.String()
-	if !strings.Contains(logs, "level=INFO") || !strings.Contains(logs, "get_next_activity: auth failed") {
+	if !strings.Contains(logs, "level=INFO") || !strings.Contains(logs, "prepare_pedagogical_turn: auth failed") {
 		t.Fatalf("expected auth failure at INFO, got logs=%q", logs)
 	}
 	if strings.Contains(logs, "level=ERROR") {
@@ -73,7 +74,7 @@ func TestGetNextActivity_AuthFailureLoggedAtInfo(t *testing.T) {
 
 func TestGetNextActivity_NeedsDomainSetup(t *testing.T) {
 	_, deps := setupToolsTest(t)
-	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{})
+	res := callNextActivity(t, deps, "L_owner", map[string]any{})
 	if res.IsError {
 		t.Fatalf("got %q", resultText(res))
 	}
@@ -87,7 +88,7 @@ func TestGetNextActivity_DomainBackendFailureIsNotSetup(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	deps.Store = &failingActivityDomainStore{Store: store, err: context.DeadlineExceeded}
 
-	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{})
+	res := callNextActivity(t, deps, "L_owner", map[string]any{})
 	if !res.IsError || resultText(res) != "failed to resolve activity domain" {
 		t.Fatalf("backend failure was collapsed to setup: error=%v text=%q", res.IsError, resultText(res))
 	}
@@ -101,7 +102,7 @@ func TestGetNextActivity_ExplicitArchivedDomainListsActiveDomains(t *testing.T) 
 		t.Fatalf("archive domain: %v", err)
 	}
 
-	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{
+	res := callNextActivity(t, deps, "L_owner", map[string]any{
 		"domain_id": domain.ID,
 	})
 	text := resultText(res)
@@ -119,7 +120,7 @@ func TestGetNextActivity_UnknownDomainIDIsNotSetup(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	active := makeOwnerDomain(t, store, "L_owner", "Fractions")
 
-	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{
+	res := callNextActivity(t, deps, "L_owner", map[string]any{
 		"domain_id": "does-not-exist",
 	})
 	text := resultText(res)
@@ -141,16 +142,13 @@ func TestGetNextActivity_HappyPath(t *testing.T) {
 	_ = store.InsertConceptStateIfNotExists(context.Background(), cs)
 	_ = store.UpsertConceptState(context.Background(), cs)
 
-	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{
+	res := callNextActivity(t, deps, "L_owner", map[string]any{
 		"domain_id": d.ID,
 	})
 	if res.IsError {
 		t.Fatalf("got %q", resultText(res))
 	}
 	out := decodeResult(t, res)
-	if out["needs_domain_setup"] != false {
-		t.Fatalf("expected needs_domain_setup=false, got %v", out["needs_domain_setup"])
-	}
 	if _, ok := out["activity"]; !ok {
 		t.Fatalf("expected activity key, got %v", out)
 	}
@@ -186,15 +184,14 @@ func TestGetNextActivity_HappyPath(t *testing.T) {
 	if got := contract["learner_explanation"]; got == "" {
 		t.Fatalf("expected contract learner_explanation, got %v", contract)
 	}
-	// The contract is the single copy of these texts; decision_id stays at
-	// the root because native clients read it there.
-	for _, duplicate := range []string{"llm_instruction", "learner_explanation", "audit_rationale"} {
+	// The contract is the single copy of these texts and of decision_id.
+	for _, duplicate := range []string{"llm_instruction", "learner_explanation", "audit_rationale", "decision_id", "needs_domain_setup"} {
 		if _, ok := out[duplicate]; ok {
 			t.Fatalf("%s repeated at the payload root", duplicate)
 		}
 	}
-	if _, ok := out["decision_id"]; !ok {
-		t.Fatalf("decision_id must remain at the payload root: %v", out)
+	if decisionIDOf(out) == "" {
+		t.Fatalf("pedagogical_contract.decision_id missing: %v", out)
 	}
 }
 
@@ -208,7 +205,7 @@ func TestGetNextActivity_ExposesTypedMotivationDegradation(t *testing.T) {
 	}
 	deps.Store = &failingMotivationOptionalStore{Store: store, err: context.DeadlineExceeded}
 
-	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{
+	res := callNextActivity(t, deps, "L_owner", map[string]any{
 		"domain_id": domain.ID,
 	})
 	if res.IsError {
@@ -241,7 +238,7 @@ func TestGetNextActivity_IncludesEpisodicContextAndReasoningRequest(t *testing.T
 		t.Fatalf("write memory session: %v", err)
 	}
 
-	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{
+	res := callNextActivity(t, deps, "L_owner", map[string]any{
 		"domain_id": d.ID,
 	})
 	if res.IsError {
@@ -284,7 +281,7 @@ func TestGetNextActivity_InjectsStableLearnerMemoryInDomainContext(t *testing.T)
 		t.Fatalf("write stable memory: %v", err)
 	}
 
-	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{"domain_id": d.ID})
+	res := callNextActivity(t, deps, "L_owner", map[string]any{"domain_id": d.ID})
 	if res.IsError {
 		t.Fatalf("got %q", resultText(res))
 	}
@@ -339,7 +336,7 @@ func TestGetNextActivityLeavesConsolidationOutsideLearnerTurn(t *testing.T) {
 		t.Fatalf("UpsertPendingConsolidation: %v", err)
 	}
 
-	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{"domain_id": d.ID})
+	res := callNextActivity(t, deps, "L_owner", map[string]any{"domain_id": d.ID})
 	if res.IsError {
 		t.Fatalf("get_next_activity failed: %s", resultText(res))
 	}
@@ -368,7 +365,7 @@ func TestGetNextActivityLeavesConsolidationOutsideLearnerTurn(t *testing.T) {
 	if item.Status != "pending" {
 		t.Fatalf("archive alone must not complete queued maintenance: %q", item.Status)
 	}
-	second := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{"domain_id": d.ID})
+	second := callNextActivity(t, deps, "L_owner", map[string]any{"domain_id": d.ID})
 	if second.IsError {
 		t.Fatalf("second get_next_activity failed: %s", resultText(second))
 	}
@@ -391,7 +388,7 @@ func TestGetNextActivity_HighBKTWithForgettingIsNotFalselySolid(t *testing.T) {
 	_ = store.InsertConceptStateIfNotExists(context.Background(), cs)
 	_ = store.UpsertConceptState(context.Background(), cs)
 
-	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{
+	res := callNextActivity(t, deps, "L_owner", map[string]any{
 		"domain_id": d.ID,
 	})
 	if res.IsError {
@@ -447,7 +444,7 @@ func TestGetNextActivity_OverloadUsesRealSessionStart(t *testing.T) {
 		t.Fatalf("seed old interaction: %v", err)
 	}
 
-	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{
+	res := callNextActivity(t, deps, "L_owner", map[string]any{
 		"domain_id": d.ID,
 	})
 	if res.IsError {
@@ -479,7 +476,7 @@ func TestGetNextActivity_IdleSessionExpiresWithoutOverload(t *testing.T) {
 		t.Fatalf("open idle session: %v", err)
 	}
 
-	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{
+	res := callNextActivity(t, deps, "L_owner", map[string]any{
 		"domain_id": d.ID,
 	})
 	if res.IsError {
@@ -519,7 +516,7 @@ func TestGetNextActivity_MaintenanceRecallSurvivesEvidenceController(t *testing.
 		t.Fatalf("set phase: %v", err)
 	}
 
-	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{"domain_id": d.ID})
+	res := callNextActivity(t, deps, "L_owner", map[string]any{"domain_id": d.ID})
 	if res.IsError {
 		t.Fatalf("got %q", resultText(res))
 	}
@@ -569,7 +566,7 @@ func TestBuildGoalRelevanceStatus(t *testing.T) {
 func TestGetNextActivity_ForeignDomainIsNotFound(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	d := makeOwnerDomain(t, store, "L_owner", "math")
-	res := callTool(t, deps, registerGetNextActivity, "L_attacker", "get_next_activity", map[string]any{
+	res := callNextActivity(t, deps, "L_attacker", map[string]any{
 		"domain_id": d.ID,
 	})
 	text := resultText(res)
@@ -599,7 +596,7 @@ func TestGetNextActivity_DomainNameSelectsMatchingDomain(t *testing.T) {
 		t.Fatalf("create probability domain: %v", err)
 	}
 
-	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{
+	res := callNextActivity(t, deps, "L_owner", map[string]any{
 		"domain_name": "golang",
 	})
 	if res.IsError {
@@ -638,7 +635,7 @@ func TestGetNextActivity_ReviewIntentAvoidsNewConcept(t *testing.T) {
 		t.Fatalf("seed state: %v", err)
 	}
 
-	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{
+	res := callNextActivity(t, deps, "L_owner", map[string]any{
 		"domain_id": d.ID,
 		"intent":    "review",
 	})
@@ -671,9 +668,9 @@ func TestGetNextActivity_ReviewIntentNoReviewedConceptDoesNotIntroduce(t *testin
 		t.Fatalf("create domain: %v", err)
 	}
 
-	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{
+	res := callNextActivity(t, deps, "L_owner", map[string]any{
 		"domain_id": d.ID,
-		"intent":    "revise",
+		"intent":    "review",
 	})
 	if res.IsError {
 		t.Fatalf("got %q", resultText(res))
@@ -704,8 +701,7 @@ func TestGetNextActivity_FlagOff_NoFadeFields(t *testing.T) {
 	_ = store.InsertConceptStateIfNotExists(context.Background(), cs)
 	_ = store.UpsertConceptState(context.Background(), cs)
 
-	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity",
-		map[string]any{"domain_id": d.ID})
+	res := callNextActivity(t, deps, "L_owner", map[string]any{"domain_id": d.ID})
 	if res.IsError {
 		t.Fatalf("got %q", resultText(res))
 	}
@@ -769,8 +765,7 @@ func TestGetNextActivity_FadeFlagOn_DoesNotWithdrawHelpFromDescriptiveScores(t *
 			// directly via insert works for non-zero scores.
 		}
 
-		res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity",
-			map[string]any{"domain_id": d.ID})
+		res := callNextActivity(t, deps, "L_owner", map[string]any{"domain_id": d.ID})
 		if res.IsError {
 			t.Fatalf("step %s: %q", st.name, resultText(res))
 		}
@@ -835,14 +830,9 @@ func TestGetNextActivity_PostOrchestratePhaseMatchesDB(t *testing.T) {
 		}
 	}
 
-	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity",
-		map[string]any{"domain_id": d.ID})
+	res := callNextActivity(t, deps, "L_owner", map[string]any{"domain_id": d.ID})
 	if res.IsError {
-		t.Fatalf("get_next_activity: %q", resultText(res))
-	}
-	out := decodeResult(t, res)
-	if out["needs_domain_setup"] != false {
-		t.Fatalf("expected needs_domain_setup=false, got %v", out["needs_domain_setup"])
+		t.Fatalf("activity decision: %q", resultText(res))
 	}
 
 	// The orchestrator should have persisted the MAINTENANCE phase.
@@ -1064,4 +1054,21 @@ func callBenchTool(b *testing.B, deps *Deps, learnerID string, args any) *mcp.Ca
 		b.Fatalf("CallTool transport error: %v", err)
 	}
 	return res
+}
+
+type failingDomainListStore struct{ storeport.Store }
+
+func (failingDomainListStore) GetDomainsByLearner(context.Context, string, bool) ([]*models.Domain, error) {
+	return nil, errors.New("backend unavailable")
+}
+
+// A backend failure while listing the alternatives of an unknown domain_id is
+// an internal error, not a "domain not found" answer.
+func TestPedagogicalTurnUnknownDomainListFailureIsInternal(t *testing.T) {
+	_, deps := setupToolsTest(t)
+	deps.Store = failingDomainListStore{Store: deps.Store}
+	res := callNextActivity(t, deps, "L_owner", map[string]any{"domain_id": "missing-domain"})
+	if text := resultText(res); !res.IsError || text != "failed to list active domains" {
+		t.Fatalf("backend failure answered as %q", text)
+	}
 }

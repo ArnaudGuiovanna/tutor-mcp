@@ -650,18 +650,20 @@ func TestApplyGate_NaN_PMastery_OnPrereq_Excludes(t *testing.T) {
 
 // ─── MasteryKST accessor ───────────────────────────────────────────────────
 
-func TestApplyGate_RespectsMasteryKSTAccessor_Legacy(t *testing.T) {
-	// Under legacy threshold (0.70), a prereq at 0.75 satisfies; at 0.65 it doesn't.
-	t.Setenv("REGULATION_THRESHOLD", "off")
+func TestApplyGate_RespectsMasteryKSTAccessor(t *testing.T) {
+	// A prereq at 0.85 satisfies the unified KST threshold; at 0.75 it doesn't.
 	g := graph([]string{"Basics", "Adv"}, map[string][]string{"Adv": {"Basics"}})
 	in := GateInput{
 		Phase:    models.PhaseInstruction,
 		Concepts: g.Concepts,
-		States:   statesMap(gateCS("Basics", 0.75), gateCS("Adv", 0.10)),
+		States:   statesMap(gateCS("Basics", 0.85), gateCS("Adv", 0.10)),
 		Graph:    g,
 	}
 	r, _ := ApplyGate(in)
 	containsAll(t, r.AllowedConcepts, []string{"Basics", "Adv"})
+	in.States = statesMap(gateCS("Basics", 0.75), gateCS("Adv", 0.10))
+	r, _ = ApplyGate(in)
+	containsNone(t, r.AllowedConcepts, []string{"Adv"})
 }
 
 // ─── Issue #16 — FORGETTING-Critical priority filter ───────────────────────

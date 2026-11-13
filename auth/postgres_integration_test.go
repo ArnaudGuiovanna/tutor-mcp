@@ -185,3 +185,14 @@ func TestPostgresOAuthInstitutionMemberExchangeAndRefresh(t *testing.T) {
 		t.Fatalf("PostgreSQL institution refresh = %d %v", status, refreshed)
 	}
 }
+
+func TestPostgresRefreshTokenOfPurgedDCRClientRejected(t *testing.T) {
+	baseDSN := os.Getenv("TUTOR_TEST_PG_DSN")
+	if baseDSN == "" {
+		t.Skip("set TUTOR_TEST_PG_DSN to run the PostgreSQL auth gate")
+	}
+	_, store := postgresAuthTestStoreInSchema(t, baseDSN, "p1_auth_purged_client")
+	setTestSecret(t)
+	server := NewOAuthServer(store, "https://test.example", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	assertPurgedDCRClientRefreshRejected(t, server, store)
+}

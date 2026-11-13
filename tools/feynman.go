@@ -14,13 +14,12 @@ import (
 )
 
 type FeynmanChallengeParams struct {
-	Concept   string `json:"concept,omitempty" jsonschema:"the concept to explain using the Feynman method; canonical key for concept-targeting tools; required unless concept_id is used"`
-	ConceptID string `json:"concept_id,omitempty" jsonschema:"deprecated compatibility alias for concept; prefer concept"`
-	DomainID  string `json:"domain_id,omitempty" jsonschema:"domain ID (optional)"`
+	Concept  string `json:"concept" jsonschema:"the concept to explain using the Feynman method (concept key from the domain graph)"`
+	DomainID string `json:"domain_id,omitempty" jsonschema:"domain ID (optional)"`
 }
 
 func registerFeynmanChallenge(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name:        "feynman_challenge",
 		Description: "Ask the learner to explain a concept whose model estimate reached the deep-evidence routing threshold. This probes understanding; it is not itself a demonstrated-mastery claim.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params FeynmanChallengeParams) (*mcp.CallToolResult, any, error) {
@@ -31,7 +30,7 @@ func registerFeynmanChallenge(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		concept, err := normalizeConceptParam(params.Concept, params.ConceptID)
+		concept, err := normalizeConceptParam(params.Concept)
 		if err != nil {
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
@@ -53,12 +52,11 @@ func registerFeynmanChallenge(server *mcp.Server, deps *Deps) {
 		// validate the concept against its concept list before touching
 		// concept_state. Without this guard the tool silently serves a
 		// Feynman challenge for a hallucinated or stale concept name that
-		// isn't part of the resolved domain — see issue #8 (mirrors the guard
-		// in record_transfer_result).
+		// isn't part of the resolved domain — see issue #8 .
 		domain, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
 		if err != nil || domain == nil {
 			if params.DomainID != "" {
-				deps.Logger.Error("feynman_challenge: domain not found by id", "err", err, "learner", learnerID, "domain_id", params.DomainID)
+				deps.Logger.Error("feynman_challenge: domain not found by id", append(diagnosticErrorAttrs(err), "learner", learnerID, "domain_id", params.DomainID)...)
 				r, _ := errorResult("domain not found")
 				return r, nil, nil
 			}
@@ -104,14 +102,14 @@ func registerFeynmanChallenge(server *mcp.Server, deps *Deps) {
 			"concept":     concept,
 			"instructions_for_llm": "After the learner's explanation, identify the specific conceptual gaps. " +
 				"For each gap, generate a short label and a description. " +
-				"Ask the learner for confirmation, reload get_curriculum_snapshot, then add the gaps with its expected_version. " +
+				"Ask the learner for confirmation, reload get_curriculum_snapshot, then add the gaps with add_concepts(expected_revision = its version). " +
 				"When a confirmed gap is prerequisite knowledge, make the source concept depend on the new micro-concept; do not reverse that edge.",
 			"gap_template": map[string]interface{}{
-				"label":            "<short gap name>",
-				"description":      "<what is missing from the explanation>",
-				"relationship":     "prerequisite_of_source",
-				"source_concept":   concept,
-				"expected_version": "<version from get_curriculum_snapshot>",
+				"label":             "<short gap name>",
+				"description":       "<what is missing from the explanation>",
+				"relationship":      "prerequisite_of_source",
+				"source_concept":    concept,
+				"expected_revision": "<version from get_curriculum_snapshot>",
 			},
 		})
 		return r, nil, nil

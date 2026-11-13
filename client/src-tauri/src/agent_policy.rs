@@ -157,6 +157,145 @@ fn claude_settings_select(settings: &Value) -> bool {
         })
 }
 
+/// Keys of the user's Claude settings that a Tutor session keeps although the
+/// user settings file is not loaded as a source: credential helpers, login
+/// pins, and the model/provider choice the adapter resolves from the same file
+/// (session-model.js assumes the CLI sees the same `model`).
+const CLAUDE_INHERITED_KEYS: [&str; 9] = [
+    "apiKeyHelper",
+    "awsAuthRefresh",
+    "awsCredentialExport",
+    "gcpAuthRefresh",
+    "proxyAuthHelper",
+    "forceLoginMethod",
+    "forceLoginOrgUUID",
+    "model",
+    "modelOverrides",
+];
+
+/// Variables of the settings `env` block that select or authenticate the
+/// provider, or reach it through the network (proxy, private CA).
+fn claude_inherited_env(key: &str) -> bool {
+    const EXACT: [&str; 11] = [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "NODE_EXTRA_CA_CERTS",
+        "API_TIMEOUT_MS",
+        "CLOUD_ML_REGION",
+        "CLAUDE_CODE_API_KEY_HELPER_TTL_MS",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    ];
+    const PREFIXES: [&str; 7] = [
+        "ANTHROPIC_",
+        "AWS_",
+        "CLAUDE_CODE_USE_",
+        "CLAUDE_CODE_SKIP_",
+        "CLAUDE_CODE_CLIENT_",
+        "VERTEX_REGION_",
+        "GOOGLE_",
+    ];
+    EXACT.contains(&key) || PREFIXES.iter().any(|prefix| key.starts_with(prefix))
+}
+
+/// Loopback names the MCP relay can be reached by: a proxy must never
+/// receive its requests nor its local bearer.
+pub const LOOPBACK_NO_PROXY: [&str; 3] = ["127.0.0.1", "localhost", "::1"];
+
+/// Union of comma-separated NO_PROXY lists, in order and without duplicates,
+/// always followed by the loopback names missing from it.
+pub fn no_proxy_with_loopback<'a>(lists: impl IntoIterator<Item = &'a str>) -> String {
+    let mut entries: Vec<&str> = Vec::new();
+    for entry in lists
+        .into_iter()
+        .flat_map(|list| list.split(','))
+        .map(str::trim)
+        .chain(LOOPBACK_NO_PROXY)
+    {
+        if !entry.is_empty() && !entries.contains(&entry) {
+            entries.push(entry);
+        }
+    }
+    entries.join(",")
+}
+
+/// The Claude CLI applies its settings `env` (here the flag tier,
+/// `options.settings.env`, which also outranks a user settings file) over its
+/// process environment. Both NO_PROXY spellings of that tier are set to the
+/// process value (`process`, loopback included) merged with whatever the
+/// inherited settings name, so a user proxy configuration can never route the
+/// loopback relay through a proxy.
+pub fn protect_loopback_no_proxy(options: &mut Value, process: &str) {
+    if !options["settings"].is_object() {
+        options["settings"] = json!({});
+    }
+    if !options["settings"]["env"].is_object() {
+        options["settings"]["env"] = json!({});
+    }
+    let env = &mut options["settings"]["env"];
+    let merged = no_proxy_with_loopback(
+        [
+            Some(process),
+            env["NO_PROXY"].as_str(),
+            env["no_proxy"].as_str(),
+        ]
+        .into_iter()
+        .flatten(),
+    );
+    env["NO_PROXY"] = json!(merged);
+    env["no_proxy"] = json!(merged);
+}
+
+/// Authentication and provider settings a native Claude session receives in
+/// its flag tier (`options.settings`) instead of loading the user's settings
+/// file, so that the user's plugins (`enabledPlugins`), permission rules
+/// (`permissions.allow`…) and hooks never apply to Tutor.
+///
+/// None keeps the previous behaviour (`settingSources: ["user"]`): a WSL
+/// harness reads a settings file this process cannot read reliably, and an
+/// unreadable or invalid file must not silently drop the user's login.
+pub fn claude_inherited_settings(target: &AgentTarget, spec: &LaunchSpec) -> Option<Value> {
+    if target.environment != "native" {
+        return None;
+    }
+    let vars = launch_vars(spec);
+    let config = lookup(&vars, "CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| home(&vars).map(|home| home.join(".claude")))?;
+    claude_inheritance(&config.join("settings.json"))
+}
+
+fn claude_inheritance(path: &Path) -> Option<Value> {
+    let text = match read_settings(path) {
+        Settings::Missing => return Some(json!({})),
+        Settings::Unreadable => return None,
+        Settings::Read(text) => text,
+    };
+    let Value::Object(settings) = serde_json::from_str::<Value>(&text).ok()? else {
+        return None;
+    };
+    let mut inherited = serde_json::Map::new();
+    for key in CLAUDE_INHERITED_KEYS {
+        if let Some(value) = settings.get(key).filter(|value| !value.is_null()) {
+            inherited.insert(key.into(), value.clone());
+        }
+    }
+    if let Some(Value::Object(env)) = settings.get("env") {
+        let env: serde_json::Map<String, Value> = env
+            .iter()
+            .filter(|(key, value)| claude_inherited_env(key) && value.is_string())
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        if !env.is_empty() {
+            inherited.insert("env".into(), Value::Object(env));
+        }
+    }
+    Some(Value::Object(inherited))
+}
+
 /// Top-level keys of a Codex config that choose the model it runs.
 const CODEX_MODEL_KEYS: [&str; 3] = ["model", "model_provider", "profile"];
 
@@ -383,6 +522,59 @@ mod tests {
         assert!(claude_user_choice(&base, None));
         // Without a home directory nothing can be verified.
         assert!(claude_user_choice(&[], None));
+    }
+
+    #[test]
+    fn no_proxy_lists_always_end_with_every_loopback_name() {
+        assert_eq!(no_proxy_with_loopback([""]), "127.0.0.1,localhost,::1");
+        assert_eq!(
+            no_proxy_with_loopback([" corp.example, localhost ,", "corp.example,.intra"]),
+            "corp.example,localhost,.intra,127.0.0.1,::1"
+        );
+    }
+
+    #[test]
+    fn claude_sessions_inherit_only_authentication_and_provider_settings() {
+        let home = tempfile::tempdir().unwrap();
+        let file = home.path().join("settings.json");
+        assert_eq!(claude_inheritance(&file), Some(json!({})));
+        std::fs::write(
+            &file,
+            json!({
+                "apiKeyHelper":"/usr/local/bin/key-helper",
+                "awsAuthRefresh":"aws sso login",
+                "model":"opus",
+                "forceLoginMethod":"console",
+                "enabledPlugins":{"evil@market":true},
+                "permissions":{"allow":["mcp__tutor__*"],"defaultMode":"acceptEdits"},
+                "hooks":{"PreToolUse":[]},
+                "statusLine":{"type":"command","command":"x"},
+                "env":{"ANTHROPIC_BASE_URL":"https://gateway.example","CLAUDE_CODE_USE_BEDROCK":"1",
+                    "AWS_PROFILE":"work","HTTPS_PROXY":"http://proxy:3128","NODE_OPTIONS":"--require=/tmp/x.js",
+                    "ENABLE_TOOL_SEARCH":"1","ANTHROPIC_NUMBER":1}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            claude_inheritance(&file),
+            Some(json!({
+                "apiKeyHelper":"/usr/local/bin/key-helper",
+                "awsAuthRefresh":"aws sso login",
+                "model":"opus",
+                "forceLoginMethod":"console",
+                "env":{"ANTHROPIC_BASE_URL":"https://gateway.example","CLAUDE_CODE_USE_BEDROCK":"1",
+                    "AWS_PROFILE":"work","HTTPS_PROXY":"http://proxy:3128"}
+            }))
+        );
+        // Unknown content keeps the legacy user source rather than dropping a login.
+        std::fs::write(&file, "not json").unwrap();
+        assert_eq!(claude_inheritance(&file), None);
+        std::fs::write(&file, "[]").unwrap();
+        assert_eq!(claude_inheritance(&file), None);
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        assert_eq!(claude_inheritance(&file), None);
     }
 
     #[test]

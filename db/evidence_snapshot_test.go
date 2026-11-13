@@ -115,6 +115,43 @@ func TestEvidenceBatchReadsMatchSingleConceptReads(t *testing.T) {
 			t.Fatalf("%s effective trust policy changed in batch: %+v", concept, batchedAssessments[concept])
 		}
 	}
+
+	// The multi-domain reads answer every domain in one statement each and
+	// agree with the per-domain batches, per-concept cap included.
+	scope := models.LegacyPrincipal("L1").TenantScope()
+	domainIDs := []string{domain.ID, otherDomain.ID, domain.ID, ""}
+	transfersByDomain, err := store.GetTransferScoresByDomains(ctx, scope, "L1", domainIDs)
+	if err != nil {
+		t.Fatalf("transfers by domains: %v", err)
+	}
+	assessmentsByDomain, err := store.GetEvaluatedAssessmentAttemptsByDomains(ctx, scope, "L1", domainIDs, 2)
+	if err != nil {
+		t.Fatalf("assessments by domains: %v", err)
+	}
+	for _, id := range []string{domain.ID, otherDomain.ID} {
+		wantTransfers, err := store.GetTransferScoresBatchInDomain(ctx, "L1", id, []string{"alpha", "beta"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantAssessments, err := store.GetEvaluatedAssessmentAttemptsBatchInDomain(ctx, "L1", id, []string{"alpha", "beta"}, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, concept := range []string{"alpha", "beta"} {
+			if !reflect.DeepEqual(transfersByDomain[id][concept], wantTransfers[concept]) {
+				t.Fatalf("%s/%s transfers by domains differ:\ngot=%+v\nwant=%+v", id, concept, transfersByDomain[id][concept], wantTransfers[concept])
+			}
+			if !reflect.DeepEqual(assessmentsByDomain[id][concept], wantAssessments[concept]) {
+				t.Fatalf("%s/%s assessments by domains differ:\ngot=%+v\nwant=%+v", id, concept, assessmentsByDomain[id][concept], wantAssessments[concept])
+			}
+		}
+	}
+	if len(assessmentsByDomain[otherDomain.ID]["alpha"]) != 1 || len(transfersByDomain[otherDomain.ID]["alpha"]) != 1 {
+		t.Fatalf("other domain evidence leaked or missing: %+v %+v", assessmentsByDomain[otherDomain.ID], transfersByDomain[otherDomain.ID])
+	}
+	if _, err := store.GetTransferScoresByDomains(ctx, models.LegacyPrincipal("L2").TenantScope(), "L1", domainIDs); err == nil {
+		t.Fatal("a scope bound to another learner was accepted")
+	}
 }
 
 func seedBatchTransfer(t *testing.T, store *Store, domainID, concept, contextType string, score float64, createdAt time.Time) {

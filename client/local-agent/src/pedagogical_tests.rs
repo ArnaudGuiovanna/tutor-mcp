@@ -17,7 +17,7 @@ const TOOLS: [&str; 4] = [
     "get_conversation_context",
     "get_curriculum_snapshot",
     "start_learning_session",
-    "get_next_activity",
+    "prepare_pedagogical_turn",
 ];
 
 fn payloads() -> Value {
@@ -49,6 +49,11 @@ fn entries() -> Vec<ToolEntry> {
             annotations: tool["annotations"].clone(),
         })
         .collect()
+}
+/// Sets a JSON pointer, inserting the final object member when absent.
+fn set_pointer(body: &mut Value, pointer: &str, value: Value) {
+    let (parent, key) = pointer.rsplit_once('/').unwrap();
+    body.pointer_mut(parent).expect(pointer)[key] = value;
 }
 fn envelope(value: Value) -> Value {
     // tools/tools.go:jsonResult emits both forms. Structured data has priority.
@@ -218,7 +223,7 @@ fn real_catalog_and_server_receipts_reach_decision_without_enabling_assessment()
             assert_eq!(args["domain_id"], "domain_h07");
             assert!(
                 args.get("session_id").is_none(),
-                "get_next_activity has no session parameter"
+                "prepare_pedagogical_turn has no session parameter"
             );
         }
         let source = f.finish_with(step, envelope(f.payloads[name].clone()));
@@ -415,42 +420,56 @@ fn session_receipt_requires_same_domain_matching_ids_and_open_status() {
 #[test]
 fn decision_rejects_cross_linked_or_stale_fields_and_unsupported_protocols() {
     for (pointer, value) in [
-        ("/domain_id", json!("foreign")),
-        ("/session_id", json!("other-session")),
-        ("/intent", json!("review")),
+        ("/mode", json!("context")),
         ("/needs_domain_setup", json!(true)),
-        ("/decision_id", json!("other-decision")),
-        ("/activity/concept", json!("concept_immutable_1")),
-        ("/activity/type", json!("CLOSE_SESSION")),
-        ("/pedagogical_contract/target_concept", json!("other")),
+        ("/needs_selection", json!(true)),
+        ("/decision", json!(null)),
+        ("/decision/domain_id", json!("foreign")),
+        ("/decision/session_id", json!("other-session")),
+        ("/decision/intent", json!("review")),
+        ("/decision/needs_domain_setup", json!(false)),
+        ("/decision/decision_id", json!("decision_h07")),
+        ("/decision/activity/concept", json!("concept_immutable_1")),
+        ("/decision/activity/type", json!("CLOSE_SESSION")),
+        ("/decision/pedagogical_contract/decision_id", json!("")),
         (
-            "/pedagogical_contract/recommended_activity_type",
+            "/decision/pedagogical_contract/target_concept",
+            json!("other"),
+        ),
+        (
+            "/decision/pedagogical_contract/recommended_activity_type",
             json!("PRACTICE"),
         ),
-        ("/pedagogical_contract/curriculum_version", json!(8)),
-        ("/pedagogical_contract/competency/id", json!("foreign")),
         (
-            "/pedagogical_contract/competency/outcomes/0/id",
+            "/decision/pedagogical_contract/curriculum_version",
+            json!(8),
+        ),
+        (
+            "/decision/pedagogical_contract/competency/id",
+            json!("foreign"),
+        ),
+        (
+            "/decision/pedagogical_contract/competency/outcomes/0/id",
             json!("invented"),
         ),
         (
-            "/pedagogical_contract/policy_version",
+            "/decision/pedagogical_contract/policy_version",
             json!("future-policy"),
         ),
         (
-            "/pedagogical_contract/learning_event_protocol",
+            "/decision/pedagogical_contract/learning_event_protocol",
             json!("future-protocol"),
         ),
         (
-            "/pedagogical_contract/bkt_update_mode",
+            "/decision/pedagogical_contract/bkt_update_mode",
             json!("learning_opportunity"),
         ),
         (
-            "/pedagogical_contract/constraints/must_collect",
+            "/decision/pedagogical_contract/constraints/must_collect",
             json!(["learner_answer"]),
         ),
         (
-            "/pedagogical_contract/llm_discretion/cannot_mark_mastery_without_evidence",
+            "/decision/pedagogical_contract/llm_discretion/cannot_mark_mastery_without_evidence",
             json!(false),
         ),
     ] {
@@ -458,8 +477,8 @@ fn decision_rejects_cross_linked_or_stale_fields_and_unsupported_protocols() {
         let mut machine = f.begin();
         f.reach(&mut machine, Phase::SessionOpen);
         let step = f.issue(&mut machine);
-        let mut body = f.payloads["get_next_activity"].clone();
-        *body.pointer_mut(pointer).unwrap() = value;
+        let mut body = f.payloads["prepare_pedagogical_turn"].clone();
+        set_pointer(&mut body, pointer, value);
         let source = f.finish_with(step, envelope(body));
         assert!(f.accept(&mut machine, &source).is_err(), "{pointer}");
         assert!(machine.decision.is_none());
@@ -485,7 +504,7 @@ fn receipt_for_a_different_operation_or_turn_cannot_advance() {
             step.call().operation_id().into()
         };
         let tool = if mode == "wrong-tool" {
-            "tutor/get_pending_alerts"
+            "tutor/get_learner_state"
         } else {
             step.call().tool_id()
         };
@@ -780,10 +799,13 @@ fn review_intent_is_host_owned_and_never_overridden_by_the_model() {
     let step = f.issue(&mut machine);
     assert_eq!(
         step.call().arguments(),
-        &json!({"domain_id":"domain_h07","intent":"review"})
+        &json!({"domain_id":"domain_h07","intent":"review","mode":"activity"})
     );
     // The auto receipt is not acceptable for the current explicit review.
-    let source = f.finish_with(step, envelope(f.payloads["get_next_activity"].clone()));
+    let source = f.finish_with(
+        step,
+        envelope(f.payloads["prepare_pedagogical_turn"].clone()),
+    );
     assert_eq!(f.accept(&mut machine, &source), Err(Error::Scope));
 }
 
@@ -804,11 +826,15 @@ fn absent_duplicate_and_null_outcomes_are_not_confused() {
             _ => competency["outcomes"] = Value::Null,
         }
         f.payloads["get_curriculum_snapshot"]["snapshot"]["concepts"][0] = competency.clone();
-        f.payloads["get_next_activity"]["pedagogical_contract"]["competency"] = competency;
+        f.payloads["prepare_pedagogical_turn"]["decision"]["pedagogical_contract"]["competency"] =
+            competency;
         let mut machine = f.begin();
         f.reach(&mut machine, Phase::SessionOpen);
         let step = f.issue(&mut machine);
-        let source = f.finish_with(step, envelope(f.payloads["get_next_activity"].clone()));
+        let source = f.finish_with(
+            step,
+            envelope(f.payloads["prepare_pedagogical_turn"].clone()),
+        );
         assert_eq!(
             f.accept(&mut machine, &source).is_ok(),
             mode == "null",
@@ -908,16 +934,17 @@ fn rest_and_close_session_are_terminal_server_guidance_without_a_frozen_decision
 #[test]
 fn terminal_receipts_still_require_matching_scope_and_no_fabricated_decision() {
     for (pointer, value) in [
-        ("/session_id", json!("foreign")),
-        ("/domain_id", json!("foreign")),
-        ("/intent", json!("review")),
-        ("/decision_id", json!("fabricated")),
+        ("/decision/session_id", json!("foreign")),
+        ("/decision/domain_id", json!("foreign")),
+        ("/decision/intent", json!("review")),
+        ("/decision/decision_id", json!("fabricated")),
+        ("/needs_domain_setup", json!(true)),
         (
-            "/pedagogical_contract/recommended_activity_type",
+            "/decision/pedagogical_contract/recommended_activity_type",
             json!("PRACTICE"),
         ),
         (
-            "/pedagogical_contract/bkt_update_mode",
+            "/decision/pedagogical_contract/bkt_update_mode",
             json!("learning_opportunity"),
         ),
     ] {
@@ -926,7 +953,7 @@ fn terminal_receipts_still_require_matching_scope_and_no_fabricated_decision() {
         f.reach(&mut machine, Phase::SessionOpen);
         let step = f.issue(&mut machine);
         let mut body = terminal_envelope("REST")["structuredContent"].clone();
-        *body.pointer_mut(pointer).unwrap() = value;
+        set_pointer(&mut body, pointer, value);
         let source = f.finish_with(step, envelope(body));
         assert!(f.accept(&mut machine, &source).is_err(), "{pointer}");
         assert!(machine.terminal.is_none());
@@ -942,7 +969,7 @@ fn terminal_receipts_still_require_matching_scope_and_no_fabricated_decision() {
         f.reach(&mut machine, Phase::SessionOpen);
         let step = f.issue(&mut machine);
         let mut body = terminal_envelope("CLOSE_SESSION")["structuredContent"].clone();
-        body["pedagogical_contract"][key] = json!("invented");
+        body["decision"]["pedagogical_contract"][key] = json!("invented");
         let source = f.finish_with(step, envelope(body));
         assert_eq!(
             f.accept(&mut machine, &source),
@@ -960,9 +987,9 @@ fn review_without_reviewable_concept_stops_without_starting_an_assessment() {
     f.reach(&mut machine, Phase::SessionOpen);
     let step = f.issue(&mut machine);
     let mut body = terminal_envelope("REST")["structuredContent"].clone();
-    body["intent"] = json!("review");
-    body["intent_status"] = json!("no_reviewable_concept");
-    body["pedagogical_contract"]["intent"] = json!("review_prior_material");
+    body["decision"]["intent"] = json!("review");
+    body["decision"]["intent_status"] = json!("no_reviewable_concept");
+    body["decision"]["pedagogical_contract"]["intent"] = json!("review_prior_material");
     let source = f.finish_with(step, envelope(body));
     f.accept(&mut machine, &source).unwrap();
     assert_eq!(machine.phase(), Phase::Terminal(TerminalKind::Rest));

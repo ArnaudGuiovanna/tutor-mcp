@@ -4,6 +4,13 @@
 > `engine/router.go` décrivent l'ancien chemin de migration, aujourd'hui
 > supprimé. Le runtime supporté compose ce sélecteur depuis
 > `engine/orchestrator.go`.
+>
+> **État courant (2026-11).** `algorithms/irt.go` a été supprimé : la
+> difficulté de génération est une heuristique fixe (`PracticeDifficultyTarget`)
+> abaissée de 0.20 (plancher 0.30) sur un concept en alerte `ZPD_DRIFT`
+> (`easeDifficultyAfterFailureStreak`), sauf pour les évaluations. Les
+> wrappers `SelectAction` et le compteur `NaNFallbackCount` ont été supprimés ;
+> le point d'entrée est `SelectActionForPhaseAt`.
 
 > Composant 3/7 du pipeline de régulation. Reçoit un `concept_id` déjà
 > choisi par `[4] ConceptSelector` dans l'orchestrateur courant et
@@ -282,7 +289,7 @@ func zpdDifficultyFromTheta(theta float64) float64 {
 |-----|---------------|----------|
 | `cs == nil` | Erreur retournée par le caller (concept introuvable). `[5]` panique sur nil deref → caller doit valider. | Contractuel. |
 | `cs.CardState == "new"` (jamais pratiqué) | Saute l'override FSRS retention (pas de Stability significative). Tombe dans le branch mastery. PMastery=0.1 par défaut → mastery < 0.30 → NewConcept. | Cohérent avec `engine/alert.go:20` qui exclut les `card_state="new"` de FORGETTING. |
-| `cs.PMastery = NaN` (cf F-1.3 audit) | Toutes les comparaisons NaN sont false → tombe dans le `default` (high-mastery branch). Avec `history.MasteryChallengeCount=0` → MasteryChallenge. **Mauvais.** | Voir OQ-5.6 — défense optionnelle. |
+| `cs.PMastery = NaN` (division par zéro BKT) | Toutes les comparaisons NaN sont false → tombe dans le `default` (high-mastery branch). Avec `history.MasteryChallengeCount=0` → MasteryChallenge. **Mauvais.** | Voir OQ-5.6 — défense optionnelle. |
 | `cs.Theta = NaN` ou clampé à ±4 | `zpdDifficultyFromTheta` retourne 0.30 (theta=-4) ou 0.85 (theta=4). Clamp cohérent. NaN → math.Exp(NaN) = NaN → clamp NaN — clamp doit gérer. | Voir OQ-5.6. |
 | Concept jamais interagi mais `mc != nil` | Misconception override gagne, retourne DebugMisconception. Cohérent. | OK. |
 | `MasteryBKT()` change (REGULATION_THRESHOLD) | Le seuil 0.85 utilisé dans le case statement lit l'accesseur ; la cascade respecte le profil actif. | OK — pas de literal hardcoded. |
@@ -479,9 +486,9 @@ par sommeil".
 Un compteur supplémentaire dans `ActionHistory` (`InteractionsAboveBKT
 int`) que le caller dérive depuis l'historique.
 
-### OQ-5.6 — Défense contre `NaN`/`nil` (cf F-1.3 dette différée)
+### OQ-5.6 — Défense contre `NaN`/`nil`
 
-`cs.PMastery = NaN` est observable si F-1.3 (BKT division par zéro)
+`cs.PMastery = NaN` est observable si la division par zéro BKT
 n'est pas corrigé. Que fait `[5]` ?
 
 **A.** Aucune défense. NaN tombe dans le default (high-mastery) →
@@ -496,7 +503,7 @@ Mauvais.
 difficulté 0.55". Compromis entre A et B.
 
 **Mon défaut** : **B**. Coût trivial, signal clair en log, évite la
-décision fausse. Note inline pointant vers F-1.3 dans la dette.
+décision fausse. Note inline pointant vers la division par zéro BKT.
 
 ---
 
@@ -549,7 +556,7 @@ ActionSelector seul ne consomme pas `goal_relevance`.
 | **Stabilité high-mastery** | OQ-5.5 = B (N=3 interactions au-dessus de seuil) |
 | **NaN guard** | OQ-5.6 = B (Rest fallback) |
 | **Flag** | `REGULATION_ACTION=off` retire seulement l'appendix prompt ; `SelectAction` reste exécuté par l'orchestrateur |
-| **Findings résolus** | F-3.1 (θ → DifficultyTarget), F-3.5 (Feynman/Transfer routables serveur via l'orchestrateur) |
+| **Problèmes résolus** | θ → DifficultyTarget, Feynman/Transfer routables serveur via l'orchestrateur |
 
 ---
 

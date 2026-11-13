@@ -132,7 +132,13 @@ transaction que la consommation du code et la création du refresh token. La
 mutation est idempotente et accepte les clients CIMD non persistés. Le cleanup
 des clients jamais utilisés reste exclusivement dans le job horaire du
 scheduler ; `/register` ne le déclenche plus. La suppression et son audit sont
-dans la même transaction.
+dans la même transaction. Sous PostgreSQL, les approbations d'apprenants qui
+nomment le client sont supprimées avec lui dans tous les tenants par la clé
+étrangère `ON DELETE CASCADE` de `learner_approved_clients` : un client purgé ou
+évincé ne reste donc jamais compté dans le plafond. Les codes d'autorisation en
+attente d'un client supprimé ne sont plus échangeables (le client est
+introuvable) et disparaissent au nettoyage horaire de leur tenant, au plus tard
+5 minutes après leur émission.
 
 Le nombre total de clients enregistrés est plafonné (10 000). Lorsque le
 plafond est atteint, un nouvel enregistrement évince d'abord le plus ancien
@@ -157,7 +163,8 @@ Les clients confidentiels ne sont pas dédupliqués. Chaque enregistrement
 confidentiel admis crée un client distinct et reçoit `201` avec un nouveau
 `client_id` et un nouveau `client_secret`, soumis au quota de l'IAT et au
 plafond global. Le secret n'est renvoyé qu'une seule fois, à la création ;
-seul son hachage bcrypt est conservé. Un client confidentiel qui a perdu son
+seul son hachage bcrypt est conservé (aucune colonne ne peut en contenir une
+copie chiffrée). Un client confidentiel qui a perdu son
 secret doit se ré-enregistrer et utiliser le nouveau couple d'identifiants.
 Les enregistrements antérieurs inutilisés expirent selon la règle des clients
 provisoires ci-dessus.
@@ -166,7 +173,11 @@ provisoires ci-dessus.
 
 Les formulaires servis par le serveur (consentement `/authorize` et
 formulaires de compte) vérifient l'origine de la soumission en plus du jeton
-CSRF. Quand le navigateur envoie `Sec-Fetch-Site`, seules les valeurs
+CSRF. Ce jeton aléatoire, à usage unique dans toute la flotte, est comparé au
+cookie `__Host-` du formulaire (`Secure`, `Path=/`, sans `Domain` ; noms sans
+préfixe uniquement pour un `BASE_URL` HTTP en boucle locale). Aucune session
+n'existe avant la connexion : le jeton n'est donc pas dérivé d'une session.
+Quand le navigateur envoie `Sec-Fetch-Site`, seules les valeurs
 `same-origin` et `none` sont acceptées ; sinon un en-tête `Origin` présent doit
 correspondre à `BASE_URL` (schéma et hôte). Une requête sans ces en-têtes, ou
 avec `Origin: null`, reste soumise au jeton CSRF. Derrière un reverse proxy,

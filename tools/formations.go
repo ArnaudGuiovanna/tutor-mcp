@@ -64,7 +64,7 @@ type PublishFormationParams struct {
 
 func registerFormationTools(server *mcp.Server, deps *Deps) {
 	registerFormationCatalogTools(server, deps)
-	addTool(server, &mcp.Tool{Name: "draft_formation", Description: "Create a formation draft, or clone an existing version. Requires explicit formation authoring access. Learners already enrolled remain on their published version."}, func(ctx context.Context, _ *mcp.CallToolRequest, input DraftFormationParams) (*mcp.CallToolResult, any, error) {
+	addTool(server, deps, &mcp.Tool{Name: "draft_formation", Description: "Create a formation draft, or clone an existing version. Requires explicit formation authoring access. Learners already enrolled remain on their published version."}, func(ctx context.Context, _ *mcp.CallToolRequest, input DraftFormationParams) (*mcp.CallToolResult, any, error) {
 		actor, store, err := formationActor(ctx, deps)
 		if err != nil {
 			r, _ := errorResult(err.Error())
@@ -89,7 +89,7 @@ func registerFormationTools(server *mcp.Server, deps *Deps) {
 		}
 		return formationToolResult(deps, output, err)
 	})
-	addTool(server, &mcp.Tool{Name: "add_formation_concepts", Description: "Add or replace draft concepts by stable key, including descriptions, outcomes, criteria and prerequisites. The batch is atomic. Published formations are immutable; clone a version first."}, func(ctx context.Context, _ *mcp.CallToolRequest, input AddFormationConceptsParams) (*mcp.CallToolResult, any, error) {
+	addTool(server, deps, &mcp.Tool{Name: "add_formation_concepts", Description: "Add or replace draft concepts by stable key, including descriptions, outcomes, criteria and prerequisites. The batch is atomic. Published formations are immutable; clone a version first."}, func(ctx context.Context, _ *mcp.CallToolRequest, input AddFormationConceptsParams) (*mcp.CallToolResult, any, error) {
 		actor, store, err := formationActor(ctx, deps)
 		if err != nil {
 			r, _ := errorResult(err.Error())
@@ -102,7 +102,7 @@ func registerFormationTools(server *mcp.Server, deps *Deps) {
 		out, _, err := store.AddFormationConceptsIdempotent(ctx, actor, input.IdempotencyKey, input.VersionID, input.Modules, input.Concepts)
 		return formationToolResult(deps, out, err)
 	})
-	addTool(server, &mcp.Tool{Name: "get_formation_version", Description: "Read the complete version of a formation you own or are assigned to, including modules, concept IDs, pedagogical definitions and prerequisites. Review a draft before publishing."}, func(ctx context.Context, _ *mcp.CallToolRequest, input FormationVersionParams) (*mcp.CallToolResult, any, error) {
+	addTool(server, deps, &mcp.Tool{Name: "get_formation_version", Description: "Read the complete version of a formation you own or are assigned to, including modules, concept IDs, pedagogical definitions and prerequisites. Review a draft before publishing."}, func(ctx context.Context, _ *mcp.CallToolRequest, input FormationVersionParams) (*mcp.CallToolResult, any, error) {
 		actor, store, err := formationActor(ctx, deps)
 		if err != nil {
 			r, _ := errorResult(err.Error())
@@ -115,7 +115,7 @@ func registerFormationTools(server *mcp.Server, deps *Deps) {
 		}
 		return formationToolResult(deps, out, err)
 	})
-	addTool(server, &mcp.Tool{Name: "publish_formation", Description: "Publish a reviewed formation draft. Its content becomes immutable and available for cohort enrollment. Requires the formateur's explicit decision to publish; existing enrollments never migrate automatically."}, func(ctx context.Context, _ *mcp.CallToolRequest, input PublishFormationParams) (*mcp.CallToolResult, any, error) {
+	addTool(server, deps, &mcp.Tool{Name: "publish_formation", Description: "Publish a reviewed formation draft. Its content becomes immutable and available for cohort enrollment. Requires the formateur's explicit decision to publish; existing enrollments never migrate automatically."}, func(ctx context.Context, _ *mcp.CallToolRequest, input PublishFormationParams) (*mcp.CallToolResult, any, error) {
 		actor, store, err := formationActor(ctx, deps)
 		if err != nil {
 			r, _ := errorResult(err.Error())

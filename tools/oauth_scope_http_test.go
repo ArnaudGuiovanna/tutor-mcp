@@ -34,12 +34,12 @@ func TestOAuthScopeHTTPMiddleware_InsufficientScopeReturnsStepUpChallenge(t *tes
 		modern bool
 	}{
 		{name: "read-only token calling mutation", tool: "record_interaction", grant: models.OAuthScopeLearnerRead},
-		{name: "modern write-only token calling read with side effects", tool: "get_next_activity", grant: models.OAuthScopeLearnerWrite, modern: true},
+		{name: "modern write-only token calling read with side effects", tool: "get_memory_state", grant: models.OAuthScopeLearnerWrite, modern: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			called := false
 			next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })
-			handler := OAuthScopeHTTPMiddleware("https://test.example", 4096, true, next)
+			handler := OAuthScopeHTTPMiddleware(&Deps{BaseURL: "https://test.example", OAuthGranularScopes: true, Regulation: RegulationFlagsFromEnv()}, 4096, next)
 			meta := ""
 			if tc.modern {
 				meta = `"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"},`
@@ -87,7 +87,7 @@ func TestOAuthScopeHTTPMiddleware_InsufficientScopeReturnsStepUpChallenge(t *tes
 
 func TestOAuthScopeHTTPMiddleware_LegacyRolloutChallengesForBundle(t *testing.T) {
 	called := false
-	handler := OAuthScopeHTTPMiddleware("https://test.example", 4096, false, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	handler := OAuthScopeHTTPMiddleware(&Deps{BaseURL: "https://test.example", OAuthGranularScopes: false, Regulation: RegulationFlagsFromEnv()}, 4096, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		called = true
 	}))
 	body := `{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"record_interaction","arguments":{}}}`
@@ -114,7 +114,7 @@ func TestFormationScopesDoNotInheritLearnerBundle(t *testing.T) {
 		{"publish_formation", "formation:read", false},
 		{"draft_formation", "formation:write", true},
 		{"get_formation_version", "formation:read", true},
-		{"get_next_activity", "formation:read formation:write", false},
+		{"get_memory_state", "formation:read formation:write", false},
 		{"join_formation", "learner:read", false},
 		{"leave_formation", "formation:write", false},
 		{"get_my_formations", "learner:write", false},
@@ -132,7 +132,7 @@ func TestFormationScopesDoNotInheritLearnerBundle(t *testing.T) {
 	} {
 		t.Run(tc.tool+"/"+tc.grant, func(t *testing.T) {
 			called := false
-			h := OAuthScopeHTTPMiddleware("https://test.example", 4096, false, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { called = true; w.WriteHeader(204) }))
+			h := OAuthScopeHTTPMiddleware(&Deps{BaseURL: "https://test.example", OAuthGranularScopes: false, Regulation: RegulationFlagsFromEnv()}, 4096, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { called = true; w.WriteHeader(204) }))
 			req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"`+tc.tool+`","arguments":{}}}`))
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Accept", "application/json, text/event-stream")
@@ -161,10 +161,10 @@ func TestOAuthScopeHTTPMiddleware_AllowsSufficientAndLegacyGrants(t *testing.T) 
 		tool  string
 		grant string
 	}{
-		{name: "pure read", tool: "get_pending_alerts", grant: models.OAuthScopeLearnerRead},
+		{name: "pure read", tool: "get_learner_state", grant: models.OAuthScopeLearnerRead},
 		{name: "pure write", tool: "record_interaction", grant: models.OAuthScopeLearnerWrite},
 		{name: "mixed granular", tool: "get_memory_state", grant: models.OAuthScopeLearnerReadWrite},
-		{name: "bounded legacy bundle", tool: "get_metacognitive_mirror", grant: models.OAuthScopeLearner},
+		{name: "bounded legacy bundle", tool: "get_curriculum_snapshot", grant: models.OAuthScopeLearner},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var gotBody string
@@ -173,7 +173,7 @@ func TestOAuthScopeHTTPMiddleware_AllowsSufficientAndLegacyGrants(t *testing.T) 
 				gotBody = string(body)
 				w.WriteHeader(http.StatusNoContent)
 			})
-			handler := OAuthScopeHTTPMiddleware("https://test.example", 4096, true, next)
+			handler := OAuthScopeHTTPMiddleware(&Deps{BaseURL: "https://test.example", OAuthGranularScopes: true, Regulation: RegulationFlagsFromEnv()}, 4096, next)
 			body := `{"jsonrpc":"2.0","id":"ok","method":"tools/call","params":{"name":"` + tc.tool + `","arguments":{}}}`
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, scopedHTTPRequest(t, body, tc.grant))
@@ -188,7 +188,7 @@ func TestOAuthScopeHTTPMiddleware_BoundsBodyAndDefersProtocolErrors(t *testing.T
 	t.Setenv("REGULATION_GOAL", "off")
 	t.Run("oversized", func(t *testing.T) {
 		called := false
-		handler := OAuthScopeHTTPMiddleware("https://test.example", 32, true, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+		handler := OAuthScopeHTTPMiddleware(&Deps{BaseURL: "https://test.example", OAuthGranularScopes: true, Regulation: RegulationFlagsFromEnv()}, 32, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, scopedHTTPRequest(t, strings.Repeat("x", 33), models.OAuthScopeLearnerRead))
 		if rec.Code != http.StatusRequestEntityTooLarge || called {
@@ -207,7 +207,7 @@ func TestOAuthScopeHTTPMiddleware_BoundsBodyAndDefersProtocolErrors(t *testing.T
 	} {
 		t.Run(body, func(t *testing.T) {
 			called := false
-			handler := OAuthScopeHTTPMiddleware("https://test.example", 4096, true, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handler := OAuthScopeHTTPMiddleware(&Deps{BaseURL: "https://test.example", OAuthGranularScopes: true, Regulation: RegulationFlagsFromEnv()}, 4096, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				called = true
 				got, _ := io.ReadAll(r.Body)
 				if string(got) != body {
@@ -234,7 +234,7 @@ func TestOAuthScopeHTTPMiddleware_BoundsBodyAndDefersProtocolErrors(t *testing.T
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			called := false
-			handler := OAuthScopeHTTPMiddleware("https://test.example", 4096, true, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			handler := OAuthScopeHTTPMiddleware(&Deps{BaseURL: "https://test.example", OAuthGranularScopes: true, Regulation: RegulationFlagsFromEnv()}, 4096, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				called = true
 				w.WriteHeader(http.StatusNoContent)
 			}))
@@ -251,7 +251,7 @@ func TestOAuthScopeHTTPMiddleware_BoundsBodyAndDefersProtocolErrors(t *testing.T
 
 	t.Run("modern routing headers must agree with body", func(t *testing.T) {
 		called := false
-		handler := OAuthScopeHTTPMiddleware("https://test.example", 4096, true, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		handler := OAuthScopeHTTPMiddleware(&Deps{BaseURL: "https://test.example", OAuthGranularScopes: true, Regulation: RegulationFlagsFromEnv()}, 4096, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			called = true
 			w.WriteHeader(http.StatusNoContent)
 		}))

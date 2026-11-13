@@ -610,3 +610,116 @@ impl Backend {
         Ok(())
     }
 }
+
+/// Training tools the interface may call, named as on the MCP surface.
+/// Edits and lifecycle changes are single tools selected by `action`
+/// (`edit_training`: preview/propose/save; `manage_training_lifecycle`:
+/// archive/restore/delete/withdraw with `preview=true` or `confirm=true`).
+pub(super) const TRAINING_TOOLS: &[&str] = &[
+    "list_training_library",
+    "get_training_groups",
+    "get_training",
+    "get_conversation_context",
+    "select_conversation_training",
+    "edit_training",
+    "share_training",
+    "submit_training",
+    "decide_training",
+    "publish_training",
+    "set_training_access",
+    "get_training_policy",
+    "set_training_policy",
+    "find_training_members",
+    "join_training",
+    "manage_training_lifecycle",
+];
+
+const EDIT_ACTIONS: &[&str] = &["preview", "propose", "save"];
+const LIFECYCLE_ACTIONS: &[&str] = &["archive", "restore", "delete", "withdraw"];
+
+fn invalid_training_request() -> String {
+    "Requête de formation invalide.".into()
+}
+
+/// Validates the `action` selector of a merged training tool.
+fn training_selector<'a>(tool: &str, input: &'a Value) -> Result<Option<&'a str>, String> {
+    let allowed = match tool {
+        "edit_training" => EDIT_ACTIONS,
+        "manage_training_lifecycle" => LIFECYCLE_ACTIONS,
+        _ => return Ok(None),
+    };
+    input
+        .get("action")
+        .and_then(Value::as_str)
+        .filter(|action| allowed.contains(action))
+        .map(Some)
+        .ok_or_else(invalid_training_request)
+}
+
+/// Local mode calls the MCP tool itself. The interface names the training
+/// and the idempotency key `id` and `key`, as the native client API does;
+/// the MCP surface expects `training_id` and `idempotency_key`.
+pub(super) fn local_training_call(
+    tool: &str,
+    input: Value,
+) -> Result<(&'static str, Value), String> {
+    let tool = TRAINING_TOOLS
+        .iter()
+        .copied()
+        .find(|name| *name == tool)
+        .ok_or_else(invalid_training_request)?;
+    training_selector(tool, &input)?;
+    let Value::Object(fields) = input else {
+        return Err(invalid_training_request());
+    };
+    let args = fields
+        .into_iter()
+        .map(|(name, value)| {
+            let name = match name.as_str() {
+                "id" => "training_id".to_owned(),
+                "key" => "idempotency_key".to_owned(),
+                _ => name,
+            };
+            (name, value)
+        })
+        .collect();
+    Ok((tool, Value::Object(args)))
+}
+
+/// Remote mode goes through the native client API, which keeps the store
+/// action vocabulary (`save_training_edit`, `archive_training`,
+/// `preview_training_lifecycle` with `decision`, ...). Translate one
+/// validated MCP tool call into that action and its request body.
+pub(super) fn native_training_call(tool: &str, input: Value) -> Result<(String, Value), String> {
+    if !TRAINING_TOOLS.contains(&tool) {
+        return Err(invalid_training_request());
+    }
+    let selector = training_selector(tool, &input)?.map(str::to_owned);
+    let Value::Object(mut fields) = input else {
+        return Err(invalid_training_request());
+    };
+    fields.remove("action");
+    let preview = fields.remove("preview");
+    let action = match (tool, selector) {
+        ("edit_training", Some(action)) => {
+            if preview.is_some() {
+                return Err(invalid_training_request());
+            }
+            format!("{action}_training_edit")
+        }
+        ("manage_training_lifecycle", Some(action)) => match preview {
+            Some(Value::Bool(true)) => {
+                if fields.contains_key("confirm") {
+                    return Err(invalid_training_request());
+                }
+                fields.insert("decision".into(), json!(format!("{action}_training")));
+                "preview_training_lifecycle".to_owned()
+            }
+            None | Some(Value::Bool(false)) => format!("{action}_training"),
+            Some(_) => return Err(invalid_training_request()),
+        },
+        (_, None) if preview.is_none() => tool.to_owned(),
+        _ => return Err(invalid_training_request()),
+    };
+    Ok((action, Value::Object(fields)))
+}

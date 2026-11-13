@@ -223,10 +223,7 @@ impl Effect {
 /// readOnlyHint. Expansion requires reviewing the real server handler.
 fn effect(tool: &str) -> Result<Effect, Error> {
     match tool {
-        "get_learner_context"
-        | "get_pending_alerts"
-        | "get_dashboard_state"
-        | "get_olm_snapshot"
+        "get_learner_state"
         | "get_misconceptions"
         | "get_pedagogical_snapshots"
         | "get_autonomy_metrics"
@@ -240,13 +237,12 @@ fn effect(tool: &str) -> Result<Effect, Error> {
         "get_conversation_context"
         | "get_curriculum_snapshot"
         | "get_memory_state"
-        | "get_metacognitive_mirror"
         // Logical reads still initialize legacy curriculum baselines via
         // trainingDocument/EnsureCurriculumBaseline; no replay contract.
         | "list_training_library"
         | "get_training" => Ok(Effect::MutationWithoutReplayContract),
         "start_learning_session"
-        | "get_next_activity"
+        | "prepare_pedagogical_turn"
         | "prepare_assessment_attempt"
         | "submit_assessment_attempt"
         | "cancel_assessment_attempt"
@@ -272,7 +268,7 @@ pub(crate) fn protected(key: &str) -> bool {
                 | "expected_selection"
                 | "expected_revision"
                 | "learner_response"
-                | "rubric_json"
+                | "rubric"
                 | "evaluator_id"
                 | "response_time_seconds"
                 | "hints_used"
@@ -282,7 +278,7 @@ pub(crate) fn protected(key: &str) -> bool {
                 // read_raw_session addresses a retained session by timestamp.
                 | "timestamp"
                 | "evaluation_method"
-                | "evaluation_provenance_json"
+                | "evaluation_provenance"
                 | "interpretation_brief"
                 | "self_initiated"
                 | "event_key"
@@ -527,13 +523,13 @@ mod tests {
             json!({"structuredContent":{"domain_id":"verified-domain"}}),
         );
         let mut fields = VerifiedFields::new("epoch1".into(), &journal).unwrap();
-        let catalog = catalog("get_next_activity", schema());
+        let catalog = catalog("prepare_pedagogical_turn", schema());
         let id = uuid::Uuid::new_v4();
         assert!(matches!(
             validate_call(
                 &catalog,
                 "epoch1",
-                "tutor/get_next_activity",
+                "tutor/prepare_pedagogical_turn",
                 &json!({"domain_id":"invented","intent":"auto"}),
                 &fields,
                 id
@@ -547,7 +543,7 @@ mod tests {
             validate_call(
                 &catalog,
                 "epoch1",
-                "tutor/get_next_activity",
+                "tutor/prepare_pedagogical_turn",
                 &json!({"domain_id":"invented","intent":"auto"}),
                 &fields,
                 id
@@ -557,7 +553,7 @@ mod tests {
         let call = validate_call(
             &catalog,
             "epoch1",
-            "tutor/get_next_activity",
+            "tutor/prepare_pedagogical_turn",
             &json!({"intent":"auto"}),
             &fields,
             id,
@@ -568,17 +564,17 @@ mod tests {
         assert_eq!(
             call.effect(),
             Effect::MiddlewareKey,
-            "get_next_activity mutates even if the annotation says otherwise"
+            "prepare_pedagogical_turn mutates even if the annotation says otherwise"
         );
         assert_eq!(
             call.permission_params("session", "call")["toolCall"]["rawInput"]["tool"],
-            "get_next_activity"
+            "prepare_pedagogical_turn"
         );
         assert!(matches!(
             validate_call(
                 &catalog,
                 "epoch2",
-                "tutor/get_next_activity",
+                "tutor/prepare_pedagogical_turn",
                 &json!({"intent":"auto"}),
                 &fields,
                 id
@@ -666,13 +662,13 @@ mod tests {
         // Retaining a session address must not inject it into unrelated tools
         // whose live contract does not accept that argument.
         let alerts = catalog(
-            "get_pending_alerts",
+            "get_learner_state",
             json!({"type":"object","properties":{},"additionalProperties":false}),
         );
         let call = validate_call(
             &alerts,
             "epoch1",
-            "tutor/get_pending_alerts",
+            "tutor/get_learner_state",
             &json!({}),
             &fields,
             uuid::Uuid::new_v4(),
@@ -688,7 +684,7 @@ mod tests {
         let fields = VerifiedFields::new("epoch1".into(), &journal).unwrap();
         let id = uuid::Uuid::new_v4();
         let typed = catalog(
-            "get_pending_alerts",
+            "get_learner_state",
             json!({"type":"object","properties":{"limit":{"type":"integer","minimum":1,"maximum":10}},"additionalProperties":false}),
         );
         for args in [
@@ -700,7 +696,7 @@ mod tests {
             assert!(validate_call(
                 &typed,
                 "epoch1",
-                "tutor/get_pending_alerts",
+                "tutor/get_learner_state",
                 &args,
                 &fields,
                 id
@@ -710,7 +706,7 @@ mod tests {
         assert!(validate_call(
             &typed,
             "epoch1",
-            "tutor/get_pending_alerts",
+            "tutor/get_learner_state",
             &json!({"limit":5}),
             &fields,
             id
@@ -721,14 +717,14 @@ mod tests {
             "https://example.invalid/schema",
         ] {
             let external = catalog(
-                "get_pending_alerts",
+                "get_learner_state",
                 json!({"type":"object","$ref":reference}),
             );
             assert!(matches!(
                 validate_call(
                     &external,
                     "epoch1",
-                    "tutor/get_pending_alerts",
+                    "tutor/get_learner_state",
                     &json!({}),
                     &fields,
                     id
@@ -850,12 +846,12 @@ mod tests {
         }
         // Even a permissive schema cannot bypass equality with a frozen field
         // by omitting that field from its properties annotation.
-        let catalog = catalog("get_learner_context", json!({"type":"object"}));
+        let catalog = catalog("get_learner_state", json!({"type":"object"}));
         assert!(matches!(
             validate_call(
                 &catalog,
                 "epoch1",
-                "tutor/get_learner_context",
+                "tutor/get_learner_state",
                 &json!({"domain_id":"invented"}),
                 &fields,
                 uuid::Uuid::new_v4()

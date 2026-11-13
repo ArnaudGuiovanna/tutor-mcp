@@ -131,7 +131,7 @@ Your AI handles the conversation, explanations and exercises. Tutor MCP gives it
 | **Learning engine** | Concepts, prerequisites, mastery estimates, review timing and assessment evidence | Chooses what to practice, revisit or assess next. |
 | **Narrative memory** | Session summaries, goals, recurring misconceptions and useful learner context | Helps the AI pick up the thread and explain things in context. |
 
-The loop is simple: **choose an activity → teach and practice → record the response → update the learning state**. The client calls `get_next_activity` for guidance and `record_interaction` to save observations. Session notes enrich the next conversation.
+The loop is simple: **choose an activity → teach and practice → record the response → update the learning state**. The client calls `prepare_pedagogical_turn` (`mode="activity"`) for guidance and `record_interaction` to save observations. Session notes enrich the next conversation.
 
 BKT estimates knowledge, FSRS schedules reviews, and prerequisite checks keep the path coherent. Decisions are inspectable; their quality depends on the evidence the AI records. See the [architecture and diagrams](docs/architecture.md) and [algorithm guide](docs/algorithms.md) for the mechanics and limits.
 

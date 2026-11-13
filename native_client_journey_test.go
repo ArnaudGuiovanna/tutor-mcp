@@ -112,7 +112,7 @@ func TestNativeClientAuthorPublishAndLearningJourney(t *testing.T) {
 				return names
 			}
 			names := list(read)
-			if !slices.Contains(names, "list_formation_versions") || slices.Contains(names, "list_trainer_cohorts") || slices.Contains(names, "get_learner_context") || slices.Contains(names, "publish_formation_to_catalog") {
+			if !slices.Contains(names, "list_formation_versions") || slices.Contains(names, "list_trainer_cohorts") || slices.Contains(names, "get_learner_state") || slices.Contains(names, "publish_formation_to_catalog") {
 				t.Fatalf("irrelevant tools exposed to owner read activity: %v", names)
 			}
 			if status, _ := request(read, "POST", "/admin/catalog/formations", `{"name":"Denied"}`); status != 403 {
@@ -181,7 +181,7 @@ func TestNativeClientAuthorPublishAndLearningJourney(t *testing.T) {
 				t.Fatalf("trainer overview=%d %#v", status, out)
 			}
 			names = list(training)
-			if !slices.Contains(names, "list_trainer_cohorts") || slices.Contains(names, "list_formations") || slices.Contains(names, "get_learner_context") {
+			if !slices.Contains(names, "list_trainer_cohorts") || slices.Contains(names, "list_formations") || slices.Contains(names, "get_learner_state") {
 				t.Fatalf("trainer discovery=%v", names)
 			}
 		})

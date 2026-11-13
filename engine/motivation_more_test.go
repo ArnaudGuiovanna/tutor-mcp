@@ -173,7 +173,7 @@ func TestComposeBrief_Milestone(t *testing.T) {
 		ConceptState: &models.ConceptState{PMastery: 0.86},
 		Now:          now,
 	}
-	b := ComposeBrief(in, models.MotivationKindMilestone, "")
+	b := composeBrief(in, models.MotivationKindMilestone, "", nil, false)
 	if b.ProgressDelta == nil {
 		t.Fatal("expected ProgressDelta populated")
 	}
@@ -199,7 +199,7 @@ func TestComposeBrief_GrowthMindset(t *testing.T) {
 		},
 		Now: now,
 	}
-	b := ComposeBrief(in, models.MotivationKindGrowthMindset, "")
+	b := composeBrief(in, models.MotivationKindGrowthMindset, "", nil, false)
 	if b.FailureContext == nil {
 		t.Fatal("expected FailureContext populated")
 	}
@@ -224,7 +224,7 @@ func TestComposeBrief_GrowthMindset_NowZero(t *testing.T) {
 			Concept: "X", Success: false, CreatedAt: time.Now().Add(-3 * time.Hour),
 		},
 	}
-	b := ComposeBrief(in, models.MotivationKindGrowthMindset, "")
+	b := composeBrief(in, models.MotivationKindGrowthMindset, "", nil, false)
 	if b.FailureContext == nil {
 		t.Fatal("FailureContext nil")
 	}
@@ -247,7 +247,7 @@ func TestComposeBrief_AffectReframe_AllDimensions(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			in := BriefInput{LatestAffect: tc.affect, Now: now}
-			b := ComposeBrief(in, models.MotivationKindAffectReframe, "")
+			b := composeBrief(in, models.MotivationKindAffectReframe, "", nil, false)
 			if b.AffectContext == nil {
 				t.Fatal("expected AffectContext populated")
 			}
@@ -265,7 +265,7 @@ func TestComposeBrief_AffectReframe_NowZero(t *testing.T) {
 	in := BriefInput{
 		LatestAffect: &models.AffectState{SessionID: "s", Satisfaction: 1, CreatedAt: time.Now().Add(-1 * time.Hour)},
 	}
-	b := ComposeBrief(in, models.MotivationKindAffectReframe, "")
+	b := composeBrief(in, models.MotivationKindAffectReframe, "", nil, false)
 	if b.AffectContext == nil {
 		t.Fatal("AffectContext nil")
 	}
@@ -275,7 +275,7 @@ func TestComposeBrief_AffectReframe_NowZero(t *testing.T) {
 }
 
 func TestComposeBrief_PlateauRecontext(t *testing.T) {
-	b := ComposeBrief(BriefInput{}, models.MotivationKindPlateauRecontext, "")
+	b := composeBrief(BriefInput{}, models.MotivationKindPlateauRecontext, "", nil, false)
 	if b.Kind != models.MotivationKindPlateauRecontext {
 		t.Errorf("kind = %q, want plateau_recontext", b.Kind)
 	}
@@ -286,7 +286,7 @@ func TestComposeBrief_PlateauRecontext(t *testing.T) {
 
 func TestComposeBrief_WhyThisExercise(t *testing.T) {
 	in := BriefInput{Domain: newDomainWithGoal("become SRE")}
-	b := ComposeBrief(in, models.MotivationKindWhyThisExercise, "")
+	b := composeBrief(in, models.MotivationKindWhyThisExercise, "", nil, false)
 	if b.GoalLink != "become SRE" {
 		t.Errorf("GoalLink = %q, want 'become SRE'", b.GoalLink)
 	}
@@ -299,7 +299,7 @@ func TestComposeBrief_CompetenceValue_NoStatementAuthored(t *testing.T) {
 	domain := newDomainWithGoal("g")
 	domain.ValueFramingsJSON = "" // nothing authored
 	in := BriefInput{Domain: domain, Concept: "X", ConceptState: &models.ConceptState{PMastery: 0.3}}
-	b := ComposeBrief(in, models.MotivationKindCompetenceValue, "intellectual")
+	b := composeBrief(in, models.MotivationKindCompetenceValue, "intellectual", nil, false)
 	if b.ValueFraming == nil {
 		t.Fatal("ValueFraming nil")
 	}
@@ -318,7 +318,7 @@ func TestComposeBrief_CompetenceValue_BadJSON(t *testing.T) {
 	domain := newDomainWithGoal("g")
 	domain.ValueFramingsJSON = "this is not json"
 	in := BriefInput{Domain: domain, Concept: "X"}
-	b := ComposeBrief(in, models.MotivationKindCompetenceValue, "financial")
+	b := composeBrief(in, models.MotivationKindCompetenceValue, "financial", nil, false)
 	if b.ValueFraming == nil {
 		t.Fatal("ValueFraming nil")
 	}

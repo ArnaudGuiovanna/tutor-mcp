@@ -35,9 +35,16 @@ func initialMCPOAuthScope(granular bool) string {
 // newMCPHTTPHandler is the production HTTP assembly, including tool middleware
 // registered by newTutorServer. It does not create or own rate-limit guards.
 func newMCPHTTPHandler(deps *tools.Deps, maxBodyBytes int64, timeout time.Duration, guards mcpHTTPGuards) http.Handler {
+	// The REGULATION_* switches are read once, when the handler is assembled.
+	configured := *deps
+	configured.Regulation = tools.RegulationFlagsFromEnv()
+	deps = &configured
 	server := newTutorServer(deps, timeout)
 	raw := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, &mcp.StreamableHTTPOptions{
-		Stateless:                    true,
+		Stateless: true,
+		// Tools never notify the client during a call (no progress or log
+		// messages), so each POST answers with one application/json body.
+		JSONResponse:                 true,
 		DisableLocalhostProtection:   true, // public reverse proxy
 		MaxRequestBodyBytes:          maxBodyBytes,
 		PropagateRequestCancellation: true,
@@ -47,7 +54,7 @@ func newMCPHTTPHandler(deps *tools.Deps, maxBodyBytes int64, timeout time.Durati
 	// Cross-origin rejection precedes buffering; OAuth preflight and the SDK
 	// consume the same bounded bytes only after both identity guards.
 	handler := cop.Handler(mcpRequestBodyLimitMiddleware(maxBodyBytes,
-		tools.OAuthScopeHTTPMiddleware(deps.BaseURL, maxBodyBytes, deps.OAuthGranularScopes, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tools.OAuthScopeHTTPMiddleware(deps, maxBodyBytes, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			id := r.Header.Get("Tutor-Conversation-ID")
 			if len(id) > 128 {
 				http.Error(w, "invalid conversation", 400)

@@ -15,7 +15,6 @@ import (
 	"os"
 	"regexp"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -41,13 +40,57 @@ type Deps struct {
 	OAuthGranularScopes bool
 	// Zero leaves direct RegisterTools embedders without a server deadline.
 	ToolCallTimeout time.Duration
+	// Regulation holds the REGULATION_* switches, read once at startup by
+	// RegulationFlagsFromEnv. The zero value is the documented default.
+	Regulation RegulationFlags
+
+	// registry collects the names registered by RegisterTools. It is set on
+	// the private copy of Deps that RegisterTools hands to every register
+	// function, never shared between servers.
+	registry *toolRegistry
 }
 
-var toolRegistrationLocalModes sync.Map
+// toolRegistry is the explicit registration state of one RegisterTools call.
+type toolRegistry struct {
+	names map[string]struct{}
+}
 
-var toolRegistrationOAuthModes sync.Map // map[*mcp.Server]bool; populated only during RegisterTools
+// RegulationFlags are the REGULATION_* environment switches visible to the
+// tool layer. Every field's zero value is the default, so a Deps literal
+// without flags behaves like an unconfigured deployment.
+type RegulationFlags struct {
+	// GoalDisabled (REGULATION_GOAL=off) hides set_goal_relevance and
+	// get_goal_relevance and the goal reminders of init_domain/add_concepts.
+	GoalDisabled bool
+	// The three appendix switches (REGULATION_ACTION/CONCEPT/GATE=off) hide
+	// explanatory prompt sections only; the runtime selectors keep running.
+	ActionAppendixDisabled  bool
+	ConceptAppendixDisabled bool
+	GateAppendixDisabled    bool
+	// FadeDiagnostics (REGULATION_FADE=on) adds descriptive autonomy
+	// diagnostics to prepared activities. It never reduces help.
+	FadeDiagnostics bool
+}
 
-var toolRegistrationNames sync.Map // map[*mcp.Server]map[string]struct{}; registration only
+// RegulationFlagsFromEnv reads the REGULATION_* switches. Call it once at
+// startup and store the result in Deps.Regulation. Only the literal "off"
+// disables a default-on switch and only "on" enables REGULATION_FADE.
+func RegulationFlagsFromEnv() RegulationFlags {
+	return RegulationFlags{
+		GoalDisabled:            os.Getenv("REGULATION_GOAL") == "off",
+		ActionAppendixDisabled:  os.Getenv("REGULATION_ACTION") == "off",
+		ConceptAppendixDisabled: os.Getenv("REGULATION_CONCEPT") == "off",
+		GateAppendixDisabled:    os.Getenv("REGULATION_GATE") == "off",
+		FadeDiagnostics:         os.Getenv("REGULATION_FADE") == "on",
+	}
+}
+
+func (deps *Deps) regulation() RegulationFlags {
+	if deps == nil {
+		return RegulationFlags{}
+	}
+	return deps.Regulation
+}
 
 var readOnlyTools = map[string]bool{
 	"get_conversation_context":       true,
@@ -65,11 +108,9 @@ var readOnlyTools = map[string]bool{
 	"get_my_formations":              true,
 	"get_learner_formation":          true,
 	"get_formation_version":          true,
-	"get_pending_alerts":             true,
 	"check_mastery":                  true,
-	"get_learner_context":            true,
+	"get_learner_state":              true,
 	"get_availability_model":         true,
-	"get_olm_snapshot":               true,
 	"get_pedagogical_snapshots":      true,
 	"get_decision_replay_summary":    true,
 	"validate_domain_graph":          true,
@@ -79,7 +120,6 @@ var readOnlyTools = map[string]bool{
 	"read_raw_session":               true,
 	"get_misconceptions":             true,
 	"list_implementation_intentions": true,
-	"get_dashboard_state":            true,
 	"get_goal_relevance":             true,
 	// trainingPolicy only reads tenants.policy_json when it is not setting it.
 	"get_training_policy": true,
@@ -90,32 +130,26 @@ var readOnlyTools = map[string]bool{
 // their primary read payload, while a read-only grant must not authorize their
 // side effects, so these tools require both granular capabilities.
 //
-// Training reads are not listed: their scope comes from
-// models.TrainingReadAction (see requiredOAuthScopesForTool).
+// Training tools are not listed: their scope comes from trainingTools (see
+// requiredOAuthScopesForTool).
 var readWriteTools = map[string]bool{
 	"claim_memory_maintenance":  true,
 	"commit_memory_maintenance": true,
-	"prepare_pedagogical_turn":  true,
 	"get_curriculum_snapshot":   true,
 	"get_memory_state":          true,
-	"get_next_activity":         true,
-	"get_metacognitive_mirror":  true,
 }
 
 // toolReadOnlyHint is the advertised MCP readOnlyHint. It differs from
 // readOnlyTools, which selects a read-only database transaction: training
-// reads (get_training, list_training_library, preview_training_edit,
-// preview_training_lifecycle, find_training_members) change nothing the caller
-// can observe and need only a read grant, but they may materialize the
-// immutable curriculum baseline of a legacy personal domain or take a
-// PostgreSQL row lock, so they keep a write transaction.
+// reads (get_training, list_training_library, find_training_members) change
+// nothing the caller can observe and need only a read grant, but they may
+// materialize the immutable curriculum baseline of a legacy personal domain or
+// take a PostgreSQL row lock, so they keep a write transaction.
 func toolReadOnlyHint(name string) bool {
-	return readOnlyTools[name] || models.TrainingReadAction(name)
+	return readOnlyTools[name] || trainingTools[name].read
 }
 
 var writeTools = map[string]bool{
-	"archive_training": true, "restore_training": true, "delete_training": true, "withdraw_training": true,
-	"select_conversation_training": true, "save_training_edit": true, "propose_training_edit": true, "share_training": true, "submit_training": true, "decide_training": true, "publish_training": true, "set_training_access": true, "set_training_policy": true, "join_training": true,
 	"publish_formation_to_catalog":    true,
 	"join_formation":                  true,
 	"leave_formation":                 true,
@@ -123,10 +157,9 @@ var writeTools = map[string]bool{
 	"add_formation_concepts":          true,
 	"publish_formation":               true,
 	"add_concepts":                    true,
-	"archive_domain":                  true,
+	"manage_domain":                   true,
 	"calibration_check":               true,
 	"cancel_assessment_attempt":       true,
-	"delete_domain":                   true,
 	"init_domain":                     true,
 	"learning_negotiation":            true,
 	"mark_domain_high_stakes":         true,
@@ -138,12 +171,10 @@ var writeTools = map[string]bool{
 	"record_interaction":              true,
 	"record_learning_event":           true,
 	"record_session_close":            true,
-	"record_transfer_result":          true,
 	"set_domain_priority":             true,
 	"set_goal_relevance":              true,
 	"start_learning_session":          true,
 	"submit_assessment_attempt":       true,
-	"unarchive_domain":                true,
 	"update_availability_model":       true,
 	"update_implementation_intention": true,
 	"update_learner_memory":           true,
@@ -158,7 +189,6 @@ var additiveWriteTools = map[string]bool{
 	"prepare_pedagogical_turn":   true,
 	"draft_formation":            true,
 	"start_learning_session":     true,
-	"get_next_activity":          true,
 	"get_curriculum_snapshot":    true,
 	"get_memory_state":           true,
 	"record_interaction":         true,
@@ -169,9 +199,6 @@ var additiveWriteTools = map[string]bool{
 	"record_affect":              true,
 	"calibration_check":          true,
 	"record_calibration_result":  true,
-	"record_transfer_result":     true,
-	"unarchive_domain":           true,
-	"get_metacognitive_mirror":   true,
 }
 
 // openWorldTools includes tools that directly enqueue work intended for an
@@ -179,8 +206,6 @@ var additiveWriteTools = map[string]bool{
 // asynchronously in the scheduler.
 var openWorldTools = map[string]bool{
 	"prepare_pedagogical_turn": true,
-	"get_next_activity":        true,
-	"get_metacognitive_mirror": true,
 	"queue_webhook_message":    true,
 }
 
@@ -198,8 +223,11 @@ func requiredOAuthScopesForTool(name string) ([]string, bool) {
 	if contributionTool(name) {
 		return []string{models.OAuthScopeFormationContribute}, true
 	}
-	if models.ValidTrainingAction(name) {
-		if models.TrainingReadAction(name) {
+	if spec, ok := trainingTools[name]; ok {
+		// edit_training and manage_training_lifecycle advertise the minimum
+		// (preview) capability; requiredOAuthScopesForCall adds write for an
+		// applying call.
+		if spec.read || spec.actionSelected {
 			return []string{models.OAuthScopeLearnerRead}, true
 		}
 		return []string{models.OAuthScopeLearnerWrite}, true
@@ -225,10 +253,10 @@ func requiredOAuthScopesForTool(name string) ([]string, bool) {
 	return nil, false
 }
 
-func oauthToolAvailable(name string) bool {
+func oauthToolAvailable(deps *Deps, name string) bool {
 	switch name {
 	case "set_goal_relevance", "get_goal_relevance":
-		return regulationGoalEnabled()
+		return !deps.regulation().GoalDisabled
 	default:
 		return true
 	}
@@ -260,20 +288,29 @@ func hasToolOAuthScopes(ctx context.Context, name string, required []string) boo
 // Only inputs whose handler rejects every other value are listed, so no call
 // that used to succeed can fail schema validation. An optional field whose
 // empty string is accepted lists "" explicitly. Inputs normalized leniently by
-// their handler (get_next_activity.intent, transfer context types, OLM scope)
-// are deliberately absent, as are inputs whose handler answers with a more
-// specific explanation than a schema mismatch (record_interaction's
-// activity_type/error_type self-correction message, curriculum review status).
+// their handler (transfer context types and transfer dimensions) are
+// deliberately absent, as are inputs whose handler answers with a more
+// specific explanation than a schema mismatch (curriculum review status).
 // Keys are property paths: "a.b" descends into an object, "a[]" into array
 // items and "a{}" into map values.
 var toolInputEnums = map[string]map[string][]any{
 	"record_learning_event":      {"kind": {"feedback", "instruction"}},
-	"prepare_pedagogical_turn":   {"mode": {"context", "activity"}, "intent": {"auto", "review"}},
+	"prepare_pedagogical_turn":   {"mode": enumValues("", "context", "activity"), "intent": enumValues("", activityIntentAuto, activityIntentReview)},
 	"prepare_assessment_attempt": {"activity_type": enumValues(allowedActivityTypes...)},
-	"update_learner_memory": {
-		"scope":     enumValues(allowedMemoryScopes...),
-		"operation": enumValues(append([]string{""}, allowedMemoryOperations...)...),
+	"record_interaction": {
+		"activity_type": enumValues(allowedActivityTypes...),
+		"error_type":    enumValues(append([]string{""}, allowedErrorTypes...)...),
 	},
+	"update_learner_memory": {
+		"scope":       enumValues(allowedMemoryScopes...),
+		"operation":   enumValues(append([]string{""}, allowedMemoryOperations...)...),
+		"period_type": enumValues("", string(memory.PeriodMonthly), string(memory.PeriodQuarterly), string(memory.PeriodAnnual)),
+	},
+	"update_availability_model":       {"notification_frequency": enumValues("", models.NotificationFrequencyAsScheduled, models.NotificationFrequencyDaily, models.NotificationFrequencyWeekly)},
+	"get_learner_state":               {"view": enumValues(append([]string{""}, learnerStateViews...)...)},
+	"manage_domain":                   {"action": enumValues(domainLifecycleActions...)},
+	"edit_training":                   {"action": enumValues(trainingEditActions...)},
+	"manage_training_lifecycle":       {"action": enumValues(trainingLifecycleActions...)},
 	"update_implementation_intention": {"status": enumValues(models.IntentionStatusHonored, models.IntentionStatusMissed, models.IntentionStatusCancelled)},
 	"list_implementation_intentions":  {"status": enumValues("", models.IntentionStatusPending, models.IntentionStatusHonored, models.IntentionStatusMissed, models.IntentionStatusCancelled)},
 	"learning_negotiation":            {"activity_type": enumValues(append([]string{""}, allowedLearningNegotiationActivityTypes...)...)},
@@ -286,13 +323,12 @@ var toolInputEnums = map[string]map[string][]any{
 		"metadata.level":       curriculumLevelEnum,
 		"new_concepts[].level": curriculumLevelEnum,
 	},
-	"init_domain":                {"details{}.level": curriculumLevelEnum},
-	"add_concepts":               {"details{}.level": curriculumLevelEnum},
-	"list_training_library":      {"filter": enumValues("", "personal", "institutional", "shared", "mine", "review", "archived")},
-	"share_training":             {"audience": trainingAudienceEnum},
-	"set_training_access":        {"audience": trainingAudienceEnum},
-	"decide_training":            {"decision": enumValues("approve", "changes_requested")},
-	"preview_training_lifecycle": {"decision": enumValues("archive_training", "restore_training", "delete_training", "withdraw_training")},
+	"init_domain":           {"details{}.level": curriculumLevelEnum},
+	"add_concepts":          {"details{}.level": curriculumLevelEnum},
+	"list_training_library": {"filter": enumValues("", "personal", "institutional", "shared", "mine", "review", "archived")},
+	"share_training":        {"audience": trainingAudienceEnum},
+	"set_training_access":   {"audience": trainingAudienceEnum},
+	"decide_training":       {"decision": enumValues("approve", "changes_requested")},
 }
 
 var curriculumLevelEnum = enumValues("", string(models.CurriculumLevelUnspecified), string(models.CurriculumLevelFoundation), string(models.CurriculumLevelIntermediate), string(models.CurriculumLevelAdvanced))
@@ -329,71 +365,13 @@ func schemaPropertyAt(schema *jsonschema.Schema, path string) *jsonschema.Schema
 	return current
 }
 
-// toolInputStringForms names inputs declared as an object that also accept a
-// plain sentence, decoded by the type's own UnmarshalJSON. The schema has to
-// advertise both shapes, because the SDK validates arguments against it before
-// any decoding happens.
-var toolInputStringForms = map[string][]string{
-	"record_session_close": {"implementation_intention"},
-}
-
-// constrainInputSchema infers the schema the SDK would have inferred anyway and
-// adds the enums and alternate shapes above, leaving every tool without an
-// entry untouched.
-func constrainInputSchema[In any](tool *mcp.Tool) {
-	enums, hasEnums := toolInputEnums[tool.Name]
-	stringForms, hasStringForms := toolInputStringForms[tool.Name]
-	if !hasEnums && !hasStringForms {
-		return
-	}
-	if tool.InputSchema != nil {
-		// Hand-built schemas (training, prepare_assessment_attempt) receive
-		// the same enums; alternate string shapes stay an inferred-only feature.
-		explicit, ok := tool.InputSchema.(*jsonschema.Schema)
-		if !ok {
-			return
-		}
-		applyInputEnums(tool.Name, explicit, enums)
-		return
-	}
-	schema, err := jsonschema.For[In](&jsonschema.ForOptions{})
-	if err != nil {
-		panic("cannot infer the input schema of MCP tool " + tool.Name + ": " + err.Error())
-	}
-	applyInputEnums(tool.Name, schema, enums)
-	for _, field := range stringForms {
-		property, ok := schema.Properties[field]
-		if !ok {
-			panic("MCP tool " + tool.Name + " has no " + field + " input to constrain")
-		}
-		object := *property
-		object.Description = ""
-		schema.Properties[field] = &jsonschema.Schema{
-			Description: property.Description,
-			AnyOf:       []*jsonschema.Schema{&object, {Type: "string"}},
-		}
-	}
-	tool.InputSchema = schema
-}
-
-func applyInputEnums(toolName string, schema *jsonschema.Schema, enums map[string][]any) {
-	for field, values := range enums {
-		property := schemaPropertyAt(schema, field)
-		if property == nil {
-			panic("MCP tool " + toolName + " has no " + field + " input to constrain")
-		}
-		property.Enum = values
-	}
-}
-
-func addTool[In, Out any](server *mcp.Server, tool *mcp.Tool, handler mcp.ToolHandlerFor[In, Out]) {
+func addTool[In, Out any](server *mcp.Server, deps *Deps, tool *mcp.Tool, handler mcp.ToolHandlerFor[In, Out]) {
 	readOnly := toolReadOnlyHint(tool.Name)
 	requiredScopes, known := requiredOAuthScopesForTool(tool.Name)
 	if !known {
 		panic("missing OAuth scope policy for MCP tool " + tool.Name)
 	}
-	granularScopes, _ := toolRegistrationOAuthModes.Load(server)
-	granular, _ := granularScopes.(bool)
+	granular := deps != nil && deps.OAuthGranularScopes
 	advertisedScopes := requiredScopes
 	if !granular && !formationTool(tool.Name) && !progressTool(tool.Name) && !contributionTool(tool.Name) {
 		advertisedScopes = []string{models.OAuthScopeLearner}
@@ -420,7 +398,7 @@ func addTool[In, Out any](server *mcp.Server, tool *mcp.Tool, handler mcp.ToolHa
 	if contributionCompatibleTool(tool.Name) {
 		tool.Meta["securitySchemes"] = append(tool.Meta["securitySchemes"].([]map[string]any), map[string]any{"type": "oauth2", "scopes": []string{models.OAuthScopeFormationContribute}})
 	}
-	if local, _ := toolRegistrationLocalModes.Load(server); local == true {
+	if deps != nil && deps.LocalStdio {
 		tool.Meta["securitySchemes"] = []map[string]any{{"type": "noauth"}}
 	}
 	scopedHandler := func(ctx context.Context, req *mcp.CallToolRequest, input In) (*mcp.CallToolResult, Out, error) {
@@ -443,8 +421,8 @@ func addTool[In, Out any](server *mcp.Server, tool *mcp.Tool, handler mcp.ToolHa
 		return handler(ctx, req, input)
 	}
 	constrainInputSchema[In](tool)
-	if names, ok := toolRegistrationNames.Load(server); ok {
-		names.(map[string]struct{})[tool.Name] = struct{}{}
+	if deps != nil && deps.registry != nil {
+		deps.registry.names[tool.Name] = struct{}{}
 	}
 	mcp.AddTool(server, tool, scopedHandler)
 }
@@ -453,7 +431,11 @@ func addTool[In, Out any](server *mcp.Server, tool *mcp.Tool, handler mcp.ToolHa
 // it executes first and an unauthorized mutation cannot reserve a replay key.
 // addTool repeats the check because many package-level tests and embedders
 // register one tool directly instead of calling RegisterTools.
-func toolOAuthScopeMiddleware(baseURL string, granular bool) mcp.Middleware {
+func toolOAuthScopeMiddleware(deps *Deps) mcp.Middleware {
+	baseURL, granular := "", false
+	if deps != nil {
+		baseURL, granular = deps.BaseURL, deps.OAuthGranularScopes
+	}
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			if method == "tools/list" && auth.IsNativeClientSession(ctx) {
@@ -480,7 +462,7 @@ func toolOAuthScopeMiddleware(baseURL string, granular bool) mcp.Middleware {
 				result, _ := errorResult(scopeErr.Error())
 				return result, nil
 			}
-			if !known || !oauthToolAvailable(call.Params.Name) {
+			if !known || !oauthToolAvailable(deps, call.Params.Name) {
 				return next(ctx, method, req)
 			}
 			if hasToolOAuthScopes(ctx, call.Params.Name, requiredScopes) {
@@ -551,11 +533,10 @@ func domainLookupErrorResult(deps *Deps, err error) (*mcp.CallToolResult, error)
 //
 // Archived domains are explicitly rejected when resolved by ID: see issue #94.
 // Without this guard, callers like record_interaction would silently advance
-// BKT/FSRS state on a domain the learner has explicitly archived. Archive-
-// specific tools (archive_domain, unarchive_domain, delete_domain) do not go
-// through resolveDomain — they call store.GetLearnerDomainByID directly because
+// BKT/FSRS state on a domain the learner has explicitly archived.
+// manage_domain does not go through resolveDomain - it calls store.GetLearnerDomainByID directly because
 // they legitimately need to operate on archived rows.
-func resolveDomain(ctx context.Context, store storeport.Store, learnerID, domainID string) (*models.Domain, error) {
+func resolveDomain(ctx context.Context, store storeport.DomainStore, learnerID, domainID string) (*models.Domain, error) {
 	if conversationID := storeport.ConversationID(ctx); conversationID != "" {
 		p, ok := auth.GetPrincipal(ctx)
 		training, available := store.(storeport.TrainingStore)
@@ -807,25 +788,22 @@ func domainSetupInstruction(deps *Deps) string {
 
 // RegisterTools registers all MCP tools and prompts on the given server.
 func RegisterTools(server *mcp.Server, deps *Deps) {
-	names := make(map[string]struct{})
-	toolRegistrationNames.Store(server, names)
-	defer toolRegistrationNames.Delete(server)
-	granularScopes := deps != nil && deps.OAuthGranularScopes
-	toolRegistrationLocalModes.Store(server, deps != nil && deps.LocalStdio)
-	defer toolRegistrationLocalModes.Delete(server)
-	toolRegistrationOAuthModes.Store(server, granularScopes)
-	defer toolRegistrationOAuthModes.Delete(server)
+	configured := Deps{}
+	if deps != nil {
+		configured = *deps
+	}
+	registry := &toolRegistry{names: make(map[string]struct{})}
+	configured.registry = registry
+	deps = &configured
 	addIdempotencyMiddleware(server, deps)
 	registerTrainingTools(server, deps)
-	if deps != nil && deps.Institution {
+	if deps.Institution {
 		registerFormationTools(server, deps)
 		registerProgressTools(server, deps)
 		registerLearnerFormationTools(server, deps)
 		registerBadgeTools(server, deps)
 	}
 	registerStartLearningSession(server, deps)
-	registerGetPendingAlerts(server, deps)
-	registerGetNextActivity(server, deps)
 	registerPreparePedagogicalTurn(server, deps)
 	registerRecordInteraction(server, deps)
 	registerRecordLearningEvent(server, deps)
@@ -833,7 +811,7 @@ func RegisterTools(server *mcp.Server, deps *Deps) {
 	registerSubmitAssessmentAttempt(server, deps)
 	registerCancelAssessmentAttempt(server, deps)
 	registerCheckMastery(server, deps)
-	registerGetLearnerContext(server, deps)
+	registerGetLearnerState(server, deps)
 	registerGetAvailabilityModel(server, deps)
 	registerUpdateAvailabilityModel(server, deps)
 	registerInitDomain(server, deps)
@@ -846,13 +824,10 @@ func RegisterTools(server *mcp.Server, deps *Deps) {
 	registerCalibrationCheck(server, deps)
 	registerRecordCalibrationResult(server, deps)
 	registerGetAutonomyMetrics(server, deps)
-	registerGetMetacognitiveMirror(server, deps)
-	registerGetOLMSnapshot(server, deps)
 	registerGetPedagogicalSnapshots(server, deps)
 	registerGetDecisionReplaySummary(server, deps)
 	registerFeynmanChallenge(server, deps)
 	registerTransferChallenge(server, deps)
-	registerRecordTransferResult(server, deps)
 	registerLearningNegotiation(server, deps)
 	registerSetDomainPriority(server, deps)
 	registerMarkDomainHighStakes(server, deps)
@@ -861,39 +836,28 @@ func RegisterTools(server *mcp.Server, deps *Deps) {
 	registerGetMemoryState(server, deps)
 	registerClaimMemoryMaintenance(server, deps)
 	registerCommitMemoryMaintenance(server, deps)
-	registerArchiveDomain(server, deps)
-	registerUnarchiveDomain(server, deps)
-	registerDeleteDomain(server, deps)
+	registerManageDomain(server, deps)
 	registerGetMisconceptions(server, deps)
 	registerRecordSessionClose(server, deps)
 	registerListImplementationIntentions(server, deps)
 	registerUpdateImplementationIntention(server, deps)
 	registerQueueWebhookMessage(server, deps)
-	registerGetDashboardState(server, deps)
-	// [1] GoalDecomposer — gated by REGULATION_GOAL=on. When off, neither
+	// [1] GoalDecomposer - hidden by REGULATION_GOAL=off. When off, neither
 	// tool is registered, so the surface is invisible to the LLM and the
 	// system prompt has no instruction to call them.
 	registerSetGoalRelevance(server, deps)
 	registerGetGoalRelevance(server, deps)
-	RegisterPrompt(server)
-	baseURL := ""
-	if deps != nil {
-		baseURL = deps.BaseURL
-	}
+	RegisterPrompt(server, deps)
 	server.AddReceivingMiddleware(
 		conversationBindingMiddleware(),
-		toolOAuthScopeMiddleware(baseURL, granularScopes),
+		toolOAuthScopeMiddleware(deps),
 		toolTenantTransactionMiddleware(deps),
 	)
-	if deps != nil && deps.ToolCallTimeout != 0 {
+	if deps.ToolCallTimeout != 0 {
 		server.AddReceivingMiddleware(ToolCallDeadlineMiddleware(deps.ToolCallTimeout))
 	}
 	server.AddReceivingMiddleware(ToolPolicyMiddleware())
-	var observationLogger *slog.Logger
-	if deps != nil {
-		observationLogger = deps.Logger
-	}
-	server.AddReceivingMiddleware(toolCallObservationMiddleware(names, observationLogger))
+	server.AddReceivingMiddleware(toolCallObservationMiddleware(registry.names, deps.Logger))
 }
 
 var errToolApplicationFailure = errors.New("MCP tool returned an application error")
@@ -920,7 +884,7 @@ func toolTenantTransactionMiddleware(deps *Deps) mcp.Middleware {
 				markToolCallDenied(ctx, result)
 				return result, nil
 			}
-			if !isProgress && !models.ValidTrainingAction(toolNameFromRequest(req)) && !principal.Authorize(permission, models.AuthorizationResource{TenantID: principal.TenantID, OwnerUserID: principal.UserID}) {
+			if !isProgress && !trainingTool(toolNameFromRequest(req)) && !principal.Authorize(permission, models.AuthorizationResource{TenantID: principal.TenantID, OwnerUserID: principal.UserID}) {
 				result, _ := errorResult("tenant principal is not authorized for this tool")
 				markToolCallDenied(ctx, result)
 				return result, nil
@@ -965,7 +929,7 @@ func toolTenantTransactionMiddleware(deps *Deps) mcp.Middleware {
 					return result, nil
 				}
 				if deps.Logger != nil {
-					deps.Logger.Error("tenant tool transaction failed", "err", err, "tool", toolNameFromRequest(req))
+					deps.Logger.Error("tenant tool transaction failed", append(diagnosticErrorAttrs(err), "tool", toolNameFromRequest(req))...)
 				}
 				failure, _ := errorResult("tenant-scoped persistence failed")
 				return failure, nil

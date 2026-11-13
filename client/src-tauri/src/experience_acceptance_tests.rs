@@ -112,6 +112,7 @@ async fn typed_terminal_provider_failures_are_errors_in_both_languages_without_r
         );
         assert_eq!(snapshot["agentConnected"], true);
         let mut statuses = 0;
+        let mut turn_errors = 0;
         while let Ok(event) = events.try_recv() {
             assert!(
                 !event.to_string().contains("private-provider-token"),
@@ -121,9 +122,17 @@ async fn typed_terminal_provider_failures_are_errors_in_both_languages_without_r
                 statuses += 1;
                 assert_eq!(event["value"]["severity"], "error");
                 assert_eq!(event["value"]["message"], expected);
+                assert_eq!(event["value"]["conversationId"], conversation.id.as_str());
+                assert!(event["value"]["turnId"].is_string());
+            }
+            if event["value"]["type"] == "turn_error" {
+                turn_errors += 1;
+                assert_eq!(event["value"]["conversationId"], conversation.id.as_str());
+                assert!(event["value"]["turnId"].is_string());
             }
         }
         assert_eq!(statuses, 1, "a terminal error is emitted once");
+        assert_eq!(turn_errors, 1, "the failed turn is reported with its conversation");
         let saved = WorkspaceStore::load(directory.path()).unwrap();
         assert_eq!(saved.data.conversations[0].messages[1].status, "error");
         assert!(!serde_json::to_string(&saved.data)
@@ -298,7 +307,7 @@ fn rpc(request: &Request, result: Value) -> (String, String) {
     )
 }
 fn tools() -> Value {
-    json!({"tools":[{"name":"get_next_activity","description":"Actual endpoint catalogue","annotations":{"readOnlyHint":true}}]})
+    json!({"tools":[{"name":"get_learner_state","description":"Actual endpoint catalogue","annotations":{"readOnlyHint":true}}]})
 }
 fn policy(origin: &str, decision: PermissionDecision) -> PermissionPolicy {
     PermissionPolicy {
@@ -416,7 +425,7 @@ async fn tool_catalogue_uses_real_json_and_sse_pages_and_local_rpc() {
         assert!(request.headers["accept"].contains("text/event-stream"));
         let body=request.json();assert_eq!(body["method"],"tools/list");
         if body["params"]["cursor"].is_null() {
-            rpc(request,json!({"tools":[{"name":"get_next_activity","description":"Page one"}],"nextCursor":"page-two"}))
+            rpc(request,json!({"tools":[{"name":"get_learner_state","description":"Page one"}],"nextCursor":"page-two"}))
         } else {
             assert_eq!(body["params"]["cursor"],"page-two");
             ("text/event-stream".into(),format!("event: message\r\ndata: {}\r\n\r\nevent: message\r\ndata: {}\r\n\r\n",json!({"jsonrpc":"2.0","method":"notifications/tools/list_changed"}),json!({"jsonrpc":"2.0","id":body["id"],"result":{"tools":[{"name":"get_training","description":"Page two","annotations":{"readOnlyHint":true}}]}})))
@@ -442,7 +451,7 @@ async fn tool_catalogue_uses_real_json_and_sse_pages_and_local_rpc() {
     let (local, _) = connected(local_dir.path()).await;
     assert_eq!(
         local.list_mcp_tools().await.unwrap()["tools"][0]["name"],
-        "get_next_activity"
+        "get_learner_state"
     );
     local.shutdown().await;
 }
@@ -489,7 +498,7 @@ async fn persistent_consent_survives_reopening_without_permission_ui() {
     let mut preference = policy(&server.origin, PermissionDecision::Ask);
     preference
         .tools
-        .insert("get_next_activity".into(), PermissionDecision::Allow);
+        .insert("get_learner_state".into(), PermissionDecision::Allow);
     let (backend, mut events) =
         remote_backend(directory.path(), &server, Some(preference), false).await;
     assert_eq!(
@@ -688,7 +697,7 @@ async fn mcp_deny_policy_reaches_the_http_server_through_the_agent_configuration
                 serde_json::from_str(&request.headers["tutor-tool-policy"]).unwrap();
             assert_eq!(consent["default"], "deny");
             assert_eq!(request.headers["authorization"], "Bearer test-token");
-            assert_eq!(request.json()["params"]["name"], "get_next_activity");
+            assert_eq!(request.json()["params"]["name"], "get_learner_state");
             rpc(
                 request,
                 json!({"isError":true,"structuredContent":{"error":"tool_permission_denied"}}),
@@ -718,6 +727,58 @@ async fn mcp_deny_policy_reaches_the_http_server_through_the_agent_configuration
             .count(),
         1
     );
+    backend.shutdown().await;
+}
+
+#[tokio::test]
+async fn institution_reads_run_during_a_turn_and_mutations_are_refused() {
+    let server = server(|request| rpc(request, tools())).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (backend, _) = remote_backend(dir.path(), &server, None, false).await;
+    *backend.prompt.lock().await = Some(Prompt {
+        conversation_id: "conversation".into(),
+        session_id: "session".into(),
+        assistant_message_id: "answer".into(),
+        generation: "generation".into(),
+        cancelled: false,
+        failure: None,
+        provider_failure: false,
+        truncated: false,
+        context_changed: false,
+        catalog_changed: false,
+        private_output: false,
+        budget: TurnBudget::default(),
+    });
+    for action in ["overview", "list_members", "get_erasure_status"] {
+        assert_eq!(
+            backend
+                .institution_action(action.into(), json!({}))
+                .await
+                .unwrap()["received"],
+            true,
+            "{action}"
+        );
+    }
+    for action in ["request_erasure", "update_member_roles"] {
+        assert_eq!(
+            backend
+                .institution_action(action.into(), json!({"confirm":true}))
+                .await
+                .unwrap_err(),
+            TurnBlocked::Institution.message(),
+            "{action}"
+        );
+    }
+    let sent = server
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.path == "/api/client/v1/institution/actions")
+        .count();
+    assert_eq!(sent, 3, "mutations never reach the server during a turn");
+    assert!(backend.prompt.lock().await.is_some());
+    *backend.prompt.lock().await = None;
     backend.shutdown().await;
 }
 

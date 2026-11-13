@@ -97,24 +97,3 @@ func TestFeynmanChallenge_EligibleHappyPath(t *testing.T) {
 		t.Fatalf("did not expect legacy concept_id alias in result: %v", out)
 	}
 }
-
-func TestFeynmanChallenge_AcceptsLegacyConceptID(t *testing.T) {
-	store, deps := setupToolsTest(t)
-	seedDomain(t, store, "L_owner", "legacy_calc")
-	cs := models.NewConceptState("L_owner", "legacy_calc")
-	cs.PMastery = 0.95
-	_ = store.InsertConceptStateIfNotExists(context.Background(), cs)
-	_ = store.UpsertConceptState(context.Background(), cs)
-
-	res := callTool(t, deps, registerFeynmanChallenge, "L_owner", "feynman_challenge", map[string]any{"concept_id": "legacy_calc"})
-	if res.IsError {
-		t.Fatalf("expected success, got %q", resultText(res))
-	}
-	out := decodeResult(t, res)
-	if out["concept"] != "legacy_calc" {
-		t.Fatalf("expected canonical concept key, got %v", out)
-	}
-	if _, ok := out["concept_id"]; ok {
-		t.Fatalf("did not expect legacy concept_id alias in result: %v", out)
-	}
-}

@@ -352,11 +352,12 @@ func TestDCRConfidentialRegistrationNeverReturnsStoredSecret(t *testing.T) {
 	if firstPayload["client_id"] == secondPayload["client_id"] || firstPayload["client_secret"] == secondPayload["client_secret"] {
 		t.Fatalf("equivalent confidential registration reused a credential: first=%v second=%v", firstPayload, secondPayload)
 	}
-	var stored int
-	if err := store.RawDB().QueryRow(`SELECT COUNT(*) FROM oauth_clients WHERE registration_secret_ciphertext <> ''`).Scan(&stored); err != nil {
+	// Only the bcrypt digest is stored: no column can hold the secret itself.
+	var hash string
+	if err := store.RawDB().QueryRow(`SELECT client_secret_hash FROM oauth_clients WHERE client_id = ?`, firstPayload["client_id"]).Scan(&hash); err != nil {
 		t.Fatal(err)
 	}
-	if stored != 0 {
-		t.Fatal("confidential registration persisted a recoverable secret")
+	if hash == "" || hash == firstPayload["client_secret"] {
+		t.Fatal("confidential registration did not store only a secret digest")
 	}
 }

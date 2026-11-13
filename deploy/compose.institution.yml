@@ -10,7 +10,9 @@ x-runtime: &runtime
   tmpfs: [/tmp]
   cap_drop: [ALL]
   security_opt: [no-new-privileges:true]
-  stop_grace_period: 40s
+  # Graceful HTTP drain = max(30s, MCP_TOOL_CALL_TIMEOUT_SECONDS + 10s), then
+  # cleanup; keep this above it (docs/configuration.md).
+  stop_grace_period: 50s
 services:
   migrator:
     <<: *runtime

@@ -10,29 +10,30 @@ import (
 	"tutor-mcp/models"
 )
 
-func TestGetMetacognitiveMirror_NoAuth(t *testing.T) {
+func TestActivityMetacognitiveMirror_NoAuth(t *testing.T) {
 	_, deps := setupToolsTest(t)
-	res := callTool(t, deps, registerGetMetacognitiveMirror, "", "get_metacognitive_mirror", map[string]any{})
+	res := callNextActivity(t, deps, "", map[string]any{})
 	if !res.IsError {
 		t.Fatalf("expected auth error")
 	}
 }
 
-func TestGetMetacognitiveMirror_NoPattern(t *testing.T) {
-	_, deps := setupToolsTest(t)
-	res := callTool(t, deps, registerGetMetacognitiveMirror, "L_owner", "get_metacognitive_mirror", map[string]any{})
+func TestActivityMetacognitiveMirror_NoPattern(t *testing.T) {
+	store, deps := setupToolsTest(t)
+	makeOwnerDomain(t, store, "L_owner", "math")
+	res := callNextActivity(t, deps, "L_owner", map[string]any{})
 	if res.IsError {
 		t.Fatalf("got %q", resultText(res))
 	}
 	out := decodeResult(t, res)
-	if _, ok := out["mirror"]; !ok {
-		t.Fatalf("expected mirror key, got %v", out)
+	if mirror, ok := out["metacognitive_mirror"]; !ok || mirror != nil {
+		t.Fatalf("expected a null metacognitive_mirror without a consolidated pattern, got %v", out["metacognitive_mirror"])
 	}
 }
 
-func TestGetMetacognitiveMirror_UnknownDomainIDRejected(t *testing.T) {
+func TestActivityMetacognitiveMirror_UnknownDomainIDRejected(t *testing.T) {
 	_, deps := setupToolsTest(t)
-	res := callTool(t, deps, registerGetMetacognitiveMirror, "L_owner", "get_metacognitive_mirror", map[string]any{
+	res := callNextActivity(t, deps, "L_owner", map[string]any{
 		"domain_id": "nonexistent_domain_id",
 	})
 	if !res.IsError {
@@ -40,8 +41,8 @@ func TestGetMetacognitiveMirror_UnknownDomainIDRejected(t *testing.T) {
 	}
 }
 
-func TestGetMetacognitiveMirror_DomainIDFiltersForeignSignal(t *testing.T) {
-	// Regression: get_metacognitive_mirror must filter the concept-keyed
+func TestActivityMetacognitiveMirror_DomainIDFiltersForeignSignal(t *testing.T) {
+	// Regression: the activity's metacognitive mirror must filter the concept-keyed
 	// inputs (Interactions, ConceptStates) to the active domain's
 	// concept set when domain_id is provided. Seeding a strong
 	// no_initiative pattern on foreign concept "x" (D2) and querying
@@ -76,14 +77,14 @@ func TestGetMetacognitiveMirror_DomainIDFiltersForeignSignal(t *testing.T) {
 	}
 
 	// Query with domain_id=D1: x's signal must be filtered out → mirror null.
-	res := callTool(t, deps, registerGetMetacognitiveMirror, "L_owner", "get_metacognitive_mirror", map[string]any{
+	res := callNextActivity(t, deps, "L_owner", map[string]any{
 		"domain_id": d1.ID,
 	})
 	if res.IsError {
 		t.Fatalf("D1 query errored: %s", resultText(res))
 	}
 	out := decodeResult(t, res)
-	if mirror, ok := out["mirror"]; ok && mirror != nil {
+	if mirror, ok := out["metacognitive_mirror"]; ok && mirror != nil {
 		t.Errorf("cross-domain leak: with domain_id=D1, mirror should be nil (x's signal filtered out), got %v", mirror)
 	}
 }

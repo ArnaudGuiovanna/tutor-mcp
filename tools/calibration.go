@@ -17,14 +17,13 @@ import (
 
 type CalibrationCheckParams struct {
 	IdempotentMutationParams
-	Concept          string  `json:"concept,omitempty" jsonschema:"the concept to assess; canonical key for concept-targeting tools; required unless concept_id is used"`
-	ConceptID        string  `json:"concept_id,omitempty" jsonschema:"deprecated compatibility alias for concept; prefer concept"`
+	Concept          string  `json:"concept" jsonschema:"the concept to assess (concept key from the domain graph)"`
 	PredictedMastery float64 `json:"predicted_mastery" jsonschema:"learner self-assessment on a 1..5 Likert scale (1=no mastery, 5=perfect mastery); stored internally as 0..1"`
 	DomainID         string  `json:"domain_id,omitempty" jsonschema:"domain ID (optional)"`
 }
 
 func registerCalibrationCheck(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name:        "calibration_check",
 		Description: "Record the learner's self-assessment on a concept before an exercise. Returns a prediction_id for post-exercise comparison.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params CalibrationCheckParams) (*mcp.CallToolResult, any, error) {
@@ -35,7 +34,7 @@ func registerCalibrationCheck(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		concept, err := normalizeConceptParam(params.Concept, params.ConceptID)
+		concept, err := normalizeConceptParam(params.Concept)
 		if err != nil {
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
@@ -117,7 +116,7 @@ type RecordCalibrationResultParams struct {
 }
 
 func registerRecordCalibrationResult(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name:        "record_calibration_result",
 		Description: "Compare the learner's prediction with the actual result. Updates the calibration bias.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params RecordCalibrationResultParams) (*mcp.CallToolResult, any, error) {
@@ -163,7 +162,7 @@ func registerRecordCalibrationResult(server *mcp.Server, deps *Deps) {
 			// Completion is already durable and single-use. Returning an MCP
 			// application error here would release the idempotency key, then a
 			// retry would hit a state conflict after the successful mutation.
-			deps.Logger.Warn("record_calibration_result: updated bias readback degraded", "err", err, "learner", learnerID, "prediction", params.PredictionID)
+			deps.Logger.Warn("record_calibration_result: updated bias readback degraded", append(diagnosticErrorAttrs(err), "learner", learnerID, "prediction", params.PredictionID)...)
 			r, _ := jsonResult(map[string]interface{}{
 				"delta":                    delta,
 				"domain_id":                record.DomainID,

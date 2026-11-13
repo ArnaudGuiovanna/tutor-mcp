@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"tutor-mcp/auth"
+	"tutor-mcp/engine"
 )
 
 func TestLoadStartupConfigDefaults(t *testing.T) {
@@ -504,6 +505,7 @@ func clearStartupEnv(t *testing.T) {
 		"MCP_MAX_CONCURRENT",
 		"MCP_MAX_CONCURRENT_PER_LEARNER",
 		"MCP_TOOL_CALL_TIMEOUT_SECONDS",
+		"TUTOR_MCP_CONSOLIDATION_DELIVERY_TIMEOUT_MINUTES",
 		"AUTH_BCRYPT_MAX_CONCURRENT",
 		"OAUTH_GRANULAR_SCOPES",
 		"OAUTH_DCR_MODE",
@@ -521,5 +523,33 @@ func clearStartupEnv(t *testing.T) {
 		"JWT_ED25519_KEYS",
 	} {
 		t.Setenv(name, "")
+	}
+}
+
+func TestConsolidationDeliveryTimeoutIsParsedOnceAtStartup(t *testing.T) {
+	clearStartupEnv(t)
+	cfg, err := loadStartupConfig("3000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ConsolidationDeliveryTimeout != engine.DefaultConsolidationDeliveryTimeout {
+		t.Fatalf("default timeout=%s", cfg.ConsolidationDeliveryTimeout)
+	}
+	if got := schedulerOptions(cfg).ConsolidationDeliveryTimeout; got != engine.DefaultConsolidationDeliveryTimeout {
+		t.Fatalf("scheduler option=%s", got)
+	}
+	t.Setenv("TUTOR_MCP_CONSOLIDATION_DELIVERY_TIMEOUT_MINUTES", "45")
+	cfg, err = loadStartupConfig("3000")
+	if err != nil || cfg.ConsolidationDeliveryTimeout != 45*time.Minute {
+		t.Fatalf("configured timeout=%s err=%v", cfg.ConsolidationDeliveryTimeout, err)
+	}
+	for _, invalid := range []string{"0", "-5", "abc", "1.5", "10081"} {
+		t.Setenv("TUTOR_MCP_CONSOLIDATION_DELIVERY_TIMEOUT_MINUTES", invalid)
+		if _, err := loadStartupConfig("3000"); err == nil || !strings.Contains(err.Error(), "TUTOR_MCP_CONSOLIDATION_DELIVERY_TIMEOUT_MINUTES") {
+			t.Fatalf("invalid value %q accepted: %v", invalid, err)
+		}
+		if _, err := consolidationDeliveryTimeoutFromEnv(); err == nil {
+			t.Fatalf("local parser accepted %q", invalid)
+		}
 	}
 }

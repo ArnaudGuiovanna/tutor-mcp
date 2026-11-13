@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -144,36 +146,6 @@ func setReviewState(t *testing.T, store *db.Store, concept string, p, stability 
 	}
 }
 
-func TestBuildObservablesUsesCurrentFSRSAge(t *testing.T) {
-	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
-	lastReview := now.Add(-2 * time.Hour)
-	cs := &models.ConceptState{
-		Concept:     "A",
-		PMastery:    0.95,
-		CardState:   "review",
-		Stability:   1,
-		ElapsedDays: 90,
-		LastReview:  &lastReview,
-	}
-	domain := &models.Domain{Graph: models.KnowledgeSpace{Concepts: []string{"A"}}}
-	fixtures := &pipelineFixtures{
-		StatesList:      []*models.ConceptState{cs},
-		StatesByConcept: map[string]*models.ConceptState{"A": cs},
-		GoalRelevance:   map[string]float64{"A": 1},
-	}
-	cfg := NewDefaultPhaseConfig()
-
-	got := buildObservables(domain, fixtures, cfg, now)
-	if got.GoalRelevantBelowRetention {
-		t.Fatal("recent review was treated as 90 days old from historical ElapsedDays")
-	}
-
-	got = buildObservables(domain, fixtures, cfg, now.Add(30*24*time.Hour))
-	if !got.GoalRelevantBelowRetention {
-		t.Fatal("30 days of current age should trigger the retention observable")
-	}
-}
-
 // ─── Phase NULL → INSTRUCTION fallback (legacy) ────────────────────────────
 
 func TestOrchestrate_DomainPhaseNull_DefaultsToInstruction(t *testing.T) {
@@ -261,77 +233,275 @@ func TestOrchestrate_DiagnosticEmitsColdAssessment(t *testing.T) {
 	}
 }
 
+// The item budget ends the placement while concepts are still unclassified.
+// Six independent concepts and a budget of three: three hint-free successes
+// on distinct concepts each leave their concept inside the ambiguous band
+// (0.5 -> 0.82), so the placement is not complete by classification and only
+// the budget can end it. Practice interactions before them never count.
 func TestOrchestrate_Diagnostic_NMaxReached_TransitionsToInstruction(t *testing.T) {
 	store := setupOrchStore(t)
-	domainID := seedOrchDomain(t, store, []string{"A"}, nil, models.PhaseDiagnostic)
-	setGoalRelevance(t, store, domainID, map[string]float64{"A": 1.0})
-
-	// Unrelated practice events cannot force the diagnostic cap.
-	now := time.Now().UTC()
-	eventStart := now.Add(-30 * time.Minute)
-	for i := range 8 {
-		_, _ = recordSyntheticInteraction(t, store, domainID, "A", string(models.ActivityPractice), true, eventStart.Add(time.Duration(i)*time.Second))
-	}
-	// Force phase_changed_at far in the past so all 8 count.
-	if err := store.UpdateDomainPhase(context.Background(), domainID, models.PhaseDiagnostic, 0.469, now.Add(-1*time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Orchestrate(context.Background(), store, defaultInput(domainID)); err != nil {
-		t.Fatalf("unexpected error before diagnostic evidence: %v", err)
-	}
-	d, _ := store.GetDomainByID(context.Background(), domainID)
-	if d.Phase != models.PhaseDiagnostic {
-		t.Fatalf("practice interactions forced diagnostic exit: phase=%q", d.Phase)
-	}
-
-	// Eight actual cold assessments reach NDiagnosticMax.
-	for i := range 8 {
-		_, _ = recordSyntheticInteraction(t, store, domainID, "A", string(models.ActivityDiagnosticAssessment), true, eventStart.Add(time.Duration(20+i)*time.Second))
-	}
-
-	if _, err := Orchestrate(context.Background(), store, defaultInput(domainID)); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	d, _ = store.GetDomainByID(context.Background(), domainID)
-	if d.Phase != models.PhaseInstruction {
-		t.Errorf("expected transition to INSTRUCTION via NMax, got phase=%q", d.Phase)
-	}
-}
-
-func TestOrchestrate_DiagnosticCoversDistinctConceptsBeforeRetesting(t *testing.T) {
-	// Five concepts, diagnostic phase. Each qualified diagnostic raises the
-	// tested concept to P=0.33, whose information gain beats an untested
-	// concept at P=0.10. Coverage must still visit every concept once
-	// before any concept is re-tested.
-	store := setupOrchStore(t)
-	concepts := []string{"A", "B", "C", "D", "E"}
+	concepts := []string{"A", "B", "C", "D", "E", "F"}
 	domainID := seedOrchDomain(t, store, concepts, nil, models.PhaseDiagnostic)
 	now := time.Now().UTC()
 	if err := store.UpdateDomainPhase(context.Background(), domainID, models.PhaseDiagnostic, 0.469, now.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	seen := map[string]bool{}
-	for call := range len(concepts) {
+	input := defaultInput(domainID)
+	input.Config.NDiagnosticMax = 3
+	phaseOf := func() models.Phase {
+		t.Helper()
+		d, err := store.GetDomainByID(context.Background(), domainID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d.Phase
+	}
+
+	eventStart := now.Add(-30 * time.Minute)
+	for i := range 8 {
+		if _, err := recordSyntheticInteraction(t, store, domainID, concepts[i%len(concepts)], string(models.ActivityPractice), true, eventStart.Add(time.Duration(i)*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := Orchestrate(context.Background(), store, input); err != nil {
+		t.Fatalf("orchestrate before diagnostic evidence: %v", err)
+	}
+	if phase := phaseOf(); phase != models.PhaseDiagnostic {
+		t.Fatalf("practice interactions forced diagnostic exit: phase=%q", phase)
+	}
+
+	for i, concept := range []string{"A", "B"} {
+		if _, err := recordSyntheticInteraction(t, store, domainID, concept, string(models.ActivityDiagnosticAssessment), true, eventStart.Add(time.Duration(20+i)*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := Orchestrate(context.Background(), store, input); err != nil {
+		t.Fatal(err)
+	}
+	if phase := phaseOf(); phase != models.PhaseDiagnostic {
+		t.Fatalf("two of three items ended the placement: phase=%q", phase)
+	}
+
+	if _, err := recordSyntheticInteraction(t, store, domainID, "C", string(models.ActivityDiagnosticAssessment), true, eventStart.Add(30*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	observations, err := LoadPlacementObservations(context.Background(), store, models.LegacyPrincipal("L1").TenantScope(), domainID, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	placement := ReplayPlacement(models.KnowledgeSpace{Concepts: concepts}, nil, observations, input.Config.NDiagnosticMax)
+	if !placement.BudgetReached() || len(placement.Unclassified()) != len(concepts) {
+		t.Fatalf("fixture must spend the budget with every concept unclassified: items=%d unclassified=%v",
+			placement.Items, placement.Unclassified())
+	}
+	if _, err := Orchestrate(context.Background(), store, input); err != nil {
+		t.Fatal(err)
+	}
+	if phase := phaseOf(); phase != models.PhaseInstruction {
+		t.Fatalf("spent budget must end DIAGNOSTIC, got phase=%q", phase)
+	}
+}
+
+// Repeating one item does not spend the diagnostic budget: only the first
+// PlacementMaxItemsPerConcept answers on a concept count.
+func TestOrchestrate_DiagnosticRepeatedItemDoesNotExhaustBudget(t *testing.T) {
+	store := setupOrchStore(t)
+	concepts := []string{"A", "B", "C", "D"}
+	domainID := seedOrchDomain(t, store, concepts, nil, models.PhaseDiagnostic)
+	now := time.Now().UTC()
+	if err := store.UpdateDomainPhase(context.Background(), domainID, models.PhaseDiagnostic, 0.469, now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	input := defaultInput(domainID)
+	input.Config.NDiagnosticMax = 4
+	for i := range 8 {
+		if _, err := recordSyntheticInteraction(t, store, domainID, "A", string(models.ActivityDiagnosticAssessment), true, now.Add(-30*time.Minute+time.Duration(i)*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	activity, phase, err := OrchestrateWithPhase(context.Background(), store, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if phase != models.PhaseDiagnostic {
+		t.Fatalf("eight repetitions of one item ended the placement: phase=%q", phase)
+	}
+	if activity.Type != models.ActivityDiagnosticAssessment || activity.Concept == "A" {
+		t.Fatalf("placement must move on to an unclassified concept, got %+v", activity)
+	}
+}
+
+func TestOrchestrate_AdaptivePlacementBisectsPrerequisiteChain(t *testing.T) {
+	// a <- b <- c <- d <- e <- f <- g. The simulated learner knows a, b, c.
+	// The placement starts at the median depth, propagates outcomes along
+	// the chain and classifies all seven concepts in fewer items than a
+	// concept-by-concept sweep.
+	store := setupOrchStore(t)
+	concepts := []string{"a", "b", "c", "d", "e", "f", "g"}
+	prereqs := map[string][]string{}
+	for i := 1; i < len(concepts); i++ {
+		prereqs[concepts[i]] = []string{concepts[i-1]}
+	}
+	domainID := seedOrchDomain(t, store, concepts, prereqs, models.PhaseDiagnostic)
+	now := time.Now().UTC()
+	if err := store.UpdateDomainPhase(context.Background(), domainID, models.PhaseDiagnostic, 0.469, now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	knows := map[string]bool{"a": true, "b": true, "c": true}
+	var tested []string
+	for call := range len(concepts) + 1 {
 		input := defaultInput(domainID)
 		input.Now = now.Add(time.Duration(call) * time.Minute)
+		input.SessionStart = input.Now
 		activity, phase, err := OrchestrateWithPhase(context.Background(), store, input)
 		if err != nil {
 			t.Fatalf("call %d: %v", call, err)
 		}
-		if phase != models.PhaseDiagnostic || activity.Type != models.ActivityDiagnosticAssessment {
-			t.Fatalf("call %d: expected a diagnostic, got phase=%s activity=%+v", call, phase, activity)
+		if phase != models.PhaseDiagnostic {
+			break
 		}
-		if seen[activity.Concept] {
-			t.Fatalf("call %d re-tested %s before covering %v", call, activity.Concept, concepts)
+		if activity.Type != models.ActivityDiagnosticAssessment {
+			t.Fatalf("call %d: expected a cold diagnostic, got %+v", call, activity)
 		}
-		seen[activity.Concept] = true
-		if _, err := recordSyntheticInteraction(t, store, domainID, activity.Concept, string(models.ActivityDiagnosticAssessment), true, input.Now); err != nil {
+		tested = append(tested, activity.Concept)
+		if _, err := recordSyntheticInteraction(t, store, domainID, activity.Concept, string(models.ActivityDiagnosticAssessment), knows[activity.Concept], input.Now); err != nil {
 			t.Fatal(err)
 		}
-		setMastery(t, store, activity.Concept, 0.33)
 	}
-	if len(seen) != len(concepts) {
-		t.Fatalf("coverage incomplete: %v", seen)
+	domain, _ := store.GetDomainByID(context.Background(), domainID)
+	if domain.Phase != models.PhaseInstruction {
+		t.Fatalf("placement did not complete: phase=%q tested=%v", domain.Phase, tested)
+	}
+	if len(tested) == 0 || tested[0] != "d" {
+		t.Fatalf("first item must target the median depth d, tested=%v", tested)
+	}
+	if len(tested) >= len(concepts) {
+		t.Fatalf("placement used %d items for %d concepts: %v", len(tested), len(concepts), tested)
+	}
+	for _, concept := range []string{"e", "f", "g"} {
+		if slices.Contains(tested, concept) {
+			t.Fatalf("failure on d must place %s without testing it, tested=%v", concept, tested)
+		}
+	}
+}
+
+func TestOrchestrate_FailureStreakEasesGeneratedDifficulty(t *testing.T) {
+	store := setupOrchStore(t)
+	domainID := seedOrchDomain(t, store, []string{"A"}, nil, models.PhaseInstruction)
+	setGoalRelevance(t, store, domainID, map[string]float64{"A": 1})
+	now := time.Now().UTC()
+	input := defaultInput(domainID)
+	input.Now = now
+	input.SessionStart = now
+	before, err := Orchestrate(context.Background(), store, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3 {
+		if _, err := recordSyntheticInteraction(t, store, domainID, "A", string(models.ActivityPractice), false, now.Add(-time.Duration(10-i)*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after, err := Orchestrate(context.Background(), store, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Concept != "A" || after.DifficultyTarget >= before.DifficultyTarget ||
+		!strings.Contains(after.Rationale, "ZPD_DRIFT") {
+		t.Fatalf("three consecutive failures must lower the requested difficulty: before=%+v after=%+v", before, after)
+	}
+}
+
+func TestApplyPlacementEstimatesPropagatesWithoutCreatingCards(t *testing.T) {
+	store := setupOrchStore(t)
+	concepts := []string{"a", "b", "c", "d"}
+	prereqs := map[string][]string{"b": {"a"}, "c": {"b"}, "d": {"c"}}
+	domainID := seedOrchDomain(t, store, concepts, prereqs, models.PhaseDiagnostic)
+	now := time.Now().UTC()
+	if err := store.UpdateDomainPhase(context.Background(), domainID, models.PhaseDiagnostic, 0.469, now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recordSyntheticInteraction(t, store, domainID, "c", string(models.ActivityDiagnosticAssessment), false, now.Add(-30*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recordSyntheticInteraction(t, store, domainID, "b", string(models.ActivityDiagnosticAssessment), true, now.Add(-20*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	estimates, err := ApplyPlacementEstimates(context.Background(), store, models.LegacyPrincipal("L1").TenantScope(), domainID, NewDefaultPhaseConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ReplayPlacement(models.KnowledgeSpace{Concepts: concepts, Prerequisites: prereqs}, nil,
+		[]models.DiagnosticObservation{{Concept: "c"}, {Concept: "b", Success: true}}, 0)
+	for _, concept := range concepts {
+		cs, err := store.GetConceptStateInDomain(context.Background(), "L1", domainID, concept)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if math.Abs(cs.PMastery-want.Concepts[concept].Estimate) > 1e-9 || estimates[concept] != cs.PMastery {
+			t.Fatalf("%s: stored %.4f, returned %.4f, want placement %.4f", concept, cs.PMastery, estimates[concept], want.Concepts[concept].Estimate)
+		}
+		if cs.CardState != "new" || cs.LastReview != nil || cs.Reps != 0 {
+			t.Fatalf("%s: placement must not create or schedule an FSRS card: %+v", concept, cs)
+		}
+	}
+	if store.UpdateDomainPhase(context.Background(), domainID, models.PhaseInstruction, 0, now) != nil {
+		t.Fatal("update phase")
+	}
+	estimates, err = ApplyPlacementEstimates(context.Background(), store, models.LegacyPrincipal("L1").TenantScope(), domainID, NewDefaultPhaseConfig())
+	if err != nil || estimates != nil {
+		t.Fatalf("outside DIAGNOSTIC the placement is not written: %v %v", estimates, err)
+	}
+}
+
+// Evidence outside the placement is detected over the whole history: one old
+// practice answer on a, buried under hundreds of later interactions, still
+// keeps a's own estimate when a success on b would propagate to it.
+func TestApplyPlacementEstimatesKeepsConceptWithOldForeignEvidence(t *testing.T) {
+	store := setupOrchStore(t)
+	concepts := []string{"a", "b", "z"}
+	prereqs := map[string][]string{"b": {"a"}}
+	domainID := seedOrchDomain(t, store, concepts, prereqs, models.PhaseDiagnostic)
+	now := time.Now().UTC()
+	start := now.Add(-48 * time.Hour)
+	if _, err := recordSyntheticInteraction(t, store, domainID, "a", string(models.ActivityPractice), false, start); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 250 {
+		if _, err := recordSyntheticInteraction(t, store, domainID, "z", string(models.ActivityPractice), true, start.Add(time.Duration(i+1)*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cs, err := store.GetConceptStateInDomain(context.Background(), "L1", domainID, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs.PMastery = 0.3
+	if err := store.UpsertConceptState(context.Background(), cs); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateDomainPhase(context.Background(), domainID, models.PhaseDiagnostic, 0.469, now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recordSyntheticInteraction(t, store, domainID, "b", string(models.ActivityDiagnosticAssessment), true, now.Add(-30*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	estimates, err := ApplyPlacementEstimates(context.Background(), store, models.LegacyPrincipal("L1").TenantScope(), domainID, NewDefaultPhaseConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := estimates["a"]; ok {
+		t.Fatalf("a has older practice evidence and must keep its estimate, got %v", estimates)
+	}
+	if _, ok := estimates["b"]; !ok {
+		t.Fatalf("b is placement-only and must be written, got %v", estimates)
+	}
+	after, err := store.GetConceptStateInDomain(context.Background(), "L1", domainID, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.PMastery != 0.3 {
+		t.Fatalf("placement overwrote a's model estimate: %.4f", after.PMastery)
 	}
 }
 
@@ -394,8 +564,9 @@ func TestOrchestrate_DiagnosticRequiresAttemptLinkedHintFreeDistinctCoverage(t *
 		t.Fatalf("unlinked, hinted, or repeated diagnostics bypassed coverage: phase=%q", domain.Phase)
 	}
 
+	// One cold failure classifies each remaining concept.
 	for index, concept := range []string{"B", "C"} {
-		if _, err := recordSyntheticInteraction(t, store, domainID, concept, string(models.ActivityDiagnosticAssessment), true, now.Add(-10*time.Minute+time.Duration(index)*time.Second)); err != nil {
+		if _, err := recordSyntheticInteraction(t, store, domainID, concept, string(models.ActivityDiagnosticAssessment), false, now.Add(-10*time.Minute+time.Duration(index)*time.Second)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -404,7 +575,7 @@ func TestOrchestrate_DiagnosticRequiresAttemptLinkedHintFreeDistinctCoverage(t *
 	}
 	domain, _ = store.GetDomainByID(context.Background(), domainID)
 	if domain.Phase != models.PhaseInstruction {
-		t.Fatalf("all three qualified distinct concepts should complete diagnostic, phase=%q", domain.Phase)
+		t.Fatalf("placing all three concepts should complete diagnostic, phase=%q", domain.Phase)
 	}
 }
 

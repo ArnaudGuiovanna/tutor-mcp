@@ -55,7 +55,7 @@ func TestRegistrationPreHijackCannotActivateFromMailboxClick(t *testing.T) {
 	}
 	authorizeReq := httptest.NewRequest(http.MethodPost, "/authorize", strings.NewReader(authorizeForm.Encode()))
 	authorizeReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	authorizeReq.AddCookie(&http.Cookie{Name: "csrf_token", Value: "attacker-csrf"})
+	authorizeReq.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: "attacker-csrf"})
 	authorizeRec := httptest.NewRecorder()
 	s.HandleAuthorizePost(authorizeRec, authorizeReq)
 	if authorizeRec.Code != http.StatusAccepted {
@@ -92,7 +92,7 @@ func TestRegistrationPreHijackCannotActivateFromMailboxClick(t *testing.T) {
 		}
 		var csrf string
 		for _, cookie := range rec.Result().Cookies() {
-			if cookie.Name == accountCSRFCookieName {
+			if cookie.Name == accountCSRFCookieName("/verify-email") {
 				csrf = cookie.Value
 			}
 		}
@@ -183,7 +183,7 @@ func accountCSRF(t *testing.T, s *OAuthServer, path string, handler http.Handler
 		t.Fatalf("GET %s status=%d body=%q", path, rec.Code, rec.Body.String())
 	}
 	for _, cookie := range rec.Result().Cookies() {
-		if cookie.Name == accountCSRFCookieName {
+		if cookie.Name == accountCSRFCookieName(strings.SplitN(path, "?", 2)[0]) {
 			return cookie.Value
 		}
 	}
@@ -196,7 +196,7 @@ func postAccountForm(t *testing.T, path, csrf string, form url.Values, handler h
 	form.Set("csrf_token", csrf)
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: accountCSRFCookieName, Value: csrf})
+	req.AddCookie(&http.Cookie{Name: accountCSRFCookieName(strings.SplitN(path, "?", 2)[0]), Value: csrf})
 	rec := httptest.NewRecorder()
 	handler(rec, req)
 	return rec
@@ -288,7 +288,7 @@ func TestUnverifiedLoginIsUniformCredentialFailure(t *testing.T) {
 	}
 	req := httptest.NewRequest(http.MethodPost, "/authorize", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "login-csrf"})
+	req.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: "login-csrf"})
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
 	if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Body.String(), "Invalid email or password.") {

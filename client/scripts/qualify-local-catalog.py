@@ -113,7 +113,7 @@ def inspect_journal(root, sessions, rows, trainings, objective, context, probe):
             check(result, label + '_no_model_projection', not any(kind == 'context_projection' for _, kind, _ in decoded))
             states = [operation[4] for operation in operations]
             check(result, label + '_dispatch_and_denial_receipts', len(operations) == len(expected) and states.count('completed') == sum(row['permissionAllowed'] for row in expected) and states.count('rejected') == sum(not row['permissionAllowed'] for row in expected))
-            check(result, label + '_no_mutation_unknown_or_other_tool', all(operation[2] == 'tutor/get_learner_context' and operation[5] == 0 and operation[4] in ('completed', 'rejected') for operation in operations))
+            check(result, label + '_no_mutation_unknown_or_other_tool', all(operation[2] == 'tutor/get_learner_state' and operation[5] == 0 and operation[4] in ('completed', 'rejected') for operation in operations))
             expected_args = resident.expected_profile_arguments(trainings[label])
             check(result, label + '_exact_verified_arguments', all(json.loads(operation[3]) == expected_args for operation in operations))
             linked = len(turns) == len(expected)

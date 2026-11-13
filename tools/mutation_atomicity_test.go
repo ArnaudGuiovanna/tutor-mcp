@@ -124,7 +124,7 @@ func TestPublishCurriculumRevision_PostCommitReadbackFailureIsDegradedSuccess(t 
 
 	result := callTool(t, deps, registerReviseCurriculum, "L_owner", "publish_curriculum_revision", map[string]any{
 		"domain_id":          domain.ID,
-		"expected_version":   1,
+		"expected_revision":  1,
 		"operation":          "rename",
 		"source_concept_ids": []string{baseline.Concepts[0].ID},
 		"new_label":          "renamed competency",
@@ -152,7 +152,7 @@ func TestUpdateAvailability_DecodesPresentationBeforeCommit(t *testing.T) {
 	deps.Store = &corruptAvailabilityResponseStore{Store: store}
 
 	result := callTool(t, deps, registerUpdateAvailabilityModel, "L_owner", "update_availability_model", map[string]any{
-		"expected_version":             0,
+		"expected_revision":            0,
 		"timezone":                     "UTC",
 		"preferred_windows":            []map[string]any{{"day": "monday", "start": "09:00", "end": "10:00"}},
 		"avg_session_duration_minutes": 30,
@@ -206,7 +206,7 @@ func TestGetNextActivity_PostMutationEnrichmentFailureIsDegradedSuccess(t *testi
 	domain := makeOwnerDomain(t, store, "L_owner", "atomic-activity")
 	deps.Store = &failMetacognitiveReadbackStore{Store: store}
 
-	result := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{
+	result := callNextActivity(t, deps, "L_owner", map[string]any{
 		"domain_id": domain.ID,
 	})
 	if result.IsError {

@@ -31,8 +31,7 @@ retention, demonstration or transfer.
 Learner-facing dashboards expose the evidence stage and the model's routing
 estimate separately. Their progress percentage is the proportion of active
 competencies with demonstrated evidence; a high estimate alone cannot increase
-that percentage. The deprecated `mastered_count` compatibility field is an
-alias of the demonstrated count.
+that percentage; read the `demonstrated_count` and `total_demonstrated` fields.
 
 ## Assessment evidence
 
@@ -152,11 +151,24 @@ A diagnostic activity is an assessment, not instruction. It must:
 - use the dedicated `DIAGNOSTIC_ASSESSMENT` activity type;
 - be linked to a submitted and evaluated attempt; interactions without an
   attempt or with `hints_requested > 0` do not count;
-- sample the domain rather than repeatedly teaching the lowest-prior concept;
-- cover every distinct concept when the domain has at most eight concepts, or
-  at least eight distinct concepts in a larger domain; repeated attempts on one
-  concept do not consume that target, and entropy cannot bypass it;
+- follow the adaptive placement: the next item targets the concept of median
+  prerequisite depth among the concepts not yet classified;
+- start every concept at an uninformative 0.5 estimate; a hint-free success
+  is applied to the tested concept and to all its prerequisites, a failure to
+  the tested concept and to every concept that requires it;
+- give a concept at most two items, the second only while its estimate stays
+  strictly between 0.15 and 0.85; a concept is classified once an observation
+  moves it outside that band or after its second item;
+- end when every concept is classified or after the item budget (12 qualified
+  items by default); entropy is reported but never ends the diagnostic;
+- write only P(L): a placement estimate, direct or propagated, creates no FSRS
+  card (a failed cold diagnostic never schedules recall) and never counts as
+  retained, demonstrated or transferred evidence;
 - never count an introduction as prior-knowledge evidence.
+
+The placement is replayed from the qualified observations of the current
+diagnostic phase, so its selection does not depend on the order of the
+responses. A concept with any other evidence keeps its own estimate.
 
 `MASTERY_READY` and `check_mastery` consume the same evaluated attempts and
 trusted transfer facts. A recent trusted transfer failure therefore suppresses
@@ -179,7 +191,7 @@ merge and removal preserve an audit trail.
 
 `get_curriculum_snapshot` exposes the current version and stable concept IDs.
 Every `add_concepts` or `publish_curriculum_revision` write must supply that
-version as `expected_version`; a stale writer is rejected and must rebase.
+version as `expected_revision`; a stale writer is rejected and must rebase.
 Rename changes only the display label. Split and merge retire their sources in
 the new snapshot, while removal is refused if an active competency still
 depends on the target. Public callers may mark a proposal unreviewed or
@@ -213,8 +225,9 @@ claim that any external review service exists.
 
 The learning-integrity suite must cover, at minimum:
 
-1. one answer cannot saturate ability at either bound;
-2. alternating outcomes produce a stable cumulative trajectory;
+1. one answer cannot saturate the knowledge estimate at either bound;
+2. alternating outcomes on learning activities keep the estimate bounded
+   away from 0 and 1;
 3. a cold diagnostic never returns an instructional activity;
 4. Spanish, history, mathematics and programming receive domain-neutral task
    contracts unless their curriculum explicitly requests code;
@@ -226,8 +239,9 @@ The learning-integrity suite must cover, at minimum:
    version conflict;
 10. delayed-recall fixtures prove that unlinked observations remain
     unverified, while linked attempts distinguish retained and demonstrated;
-11. diagnostic fixtures reject hints, missing attempts and repeated-concept
-    padding, and enforce the bounded distinct-concept target;
+11. diagnostic fixtures reject hints and missing attempts, bisect the
+    prerequisite graph, propagate outcomes without creating FSRS cards and
+    stop on classification or item budget;
 12. trusted transfer fixtures retain both successes and failures and keep
     `check_mastery` coherent with `MASTERY_READY`;
 13. public HTTP bodies, emails and token rotation satisfy the security limits;

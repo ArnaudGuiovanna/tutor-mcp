@@ -4,13 +4,13 @@ use serde_json::json;
 
 fn turn_packet(mode: &str) -> Value {
     json!({"schema_version":"pedagogical-turn/v1","mode":mode,"conversation":context(),"permissions":{"read":true,"prepare_activity":true},
-        "activity":{"activity":{"type":"RECALL_EXERCISE","concept":"Variables"},"session_id":"session-go","decision_id":"decision-1","pedagogical_contract":{"competency":{"outcomes":[]}}},
+        "decision":{"activity":{"type":"RECALL_EXERCISE","concept":"Variables"},"session_id":"session-go","pedagogical_contract":{"decision_id":"decision-1","competency":{"outcomes":[]}}},
         "attempt":{"id":"attempt-1","domain_id":"go","concept":"Variables","status":"prepared","rubric":serde_json::from_str::<Value>(card()["rubricJson"].as_str().unwrap()).unwrap()}})
 }
 
 fn resume_packet(activity_type: &str, presentation: &str) -> Value {
     let mut packet = turn_packet("activity");
-    packet["activity"]["activity"]["type"] = json!(activity_type);
+    packet["decision"]["activity"]["type"] = json!(activity_type);
     packet["needs_selection"] = json!(false);
     packet["presentation"] = json!(presentation);
     packet["training"] = json!({"id":"personal:go","domain_id":"go","name":"Go"});
@@ -26,7 +26,8 @@ fn resume_requires_server_selection_capability_and_canonical_presentation() {
         assert_eq!(args["intent"], "auto");
         assert_eq!(args["expected_selection"], 1);
         assert!(tools.contains(&"select_conversation_training"));
-        assert!(tools.contains(&"get_next_activity"));
+        assert!(tools.contains(&"prepare_pedagogical_turn"));
+        assert!(!tools.contains(&"get_next_activity"));
         let packet = resume_packet("NEW_CONCEPT", "instruction");
         assert!(PreparedTurn::new(&conversation, message, packet.clone()).unwrap().private_output());
         let mut wrong = packet.clone();
@@ -82,7 +83,7 @@ fn introduction_is_only_instruction_and_guidance_never_awards_progress() {
 fn resume_choices_are_bounded_and_require_no_generation_or_learning_mutation() {
     let conversation = conversation(card());
     let mut packet = turn_packet("activity");
-    packet.as_object_mut().unwrap().remove("activity");
+    packet.as_object_mut().unwrap().remove("decision");
     packet["needs_selection"] = json!(true);
     packet["selection_reason"] = json!("ambiguous");
     packet["training_choices_has_more"] = json!(false);
@@ -198,6 +199,18 @@ fn prepared_turn_freezes_before_display_and_records_before_feedback() {
         output.mutation.as_ref().unwrap().1["decision_id"],
         "decision-1"
     );
+    // The MCP contract takes the frozen rubric as an object, never JSON text.
+    assert_eq!(
+        output.mutation.as_ref().unwrap().1["rubric"],
+        serde_json::from_str::<Value>(card()["rubricJson"].as_str().unwrap()).unwrap()
+    );
+    assert!(output
+        .mutation
+        .as_ref()
+        .unwrap()
+        .1
+        .get("rubric_json")
+        .is_none());
     assert!(output.commit(&json!({})).is_err());
     output.commit(&json!({"attempt_id":"confirmed"})).unwrap();
     assert_eq!(
@@ -215,11 +228,14 @@ fn prepared_turn_freezes_before_display_and_records_before_feedback() {
     let turn = PreparedTurn::new(&conversation, &response, turn_packet("context")).unwrap();
     assert_eq!(turn.submission().unwrap()["learner_response"], "b: 5");
     let score = json!({"criteria_scores":[{"id":"correct","score":1,"max_score":1,"evidence":"The selected value is 5."}],"total":1,"max_total":1,"summary":"Correct","confidence":0.9});
-    let evaluation = json!({"version":1,"attempt_id":"attempt-1","rubric_score_json":score.to_string(),"feedback":"Vous avez retrouvé la valeur."});
+    let encoded = json!({"version":1,"attempt_id":"attempt-1","rubric_score_json":score.to_string(),"feedback":"Vous avez retrouvé la valeur."});
+    assert!(turn.output(&fence("tutor-evaluation", &encoded)).is_err());
+    let evaluation = json!({"version":1,"attempt_id":"attempt-1","rubric_score":score,"feedback":"Vous avez retrouvé la valeur."});
     let mut output = turn
         .output(&fence("tutor-evaluation", &evaluation))
         .unwrap();
     assert_eq!(output.mutation.as_ref().unwrap().0, "record_interaction");
+    assert_eq!(output.mutation.as_ref().unwrap().1["rubric_score"], score);
     assert!(output.commit(&json!({"updated":true,"assessment_attempt_id":"foreign","assessment_status":"evaluated","derived_success":true})).is_err());
     output.commit(&json!({"updated":true,"assessment_attempt_id":"attempt-1","assessment_status":"evaluated","derived_success":true})).unwrap();
     assert_eq!(output.delivery.as_ref().unwrap().kind, "feedback");
@@ -292,7 +308,7 @@ fn prepared_turn_rejects_changed_rubric_and_false_score_or_prose_receipts() {
         json!({"criteria_scores":[{"id":"correct","score":2,"max_score":1,"evidence":"invented"}],"total":2,"max_total":1,"confidence":0.9}),
         json!({"criteria_scores":[{"id":"correct","score":1,"max_score":1,"evidence":"Observed value"}],"total":1,"max_total":1,"confidence":"medium"}),
     ] {
-        assert!(turn.output(&fence("tutor-evaluation",&json!({"version":1,"attempt_id":"attempt-1","rubric_score_json":score.to_string(),"feedback":"Good"}))).is_err());
+        assert!(turn.output(&fence("tutor-evaluation",&json!({"version":1,"attempt_id":"attempt-1","rubric_score":score,"feedback":"Good"}))).is_err());
     }
 }
 
@@ -562,7 +578,7 @@ fn flashcards_are_self_reports_without_assessment_attempts() {
         assert!(instructions.contains("AUTOÉVALUATION"));
         assert!(instructions.contains("sans attempt_id"));
         assert!(instructions.contains("confidence=0.4"));
-        assert!(instructions.contains("n’appelle PAS get_next_activity"));
+        assert!(instructions.contains("n’appelle PAS prepare_pedagogical_turn"));
         assert!(instructions.contains("acp-"));
     }
     rating["attemptId"] = json!("invented-proof");

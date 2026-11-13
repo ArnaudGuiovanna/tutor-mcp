@@ -93,7 +93,7 @@ func postBudgetedLogin(t *testing.T, server *OAuthServer, email, password, csrf 
 	}
 	req := httptest.NewRequest(http.MethodPost, "/authorize", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: csrf})
+	req.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: csrf})
 	rec := httptest.NewRecorder()
 	server.HandleAuthorizePost(rec, req)
 	return rec
@@ -301,7 +301,7 @@ func postRegistrationStartNoDrain(t *testing.T, server *OAuthServer, email, csrf
 	}
 	req := httptest.NewRequest(http.MethodPost, "/authorize", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: csrf})
+	req.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: csrf})
 	rec := httptest.NewRecorder()
 	server.HandleAuthorizePost(rec, req)
 	return rec

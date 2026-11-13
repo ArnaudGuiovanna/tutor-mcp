@@ -105,7 +105,7 @@ func (s *Store) GetNativeIdentity(ctx context.Context, tenantID, publicKey, acti
    FROM native_identities n JOIN users u ON u.id=n.user_id AND u.status='active' AND u.identity_mode='pubkey'
    JOIN tenant_memberships tm ON tm.user_id=u.id AND tm.tenant_id=? AND tm.status='active'
    JOIN tenants t ON t.id=tm.tenant_id AND t.status='active'
-   WHERE `+column+`=? AND n.status='active' AND (tm.mfa_required=0 OR tm.mfa_verified_at IS NOT NULL)`, tenantID, publicKey).Scan(&n.ID, &n.UserID, &n.TenantID, &n.MembershipID, &n.LearnerID, &n.PublicKey, &n.RecoveryPublicKey, &n.DisplayName, &n.Status, &n.Version, &n.CreatedAt, &n.UpdatedAt)
+   WHERE `+column+`=? AND n.status='active'`, tenantID, publicKey).Scan(&n.ID, &n.UserID, &n.TenantID, &n.MembershipID, &n.LearnerID, &n.PublicKey, &n.RecoveryPublicKey, &n.DisplayName, &n.Status, &n.Version, &n.CreatedAt, &n.UpdatedAt)
 		if errors.Is(err, sql.ErrNoRows) {
 			return storeport.ErrInvalidNativeIdentity
 		}
@@ -519,7 +519,7 @@ func (s *Store) provisionNativeIdentity(ctx context.Context, actor models.Contro
 				return err
 			}
 		}
-		if _, err = tx.exec(ctx, `INSERT INTO tenant_memberships(id,tenant_id,user_id,learner_id,roles_json,status,version,created_at,updated_at,mfa_required) VALUES(?,?,?,?,?,'active',1,?,?,0)`, membershipID, tenantID, n.UserID, nullString(learnerID), rolesJSON, now, now); err != nil {
+		if _, err = tx.exec(ctx, `INSERT INTO tenant_memberships(id,tenant_id,user_id,learner_id,roles_json,status,version,created_at,updated_at) VALUES(?,?,?,?,?,'active',1,?,?)`, membershipID, tenantID, n.UserID, nullString(learnerID), rolesJSON, now, now); err != nil {
 			return err
 		}
 		action := "membership.provision_native_member"
@@ -616,7 +616,7 @@ func (s *Store) BindNativeIdentity(ctx context.Context, actor models.ControlPlan
 			if _, err = tx.exec(ctx, `UPDATE learners SET identity_mode='pubkey',email=NULL,password_hash=NULL,email_verified_at=NULL WHERE tenant_id=? AND user_id=?`, tenant, userID); err != nil {
 				return err
 			}
-			if _, err = tx.exec(ctx, `UPDATE tenant_memberships SET mfa_required=0,mfa_verified_at=NULL,version=version+1,updated_at=? WHERE tenant_id=? AND user_id=?`, now, tenant, userID); err != nil {
+			if _, err = tx.exec(ctx, `UPDATE tenant_memberships SET version=version+1,updated_at=? WHERE tenant_id=? AND user_id=?`, now, tenant, userID); err != nil {
 				return err
 			}
 			for _, table := range []string{"oauth_codes", "refresh_tokens", "account_tokens", "login_challenges", "learner_approved_clients", "credential_tenant_routes"} {
@@ -625,10 +625,8 @@ func (s *Store) BindNativeIdentity(ctx context.Context, actor models.ControlPlan
 				}
 			}
 		}
-		for _, table := range []string{"console_sessions", "user_password_resets", "mfa_credentials", "mfa_recovery_codes", "external_identities"} {
-			if _, err = tx.exec(ctx, `DELETE FROM `+table+` WHERE user_id=?`, userID); err != nil {
-				return err
-			}
+		if _, err = tx.exec(ctx, `DELETE FROM external_identities WHERE user_id=?`, userID); err != nil {
+			return err
 		}
 		if tx.dialect == DialectPostgres {
 			if _, err = tx.exec(ctx, `SELECT set_config('app.current_tenant',?,true)`, request.TenantID); err != nil {

@@ -5,6 +5,15 @@
 > migration désormais terminée. Le pipeline supporté est toujours actif dans
 > `engine/orchestrator.go`; le code, les schémas MCP, `README.md` et
 > `OPERATIONS.md` font foi.
+>
+> **État courant (2026-11).** La sortie de DIAGNOSTIC ne dépend plus de la
+> couverture de concepts distincts ni de `DeltaHThreshold` (supprimé) : elle
+> survient quand le placement adaptatif (`engine/placement.go`) a classé tous
+> les concepts ou quand le budget `NDiagnosticMax` (12 items qualifiés) est
+> atteint ; l'entropie n'est plus qu'un signal d'audit.
+> `RetentionRecallThreshold` et `GoalRelevantBelowRetention` ont été
+> supprimés : l'oubli est traité par la sélection de rappel dans chaque phase
+> et ne change pas la phase d'acquisition.
 
 > Voir aussi `docs/regulation-design/00-pipeline-vs-legacy.md` pour le mapping des 7 priorités du router legacy vers le pipeline orchestrateur (audit #15).
 
@@ -925,7 +934,7 @@ qui est déjà fait par `Orchestrate`).
 | **Goal-relevant cutoff** | OQ-2.7 = A (`goal_relevance > 0`), uncovered exclus |
 | **Test E2E** | Apprenant simulé sur 30 sessions, valide les 3 transitions |
 | **Compatibilité** | Backward : NULL phase → INSTRUCTION ; flag off → legacy `Route` ; idempotence on/off |
-| **Findings résolus** | F-3.X (le pipeline complet), F-X.X (orchestration centralisée), validation empirique de [1]/[4]/[3]/[5] sous régime intégré |
+| **Problèmes résolus** | pipeline complet, orchestration centralisée, validation empirique de [1]/[4]/[3]/[5] sous régime intégré |
 
 ---
 

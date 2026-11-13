@@ -16,17 +16,32 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # The OIDC token and attestation write are scoped to this job only: it
+    # signs SLSA build provenance for the archives it has just built.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: 1.26.11
-          cache: true
+          # Attested artifacts are built from a cold module and build cache:
+          # a cache restored from another workflow could poison what the
+          # provenance then vouches for.
+          cache: false
       - name: Build archives and checksums
         env:
           RELEASE_VERSION: ${{ inputs.version }}
           GOTOOLCHAIN: local
         run: python3 scripts/package-release.py --version "$RELEASE_VERSION"
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/tutor-mcp_*.tar.gz
+            dist/tutor-mcp_*.zip
       - name: Retain release artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

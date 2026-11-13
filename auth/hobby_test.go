@@ -151,7 +151,7 @@ func TestHobbyOAuthClientFixtures(t *testing.T) {
 				}
 				req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
 				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-				req.AddCookie(&http.Cookie{Name: "csrf_token", Value: csrf})
+				req.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: csrf})
 				rec := httptest.NewRecorder()
 				s.HandleAuthorizePost(rec, req)
 				return rec

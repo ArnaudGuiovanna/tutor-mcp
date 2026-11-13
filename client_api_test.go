@@ -161,19 +161,7 @@ func TestClientAPIOverviewUsesOnlyAuthenticatedLearnerAndScope(t *testing.T) {
 
 func clientAPIOwner(t *testing.T, f *mcpHTTPFixture, slug string) models.Principal {
 	t.Helper()
-	user, err := f.admin.GetLocalUserByEmail(t.Context(), "owner@"+slug+".test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	memberships, err := f.admin.ListActiveMembershipsForUser(t.Context(), user.ID)
-	if err != nil || len(memberships) != 1 {
-		t.Fatalf("owner memberships=%v err=%v", memberships, err)
-	}
-	principal, err := f.admin.GetPrincipal(t.Context(), mcpHTTPMembershipScope(&memberships[0]), []string{models.OAuthScopeLearner})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return principal
+	return f.ownerPrincipal(t, slug)
 }
 
 func TestClientAPIStaffOverviewNeedsExplicitFormationGrantAndNoLearner(t *testing.T) {

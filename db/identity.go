@@ -86,7 +86,7 @@ func (s *Store) GetPrincipal(ctx context.Context, scope models.TenantScope, scop
         LEFT JOIN learners l ON l.id = tm.learner_id AND l.tenant_id = tm.tenant_id
           AND l.user_id = tm.user_id AND l.membership_id = tm.id
         WHERE tm.tenant_id = ? AND tm.user_id = ? AND tm.id = ?
-          AND tm.status = 'active' AND (tm.mfa_required = 0 OR tm.mfa_verified_at IS NOT NULL)
+          AND tm.status = 'active'
           AND ((tm.learner_id IS NULL AND ? = '') OR l.id = ?)`,
 		scope.TenantID, scope.UserID, scope.MembershipID, scope.LearnerID, scope.LearnerID).Scan(
 		&principal.UserID, &principal.TenantID, &principal.MembershipID,
@@ -152,7 +152,6 @@ func (s *Store) ValidatePrincipal(ctx context.Context, principal models.Principa
           AND tm.id = ?
           AND tm.user_id = ?
           AND tm.status = 'active'
-		  AND (tm.mfa_required = 0 OR tm.mfa_verified_at IS NOT NULL)
           AND tm.version = ?
           AND ((? = '' AND tm.learner_id IS NULL) OR tm.learner_id = ?)`
 	if tx, ok := ctx.Value(tenantTransactionContextKey{}).(*tenantTransactionContext); ok &&
@@ -205,7 +204,7 @@ func (s *Store) listMembershipsForUser(ctx context.Context, userID string, activ
 	}
 	query := `SELECT tm.id, tm.tenant_id, t.name, tm.user_id,
                COALESCE(tm.learner_id, ''), tm.roles_json, tm.status,
-               tm.version, tm.mfa_required, tm.created_at, tm.updated_at
+               tm.version, tm.created_at, tm.updated_at
         FROM tenant_memberships tm
         JOIN tenants t ON t.id = tm.tenant_id AND t.status = 'active'
 		WHERE tm.user_id = ? AND tm.status <> 'revoked'`
@@ -222,13 +221,11 @@ func (s *Store) listMembershipsForUser(ctx context.Context, userID string, activ
 	for rows.Next() {
 		var membership models.TenantMembership
 		var rolesJSON string
-		var mfaRequired int
 		if err := rows.Scan(&membership.ID, &membership.TenantID, &membership.TenantName, &membership.UserID,
-			&membership.LearnerID, &rolesJSON, &membership.Status, &membership.Version, &mfaRequired,
+			&membership.LearnerID, &rolesJSON, &membership.Status, &membership.Version,
 			&membership.CreatedAt, &membership.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan membership: %w", err)
 		}
-		membership.MFARequired = mfaRequired == 1
 		if err := json.Unmarshal([]byte(rolesJSON), &membership.Roles); err != nil {
 			return nil, fmt.Errorf("scan membership roles: %w", err)
 		}
@@ -301,53 +298,17 @@ func (s *Store) SetMembershipAuthorization(ctx context.Context, scope models.Ten
 		return 0, err
 	}
 	now := time.Now().UTC()
-	mfaRequired := 0
-	if models.RolesRequireMFA(roles) {
-		mfaRequired = 1
-	}
 	var version int64
 	err = s.queryRow(ctx, `UPDATE tenant_memberships
-		SET status = ?, roles_json = ?, mfa_required = CASE WHEN EXISTS (
-		 SELECT 1 FROM users u
-		 WHERE u.id=tenant_memberships.user_id AND u.identity_mode='pubkey'
-		) THEN 0 ELSE ? END,
-		    version = version + 1, updated_at = ?
+		SET status = ?, roles_json = ?, version = version + 1, updated_at = ?
 		WHERE tenant_id = ? AND id = ? AND user_id = ?
-		RETURNING version`, status, string(rolesJSON), mfaRequired, now,
+		RETURNING version`, status, string(rolesJSON), now,
 		scope.TenantID, scope.MembershipID, scope.UserID).Scan(&version)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, storeport.WrapNotFound(err)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("set membership authorization: %w", err)
-	}
-	return version, nil
-}
-
-func (s *Store) RecordMembershipMFAVerification(ctx context.Context, scope models.TenantScope, verifiedAt time.Time) (int64, error) {
-	if err := scope.Validate(); err != nil || verifiedAt.IsZero() {
-		return 0, fmt.Errorf("record MFA verification: invalid scope or timestamp")
-	}
-	if !s.inTenantTransaction(ctx, scope) && s.root != nil {
-		var version int64
-		err := s.WithTenantTx(ctx, scope, func(txCtx context.Context, scoped storeport.Store) error {
-			var innerErr error
-			version, innerErr = scoped.RecordMembershipMFAVerification(txCtx, scope, verifiedAt)
-			return innerErr
-		})
-		return version, err
-	}
-	var version int64
-	err := s.queryRow(ctx, `UPDATE tenant_memberships
-		SET mfa_verified_at = ?, version = version + 1, updated_at = ?
-		WHERE tenant_id = ? AND id = ? AND user_id = ? AND status = 'active'
-		RETURNING version`, verifiedAt.UTC(), verifiedAt.UTC(), scope.TenantID,
-		scope.MembershipID, scope.UserID).Scan(&version)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, storeport.WrapNotFound(err)
-	}
-	if err != nil {
-		return 0, fmt.Errorf("record MFA verification: %w", err)
 	}
 	return version, nil
 }

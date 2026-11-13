@@ -30,7 +30,7 @@ import (
 )
 
 // NormalizeEmail folds an email address to a canonical form (lowercase +
-// trimmed). R002: SQLite's default BINARY collation treats Alice@x.com and
+// trimmed). SQLite's default BINARY collation treats Alice@x.com and
 // alice@x.com as different keys, which lets an attacker rotate case to bypass
 // the per-account failure-tracker lockout and lets registration create
 // duplicate accounts whose only difference is letter case. Every handler that
@@ -160,7 +160,7 @@ type oauthStore interface {
 	storeport.LearnerStore
 	storeport.AuthStore
 	storeport.IdentityStore
-	WithTenantTx(context.Context, models.TenantScope, func(context.Context, storeport.Store) error) error
+	storeport.TenantTxStore
 }
 
 // serviceAccountAuthenticator is deliberately separate from oauthStore so
@@ -178,9 +178,7 @@ type oauthCSRFConsumer interface {
 // OAuthServer implements the OAuth 2.1 authorization server.
 type OAuthServer struct {
 	hobbyAccounts        bool
-	accounts             storeport.InstitutionAccountStore
-	signupOpen           bool
-	signupPlan           string
+	loopbackHTTPCookies  bool
 	store                oauthStore
 	baseURL              string
 	logger               *slog.Logger
@@ -216,6 +214,7 @@ func NewOAuthServer(store oauthStore, baseURL string, logger *slog.Logger) *OAut
 	return &OAuthServer{
 		store:                store,
 		baseURL:              baseURL,
+		loopbackHTTPCookies:  loopbackHTTPOrigin(baseURL),
 		logger:               logger,
 		loginFailures:        NewLoginFailureTracker(5, 10*time.Minute),
 		bcrypt:               currentBcryptBudget(),
@@ -228,20 +227,13 @@ func NewOAuthServer(store oauthStore, baseURL string, logger *slog.Logger) *OAut
 	}
 }
 
-func setAuthorizeCSRFCookie(w http.ResponseWriter, value string, maxAge int) {
-	cookie := &http.Cookie{
-		Name:     "csrf_token",
-		Value:    value,
-		Path:     "/authorize",
-		MaxAge:   maxAge,
-		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteStrictMode,
-	}
-	if maxAge < 0 {
-		cookie.Expires = time.Unix(1, 0).UTC()
-	}
-	http.SetCookie(w, cookie)
+// setAuthorizeCSRFCookie stores the /authorize double-submit token. No
+// session exists before sign-in, so the token cannot be derived from one: it
+// is a random value, compared in constant time with the form field and then
+// consumed once fleet-wide (consumeCSRF), after the Origin/Sec-Fetch-Site
+// check of sameOriginFormPost.
+func (s *OAuthServer) setAuthorizeCSRFCookie(w http.ResponseWriter, value string, maxAge int) {
+	s.setCookie(w, authorizeCSRFCookieName, value, maxAge, http.SameSiteStrictMode)
 }
 
 // consumeCSRF makes a valid double-submit token single-use fleet-wide when the
@@ -290,9 +282,6 @@ func (s *OAuthServer) HandleAuthServerMetadata(w http.ResponseWriter, r *http.Re
 			models.OAuthScopeLearnerRead,
 			models.OAuthScopeLearnerWrite,
 		}
-	}
-	if s.InstitutionAccountsEnabled() {
-		scopesSupported = append(scopesSupported, models.OAuthScopeFormationContribute, models.OAuthScopeFormationRead, models.OAuthScopeFormationWrite, models.OAuthScopeProgressRead)
 	}
 	meta := map[string]interface{}{
 		"issuer":                                s.baseURL,
@@ -413,12 +402,10 @@ func (s *OAuthServer) HandleAuthorizeGet(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	setAuthorizeCSRFCookie(w, csrfToken, 3600)
+	s.setAuthorizeCSRFCookie(w, csrfToken, 3600)
 
 	data := authPageData{
 		Hobby:               s.hobbyAccounts,
-		Institution:         s.accounts != nil,
-		SignupOpen:          s.SignupOpen(),
 		ClientID:            clientID,
 		ClientName:          client.ClientName,
 		RedirectURI:         redirectURI,
@@ -470,10 +457,10 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 		http.Error(w, "forbidden: cross-origin form submission", http.StatusForbidden)
 		return
 	}
-	cookie, cerr := r.Cookie("csrf_token")
+	cookieCSRF, hasCookie := s.cookieValue(r, authorizeCSRFCookieName)
 	formCSRF := r.FormValue("csrf_token")
-	if cerr != nil || cookie.Value == "" || formCSRF == "" ||
-		subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(formCSRF)) != 1 {
+	if !hasCookie || formCSRF == "" ||
+		subtle.ConstantTimeCompare([]byte(cookieCSRF), []byte(formCSRF)) != 1 {
 		http.Error(w, "forbidden: csrf check failed", http.StatusForbidden)
 		return
 	}
@@ -490,7 +477,7 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 		return
 	}
 	formCSRF = nextCSRF
-	setAuthorizeCSRFCookie(w, nextCSRF, 3600)
+	s.setAuthorizeCSRFCookie(w, nextCSRF, 3600)
 
 	clientID := r.FormValue("client_id")
 	redirectURI := r.FormValue("redirect_uri")
@@ -529,7 +516,7 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 	}
 
 	mode := r.FormValue("mode") // "login" or "register"
-	// R002: fold case + trim whitespace before any lookup or failure
+	// fold case + trim whitespace before any lookup or failure
 	// tracker call. Keeps both buckets and store rows in a single
 	// canonical form.
 	email := NormalizeEmail(r.FormValue("email"))
@@ -543,8 +530,6 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 
 	data := authPageData{
 		Hobby:               s.hobbyAccounts,
-		Institution:         s.accounts != nil,
-		SignupOpen:          s.SignupOpen(),
 		ClientID:            clientID,
 		ClientName:          client.ClientName,
 		RedirectURI:         redirectURI,
@@ -559,10 +544,6 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 
 	if s.hobbyAccounts && mode == "register" {
 		renderAuthPage(w, data, "Ask the server operator for an invitation.", "login")
-		return
-	}
-	if s.accounts != nil && mode == "register" {
-		renderAuthPage(w, data, "Accounts are created by invitation. Ask your institution for an invitation link.", "login")
 		return
 	}
 	if email == "" {
@@ -723,7 +704,7 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 				renderAuthPage(w, data, "Internal error. Please try again.", "login")
 				return
 			}
-			if !trusted && !(s.accounts != nil && memberships[0].MFARequired && memberships[0].LearnerID == "") {
+			if !trusted {
 				adaptiveScope := models.TenantScope{
 					TenantID: memberships[0].TenantID, UserID: memberships[0].UserID,
 					MembershipID: memberships[0].ID, LearnerID: memberships[0].LearnerID,
@@ -767,7 +748,9 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 				break
 			}
 		}
-		if selected.ID == "" || (selected.LearnerID == "" && (s.accounts == nil || !models.RolesAllowConsole(selected.Roles))) {
+		// Password sign-in only grants learner profiles; staff memberships
+		// authenticate with native key identities.
+		if selected.ID == "" || selected.LearnerID == "" {
 			renderAuthPage(w, data, "The selected organization is not available.", "login")
 			return
 		}
@@ -775,14 +758,7 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 			TenantID: selected.TenantID, UserID: selected.UserID,
 			MembershipID: selected.ID, LearnerID: selected.LearnerID,
 		}
-		if selected.MFARequired && s.accounts != nil {
-			version, ok := s.verifyAuthorizeSecondFactor(w, r, data, tenantScope)
-			if !ok {
-				return
-			}
-			selected.Version = version
-		}
-		// R001: if the learner has already approved this client+redirect_uri,
+		// if the learner has already approved this client+redirect_uri,
 		// the approval screen is no longer meaningful — skip it. Re-prompting
 		// every time trained users to click through reflexively, defeating the
 		// trust-on-first-use guarantee against a malicious dynamic-client
@@ -818,11 +794,13 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 			Roles: append([]string(nil), selected.Roles...), Scopes: strings.Fields(scope),
 			TokenVersion: selected.Version,
 		}
-		if hasFormationScope(scope) && (s.accounts == nil || !selectedPrincipal.Authorize(models.PermissionFormationWrite, models.AuthorizationResource{TenantID: selected.TenantID})) {
+		// Formation and staff-progression grants belong to native institution
+		// identities; a password sign-in never delegates them.
+		if hasFormationScope(scope) {
 			renderAuthPageStatus(w, http.StatusForbidden, data, "Your membership cannot grant formation authoring access.", "login")
 			return
 		}
-		if models.OAuthScopeAllows(scope, models.OAuthScopeProgressRead) && (s.accounts == nil || !selectedPrincipal.CanReadInstitutionProgress()) {
+		if models.OAuthScopeAllows(scope, models.OAuthScopeProgressRead) {
 			renderAuthPageStatus(w, http.StatusForbidden, data, "Your membership cannot grant staff progression access.", "login")
 			return
 		}
@@ -866,7 +844,7 @@ func (s *OAuthServer) HandleAuthorizePost(w http.ResponseWriter, r *http.Request
 	qv.Set("iss", s.baseURL)
 	u.RawQuery = qv.Encode()
 	s.logger.Info("authorize POST redirect", "state_len", len(state), "redirect_host", authLogIdentifier(u.Host))
-	setAuthorizeCSRFCookie(w, "", -1)
+	s.setAuthorizeCSRFCookie(w, "", -1)
 	http.Redirect(w, r, u.String(), http.StatusFound)
 }
 
@@ -1365,7 +1343,7 @@ func (s *OAuthServer) HandleRegister(w http.ResponseWriter, r *http.Request) {
 	if name, ok := req["client_name"].(string); ok {
 		clientName = name
 	}
-	// R001: cap server-side. An attacker-controlled multi-KB phishing
+	// cap server-side. An attacker-controlled multi-KB phishing
 	// paragraph in client_name would otherwise be displayed verbatim on
 	// the consent screen. Truncate to 120 bytes at a valid UTF-8 boundary
 	// so html/template still escapes safely.

@@ -48,7 +48,13 @@ L’étape se déduit de l’état (`src/onboardingModel.ts`) : une configuratio
 interrompue reprend à la première étape incomplète, sans stockage
 supplémentaire. Le réglage `setupCompleted` est posé à la fin de l’étape 3 et
 termine définitivement le parcours. Les profils antérieurs, avec un agent choisi
-et Tutor local ou au moins une conversation, sont considérés comme configurés.
+et Tutor local, au moins une conversation ou une connexion distante déjà réussie,
+sont considérés comme configurés. Une adresse distante seulement enregistrée ne
+suffit pas : une configuration neuve interrompue en attente d’autorisation de la
+clé reprend à l’étape « Serveur Tutor ». La preuve d’une connexion réussie est
+`settings.tutorConnectedOrigin` (origine du dernier serveur atteint, écrite par la
+couche native) ou, à défaut, une politique d’autorisations liée à cette origine
+et à une institution.
 Pendant le parcours, la connexion automatique de l’agent et les raccourcis
 Ctrl K / Ctrl N sont neutralisés. Paramètres → Connexion et outils propose
 « Relancer la configuration guidée » ; un compte créé depuis Mon compte repasse
@@ -69,8 +75,14 @@ Le premier onglet des paramètres regroupe trois étapes :
 
 Les connexions établies se replient en résumés consultables. Les trois raccourcis
 amènent directement à la section voulue, avec déplacement du focus au clavier.
-L’onglet Institution traite la politique d’apprentissage ; Membres traite les
-adhésions. Ces pages renvoient au même écran de connexion si nécessaire.
+L’onglet Institution affiche une seule fois le nom de l’institution, puis sa
+politique d’apprentissage ; Membres traite les adhésions. Ces pages renvoient au
+même écran de connexion si nécessaire.
+
+Les onglets suivent le modèle ARIA (`tablist`/`tab`/`tabpanel`, flèches, Début,
+Fin). L’onglet est piloté par la page de l’application : la palette et les
+raccourcis le changent sans remonter l’espace des paramètres. Un panneau déjà
+ouvert reste monté (masqué) : ses saisies et ses lectures sont conservées.
 
 **Modèle et rapidité.** Sans modèle choisi, le sélecteur indique « Automatique
 (rapide et économe) » : le harness connu utilise son petit modèle et l’effort de
@@ -96,6 +108,10 @@ d’elle-même : après un arrêt inattendu, la supervision native reconnecte av
 un délai croissant et publie son état (`agentStatus.reconnect`, événements
 `agent_reconnect`). Une ligne discrète au-dessus du composeur l’indique :
 
+Chaque ligne porte un liseré de niveau aux couleurs de la charte : information
+(bleu) pour l’attente et la reconnexion, alerte (rouge) pour l’échec,
+avertissement (ambre) pour une limite du fournisseur.
+
 - **en attente** : « Reconnexion à l’agent dans N s (tentative k) », avec un
   décompte à la seconde (seul un libellé stable est annoncé aux lecteurs
   d’écran) ;
@@ -117,10 +133,122 @@ description accessible du bouton ; il se réactive automatiquement à l’heure 
 après ce tour, avec « Réessayer » ; il n’occupe pas le bandeau global. Le
 bandeau global garde un seul message, traduit une seule fois, et se ferme.
 
+**Limite d’actions d’un tour.** Un tour arrêté par son budget (`turn_limit`, ou à
+défaut `stopReason: "max_turn_requests"` avec `turnLimit` dans le résultat de
+`send_prompt`) affiche un seul avis informatif (liseré bleu, `role="status"`,
+pas d’alerte), rattaché à la réponse interrompue de ce tour à la place de la
+ligne « Réponse interrompue » : « Le tuteur a atteint la limite de 12 actions
+pour cette réponse. » L’action « Continuer » envoie une relance courte par le
+chemin d’envoi habituel. Le texte `message` de l’événement n’est pas affiché ;
+un événement d’une autre conversation est ignoré, un événement tardif du même
+tour ne duplique pas l’avis.
+
+**Tour en cours côté interface.** Pendant une réponse, la connexion de l’agent
+(choix, connexion, déconnexion, enregistrement, identification), la connexion
+Tutor, les réglages du modèle et « Reconnecter » sont désactivés ; une note
+visible, reliée par `aria-describedby`, explique « Interrompez la réponse en
+cours pour modifier la connexion ou les réglages de l’agent. ». Si le refus
+natif survient malgré tout, il s’affiche traduit comme toute erreur.
+
+**Événements de session.** Les `session/update` ne portent qu’un identifiant de
+session. L’interface les rattache au tour actif : session MCP courante de sa
+conversation (`agentSessionId`, éventuellement `null` pour une conversation
+neuve), ou une seule session inconnue apprise pour ce tour (session privée ou
+nouvelle), après le début du prompt (`turn_phase` `waiting_model`). Les sessions
+d’autres conversations, et les sessions remplacées de la même conversation,
+sont refusées.
+
+## Fiabilité de la connexion au harness (backend natif)
+
+**Tour en cours.** Le verrou d’opération n’est tenu que pendant la préparation.
+Dès que le tour est enregistré (`Prompt`, état de tour explicite), il est
+relâché avant l’attente du modèle. Les opérations incompatibles (changer
+d’agent ou de connexion Tutor, enregistrer des réglages, choisir un modèle,
+commencer un autre tour) sont **refusées immédiatement** (« Interrompez la
+réponse en cours… ») plutôt que d’annuler le tour : un changement d’agent
+tuerait des outils qui peuvent être en train d’écrire la progression, et
+l’annulation reste un geste explicite (Stop). `agent_configuration` répond sans
+attendre avec la configuration déjà appliquée ; `select_conversation` ne change
+que la conversation affichée et n’attend ni n’interrompt le tour, lié à sa
+propre conversation et à sa session.
+
+**Budget d’un tour.** Claude reçoit `maxTurns` = 12. Codex n’a pas d’option
+équivalente : au-delà de 12 appels d’outil distincts (`tool_call` par
+`toolCallId`), Tutor envoie `session/cancel` (relance du processus après 15 s
+sans confirmation). Le tour se termine avec `stopReason: "max_turn_requests"`
+et `turnLimit: 12`, la réponse est « interrompue », et l’événement
+`acp:event {type:"turn_limit", conversationId, stopReason, limit, enforcedBy:
+"client"|"agent", message}` donne un message lisible (aussi émis quand Claude
+atteint `maxTurns`).
+
+**Deux sessions par conversation.** `agentSessionId` est la session avec le
+serveur MCP Tutor ; une seconde session sans serveur MCP, tenue par le
+processus, exécute les tours à sortie privée (activité, évaluation, reprise
+native). L’alternance ne recharge plus aucune session (`session/load`
+recréait le processus Claude et son cache de prompt). Une session qui a manqué
+des tours de l’autre reçoit l’historique récent avec son prompt suivant (état
+persistant, interne, non exposé à l’interface). Une seule session privée reste
+ouverte par processus ; les sessions remplacées sont fermées par
+`session/close` lorsque l’adaptateur l’annonce. Les événements d’un tour privé
+portent l’identifiant de la session privée, différent de `agentSessionId`.
+
+**Relais MCP local.** Pour un harness natif (hors agent local et WSL), l’adaptateur
+reçoit `http://127.0.0.1:<port>/mcp/<route>` et un bearer local aléatoire,
+stables pour le processus Tutor ; le relais n’écoute que sur la boucle locale,
+refuse un `Origin` de navigateur, un `Host` non local ou un bearer inconnu, et
+relaie vers la ressource Tutor avec le jeton institutionnel courant : méthode,
+en-têtes MCP (`Mcp-Session-Id`, `Mcp-Protocol-Version`, `Last-Event-ID`),
+codes d’erreur et corps morceau par morceau (SSE en direct). Un 401 amont
+renouvelle le jeton puis rejoue une seule fois la requête. Le renouvellement du
+jeton ne change donc plus l’empreinte de la session. `NO_PROXY` inclut
+`127.0.0.1,localhost` pour le harness. Vérifié : l’adaptateur Claude
+annonce `mcpCapabilities.http` et transmet `headers`
+(`claude-agent-acp/dist/acp-agent.js` l. 1401-1404 et 8505-8516), Codex
+aussi (`codex-acp/dist/index.js` l. 35527-35530 et 42462-42465). Un harness WSL
+garde la configuration directe (sa boucle locale n’est pas celle de Windows) ;
+l’agent local aussi : il rafraîchit par `_tutor/rebind` sans recréer de
+processus (`client/local-agent/src/mcp.rs`, `mcp_session.rs`).
+
+**Réglages Claude hérités.** `settingSources: ["user"]` appliquait aussi les
+plugins (`enabledPlugins`) et les règles `permissions.allow` de l’utilisateur.
+Le SDK 0.3.309 n’offre aucune option pour les neutraliser une à une (les
+tableaux d’autorisations s’unissent entre sources), mais `settingSources: []`
+n’en charge aucune (`sdk.d.ts` l. 2305-2315) et le niveau `--settings`
+(`options.settings`) porte `apiKeyHelper` : la CLI le lit dans les réglages
+fusionnés sans exiger la confiance du dossier, réservée aux fichiers projet et
+local (`Cg()`/`Ow()` dans la CLI embarquée). Pour un harness natif, Tutor lit
+donc au lancement `~/.claude/settings.json` (ou `CLAUDE_CONFIG_DIR`) et ne
+transmet que `apiKeyHelper`, `awsAuthRefresh`, `awsCredentialExport`,
+`gcpAuthRefresh`, `proxyAuthHelper`, `forceLoginMethod`, `forceLoginOrgUUID`,
+`model`, `modelOverrides` et les variables `env` de fournisseur, de proxy et de
+certificat (`ANTHROPIC_*`, `AWS_*`, `CLAUDE_CODE_USE_*`, `GOOGLE_*`…), avec
+`settingSources: []`. `model` reste nécessaire : l’adaptateur choisit le
+modèle initial avec ses propres réglages en supposant que la CLI voit le même
+(`session-model.js` l. 390-450). Limites : un fichier illisible ou invalide, et
+un harness WSL, conservent `settingSources: ["user"]` ; une modification de ce
+fichier s’applique au lancement suivant ; le gestionnaire de réglages de
+l’adaptateur lit toujours toutes les sources pour `permissions.defaultMode` et
+les listes de modèles (`settings.js`, `acp-agent.js` l. 8500-8568), ce que
+Tutor ne peut pas désactiver (`permissionMode` est réservé à l’adaptateur).
+
+**`disableAllHooks` et hooks de l’adaptateur.** Les hooks de l’adaptateur
+(PostToolUse, PostModelSwitch, PostCompact, TaskCreated…) sont des callbacks
+SDK passés dans `options.hooks` (`acp-agent.js` l. 8732-8860), pas des
+réglages. Le SDK les déclare à la CLI à l’initialisation ; la CLI les enregistre
+avec `origin: "sdkHost"` dans `registeredHooks`. Sa collecte des hooks (`dz`)
+ne filtre parmi eux que les hooks de plugin (`pluginRoot`) et d’appareil
+(`deviceOwner`), y compris sous un `disableAllHooks` de politique, et un
+`disableAllHooks` de niveau `--settings` agit seulement via
+`allowManagedHooksOnly` sur les hooks de fichiers de réglages et de plugins ;
+la CLI journalise d’ailleurs « SDK callback hooks still run ». Aucune
+correction n’est nécessaire.
+
 ## Lecture et interactions
 
-- Navigation de 42 pixels minimum, boutons usuels de 40 pixels, champs de
-  42 pixels, marges de page proportionnelles et largeur de lecture limitée.
+- Hauteurs issues des jetons de la charte : boutons de 32 pixels
+  (`--control-md`, 40 pour les actions principales), champs de 34 pixels
+  (`--input-h`) ; un bouton posé à côté d’un champ en prend la hauteur. Marges
+  de page proportionnelles et largeur de lecture limitée.
 - Titres, paragraphes, listes, citations et tableaux ont une hiérarchie distincte.
   Le code revient à la ligne, affiche son langage et se copie sans modification.
   Les tableaux larges se présentent verticalement quand la place manque.
@@ -146,6 +274,17 @@ bandeau global garde un seul message, traduit une seule fois, et se ferme.
   relâchement, au clavier ou à la sortie du champ. La confirmation de sauvegarde
   ne déplace pas le formulaire.
 
+**Lecture et échec de lecture.** Les panneaux qui interrogent le serveur
+(Formations de la barre latérale, Planning, Membres, politique de l’institution,
+demandes d’effacement, panneau de formation) affichent le même indicateur
+(`LoadingState` : texte et indicateur, ou squelette dans la barre latérale) puis,
+en cas d’échec, la cause et « Réessayer » (`LoadError`).
+
+**Styles.** Toutes les valeurs viennent des jetons de `src/styles.css` (:root) ;
+aucun style en ligne. La taille et l’interligne de lecture passent par
+`data-reading-size` et `data-reading-line-height`, la jauge de maîtrise par un
+SVG dont seules la largeur et la position du seuil sont des attributs.
+
 ## Vérification
 
 Les tests frontend couvrent la configuration guidée (verrou, reprise, adresse
@@ -155,7 +294,10 @@ réponse d’exercice depuis le composeur, les états de reconnexion (attente,
 réactivé (temps simulé), l’échec rattaché au tour, le modèle automatique, la
 saisie Tutor préservée pendant l’édition, ainsi que le parcours complet Tutor → agent → autorisations
 sans changer d’onglet, la sauvegarde de l’identité sur place, les exceptions
-persistantes, les suggestions, la copie fidèle et les commandes de fenêtre.
+persistantes, les suggestions, la copie fidèle et les commandes de fenêtre,
+les états de lecture et « Réessayer » (`tests/frontend/UiStates.test.tsx`), les
+formulaires d’identité (soumission, identifiants d’aide uniques, copie
+désactivée pendant une opération) et les onglets contrôlés des paramètres.
 
 Le contrôle CI `Client (Windows)` installe l’exécutable NSIS dans un compte de
 qualification isolé. `test-window-chrome.ps1`, appelé par la recette UI Automation,

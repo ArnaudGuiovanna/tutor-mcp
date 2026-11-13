@@ -57,7 +57,9 @@ type OrchestratorInput struct {
 	// current clock to the session start.
 	SessionStart time.Time
 	// DecisionScope, when set, lets the cadences count the decisions already
-	// served to this learner, not only the interactions the host recorded.
+	// served to this learner, not only the interactions the host recorded. It
+	// also scopes the read of the placement observations (the legacy scope of
+	// LearnerID otherwise).
 	DecisionScope models.TenantScope
 	// ReviewOnly biases the pipeline toward previously studied material
 	// while preserving Gate and ActionSelector constraints.
@@ -86,6 +88,27 @@ type OrchestratorInput struct {
 // retry is structural, not tunable.
 const orchestratorMaxRetries = 1
 
+// OrchestratorStore is the persistence surface of one orchestration: the
+// domain and its phase compare-and-swap, concept states, interactions,
+// misconceptions, served decisions, the evidence snapshot and the qualified
+// diagnostic observations replayed by placement.
+type OrchestratorStore interface {
+	storeport.DomainStore
+	storeport.ConceptStateStore
+	storeport.InteractionStore
+	storeport.MisconceptionStore
+	storeport.QualifiedDiagnosticObservationReader
+	EvidenceStore
+}
+
+// actionSelectionStore is what the pipeline reads after the fixtures are
+// loaded: the first active misconception and the action history of the
+// selected concept.
+type actionSelectionStore interface {
+	storeport.MisconceptionStore
+	storeport.InteractionStore
+}
+
 // Orchestrate runs the full regulation pipeline for one
 // get_next_activity call. Returns a models.Activity ready for the
 // LLM-side post-processing (tutor_mode, calibration_bias,
@@ -93,7 +116,7 @@ const orchestratorMaxRetries = 1
 //
 // Thin wrapper around OrchestrateWithPhase for callers that don't
 // need the post-orchestrate phase (e.g. learning_negotiation).
-func Orchestrate(ctx context.Context, store storeport.Store, input OrchestratorInput) (models.Activity, error) {
+func Orchestrate(ctx context.Context, store OrchestratorStore, input OrchestratorInput) (models.Activity, error) {
 	activity, _, err := OrchestrateWithPhase(ctx, store, input)
 	return activity, err
 }
@@ -107,7 +130,7 @@ func Orchestrate(ctx context.Context, store storeport.Store, input OrchestratorI
 // returns the projected phase without changing storage.
 //
 // On error, the returned phase is the empty string ("").
-func OrchestrateWithPhase(ctx context.Context, store storeport.Store, input OrchestratorInput) (models.Activity, models.Phase, error) {
+func OrchestrateWithPhase(ctx context.Context, store OrchestratorStore, input OrchestratorInput) (models.Activity, models.Phase, error) {
 	logger := input.logger()
 	domain, err := store.GetLearnerDomainByID(ctx, input.LearnerID, input.DomainID)
 	if err != nil {
@@ -149,7 +172,7 @@ func OrchestrateWithPhase(ctx context.Context, store storeport.Store, input Orch
 	if input.ReviewOnly {
 		currentPhase = models.PhaseMaintenance
 	} else {
-		obs := buildObservables(domain, pf, input.Config, input.Now)
+		obs := buildObservables(domain, pf, input.Config)
 		eval := EvaluatePhase(currentPhase, obs, input.Config)
 		fsmTransitioned = eval.Transitioned
 		if fsmTransitioned {
@@ -223,6 +246,16 @@ func OrchestrateWithPhase(ctx context.Context, store storeport.Store, input Orch
 	}, currentPhase, nil
 }
 
+// placementScope is the tenant scope used to read the qualified diagnostic
+// observations: DecisionScope when set, otherwise the legacy single-tenant
+// scope of LearnerID (embedders without an authenticated principal).
+func (input OrchestratorInput) placementScope() models.TenantScope {
+	if input.DecisionScope.LearnerID != "" {
+		return input.DecisionScope
+	}
+	return models.LegacyPrincipal(input.LearnerID).TenantScope()
+}
+
 func (input OrchestratorInput) logger() *slog.Logger {
 	if input.Logger != nil {
 		return input.Logger
@@ -247,8 +280,9 @@ type pipelineFixtures struct {
 	RecentConcepts     []string
 	RecentInteractions []*models.Interaction
 	Alerts             []models.Alert
-	DiagnosticItems    int             // count since phase_changed_at
-	DiagnosedConcepts  map[string]bool // qualified diagnostic coverage since phase_changed_at
+	// Placement is the adaptive placement replayed from the qualified
+	// diagnostic observations since phase_changed_at.
+	Placement Placement
 	// Evidence is the domain evidence snapshot shared with alerting.
 	Evidence *EvidenceSnapshot
 	// VerifiedConcepts holds concepts with a passed evaluated assessment
@@ -259,7 +293,7 @@ type pipelineFixtures struct {
 	RecentDecisions []*models.PedagogicalDecision
 }
 
-func fetchPipelineFixtures(ctx context.Context, store storeport.Store, domain *models.Domain, input OrchestratorInput) (*pipelineFixtures, error) {
+func fetchPipelineFixtures(ctx context.Context, store OrchestratorStore, domain *models.Domain, input OrchestratorInput) (*pipelineFixtures, error) {
 	states, err := store.GetConceptStatesByDomain(ctx, input.LearnerID, domain.ID)
 	if err != nil {
 		return nil, fmt.Errorf("get states: %w", err)
@@ -293,28 +327,17 @@ func fetchPipelineFixtures(ctx context.Context, store storeport.Store, domain *m
 		return nil, fmt.Errorf("get recent concepts: %w", err)
 	}
 
-	// Diagnostic items count since phase_changed_at — only meaningful
-	// when current phase is DIAGNOSTIC, but cheap enough to always
-	// fetch.
-	var diagItems int
-	diagnosed := map[string]bool{}
-	if !domain.PhaseChangedAt.IsZero() {
-		qualifiedConcepts, queryErr := store.GetQualifiedDiagnosticConceptsSinceInDomain(ctx, input.LearnerID, domain.ID, domain.PhaseChangedAt)
-		err = queryErr
-		if err != nil {
-			return nil, fmt.Errorf("get qualified diagnostic concept coverage: %w", err)
-		}
-		for _, concept := range qualifiedConcepts {
-			if domainConcepts[concept] {
-				diagItems++
-				diagnosed[concept] = true
-			}
-		}
+	// Qualified diagnostic observations since phase_changed_at: evaluated,
+	// attempt-linked, hint-free DIAGNOSTIC_ASSESSMENT responses. Only
+	// meaningful in DIAGNOSTIC, but cheap enough to always fetch.
+	observations, err := LoadPlacementObservations(ctx, store, input.placementScope(), domain.ID, domain.PhaseChangedAt)
+	if err != nil {
+		return nil, fmt.Errorf("get qualified diagnostic observations: %w", err)
 	}
+	placement := ReplayPlacement(domain.Graph, stateMap, observations, input.Config.NDiagnosticMax)
 
 	// Alerts: re-derive from current state + recent interactions.
-	// Match what the existing get_next_activity flow does.
-	recentInteractions, err := store.GetRecentInteractionsByDomain(ctx, input.LearnerID, domain.ID, 50)
+	recentInteractions, err := store.GetRecentInteractionsByDomain(ctx, input.LearnerID, domain.ID, recentInteractionWindow)
 	if err != nil {
 		return nil, fmt.Errorf("get recent interactions: %w", err)
 	}
@@ -360,8 +383,7 @@ func fetchPipelineFixtures(ctx context.Context, store storeport.Store, domain *m
 		RecentConcepts:     recent,
 		RecentInteractions: domainInteractions,
 		Alerts:             alerts,
-		DiagnosticItems:    diagItems,
-		DiagnosedConcepts:  diagnosed,
+		Placement:          placement,
 		Evidence:           evidenceSnapshot,
 		VerifiedConcepts:   verified,
 		RecentDecisions:    recentDecisions,
@@ -389,7 +411,7 @@ func verifiedConcepts(learnerID string, concepts []string, states map[string]*mo
 	return verified
 }
 
-func buildObservables(domain *models.Domain, pf *pipelineFixtures, cfg PhaseConfig, now time.Time) PhaseObservables {
+func buildObservables(domain *models.Domain, pf *pipelineFixtures, cfg PhaseConfig) PhaseObservables {
 	meanH := MeanBinaryEntropyOverGraph(domain.Graph, pf.StatesByConcept)
 
 	bkt := algorithms.MasteryBKT()
@@ -397,7 +419,6 @@ func buildObservables(domain *models.Domain, pf *pipelineFixtures, cfg PhaseConf
 	estimated := 0
 	belowExit := 0
 	totalGoalRelevant := 0
-	belowRetention := false
 
 	for _, c := range domain.Graph.Concepts {
 		rel, hasRel := pf.GoalRelevance[c]
@@ -419,7 +440,7 @@ func buildObservables(domain *models.Domain, pf *pipelineFixtures, cfg PhaseConf
 		cs := pf.StatesByConcept[c]
 		if cs == nil {
 			// No state ≡ never practised ≡ not estimated, below the exit
-			// floor, and not "below retention" (nothing to forget).
+			// floor.
 			belowExit++
 			continue
 		}
@@ -430,23 +451,16 @@ func buildObservables(domain *models.Domain, pf *pipelineFixtures, cfg PhaseConf
 		if cs.PMastery < exit {
 			belowExit++
 		}
-		if RecallEligible(cs) {
-			retention := algorithms.CurrentRetrievability(now, cs.LastReview, cs.Stability)
-			if retention < cfg.RetentionRecallThreshold {
-				belowRetention = true
-			}
-		}
 	}
 
 	return PhaseObservables{
-		MeanEntropy:                meanH,
-		PhaseEntryEntropy:          domain.PhaseEntryEntropy,
-		DiagnosticItemsCount:       pf.DiagnosticItems,
-		DiagnosticCoverageTarget:   min(len(domain.Graph.Concepts), cfg.NDiagnosticMax),
-		EstimatedGoalRelevant:      estimated,
-		TotalGoalRelevant:          totalGoalRelevant,
-		BelowExitGoalRelevant:      belowExit,
-		GoalRelevantBelowRetention: belowRetention,
+		MeanEntropy:           meanH,
+		PhaseEntryEntropy:     domain.PhaseEntryEntropy,
+		DiagnosticItemsCount:  pf.Placement.Items,
+		PlacementUnclassified: len(pf.Placement.Unclassified()),
+		EstimatedGoalRelevant: estimated,
+		TotalGoalRelevant:     totalGoalRelevant,
+		BelowExitGoalRelevant: belowExit,
 	}
 }
 
@@ -477,7 +491,7 @@ func noFringeFallbackPhase(current models.Phase) models.Phase {
 // the one-shot phase retry).
 func runPipeline(
 	ctx context.Context,
-	store storeport.Store,
+	store actionSelectionStore,
 	domain *models.Domain,
 	pf *pipelineFixtures,
 	phase models.Phase,
@@ -502,13 +516,18 @@ func runPipeline(
 	if gateResult.EscapeAction != nil {
 		return composeEscapeActivity(*gateResult.EscapeAction), pipelineSignal{}, nil
 	}
+	// Every routed action passes through the failure-streak relief: a concept
+	// with a ZPD_DRIFT alert gets an easier generated task.
+	compose := func(action Action, selection Selection) models.Activity {
+		return composeActivity(easeDifficultyAfterFailureStreak(action, pf.Alerts, selection.Concept), selection, phase)
+	}
 	if !input.ReviewOnly && phase != models.PhaseDiagnostic {
 		if selection, ok := criticalForgettingBypassSelection(pf.Alerts, phase); ok {
 			action, err := selectActionForSelection(ctx, store, pf, selection, phase, input)
 			if err != nil {
 				return models.Activity{}, pipelineSignal{}, err
 			}
-			return composeActivity(action, selection, phase), pipelineSignal{}, nil
+			return compose(action, selection), pipelineSignal{}, nil
 		}
 	}
 	recallSelection, recallDue := Selection{}, false
@@ -520,19 +539,19 @@ func runPipeline(
 		if err != nil {
 			return models.Activity{}, pipelineSignal{}, err
 		}
-		return composeActivity(recallActionFor(action), recallSelection, phase), pipelineSignal{}, nil
+		return compose(recallActionFor(action), recallSelection), pipelineSignal{}, nil
 	}
 	if recallDue && recallQuotaAllows(pf.RecentInteractions, phase) {
 		return routeRecall()
 	}
 	if !input.ReviewOnly && phase != models.PhaseDiagnostic {
 		if selection, ok := masteryChallengeSelection(domain, pf, phase, input); ok {
-			return composeActivity(masteryChallengeAction(), selection, phase), pipelineSignal{}, nil
+			return compose(masteryChallengeAction(), selection), pipelineSignal{}, nil
 		}
 	}
 	if !input.ReviewOnly && phase == models.PhaseMaintenance && !recallDue {
 		if action, selection, ok := demonstratedMaintenanceSelection(domain, pf, phase, input); ok {
-			return composeActivity(action, selection, phase), pipelineSignal{}, nil
+			return compose(action, selection), pipelineSignal{}, nil
 		}
 	}
 	if gateResult.NoCandidate {
@@ -559,7 +578,7 @@ func runPipeline(
 	} else {
 		selection, err = SelectConceptAtWithContext(phase, pf.StatesList, filteredGraph, pf.GoalRelevance, input.Now, SelectionContext{
 			MaintenanceMasteryFloor: input.Config.EffectiveMasteryExitThreshold(),
-			DiagnosedConcepts:       pf.DiagnosedConcepts,
+			Placement:               &pf.Placement,
 			VerifiedConcepts:        pf.VerifiedConcepts,
 			DomainGraph:             &domain.Graph,
 		})
@@ -605,7 +624,7 @@ func runPipeline(
 		}
 	}
 
-	return composeActivity(action, selection, phase), pipelineSignal{}, nil
+	return compose(action, selection), pipelineSignal{}, nil
 }
 
 // RecallInterleaveInstructionActivities is the number of non-recall
@@ -716,6 +735,10 @@ func recallActionFor(action Action) Action {
 		Rationale:        "spaced retrieval of a due card",
 	}
 }
+
+// recentInteractionWindow bounds the recent domain interactions used by
+// alerts, recall quotas and cadences.
+const recentInteractionWindow = 50
 
 // recentServedWindow bounds the decision history read for cadence and
 // rotation.
@@ -975,7 +998,7 @@ func criticalForgettingBypassSelection(alerts []models.Alert, phase models.Phase
 
 func selectActionForSelection(
 	ctx context.Context,
-	store storeport.Store,
+	store actionSelectionStore,
 	pf *pipelineFixtures,
 	selection Selection,
 	phase models.Phase,

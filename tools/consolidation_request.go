@@ -37,7 +37,7 @@ func maintenanceToolError(deps *Deps, err error) (*mcp.CallToolResult, any, erro
 // Claim has intrinsic durable idempotency. Do not put it behind a generic
 // response replay cache: replay must revalidate the current lease and versions.
 func registerClaimMemoryMaintenance(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{Name: "claim_memory_maintenance", Description: "Background-only learner memory maintenance. Never call before answering the learner or generating an activity. Claims at most one bounded batch (8 sessions,16 concepts,128 KiB) for 5 minutes. Return to the learner immediately when they send a message; an interrupted batch is resumable. Summarize using the existing host model, then call commit_memory_maintenance once with every snapshot update. idle/busy/expired means no usable batch; poll later with a new idempotency_key."}, func(ctx context.Context, _ *mcp.CallToolRequest, params ClaimMemoryMaintenanceParams) (*mcp.CallToolResult, any, error) {
+	addTool(server, deps, &mcp.Tool{Name: "claim_memory_maintenance", Description: "Background-only learner memory maintenance. Never call before answering the learner or generating an activity. Claims at most one bounded batch (8 sessions,16 concepts,128 KiB) for 5 minutes. Return to the learner immediately when they send a message; an interrupted batch is resumable. Summarize using the existing host model, then call commit_memory_maintenance once with every snapshot update. idle/busy/expired means no usable batch; poll later with a new idempotency_key."}, func(ctx context.Context, _ *mcp.CallToolRequest, params ClaimMemoryMaintenanceParams) (*mcp.CallToolResult, any, error) {
 		learner, err := getLearnerID(ctx)
 		if err != nil {
 			r, _ := errorResult(err.Error())
@@ -68,7 +68,7 @@ func registerClaimMemoryMaintenance(server *mcp.Server, deps *Deps) {
 }
 
 func registerCommitMemoryMaintenance(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{Name: "commit_memory_maintenance", Description: "Atomically commit a claimed background memory batch. Send the cumulative archive_summary and exactly all supplied memory/pending/concept snapshots with their final contents. Preserve stable sections; arbitrate pending observations; do not infer mastery or score learner answers. Partial batches keep the archive summary encrypted and unpublished. Only the last complete batch publishes the archive and closes the job. Missing updates, stale sources, changed memory or expired/replaced leases fail without partial writes."}, func(ctx context.Context, _ *mcp.CallToolRequest, params CommitMemoryMaintenanceParams) (*mcp.CallToolResult, any, error) {
+	addTool(server, deps, &mcp.Tool{Name: "commit_memory_maintenance", Description: "Atomically commit a claimed background memory batch. Send the cumulative archive_summary and exactly all supplied memory/pending/concept snapshots with their final contents. Preserve stable sections; arbitrate pending observations; do not infer mastery or score learner answers. Partial batches keep the archive summary encrypted and unpublished. Only the last complete batch publishes the archive and closes the job. Missing updates, stale sources, changed memory or expired/replaced leases fail without partial writes."}, func(ctx context.Context, _ *mcp.CallToolRequest, params CommitMemoryMaintenanceParams) (*mcp.CallToolResult, any, error) {
 		learner, err := getLearnerID(ctx)
 		if err != nil {
 			r, _ := errorResult(err.Error())

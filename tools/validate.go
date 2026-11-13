@@ -15,7 +15,7 @@ import (
 // It is the shared write-side guard for record_interaction and any other tool
 // that mutates a learner's cognitive state on a per-concept basis. The error
 // string names the unknown concept and the active domain so the LLM can
-// self-correct (call get_learner_context to refresh the concept list).
+// self-correct (read the concept list with get_curriculum_snapshot).
 func validateConceptInDomain(d *models.Domain, concept string) error {
 	if d == nil {
 		return fmt.Errorf("no active domain - call init_domain first")
@@ -26,28 +26,17 @@ func validateConceptInDomain(d *models.Domain, concept string) error {
 		}
 	}
 	return fmt.Errorf(
-		"concept %q is not part of domain %q (call get_learner_context to see the concept list)",
+		"concept %q is not part of domain %q (call get_curriculum_snapshot to see the concept list)",
 		concept, d.Name,
 	)
 }
 
-// normalizeConceptParam canonicalizes concept-targeting tool params.
-// `concept` is the public key; `concept_id` is kept as a temporary
-// compatibility alias for older callers (issue #86).
-func normalizeConceptParam(concept, legacyConceptID string) (string, error) {
+// normalizeConceptParam bounds the `concept` key of concept-targeting tools.
+func normalizeConceptParam(concept string) (string, error) {
 	if err := validateString("concept", concept, maxShortLabelLen); err != nil {
 		return "", err
 	}
-	if err := validateString("concept_id", legacyConceptID, maxShortLabelLen); err != nil {
-		return "", err
-	}
-	if concept != "" && legacyConceptID != "" && concept != legacyConceptID {
-		return "", fmt.Errorf("concept and concept_id must match when both are provided")
-	}
-	if concept != "" {
-		return concept, nil
-	}
-	return legacyConceptID, nil
+	return concept, nil
 }
 
 // validateUnitInterval rejects NaN/Inf and any value outside [0, 1].
@@ -172,8 +161,7 @@ var allowedActivityTypes = []string{
 
 // allowedErrorTypes is the vocabulary record_interaction accepts for
 // error_type. Mastery updates use the fixed declared BKT parameters and do not
-// branch on it (algorithms.BKTUpdateHeuristicSlipByErrorType has no production
-// caller). The label is stored for audit, aggregated by alert.go's
+// branch on it. The label is stored for audit, aggregated by alert.go's
 // errorTypeCounts, and nudges the independent individual parameter estimate
 // (algorithms.BKTObserveIndividualized via estimateIndependentBKTParameters).
 // Arbitrary labels would add audit noise and split those aggregates.

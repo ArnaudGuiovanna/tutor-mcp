@@ -100,11 +100,6 @@ type transferDimensionBucket struct {
 	latestAt     time.Time
 }
 
-// TransferDimensions returns the stable canonical order used in JSON summaries.
-func TransferDimensions() []TransferDimension {
-	return append([]TransferDimension(nil), canonicalTransferDimensions...)
-}
-
 // NormalizeTransferDimension maps stored transfer context labels to the stable
 // transfer dimensions used by the profile. Legacy tool labels are normalized so
 // existing transfer_records can be summarized without a DB migration.
@@ -235,15 +230,6 @@ func BuildTransferProfile(concept string, scores []*models.TransferRecord) Trans
 	)
 
 	return profile
-}
-
-// BuildTrustedTransferProfile is reserved for records already filtered through
-// trusted evaluated assessment attempts by the persistence boundary, including
-// both successes and failures. The default builder deliberately labels
-// ordinary/legacy records as unverified so a routing summary cannot be mistaken
-// for a transferred-mastery claim.
-func BuildTrustedTransferProfile(concept string, scores []*models.TransferRecord) TransferProfile {
-	return BuildTrustedTransferProfileAt(concept, scores, time.Time{})
 }
 
 // BuildTrustedTransferProfileAt adds temporal failure semantics to the

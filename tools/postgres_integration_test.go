@@ -41,7 +41,7 @@ func TestPostgresMCPProgressionPath(t *testing.T) {
 	}
 
 	for index := 0; index < 6; index++ {
-		next := callTool(t, deps, registerGetNextActivity, learner.ID, "get_next_activity", map[string]any{})
+		next := callNextActivity(t, deps, learner.ID, map[string]any{})
 		if next.IsError {
 			t.Fatalf("get_next_activity %d failed: %s", index, resultText(next))
 		}

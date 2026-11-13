@@ -12,7 +12,7 @@ import (
 )
 
 func curriculumRevisionArgs(domainID string, version int, operation string, ids []string) map[string]any {
-	return map[string]any{"domain_id": domainID, "expected_version": version, "operation": operation,
+	return map[string]any{"domain_id": domainID, "expected_revision": version, "operation": operation,
 		"source_concept_ids": ids, "provenance": map[string]any{"source_type": "test", "rationale": "Clarify the curriculum contract"}}
 }
 

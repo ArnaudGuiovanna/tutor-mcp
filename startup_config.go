@@ -17,6 +17,7 @@ import (
 
 	"tutor-mcp/auth"
 	"tutor-mcp/db"
+	"tutor-mcp/engine"
 )
 
 const (
@@ -36,6 +37,7 @@ type startupConfig struct {
 	ProcessRole              string
 	DBDriver                 string
 	DBPath                   string
+	Port                     string
 	BaseURL                  string
 	SchedulerMode            string
 	RateLimitBackend         string
@@ -66,10 +68,15 @@ type startupConfig struct {
 	// MaxActiveDomainsPerLearner is the per-learner active-domain quota
 	// applied at creation (LEARNER_MAX_ACTIVE_DOMAINS, default 200).
 	MaxActiveDomainsPerLearner int
+	// ConsolidationDeliveryTimeout is how long a delivered consolidation may
+	// stay unanswered before the scheduler requeues it
+	// (TUTOR_MCP_CONSOLIDATION_DELIVERY_TIMEOUT_MINUTES, default 30).
+	ConsolidationDeliveryTimeout time.Duration
 }
 
 func loadStartupConfig(port string) (startupConfig, error) {
 	cfg := startupConfig{
+		Port:              port,
 		DeploymentProfile: normalizedEnv("DEPLOYMENT_PROFILE", "development"),
 		ProcessRole:       normalizedEnv("PROCESS_ROLE", "all"),
 		DBDriver:          normalizedEnv("DB_DRIVER", "sqlite"),
@@ -119,6 +126,11 @@ func loadStartupConfig(port string) (startupConfig, error) {
 		return startupConfig{}, err
 	}
 	cfg.MaxActiveDomainsPerLearner = maxActiveDomains
+	consolidationTimeout, err := consolidationDeliveryTimeoutFromEnv()
+	if err != nil {
+		return startupConfig{}, err
+	}
+	cfg.ConsolidationDeliveryTimeout = consolidationTimeout
 	var dcrMode string
 	var dcrTokenHash [sha256.Size]byte
 	if cfg.ProcessRole == "api" || cfg.ProcessRole == "all" {
@@ -423,6 +435,23 @@ func int64EnvInRange(name string, fallback, min, max int64) (int64, error) {
 		return 0, fmt.Errorf("%s must be between %d and %d", name, min, max)
 	}
 	return value, nil
+}
+
+// maxConsolidationDeliveryTimeoutMinutes bounds the requeue delay to one week.
+const maxConsolidationDeliveryTimeoutMinutes = 7 * 24 * 60
+
+// consolidationDeliveryTimeoutFromEnv parses
+// TUTOR_MCP_CONSOLIDATION_DELIVERY_TIMEOUT_MINUTES once at startup: unset
+// selects engine.DefaultConsolidationDeliveryTimeout, any other value must be
+// a whole number of minutes between 1 and one week. Local stdio mode reads it
+// with the same rule.
+func consolidationDeliveryTimeoutFromEnv() (time.Duration, error) {
+	minutes, err := intEnvInRange("TUTOR_MCP_CONSOLIDATION_DELIVERY_TIMEOUT_MINUTES",
+		int(engine.DefaultConsolidationDeliveryTimeout/time.Minute), 1, maxConsolidationDeliveryTimeoutMinutes)
+	if err != nil {
+		return 0, err
+	}
+	return time.Duration(minutes) * time.Minute, nil
 }
 
 func intEnvInRange(name string, fallback, min, max int) (int, error) {

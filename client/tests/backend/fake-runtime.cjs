@@ -52,7 +52,7 @@ readline.createInterface({input:process.stdin}).on('line', async (line) => {
   } else if (request.method === 'tools/list') {
     if(fs.existsSync('fixture-pedagogy.json')) {
       const fixture=JSON.parse(fs.readFileSync('fixture-pedagogy.json','utf8'));
-      const tools=['prepare_pedagogical_turn','get_conversation_context','select_conversation_training','get_next_activity',
+      const tools=['prepare_pedagogical_turn','get_conversation_context','select_conversation_training',
         'prepare_assessment_attempt','submit_assessment_attempt','record_interaction','record_learning_event',
         'claim_memory_maintenance','commit_memory_maintenance'].map(name=>{
         const inputSchema={type:'object'};
@@ -65,7 +65,7 @@ readline.createInterface({input:process.stdin}).on('line', async (line) => {
       });
       return result(request,{tools});
     }
-    result(request,{tools:[{name:'get_next_activity',description:'Fixture next activity',inputSchema:{type:'object'}}]});
+    result(request,{tools:[{name:'get_learner_state',description:'Fixture learner state',inputSchema:{type:'object'}}]});
   } else if (request.method === 'tools/call') {
     if(fs.existsSync('fixture-pedagogy.json')) {
       const fixture=JSON.parse(fs.readFileSync('fixture-pedagogy.json','utf8'));
@@ -93,7 +93,7 @@ readline.createInterface({input:process.stdin}).on('line', async (line) => {
     if(params.name==='get_conversation_context') {
       while(fs.existsSync(path.join(process.cwd(),'fixture-hold-context-refresh'))) await new Promise(resolve=>setTimeout(resolve,5));
     }
-    const value = params.name === 'get_learner_context' ? {learner_id:'learner-1',learner:{id:'learner-1'},domains:[{domain_id:'domain-1',name:'Astronomie',concept_count:1}]} : {items:[]};
+    const value = params.name === 'get_learner_state' ? {learner_id:'learner-1',learner:{id:'learner-1'},domains:[{domain_id:'domain-1',name:'Astronomie',concept_count:1}]} : {items:[]};
     result(request,{content:[{type:'text',text:JSON.stringify(value)}],structuredContent:value});
   } else if (request.method === 'session/new') {
     const sessionId = `session-${Object.keys(sessions).length + 1}`;
@@ -162,7 +162,7 @@ readline.createInterface({input:process.stdin}).on('line', async (line) => {
     } else if (text.endsWith('EXPERIENCE_HTTP')) {
       const server=sessions[params.sessionId].mcpServers[0];
       const url=new URL(server.url);
-      const payload=JSON.stringify({jsonrpc:'2.0',id:'experience-http',method:'tools/call',params:{name:'get_next_activity',arguments:{}}});
+      const payload=JSON.stringify({jsonrpc:'2.0',id:'experience-http',method:'tools/call',params:{name:'get_learner_state',arguments:{}}});
       const headers=Object.fromEntries(server.headers.map(item=>[item.name,item.value]));
       Object.assign(headers,{'Content-Type':'application/json','Content-Length':Buffer.byteLength(payload)});
       const call=require(url.protocol==='https:'?'node:https':'node:http').request(url,{method:'POST',headers},response=>{
@@ -176,11 +176,11 @@ readline.createInterface({input:process.stdin}).on('line', async (line) => {
     } else if (experience) {
       const correlated=['CORRELATED','STALE','COMPLETED','QUESTION'].includes(experience);
       const toolCall={toolCallId:'experience-call',title:'This title is deliberately not an authorization identity'};
-      if (experience==='CLAUDE') toolCall._meta={claudeCode:{mcpServer:{name:'tutor'},toolName:'mcp__tutor__get_next_activity'}};
-      else if(!correlated) toolCall.rawInput={server:'tutor',tool:experience==='UNKNOWN'?'unknown_tool':'get_next_activity',arguments:{}};
+      if (experience==='CLAUDE') toolCall._meta={claudeCode:{mcpServer:{name:'tutor'},toolName:'mcp__tutor__get_learner_state'}};
+      else if(!correlated) toolCall.rawInput={server:'tutor',tool:experience==='UNKNOWN'?'unknown_tool':'get_learner_state',arguments:{}};
       if(correlated) {
         const sessionId=experience==='STALE'?'old-session':params.sessionId;
-        send({jsonrpc:'2.0',method:'session/update',params:{sessionId,update:{sessionUpdate:'tool_call',toolCallId:'experience-call',status:'pending',rawInput:{server:'tutor',tool:'get_next_activity',arguments:{}}}}});
+        send({jsonrpc:'2.0',method:'session/update',params:{sessionId,update:{sessionUpdate:'tool_call',toolCallId:'experience-call',status:'pending',rawInput:{server:'tutor',tool:'get_learner_state',arguments:{}}}}});
         if(experience==='COMPLETED') send({jsonrpc:'2.0',method:'session/update',params:{sessionId,update:{sessionUpdate:'tool_call_update',toolCallId:'experience-call',status:'completed'}}});
       }
       const options=[{optionId:'allow',name:'Allow once',kind:'allow_once'}];

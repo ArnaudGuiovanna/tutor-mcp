@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"tutor-mcp/internal/testsupport"
 	"tutor-mcp/memory"
 	"tutor-mcp/models"
 	storeport "tutor-mcp/store"
@@ -377,16 +378,8 @@ func TestSessionNarrativeIndexTenantIsolation(t *testing.T) {
 	s := narrativeTestStore(t)
 	a := models.LegacyPrincipal("L1").TenantScope()
 	seedIndexedSession(t, s, memory.NarrativeKey{LearnerID: "L1", Scope: memory.ScopeSession, Key: "2026-10-10T00-00-00Z"}, "shared-domain", "tenant A")
-	owner, _ := verifiedOwner(t, s, seedInstitutionOwner(t, s, "index-b", "owner@index-b.test"))
-	_, token, err := s.CreateTenantInvitation(t.Context(), owner, "learner@index-b.test", []string{models.RoleLearner}, time.Now().Add(time.Hour))
-	if err != nil {
-		t.Fatal(err)
-	}
-	membership, err := s.AcceptTenantInvitationWithNewUser(t.Context(), models.InvitationCredential{Token: token}, "hash")
-	if err != nil {
-		t.Fatal(err)
-	}
-	b := models.TenantScope{TenantID: membership.TenantID, UserID: membership.UserID, MembershipID: membership.ID, LearnerID: membership.LearnerID}
+	owner := seedInstitutionOwner(t, s, "index-b")
+	b := testsupport.Scope(testsupport.ProvisionMember(t, s, owner.TenantID, "Learner", models.RoleLearner))
 	if err := s.WithTenantTx(t.Context(), b, func(ctx context.Context, _ storeport.Store) error {
 		return s.EnsureRecoveryEnrollment(ctx, b.LearnerID)
 	}); err != nil {

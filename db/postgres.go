@@ -1689,6 +1689,12 @@ END $$;`,
 	{Version: "postgres_0074_conversation_training", Body: postgresTrainingMigration},
 	{Version: "postgres_0075_consolidation_maintenance", Body: consolidationMaintenanceMigration},
 	{Version: "postgres_0076_pedagogical_snapshot_interaction_index", Body: pedagogicalSnapshotInteractionIndexMigration},
+	{Version: "postgres_0077_close_open_learning_sessions", Body: postgresCloseOpenLearningSessionsMigration},
+	{Version: "postgres_0078_drop_dcr_replay_secret", Body: postgresDropDCRReplaySecretMigration},
+	{Version: "postgres_0079_drop_institution_console", Body: postgresDropInstitutionConsoleMigration},
+	{Version: "postgres_0080_cascade_oauth_client_approvals", Body: postgresCascadeOAuthClientApprovalsMigration},
+	{Version: "postgres_0081_drop_pending_signups", Body: dropPendingSignupsMigration},
+	{Version: "postgres_0082_drop_membership_mfa_and_invitations", Body: postgresDropMembershipMFAAndInvitationsMigration},
 }
 
 // OpenPostgres opens a PostgreSQL-backed *sql.DB via the pgx database/sql

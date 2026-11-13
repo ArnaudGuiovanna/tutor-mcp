@@ -80,9 +80,15 @@ type GlobalOLMSnapshot struct {
 	RecentEvents        []LearnerEvent  `json:"recent_events"`
 }
 
+// GlobalOLMStore adds the learner-wide activity statistics to OLMStore.
+type GlobalOLMStore interface {
+	OLMStore
+	storeport.ActivityStatsStore
+}
+
 // BuildGlobalOLMSnapshot aggregates across all non-archived domains for a
 // learner — powers get_olm_snapshot(scope:"global").
-func BuildGlobalOLMSnapshot(ctx context.Context, store storeport.Store, learnerID string) (*GlobalOLMSnapshot, error) {
+func BuildGlobalOLMSnapshot(ctx context.Context, store GlobalOLMStore, learnerID string) (*GlobalOLMSnapshot, error) {
 	g := &GlobalOLMSnapshot{}
 
 	domains, err := store.GetDomainsByLearner(ctx, learnerID, false /*includeArchived*/)

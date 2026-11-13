@@ -92,22 +92,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   locked; cloning and explicit version migration preserve source history and
   reconcile evidence. Published formations can be archived; unpublished drafts
   can be deleted. Enrollment policy and optional free domains are configurable.
-- Institution console at `/console` for owners, admins, pedagogy managers and
-  trainers, with a server-side session, TOTP enrollment (QR code) and ten
-  single-use recovery codes. Owners and admins list members, invite people by
-  email with their roles, change roles, suspend or remove members, and revoke
-  pending invitations. The last active owner cannot be removed.
-- Invitation acceptance at `/invite`: new invitees choose a password; existing
-  accounts accept with theirs. Invitation links are only emailed to the
-  invitee.
-- Password recovery for institution accounts resets the global account
-  password, including staff without a learner profile, and revokes their
-  sign-ins in every institution.
-- Self-service institution signup at `/signup` with `INSTITUTION_SIGNUP=open`
-  and `SIGNUP_PLAN`. The tenant and its owner are created only after email
-  confirmation.
-- `tutor-control-plane -action=invite-owner` prints the first owner's
-  invitation link for an operator-provisioned institution.
 - New settings: `OAUTH_CIMD_MODE` (`on`, `off` or a hostname allowlist for
   Client ID Metadata Documents, default `on`),
   `OAUTH_DCR_MAX_REGISTRATIONS_PER_IP_PER_DAY` (daily per-IP budget for
@@ -115,6 +99,106 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   learner, default 200). See `docs/configuration.md`.
 
 ### Changed
+
+- MCP surface refactor (71 to 57 tools in local mode; `tools/list` from
+  about 101 KB to about 89 KB). Breaking for MCP callers; the native HTTP
+  training API keeps its action names.
+  - `get_next_activity` merged into `prepare_pedagogical_turn(mode="activity")`,
+    which now also works without a conversation (`domain_id`, `domain_name` or
+    the last active domain) and no longer requires `idempotency_key` unless it
+    selects a training. The frozen decision moved from the turn's `activity`
+    field to `decision`; `decision_id` is read from
+    `decision.pedagogical_contract.decision_id`.
+  - `get_learner_context`, `get_dashboard_state` and `get_olm_snapshot` merged
+    into `get_learner_state(view=overview|progress|model|model_all_domains)`.
+    The progress view now carries every pending alert (including metacognitive
+    ones) with `has_critical`, and an `autonomy` object. The deprecated
+    `mastered_count` (per domain) and `total_mastered` aliases were removed;
+    read `demonstrated_count` and `total_demonstrated`. With `domain_id`, the
+    progress view rejects an archived domain or one that is not the
+    conversation's selected training; archived domains shown through
+    `include_archived` never produce pending alerts.
+  - `archive_domain`, `unarchive_domain` and `delete_domain` merged into
+    `manage_domain(action)`.
+  - The `Tutor-Tool-Policy` header addresses one operation of a merged tool
+    with `<tool>.<operation>` keys: `manage_domain.delete`,
+    `edit_training.save`, `manage_training_lifecycle.withdraw`, and
+    `prepare_pedagogical_turn.activity` (which replaces a `get_next_activity`
+    rule). The operation key wins over the bare tool name, except that a bare
+    `deny` blocks every operation. Rules naming removed tools match nothing.
+  - `preview_training_lifecycle`, `archive_training`, `restore_training`,
+    `delete_training` and `withdraw_training` merged into
+    `manage_training_lifecycle(action, preview)`; `preview_training_edit`,
+    `propose_training_edit` and `save_training_edit` merged into
+    `edit_training(action=preview|propose|save)`.
+  - Parameter names: training tools use `training_id` and `idempotency_key`
+    (were `id` and `key`); `update_implementation_intention` uses
+    `intention_id` (was `id`); `add_concepts`, `publish_curriculum_revision` and
+    `update_availability_model` use `expected_revision` (was
+    `expected_version`).
+  - JSON-encoded string arguments became objects: `rubric` (was `rubric_json`),
+    `rubric_score` (was `rubric_score_json`), `semantic_observation` (was
+    `semantic_observation_json`), `evaluation_provenance` (was
+    `evaluation_provenance_json`) and module/concept `metadata` (was
+    `metadata_json`) in training documents, `draft_formation`,
+    `add_formation_concepts` and the administration HTTP API (formation
+    versions, modules and concepts are also returned with a `metadata`
+    object). Concept pedagogy stays in its typed fields; `description`,
+    `level`, `outcomes` and `criteria` are reserved metadata keys. Shared
+    document sub-schemas use `$defs`.
+  - Strict schema enums for `record_interaction.activity_type`/`error_type`,
+    `prepare_pedagogical_turn.intent`, memory `period_type`, notification
+    frequency and every `action`/`view`; every property has a description.
+    `prepare_pedagogical_turn` accepts exactly `mode` = context|activity and
+    `intent` = auto|review (or omitted); intent aliases such as `revise` or
+    `practice` are refused.
+  - `rubric` and `rubric_score` are closed objects everywhere, including the
+    standalone `record_interaction.rubric`: criteria and criteria_scores are
+    arrays of objects with numeric `max_score`/`score`. Top-level arrays,
+    objects keyed by criterion, scalar scores, numeric strings and alias field
+    names (`weight`, `points`, `threshold`, ...) are no longer normalized.
+  - `pedagogical_contract.reasoning_request` carries only its per-decision
+    reasons; the fixed task is documented once in the server instructions and
+    the `tutor_mcp` prompt, whose redundant tool reference list was removed.
+  - The stateless HTTP endpoint answers with `application/json` instead of an
+    event stream. `REGULATION_*` switches are read once at startup; tool
+    registration no longer uses package-level state; multi-domain views and
+    domain initialization use batched queries; tool logs record only error
+    diagnostics, never raw error text.
+
+- Learning-session identifiers are always generated by the server.
+  `start_learning_session` no longer creates a session under a caller-chosen
+  `session_id`; the argument only resumes a session the server issued to the
+  same learner, and an unknown value is reported as not found. Migration
+  `0085` / `postgres_0077` closes every session still open at upgrade, so
+  clients start a fresh session (closed history is kept).
+- Browser cookies of the OAuth and account pages use the `__Host-` prefix
+  (`Secure`, `Path=/`, no `Domain`) and per-flow names. A `BASE_URL` on an HTTP
+  loopback origin (`localhost`, `127.0.0.1`, `::1`) uses the same names without
+  the prefix and without `Secure`. Pages opened before the upgrade must be
+  reloaded.
+- The native identity challenge budgets (30 per minute per address and key,
+  120 per minute per address) follow `RATELIMIT_BACKEND=postgres` like the other
+  limiters and are released at shutdown.
+- Startup failures now unwind every opened resource before exiting, and the
+  API wiring is split into focused functions. The HTTP drain still waits
+  `max(30 s, MCP_TOOL_CALL_TIMEOUT_SECONDS + 10 s)`; the shipped systemd units
+  and Compose files now allow 50 s before forcing a stop.
+- PostgreSQL: a tenant transaction binds its tenant, user and membership in one
+  statement, and domain creation serializes the per-learner quota check with a
+  transaction advisory lock.
+- Deleting an expired or evicted dynamic OAuth client also deletes the consents
+  that name it in every tenant (`postgres_0080`, cascading foreign key), so the
+  client no longer stays counted against `OAUTH_DCR_MAX_CLIENTS`.
+- `TUTOR_MCP_CONSOLIDATION_DELIVERY_TIMEOUT_MINUTES` (default 30, 1–10,080) is
+  parsed once at startup and passed to the scheduler; an invalid value now
+  fails at boot in HTTP and local modes alike.
+- The authenticated MCP HTTP load gate, run in CI on SQLite and PostgreSQL 17,
+  now requires p95 < 400 ms and p99 < 1 s per tool (previously 2 s / 5 s) and
+  under 1 s for the large-history call.
+- New histogram `tutor.db.acquire.duration{pool,outcome}` measures transaction
+  start latency per pool (writer, reader or shared); starts slower than 50 ms
+  are logged at debug level with the pool occupancy.
 
 - Personal domains use fixed BKT reference parameters while mastery and FSRS
   continue to adapt. Common formations use reference or versioned collective
@@ -165,18 +249,56 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   result; training tools advertise only the parts of the programme document
   each operation consumes; validation errors are
   returned to the host with their reason; an unknown or archived `domain_id`
-  in `get_next_activity` answers "domain not found" with the learner's active
-  domains instead of a setup prompt; read-only tools carry the `readOnlyHint`
-  annotation. `get_next_activity` no longer repeats `llm_instruction`,
-  `learner_explanation` and `audit_rationale` at the root of its result; read
-  them from `pedagogical_contract` (`decision_id` stays at the root). An index
-  on `pedagogical_snapshots(interaction_id, id)` speeds up interaction reads.
+  in `prepare_pedagogical_turn(mode="activity")` answers "domain not found"
+  with the learner's active domains instead of a setup prompt; read-only tools
+  carry the `readOnlyHint` annotation. The activity decision no longer repeats
+  `llm_instruction`, `learner_explanation`, `audit_rationale` or `decision_id`
+  at its root; read them from `decision.pedagogical_contract`. An index on
+  `pedagogical_snapshots(interaction_id, id)` speeds up interaction reads.
 - Tutor desktop client: guided first-run installation, exercise answers sent
   from the study composer, supervision of the backend connection with request
   limits, a fast model selected by default, and interface refinements.
 
+- The adaptive placement replays the qualified diagnostic observations read
+  directly from storage (one query) instead of matching recent interactions
+  with the list of qualified concepts; activity turns read a shorter
+  interaction window. `get_learner_state(view="progress")` loads the evidence
+  of every domain with one statement per evidence kind.
+
+### Removed
+
+- MCP tools `get_pending_alerts` (use `get_learner_state(view="progress")`),
+  `get_metacognitive_mirror` (in every activity decision) and the legacy,
+  unverified `record_transfer_result` (record transfer through an assessment
+  attempt and `record_interaction` with `TRANSFER_PROBE`). The deprecated
+  `concept_id` alias of `calibration_check`, `check_mastery`,
+  `feynman_challenge` and `transfer_challenge` was removed; use `concept`.
+
+- The password-based institution console and everything only it used: the
+  `/console` and `/learn` web pages, institution signup (`/signup`), invitation
+  acceptance pages (`/invite`), console TOTP enrolment and recovery codes, the
+  institution-user password reset and the `INSTITUTION_SIGNUP` / `SIGNUP_PLAN`
+  settings. `--profile institution` authenticates with native key identities
+  only. Migration `0087` / `postgres_0079` drops `console_sessions`,
+  `user_password_resets`, `mfa_credentials` and `mfa_recovery_codes` with their
+  rows. Password sign-in at `/authorize` no longer issues formation or staff
+  progression scopes.
+- Self-service institution signup storage and the email owner/invitee account
+  creation paths that only tests still used: migration `0088` /
+  `postgres_0081` drops `pending_signups`. Institutions are provisioned by the
+  operator (`tutor-control-plane`) with native key identities.
+- The `REGULATION_THRESHOLD` environment variable and its legacy split
+  mastery thresholds (KST 0.70, intermediate 0.80). The BKT, KST and
+  intermediate thresholds are the constant `0.85`.
+- The stored replay envelope of confidential dynamic-client registrations:
+  migration `0086` / `postgres_0078` drops `oauth_clients.registration_secret_ciphertext`
+  and its values. A client secret is shown once at registration and only its
+  digest is kept; key rotation at startup no longer covers DCR clients.
+
 ### Security
 
+- Release archives carry a signed SLSA build-provenance attestation; verify
+  one with `gh attestation verify` as described in `SECURITY.md`.
 - Build with Go 1.26.11 to include the standard-library security fix
   GO-2026-6859, with `golang.org/x/crypto` v0.58.0 and `golang.org/x/sys`
   v0.49.0. CI, Docker and release packaging use the patched toolchain.
@@ -586,22 +708,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
   on `concept_states` under concurrent calls on the same (learner, concept)
   pair. New `Store.BeginTx` + Tx-variant helpers; DSN now carries
   `_txlock=immediate` so every `database/sql` `Begin` maps to `BEGIN IMMEDIATE`
-  on SQLite (R008).
+  on SQLite.
 - **(security)** Persist OAuth client approvals in
   `learner_approved_clients(learner_id, client_id, redirect_uri)` so a
   returning login no longer re-prompts and the consent screen retains its
-  trust-on-first-use guarantee. Cap `client_name` at 120 bytes server-side
-  (R001).
+  trust-on-first-use guarantee. Cap `client_name` at 120 bytes server-side.
 - **(security)** Fold learner emails to lowercase + trim at the handler so the
   per-account login-failure tracker cannot be bypassed by rotating case
   permutations, and so register-mode rejects case-variant duplicates. Adds
   migrations `0009_lowercase_learner_emails` and
   `0010_index_learners_email_lower` (functional UNIQUE index on `lower(email)`
-  as defence-in-depth) (R002).
+  as defence-in-depth).
 - **(security)** Bump the Go toolchain from 1.25.6 to 1.25.10. Closes 12
   upstream stdlib advisories, including four `html/template` XSS variants that
   touched `auth/pages.go`, the TLS 1.3 KeyUpdate DoS, and the `net/url` IPv6
-  host misparse that backstopped `validateRegistrationRedirectURIs` (R035).
+  host misparse that backstopped `validateRegistrationRedirectURIs`.
 - **(security)** Reject `JWT_SECRET` values that decode to fewer than 32 bytes
   (256 bits) in `auth.LoadJWTSecret`, so a short/low-entropy secret can no
   longer silently weaken HS256 token signing.

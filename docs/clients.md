@@ -68,7 +68,11 @@ Ask the assistant to use Tutor MCP explicitly when starting or resuming a lesson
 Tutor returns short server instructions at connection time, which clients that
 honor MCP `instructions` pass to the model. It also exposes a `tutor_mcp` prompt
 with the full protocol for clients that support MCP prompts, together with tool
-descriptions that guide the learning loop. The assistant must call the
+descriptions that guide the learning loop. The loop needs few calls:
+`get_learner_state` for context, `start_learning_session`, then
+`prepare_pedagogical_turn(mode="activity")` for each activity, which already
+applies alerts and returns the frozen decision, followed by
+`record_interaction`. The assistant must call the
 tools to read context and record work; plain conversation alone does not update
 the learning record. See the [tool catalog](mcp-tools.md).
 
@@ -76,7 +80,9 @@ the learning record. See the [tool catalog](mcp-tools.md).
 
 The table describes integration routes supported by the clients and Tutor's
 transports. Automated fixtures exercise Hermes metadata and Claude/ChatGPT-style
-OAuth flows. Native CI tests local stdio on Linux, macOS and Windows; Compose
+OAuth flows. The stateless HTTP endpoint answers each request with a single
+`application/json` response (no server-sent event stream), since no tool sends
+notifications during a call. Native CI tests local stdio on Linux, macOS and Windows; Compose
 acceptance covers HTTPS, OAuth, account management and persistence.
 
 These checks are distinct from an end-to-end test inside every listed product.

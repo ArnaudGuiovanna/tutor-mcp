@@ -27,7 +27,7 @@ func TestRecordInteraction_BKTObservationPolicyAndAudit(t *testing.T) {
 					"success": success, "response_time_seconds": 20.0, "confidence": 0.7,
 					"notes": "BKT observation policy regression",
 					// A host's semantic claim cannot override the mechanical policy.
-					"semantic_observation_json": `{"bkt_update_mode":"learning_opportunity","bkt_transition_applied":true}`,
+					"semantic_observation": json.RawMessage(`{"bkt_update_mode":"learning_opportunity","bkt_transition_applied":true}`),
 				}
 				if activity == models.ActivityTransferProbe {
 					args["transfer_dimension"], args["transfer_score"] = "near", 0.0

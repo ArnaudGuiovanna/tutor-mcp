@@ -3,10 +3,10 @@
   "fixture_kind": "fixed_french_tool_discovery_queries",
   "language": "fr",
   "catalog_file": "catalog-local.json",
-  "catalog_sha256": "45d5828d006fb9837caf4da2a1af0c11bf0fc2e45307fdfecd8459ba852480bf",
-  "server_commit": "a2dbd60915066b13c4ed09cfed89f980569b193c",
+  "catalog_sha256": "62e3b81c063e4aeff9534a352da598b67b6426adfc7c322f13b8ff8f65a90778",
+  "server_commit": null,
   "expected_identity_format": "exact server_id/tool_name",
-  "construction": "One manually authored intent per each of the 68 live advertised tools, plus 12 fixed accent/plural/paraphrase/distractor variants. Labels assigned from live descriptions before the first search evaluation; do not remove or relabel misses.",
+  "construction": "Originally one manually authored intent per each of the 68 tools advertised at commit a2dbd60915066b13c4ed09cfed89f980569b193c, plus 12 fixed accent/plural/paraphrase/distractor variants. On 2026-11-12 the MCP surface merged several tools; the same 80 queries were kept verbatim and relabeled to the tool that now serves each intent (relabeled_from keeps the original labels). Merged tools collapse several intents onto one tool, so the corpus now covers 55 of the 57 advertised tools; uncovered tools have no query yet. Do not remove or relabel misses.",
   "interpretation": "One intended tool per disambiguated query. Distractors are related advertised tools, not acceptable alternate labels. Discovery does not grant permission to execute a tool, including institutional tools advertised in local mode.",
   "scope": "Deterministic lexical discovery baseline; no model, execution, permission, Windows or GPU qualification. Public synthetic French text only.",
   "query_count": 80,
@@ -29,32 +29,45 @@
     {
       "id": "fr-002",
       "query": "Archive mon domaine de géométrie pour le masquer des activités tout en gardant ma progression.",
-      "expected_tool_id": "tutor/archive_domain",
+      "expected_tool_id": "tutor/manage_domain",
       "distractor_tool_ids": [
-        "tutor/delete_domain",
-        "tutor/unarchive_domain"
+        "tutor/manage_training_lifecycle"
       ],
       "tags": [
         "natural_paraphrase",
         "accent",
         "contrastive_distractors"
       ],
-      "case_group": "archive_domain"
+      "case_group": "manage_domain",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/archive_domain",
+        "distractor_tool_ids": [
+          "tutor/delete_domain",
+          "tutor/unarchive_domain"
+        ]
+      },
+      "relabel_note": "all original distractors merged into the expected tool; replacement distractors chosen at relabel time"
     },
     {
       "id": "fr-003",
       "query": "Je confirme : archive cette formation à sa révision actuelle, en conservant les versions des inscrits.",
-      "expected_tool_id": "tutor/archive_training",
+      "expected_tool_id": "tutor/manage_training_lifecycle",
       "distractor_tool_ids": [
-        "tutor/archive_domain",
-        "tutor/delete_training"
+        "tutor/manage_domain"
       ],
       "tags": [
         "natural_paraphrase",
         "accent",
         "contrastive_distractors"
       ],
-      "case_group": "archive_training"
+      "case_group": "manage_training_lifecycle",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/archive_training",
+        "distractor_tool_ids": [
+          "tutor/archive_domain",
+          "tutor/delete_training"
+        ]
+      }
     },
     {
       "id": "fr-004",
@@ -91,7 +104,7 @@
       "query": "Les preuves réunies sur cette notion suffisent-elles pour tenter un défi de maîtrise ?",
       "expected_tool_id": "tutor/check_mastery",
       "distractor_tool_ids": [
-        "tutor/get_olm_snapshot",
+        "tutor/get_learner_state",
         "tutor/feynman_challenge"
       ],
       "tags": [
@@ -99,7 +112,14 @@
         "accent",
         "plural"
       ],
-      "case_group": "check_mastery"
+      "case_group": "check_mastery",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/check_mastery",
+        "distractor_tool_ids": [
+          "tutor/get_olm_snapshot",
+          "tutor/feynman_challenge"
+        ]
+      }
     },
     {
       "id": "fr-007",
@@ -119,32 +139,46 @@
     {
       "id": "fr-008",
       "query": "Je confirme la suppression de ce domaine des vues actives, avec conservation de son historique pédagogique.",
-      "expected_tool_id": "tutor/delete_domain",
+      "expected_tool_id": "tutor/manage_domain",
       "distractor_tool_ids": [
-        "tutor/archive_domain",
-        "tutor/delete_training"
+        "tutor/manage_training_lifecycle"
       ],
       "tags": [
         "natural_paraphrase",
         "accent",
         "contrastive_distractors"
       ],
-      "case_group": "delete_domain"
+      "case_group": "manage_domain",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/delete_domain",
+        "distractor_tool_ids": [
+          "tutor/archive_domain",
+          "tutor/delete_training"
+        ]
+      }
     },
     {
       "id": "fr-009",
       "query": "Je confirme : supprime ce brouillon de formation qui n’a jamais été publié.",
-      "expected_tool_id": "tutor/delete_training",
+      "expected_tool_id": "tutor/manage_training_lifecycle",
       "distractor_tool_ids": [
-        "tutor/withdraw_training",
-        "tutor/archive_training"
+        "tutor/manage_domain",
+        "tutor/edit_training"
       ],
       "tags": [
         "natural_paraphrase",
         "accent",
         "contrastive_distractors"
       ],
-      "case_group": "delete_training"
+      "case_group": "manage_training_lifecycle",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/delete_training",
+        "distractor_tool_ids": [
+          "tutor/withdraw_training",
+          "tutor/archive_training"
+        ]
+      },
+      "relabel_note": "all original distractors merged into the expected tool; replacement distractors chosen at relabel time"
     },
     {
       "id": "fr-010",
@@ -180,15 +214,22 @@
       "query": "Montre mes taux d’apprentissage, la précision de mes prédictions et le nombre d’observations disponibles.",
       "expected_tool_id": "tutor/get_autonomy_metrics",
       "distractor_tool_ids": [
-        "tutor/get_dashboard_state",
-        "tutor/get_metacognitive_mirror"
+        "tutor/get_learner_state",
+        "tutor/prepare_pedagogical_turn"
       ],
       "tags": [
         "natural_paraphrase",
         "accent",
         "plural"
       ],
-      "case_group": "get_autonomy_metrics"
+      "case_group": "get_autonomy_metrics",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/get_autonomy_metrics",
+        "distractor_tool_ids": [
+          "tutor/get_dashboard_state",
+          "tutor/get_metacognitive_mirror"
+        ]
+      }
     },
     {
       "id": "fr-013",
@@ -238,16 +279,24 @@
     {
       "id": "fr-016",
       "query": "Affiche mon tableau de bord avec la progression par notion, la rétention et la prochaine action.",
-      "expected_tool_id": "tutor/get_dashboard_state",
+      "expected_tool_id": "tutor/get_learner_state",
       "distractor_tool_ids": [
-        "tutor/get_learner_context",
-        "tutor/get_olm_snapshot"
+        "tutor/prepare_pedagogical_turn",
+        "tutor/get_autonomy_metrics"
       ],
       "tags": [
         "natural_paraphrase",
         "accent"
       ],
-      "case_group": "get_dashboard_state"
+      "case_group": "get_learner_state",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/get_dashboard_state",
+        "distractor_tool_ids": [
+          "tutor/get_learner_context",
+          "tutor/get_olm_snapshot"
+        ]
+      },
+      "relabel_note": "all original distractors merged into the expected tool; replacement distractors chosen at relabel time"
     },
     {
       "id": "fr-017",
@@ -255,7 +304,7 @@
       "expected_tool_id": "tutor/get_decision_replay_summary",
       "distractor_tool_ids": [
         "tutor/get_pedagogical_snapshots",
-        "tutor/get_dashboard_state"
+        "tutor/get_learner_state"
       ],
       "tags": [
         "natural_paraphrase",
@@ -263,7 +312,14 @@
         "plural",
         "contrastive_distractors"
       ],
-      "case_group": "get_decision_replay_summary"
+      "case_group": "get_decision_replay_summary",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/get_decision_replay_summary",
+        "distractor_tool_ids": [
+          "tutor/get_pedagogical_snapshots",
+          "tutor/get_dashboard_state"
+        ]
+      }
     },
     {
       "id": "fr-018",
@@ -283,17 +339,23 @@
     {
       "id": "fr-019",
       "query": "Au début de la séance, retrouve mon contexte d’apprenant et les domaines que je travaille.",
-      "expected_tool_id": "tutor/get_learner_context",
+      "expected_tool_id": "tutor/get_learner_state",
       "distractor_tool_ids": [
-        "tutor/start_learning_session",
-        "tutor/get_dashboard_state"
+        "tutor/start_learning_session"
       ],
       "tags": [
         "natural_paraphrase",
         "accent",
         "plural"
       ],
-      "case_group": "get_learner_context"
+      "case_group": "get_learner_state",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/get_learner_context",
+        "distractor_tool_ids": [
+          "tutor/start_learning_session",
+          "tutor/get_dashboard_state"
+        ]
+      }
     },
     {
       "id": "fr-020",
@@ -313,9 +375,8 @@
     {
       "id": "fr-021",
       "query": "En dehors des exercices, donne-moi un reflet factuel de mes habitudes d’apprentissage et de ma dépendance à l’aide.",
-      "expected_tool_id": "tutor/get_metacognitive_mirror",
+      "expected_tool_id": "tutor/prepare_pedagogical_turn",
       "distractor_tool_ids": [
-        "tutor/get_next_activity",
         "tutor/get_autonomy_metrics"
       ],
       "tags": [
@@ -323,43 +384,62 @@
         "accent",
         "contrastive_distractors"
       ],
-      "case_group": "get_metacognitive_mirror"
+      "case_group": "prepare_pedagogical_turn",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/get_metacognitive_mirror",
+        "distractor_tool_ids": [
+          "tutor/get_next_activity",
+          "tutor/get_autonomy_metrics"
+        ]
+      }
     },
     {
       "id": "fr-022",
       "query": "Quelles confusions reviennent sur mes notions, et lesquelles sont déjà résolues ?",
       "expected_tool_id": "tutor/get_misconceptions",
       "distractor_tool_ids": [
-        "tutor/get_pending_alerts",
-        "tutor/get_learner_context"
+        "tutor/get_learner_state"
       ],
       "tags": [
         "natural_paraphrase",
         "accent",
         "plural"
       ],
-      "case_group": "get_misconceptions"
+      "case_group": "get_misconceptions",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/get_misconceptions",
+        "distractor_tool_ids": [
+          "tutor/get_pending_alerts",
+          "tutor/get_learner_context"
+        ]
+      }
     },
     {
       "id": "fr-023",
       "query": "Que devrais-je travailler maintenant ? Propose la prochaine activité adaptée à mon niveau.",
-      "expected_tool_id": "tutor/get_next_activity",
+      "expected_tool_id": "tutor/prepare_pedagogical_turn",
       "distractor_tool_ids": [
-        "tutor/get_pending_alerts",
+        "tutor/get_learner_state",
         "tutor/learning_negotiation"
       ],
       "tags": [
         "natural_paraphrase",
         "accent"
       ],
-      "case_group": "get_next_activity"
+      "case_group": "prepare_pedagogical_turn",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/get_next_activity",
+        "distractor_tool_ids": [
+          "tutor/get_pending_alerts",
+          "tutor/learning_negotiation"
+        ]
+      }
     },
     {
       "id": "fr-024",
       "query": "Montre les estimations de mon modèle apprenant et les preuves de ce qui est retenu, démontré ou transféré.",
-      "expected_tool_id": "tutor/get_olm_snapshot",
+      "expected_tool_id": "tutor/get_learner_state",
       "distractor_tool_ids": [
-        "tutor/get_dashboard_state",
         "tutor/check_mastery"
       ],
       "tags": [
@@ -367,7 +447,14 @@
         "accent",
         "plural"
       ],
-      "case_group": "get_olm_snapshot"
+      "case_group": "get_learner_state",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/get_olm_snapshot",
+        "distractor_tool_ids": [
+          "tutor/get_dashboard_state",
+          "tutor/check_mastery"
+        ]
+      }
     },
     {
       "id": "fr-025",
@@ -388,10 +475,9 @@
     {
       "id": "fr-026",
       "query": "Je demande la liste brute de toutes mes alertes en attente, y compris fatigue et transfert bloqué.",
-      "expected_tool_id": "tutor/get_pending_alerts",
+      "expected_tool_id": "tutor/get_learner_state",
       "distractor_tool_ids": [
-        "tutor/get_next_activity",
-        "tutor/get_metacognitive_mirror"
+        "tutor/prepare_pedagogical_turn"
       ],
       "tags": [
         "natural_paraphrase",
@@ -399,7 +485,14 @@
         "plural",
         "contrastive_distractors"
       ],
-      "case_group": "get_pending_alerts"
+      "case_group": "get_learner_state",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/get_pending_alerts",
+        "distractor_tool_ids": [
+          "tutor/get_next_activity",
+          "tutor/get_metacognitive_mirror"
+        ]
+      }
     },
     {
       "id": "fr-027",
@@ -481,7 +574,7 @@
       "query": "Explique le plan prévu pour cette séance et les compromis si je préfère une autre activité.",
       "expected_tool_id": "tutor/learning_negotiation",
       "distractor_tool_ids": [
-        "tutor/get_next_activity",
+        "tutor/prepare_pedagogical_turn",
         "tutor/start_learning_session"
       ],
       "tags": [
@@ -489,7 +582,14 @@
         "accent",
         "contrastive_distractors"
       ],
-      "case_group": "learning_negotiation"
+      "case_group": "learning_negotiation",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/learning_negotiation",
+        "distractor_tool_ids": [
+          "tutor/get_next_activity",
+          "tutor/start_learning_session"
+        ]
+      }
     },
     {
       "id": "fr-033",
@@ -555,47 +655,69 @@
     {
       "id": "fr-037",
       "query": "Prévisualise les conséquences pédagogiques de cette modification du programme sans l’enregistrer ni l’appliquer.",
-      "expected_tool_id": "tutor/preview_training_edit",
+      "expected_tool_id": "tutor/edit_training",
       "distractor_tool_ids": [
-        "tutor/propose_training_edit",
-        "tutor/save_training_edit"
+        "tutor/publish_training",
+        "tutor/manage_training_lifecycle"
       ],
       "tags": [
         "natural_paraphrase",
         "accent",
         "contrastive_distractors"
       ],
-      "case_group": "preview_training_edit"
+      "case_group": "edit_training",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/preview_training_edit",
+        "distractor_tool_ids": [
+          "tutor/propose_training_edit",
+          "tutor/save_training_edit"
+        ]
+      },
+      "relabel_note": "all original distractors merged into the expected tool; replacement distractors chosen at relabel time"
     },
     {
       "id": "fr-038",
       "query": "Avant de confirmer l’archivage de la formation, montre ses conséquences sans modifier les données.",
-      "expected_tool_id": "tutor/preview_training_lifecycle",
+      "expected_tool_id": "tutor/manage_training_lifecycle",
       "distractor_tool_ids": [
-        "tutor/archive_training",
-        "tutor/preview_training_edit"
+        "tutor/edit_training"
       ],
       "tags": [
         "natural_paraphrase",
         "accent",
         "contrastive_distractors"
       ],
-      "case_group": "preview_training_lifecycle"
+      "case_group": "manage_training_lifecycle",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/preview_training_lifecycle",
+        "distractor_tool_ids": [
+          "tutor/archive_training",
+          "tutor/preview_training_edit"
+        ]
+      }
     },
     {
       "id": "fr-039",
       "query": "Dépose cette proposition complète de modification dans l’éditeur pour que je puisse l’examiner, sans l’appliquer.",
-      "expected_tool_id": "tutor/propose_training_edit",
+      "expected_tool_id": "tutor/edit_training",
       "distractor_tool_ids": [
-        "tutor/preview_training_edit",
-        "tutor/save_training_edit"
+        "tutor/publish_training",
+        "tutor/manage_training_lifecycle"
       ],
       "tags": [
         "natural_paraphrase",
         "accent",
         "contrastive_distractors"
       ],
-      "case_group": "propose_training_edit"
+      "case_group": "edit_training",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/propose_training_edit",
+        "distractor_tool_ids": [
+          "tutor/preview_training_edit",
+          "tutor/save_training_edit"
+        ]
+      },
+      "relabel_note": "all original distractors merged into the expected tool; replacement distractors chosen at relabel time"
     },
     {
       "id": "fr-040",
@@ -732,25 +854,30 @@
     {
       "id": "fr-049",
       "query": "Consigne cette observation de transfert non vérifiée pour adapter les activités, sans la présenter comme une preuve de maîtrise.",
-      "expected_tool_id": "tutor/record_transfer_result",
+      "expected_tool_id": "tutor/record_interaction",
       "distractor_tool_ids": [
-        "tutor/transfer_challenge",
-        "tutor/record_interaction"
+        "tutor/transfer_challenge"
       ],
       "tags": [
         "natural_paraphrase",
         "accent",
         "contrastive_distractors"
       ],
-      "case_group": "record_transfer_result"
+      "case_group": "record_interaction",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/record_transfer_result",
+        "distractor_tool_ids": [
+          "tutor/transfer_challenge",
+          "tutor/record_interaction"
+        ]
+      }
     },
     {
       "id": "fr-050",
       "query": "Je confirme : restaure cette formation archivée en gardant les preuves et les versions existantes.",
-      "expected_tool_id": "tutor/restore_training",
+      "expected_tool_id": "tutor/manage_training_lifecycle",
       "distractor_tool_ids": [
-        "tutor/unarchive_domain",
-        "tutor/archive_training"
+        "tutor/manage_domain"
       ],
       "tags": [
         "natural_paraphrase",
@@ -758,22 +885,37 @@
         "plural",
         "contrastive_distractors"
       ],
-      "case_group": "restore_training"
+      "case_group": "manage_training_lifecycle",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/restore_training",
+        "distractor_tool_ids": [
+          "tutor/unarchive_domain",
+          "tutor/archive_training"
+        ]
+      }
     },
     {
       "id": "fr-051",
       "query": "J’ai examiné cette modification : applique maintenant le programme complet à la révision attendue.",
-      "expected_tool_id": "tutor/save_training_edit",
+      "expected_tool_id": "tutor/edit_training",
       "distractor_tool_ids": [
-        "tutor/propose_training_edit",
-        "tutor/preview_training_edit"
+        "tutor/publish_training",
+        "tutor/manage_training_lifecycle"
       ],
       "tags": [
         "natural_paraphrase",
         "accent",
         "contrastive_distractors"
       ],
-      "case_group": "save_training_edit"
+      "case_group": "edit_training",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/save_training_edit",
+        "distractor_tool_ids": [
+          "tutor/propose_training_edit",
+          "tutor/preview_training_edit"
+        ]
+      },
+      "relabel_note": "all original distractors merged into the expected tool; replacement distractors chosen at relabel time"
     },
     {
       "id": "fr-052",
@@ -870,14 +1012,21 @@
       "query": "Ouvre ou reprends ma séance durable et retrouve son identifiant pour les observations à venir.",
       "expected_tool_id": "tutor/start_learning_session",
       "distractor_tool_ids": [
-        "tutor/get_learner_context",
+        "tutor/get_learner_state",
         "tutor/record_session_close"
       ],
       "tags": [
         "natural_paraphrase",
         "accent"
       ],
-      "case_group": "start_learning_session"
+      "case_group": "start_learning_session",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/start_learning_session",
+        "distractor_tool_ids": [
+          "tutor/get_learner_context",
+          "tutor/record_session_close"
+        ]
+      }
     },
     {
       "id": "fr-059",
@@ -915,29 +1064,42 @@
       "expected_tool_id": "tutor/transfer_challenge",
       "distractor_tool_ids": [
         "tutor/feynman_challenge",
-        "tutor/record_transfer_result"
+        "tutor/record_interaction"
       ],
       "tags": [
         "natural_paraphrase",
         "accent",
         "plural"
       ],
-      "case_group": "transfer_challenge"
+      "case_group": "transfer_challenge",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/transfer_challenge",
+        "distractor_tool_ids": [
+          "tutor/feynman_challenge",
+          "tutor/record_transfer_result"
+        ]
+      }
     },
     {
       "id": "fr-062",
       "query": "Réactive mon domaine archivé pour qu’il revienne dans les activités avec toute sa progression.",
-      "expected_tool_id": "tutor/unarchive_domain",
+      "expected_tool_id": "tutor/manage_domain",
       "distractor_tool_ids": [
-        "tutor/restore_training",
-        "tutor/archive_domain"
+        "tutor/manage_training_lifecycle"
       ],
       "tags": [
         "natural_paraphrase",
         "accent",
         "contrastive_distractors"
       ],
-      "case_group": "unarchive_domain"
+      "case_group": "manage_domain",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/unarchive_domain",
+        "distractor_tool_ids": [
+          "tutor/restore_training",
+          "tutor/archive_domain"
+        ]
+      }
     },
     {
       "id": "fr-063",
@@ -1017,10 +1179,10 @@
     {
       "id": "fr-068",
       "query": "Je confirme le retrait de cette formation commune publiée des nouvelles admissions ; les inscrits gardent leur version.",
-      "expected_tool_id": "tutor/withdraw_training",
+      "expected_tool_id": "tutor/manage_training_lifecycle",
       "distractor_tool_ids": [
-        "tutor/delete_training",
-        "tutor/archive_training"
+        "tutor/manage_domain",
+        "tutor/edit_training"
       ],
       "tags": [
         "natural_paraphrase",
@@ -1028,20 +1190,34 @@
         "plural",
         "contrastive_distractors"
       ],
-      "case_group": "withdraw_training"
+      "case_group": "manage_training_lifecycle",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/withdraw_training",
+        "distractor_tool_ids": [
+          "tutor/delete_training",
+          "tutor/archive_training"
+        ]
+      },
+      "relabel_note": "all original distractors merged into the expected tool; replacement distractors chosen at relabel time"
     },
     {
       "id": "fr-069",
       "query": "Quelle activite me conseilles-tu pour continuer a apprendre ?",
-      "expected_tool_id": "tutor/get_next_activity",
+      "expected_tool_id": "tutor/prepare_pedagogical_turn",
       "distractor_tool_ids": [
-        "tutor/get_pending_alerts"
+        "tutor/get_learner_state"
       ],
       "tags": [
         "natural_paraphrase",
         "accentless_variant"
       ],
-      "case_group": "get_next_activity"
+      "case_group": "prepare_pedagogical_turn",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/get_next_activity",
+        "distractor_tool_ids": [
+          "tutor/get_pending_alerts"
+        ]
+      }
     },
     {
       "id": "fr-070",
@@ -1049,13 +1225,20 @@
       "expected_tool_id": "tutor/check_mastery",
       "distractor_tool_ids": [
         "tutor/feynman_challenge",
-        "tutor/get_olm_snapshot"
+        "tutor/get_learner_state"
       ],
       "tags": [
         "natural_paraphrase",
         "accent_variant"
       ],
-      "case_group": "check_mastery"
+      "case_group": "check_mastery",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/check_mastery",
+        "distractor_tool_ids": [
+          "tutor/feynman_challenge",
+          "tutor/get_olm_snapshot"
+        ]
+      }
     },
     {
       "id": "fr-071",
@@ -1063,39 +1246,58 @@
       "expected_tool_id": "tutor/check_mastery",
       "distractor_tool_ids": [
         "tutor/feynman_challenge",
-        "tutor/get_olm_snapshot"
+        "tutor/get_learner_state"
       ],
       "tags": [
         "natural_paraphrase",
         "accentless_variant"
       ],
-      "case_group": "check_mastery"
+      "case_group": "check_mastery",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/check_mastery",
+        "distractor_tool_ids": [
+          "tutor/feynman_challenge",
+          "tutor/get_olm_snapshot"
+        ]
+      }
     },
     {
       "id": "fr-072",
       "query": "Quelles sont mes erreurs de compréhension récurrentes ?",
       "expected_tool_id": "tutor/get_misconceptions",
       "distractor_tool_ids": [
-        "tutor/get_pending_alerts"
+        "tutor/get_learner_state"
       ],
       "tags": [
         "natural_paraphrase",
         "plural_variant"
       ],
-      "case_group": "get_misconceptions"
+      "case_group": "get_misconceptions",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/get_misconceptions",
+        "distractor_tool_ids": [
+          "tutor/get_pending_alerts"
+        ]
+      }
     },
     {
       "id": "fr-073",
       "query": "Quelle erreur de compréhension revient le plus souvent ?",
       "expected_tool_id": "tutor/get_misconceptions",
       "distractor_tool_ids": [
-        "tutor/get_pending_alerts"
+        "tutor/get_learner_state"
       ],
       "tags": [
         "natural_paraphrase",
         "singular_variant"
       ],
-      "case_group": "get_misconceptions"
+      "case_group": "get_misconceptions",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/get_misconceptions",
+        "distractor_tool_ids": [
+          "tutor/get_pending_alerts"
+        ]
+      }
     },
     {
       "id": "fr-074",
@@ -1145,10 +1347,8 @@
     {
       "id": "fr-077",
       "query": "Je veux seulement voir l’effet de mon édition, pas sauvegarder une proposition ni publier le programme.",
-      "expected_tool_id": "tutor/preview_training_edit",
+      "expected_tool_id": "tutor/edit_training",
       "distractor_tool_ids": [
-        "tutor/propose_training_edit",
-        "tutor/save_training_edit",
         "tutor/publish_training"
       ],
       "tags": [
@@ -1156,7 +1356,15 @@
         "ambiguous_distractors",
         "accent"
       ],
-      "case_group": "preview_training_edit"
+      "case_group": "edit_training",
+      "relabeled_from": {
+        "expected_tool_id": "tutor/preview_training_edit",
+        "distractor_tool_ids": [
+          "tutor/propose_training_edit",
+          "tutor/save_training_edit",
+          "tutor/publish_training"
+        ]
+      }
     },
     {
       "id": "fr-078",
@@ -1203,5 +1411,11 @@
       ],
       "case_group": "get_goal_relevance"
     }
+  ],
+  "server_base_commit": "2f3e3a53219296631c75ced46840fe8ed9cb2d5f",
+  "relabeled_query_count": 31,
+  "uncovered_tool_ids": [
+    "tutor/claim_memory_maintenance",
+    "tutor/commit_memory_maintenance"
   ]
 }

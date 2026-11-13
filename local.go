@@ -93,10 +93,15 @@ func runLocal(options commandOptions, logger *slog.Logger) error {
 		stopRepair := startNarrativeIndexRepair(ctx, store, logger, true, 30*time.Second)
 		defer stopRepair()
 	}
-	server := newTutorServer(&tools.Deps{Store: store, Logger: logger, LocalStdio: true}, defaultMCPToolCallTimeout)
+	server := newTutorServer(&tools.Deps{Store: store, Logger: logger, LocalStdio: true, Regulation: tools.RegulationFlagsFromEnv()}, defaultMCPToolCallTimeout)
 	// The distributed scheduler's durable lease protocol also works on SQLite.
 	// Multiple local clients elect one owner per scheduled window.
 	scheduler := engine.NewDistributedScheduler(store, logger)
+	consolidationTimeout, err := consolidationDeliveryTimeoutFromEnv()
+	if err != nil {
+		return err
+	}
+	scheduler.Configure(engine.SchedulerOptions{ConsolidationDeliveryTimeout: consolidationTimeout})
 	if err = scheduler.Start(); err != nil {
 		return err
 	}

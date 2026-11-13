@@ -6,29 +6,18 @@ package engine
 
 import (
 	"fmt"
+	"sort"
 	"time"
 
 	"tutor-mcp/algorithms"
 	"tutor-mcp/models"
 )
 
-func ComputeAlerts(states []*models.ConceptState, recentInteractions []*models.Interaction, sessionStart time.Time) []models.Alert {
-	return ComputeAlertsAt(states, recentInteractions, sessionStart, time.Now())
-}
-
 // MasteryAlertEvidence carries the protocol envelopes needed to distinguish
 // routing observations from retained/trusted evidence for one concept.
 type MasteryAlertEvidence struct {
 	Transfers   []*models.TransferRecord
 	Assessments []*models.AssessmentAttempt
-}
-
-// ComputeAlertsAt is the clock-injected variant of ComputeAlerts: it derives all
-// elapsed-time computations (FORGETTING retention decay, OVERLOAD session length)
-// from the supplied now rather than the wall clock, making the logic deterministic
-// and testable. ComputeAlerts is a thin wrapper that passes time.Now().
-func ComputeAlertsAt(states []*models.ConceptState, recentInteractions []*models.Interaction, sessionStart time.Time, now time.Time) []models.Alert {
-	return ComputeAlertsWithEvidenceAt(states, recentInteractions, nil, sessionStart, now)
 }
 
 // ComputeAlertsWithEvidenceAt is the authoritative MASTERY_READY variant.
@@ -89,10 +78,22 @@ func ComputeAlertsWithEvidenceAt(states []*models.ConceptState, recentInteractio
 		}
 	}
 
-	// ZPD_DRIFT: 3+ consecutive failures on same concept (check from most recent)
+	// ZPD_DRIFT: 3+ consecutive failures on the same concept (most recent
+	// first). The orchestrator acts on it by lowering the generation difficulty
+	// of the next non-assessment task on that concept
+	// (easeDifficultyAfterFailureStreak).
 	conceptFailStreaks := make(map[string]int)
 	conceptProcessed := make(map[string]bool)
+	conceptObserved := make(map[string]int)
+	conceptFailed := make(map[string]int)
 	for _, i := range recentInteractions {
+		if i == nil {
+			continue
+		}
+		conceptObserved[i.Concept]++
+		if !i.Success {
+			conceptFailed[i.Concept]++
+		}
 		if conceptProcessed[i.Concept] {
 			continue
 		}
@@ -102,42 +103,43 @@ func ComputeAlertsWithEvidenceAt(states []*models.ConceptState, recentInteractio
 			conceptProcessed[i.Concept] = true
 		}
 	}
-	for concept, streak := range conceptFailStreaks {
-		if criticalForgetting[concept] {
+	streakConcepts := make([]string, 0, len(conceptFailStreaks))
+	for concept := range conceptFailStreaks {
+		streakConcepts = append(streakConcepts, concept)
+	}
+	sort.Strings(streakConcepts)
+	for _, concept := range streakConcepts {
+		streak := conceptFailStreaks[concept]
+		if criticalForgetting[concept] || streak < 3 {
 			continue
 		}
-		if streak >= 3 {
-			errorRate := float64(streak) / float64(streak+1)
+		// Observed failure share over the recent window for this concept,
+		// not a model probability.
+		errorRate := float64(conceptFailed[concept]) / float64(conceptObserved[concept])
 
-			// Analyze error types for richer recommendation
-			recommendedAction := "reduce difficulty"
-			errorTypeCounts := make(map[string]int)
-			for _, i := range recentInteractions {
-				if i.Concept == concept && !i.Success && i.ErrorType != "" {
-					errorTypeCounts[i.ErrorType]++
-				}
+		recommendedAction := "reduce difficulty"
+		errorTypeCounts := make(map[string]int)
+		for _, i := range recentInteractions {
+			if i != nil && i.Concept == concept && !i.Success && i.ErrorType != "" {
+				errorTypeCounts[i.ErrorType]++
 			}
-			if errorTypeCounts["KNOWLEDGE_GAP"] >= 3 {
-				recommendedAction = "reduce difficulty - conceptual gap - revisit the fundamentals"
-			} else if errorTypeCounts["LOGIC_ERROR"] >= 3 {
-				recommendedAction = "reduce difficulty - recurring logic errors - reasoning exercises"
-			} else if errorTypeCounts["SYNTAX_ERROR"] >= 3 {
-				recommendedAction = "reduce difficulty - recurring syntax errors - practice exercises"
-			}
-
-			alerts = append(alerts, models.Alert{
-				Type:              models.AlertZPDDrift,
-				Concept:           concept,
-				Urgency:           models.UrgencyWarning,
-				ErrorRate:         errorRate,
-				RecommendedAction: recommendedAction,
-			})
 		}
-	}
+		if errorTypeCounts["KNOWLEDGE_GAP"] >= 3 {
+			recommendedAction = "reduce difficulty - conceptual gap - revisit the fundamentals"
+		} else if errorTypeCounts["LOGIC_ERROR"] >= 3 {
+			recommendedAction = "reduce difficulty - recurring logic errors - reasoning exercises"
+		} else if errorTypeCounts["SYNTAX_ERROR"] >= 3 {
+			recommendedAction = "reduce difficulty - recurring syntax errors - practice exercises"
+		}
 
-	// Generated items have no calibrated IRT difficulty. Legacy theta and
-	// FSRS difficulty therefore cannot predict a ZPD alert; the failure-based
-	// observation above remains available without claiming an item probability.
+		alerts = append(alerts, models.Alert{
+			Type:              models.AlertZPDDrift,
+			Concept:           concept,
+			Urgency:           models.UrgencyWarning,
+			ErrorRate:         errorRate,
+			RecommendedAction: recommendedAction,
+		})
+	}
 
 	// Historical PLATEAU alerts remain readable, but the runtime no longer
 	// infers stalled learning from saturation of a cumulative probability.

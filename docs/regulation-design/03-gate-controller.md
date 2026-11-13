@@ -480,7 +480,7 @@ anti-rep reste pertinent (varier les diagnostics).
 | **Composition** | OQ-3.5 = OVERLOAD > misconception (restrict) > prereq > anti-rep ; misconception bypasse anti-rep mais PAS prereq |
 | **Phase DIAGNOSTIC** | OQ-3.6 = A (seul prereq bypassé) |
 | **Flag** | `REGULATION_GATE=off` retire seulement l'appendix prompt ; `ApplyGate` reste exécuté par l'orchestrateur |
-| **Findings résolus** | F-2.X, F-3.X (placeholder ; le Gate matérialise les protections audit) |
+| **Problèmes résolus** | protections de routage (prérequis, anti-répétition, priorité de l'oubli critique) matérialisées par le Gate |
 
 ---
 

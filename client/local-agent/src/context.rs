@@ -800,7 +800,7 @@ mod tests {
             status: TurnStatus::Interrupted,
         }];
         let tool = ActiveTool {
-            id: "tutor/get_learner_context".into(),
+            id: "tutor/get_learner_state".into(),
             description: "Literal r0 and required_0".into(),
             input_schema: json!({"type":"object","properties":{
                 "reference":{"type":"string","enum":["r0"]},

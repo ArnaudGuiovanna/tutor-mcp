@@ -162,7 +162,7 @@ fn semantic_profile_proposal_reaches_actual_http_permission_and_journal_without_
         assert!(projected.contains(&fixture.user));
         for forbidden in [
             "inputSchema",
-            "get_learner_context",
+            "get_learner_state",
             "FIXTURE_PRIVATE_CREDENTIAL",
             "SCHEMA_ONLY_ENUM_MARKER",
         ] {
@@ -185,7 +185,7 @@ fn semantic_profile_proposal_reaches_actual_http_permission_and_journal_without_
                 OperationState::Rejected
             }
         );
-        assert_eq!(recorded.tool, "tutor/get_learner_context");
+        assert_eq!(recorded.tool, "tutor/get_learner_state");
         drop(store);
         assert_eq!(
             fixture.records("semantic_intent_proposed"),

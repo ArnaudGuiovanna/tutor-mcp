@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"sync/atomic"
 	"time"
 
 	"tutor-mcp/algorithms"
@@ -78,27 +77,14 @@ const (
 	HighMasteryStabilityWindow = 3
 )
 
-// nanFallbackCount tracks how often SelectAction encountered a NaN
-// (or nil ConceptState) and fell back to REST. Internal observability
-// per OQ-5.6 = B — exposed via NaNFallbackCount() so tests and ops
-// can measure the frequency of upstream corruption (e.g. F-1.3 BKT
-// division by zero in the audit dette).
-var nanFallbackCount atomic.Int64
-
-// NaNFallbackCount returns the number of NaN-triggered REST fallbacks
-// since process start. Used by tests; suitable for ops sampling.
-func NaNFallbackCount() int64 {
-	return nanFallbackCount.Load()
-}
-
-// SelectAction maps (concept, ConceptState, active misconception,
-// history) → Action. Pure function: no store access, no network, no
-// time.Now(). Logging is limited to the NaN-fallback path (slog.Error)
+// SelectActionAt maps (concept, ConceptState, active misconception,
+// history, now) → Action. Pure function: no store access, no network, no
+// wall clock. Logging is limited to the NaN-fallback path (slog.Error)
 // because that is a corruption signal, not a normal control flow.
 //
 // Precedence cascade (each rule documented inline):
 //
-//  1. nil state or non-finite PMastery → REST (defence vs F-1.3).
+//  1. nil state or non-finite PMastery → REST (defence against a BKT division by zero).
 //  2. Active misconception → DEBUG_MISCONCEPTION.
 //     OQ-5.4 = A: misconception beats retention because recalling a
 //     concept while a faulty belief is active just re-anchors the
@@ -115,13 +101,8 @@ func NaNFallbackCount() int64 {
 //     - p ≥ MasteryBKT() unstable    → PRACTICE (heuristic), avoids ping-pong
 //     - p ≥ MasteryBKT() stable (N=3)→ high-mastery rotation
 //
-// The threshold is read through algorithms.MasteryBKT() so the legacy
-// vs unified profile (REGULATION_THRESHOLD) is honoured — no literal
-// 0.85 in this file (drift test of [7] guards that).
-func SelectAction(concept string, cs *models.ConceptState, mc *models.MisconceptionGroup, history ActionHistory) Action {
-	return SelectActionAt(concept, cs, mc, history, time.Now().UTC())
-}
-
+// The threshold is read through algorithms.MasteryBKT() — no literal
+// 0.85 in this file (the threshold drift test guards that).
 // SelectActionForPhaseAt applies the phase-level pedagogical contract before
 // the normal mastery/retention cascade. DIAGNOSTIC is deliberately a separate
 // cold-assessment activity: feeding a bootstrap P(L)=0.1 state into the normal
@@ -144,15 +125,13 @@ func SelectActionForPhaseAt(phase models.Phase, concept string, cs *models.Conce
 // from FSRS ElapsedDays, which records the interval before the last review.
 func SelectActionAt(concept string, cs *models.ConceptState, mc *models.MisconceptionGroup, history ActionHistory, now time.Time) Action {
 	// (1) NaN / nil guard — OQ-5.6 = B. Logged at ERROR (not WARN) to
-	// surface corruption explicitly; counter incremented for sampling.
+	// surface corruption explicitly.
 	if cs == nil {
-		nanFallbackCount.Add(1)
 		slog.Error("action_selector: nil concept state, falling back to REST",
 			"concept", concept)
 		return restFallback("concept_state nil — fallback REST")
 	}
 	if math.IsNaN(cs.PMastery) || math.IsInf(cs.PMastery, 0) {
-		nanFallbackCount.Add(1)
 		slog.Error("action_selector: NaN in concept state, falling back to REST",
 			"concept", concept,
 			"p_mastery", cs.PMastery)
@@ -298,6 +277,47 @@ func selectHighMasteryAction(history ActionHistory) Action {
 			Rationale:        "stable high model estimate: new challenge cycle",
 		}
 	}
+}
+
+// FailureStreakDifficultyStep is the drop applied to the generation
+// difficulty target of a concept carrying a ZPD_DRIFT alert (three or more
+// consecutive failures). Repeated failure means the generated tasks sit above
+// what the learner can currently do even with the tutor's help; the next task
+// is therefore requested easier rather than identical. The result stays inside
+// the clampActionDifficulty band.
+const FailureStreakDifficultyStep = 0.20
+
+// easeDifficultyAfterFailureStreak lowers the difficulty requested from the
+// LLM when the selected concept has a ZPD_DRIFT alert. Measurements are left
+// untouched: lowering the difficulty of a diagnostic, mastery challenge or
+// transfer probe would manufacture evidence instead of supporting learning.
+// The same holds for a retrieval: RECALL_EXERCISE, and DEBUG_MISCONCEPTION,
+// which recallActionFor serves in its place for a due card with an active
+// misconception, grade the FSRS review (and decide whether the misconception
+// is resolved), so an easier retrieval would inflate memory stability.
+func easeDifficultyAfterFailureStreak(action Action, alerts []models.Alert, concept string) Action {
+	switch action.Type {
+	case models.ActivityDiagnosticAssessment, models.ActivityMasteryChallenge,
+		models.ActivityTransferProbe, models.ActivityRecall,
+		models.ActivityDebugMisconception, models.ActivityRest:
+		return action
+	}
+	if concept == "" || action.DifficultyTarget <= 0 {
+		return action
+	}
+	for _, alert := range alerts {
+		if alert.Type != models.AlertZPDDrift || alert.Concept != concept {
+			continue
+		}
+		eased := clampActionDifficulty(action.DifficultyTarget - FailureStreakDifficultyStep)
+		if eased < action.DifficultyTarget {
+			action.Rationale += fmt.Sprintf(" - ZPD_DRIFT: generation difficulty %.2f -> %.2f after consecutive failures",
+				action.DifficultyTarget, eased)
+			action.DifficultyTarget = eased
+		}
+		return action
+	}
+	return action
 }
 
 func clampActionDifficulty(d float64) float64 {

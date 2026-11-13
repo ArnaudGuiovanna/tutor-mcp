@@ -27,7 +27,7 @@ type RecordAffectParams struct {
 }
 
 func registerRecordAffect(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name:        "record_affect",
 		Description: "Record the learner's emotional state. Call at session start (energy, confidence) and at session end (satisfaction, perceived_difficulty, next_session_intent).",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params RecordAffectParams) (*mcp.CallToolResult, any, error) {
@@ -104,8 +104,7 @@ func registerRecordAffect(server *mcp.Server, deps *Deps) {
 		var degradedComponents []string
 		markDegraded := func(component string, err error) {
 			degradedComponents = append(degradedComponents, component)
-			deps.Logger.Warn("record_affect: optional component degraded",
-				"component", component, "err", err, "learner", learnerID, "session", params.SessionID)
+			deps.Logger.Warn("record_affect: optional component degraded", append(diagnosticErrorAttrs(err), "component", component, "learner", learnerID, "session", params.SessionID)...)
 		}
 		saved, err := deps.Store.GetAffectBySession(ctx, learnerID, params.SessionID)
 		if err != nil {

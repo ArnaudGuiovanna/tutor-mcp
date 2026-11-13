@@ -109,6 +109,12 @@ func learnerInteract(t *testing.T, store *db.Store, concept string, activityType
 	if err != nil {
 		t.Fatalf("insert interaction: %v", err)
 	}
+	if activityType == models.ActivityDiagnosticAssessment {
+		// Mirrors the record_interaction wiring of the adaptive placement.
+		if _, err := ApplyPlacementEstimates(context.Background(), store, models.LegacyPrincipal("L1").TenantScope(), cs.DomainID, NewDefaultPhaseConfig()); err != nil {
+			t.Fatalf("apply placement: %v", err)
+		}
+	}
 }
 
 // runE2ESimulation drives N sessions of Orchestrate calls against a
@@ -202,7 +208,7 @@ func runE2ESimulation(
 			StatesList:      states,
 			StatesByConcept: sm,
 			GoalRelevance:   goalRelevance,
-		}, cfg, now)
+		}, cfg)
 
 		// Run learner on the chosen concept (if any).
 		correct := false
@@ -365,16 +371,19 @@ func TestOrchestrate_E2E_BroadGoal_LongInstruction_30Sessions(t *testing.T) {
 	cfg := NewDefaultPhaseConfig()
 	art := runE2ESimulation(t, "broad_goal", concepts, nil, goal, 30, cfg)
 
-	// Assertion: the transition to MAINTENANCE must be later (or
-	// absent) than in the restrictive scenario. We verify that
-	// MAINTENANCE does not arrive before the second half of the simulation and
-	// that the final phase is MAINTENANCE. Qualified diagnostics now cover every
-	// concept in domains of size <=8, and those measured responses legitimately
-	// update the routing estimate; therefore a broad curriculum can need only a
-	// short INSTRUCTION bridge after substantial DIAGNOSTIC coverage.
-	if art.Summary.FirstMaintenanceAt > 0 && art.Summary.FirstMaintenanceAt < 15 {
-		t.Errorf("broad goal : MAINTENANCE arrived too early (session %d, expected >= 15)",
-			art.Summary.FirstMaintenanceAt)
+	// The simulated learner answers every item correctly, so the adaptive
+	// placement classifies all six concepts as known (two items each, which
+	// exactly spends the default budget) and MAINTENANCE may follow the
+	// diagnostic directly. It must never precede the end of the diagnostic.
+	if art.Summary.FirstInstructionAt == 0 {
+		t.Fatalf("broad goal : the diagnostic never ended")
+	}
+	if diag := art.Summary.PhaseDistribution[string(models.PhaseDiagnostic)]; diag > NewDefaultPhaseConfig().NDiagnosticMax {
+		t.Errorf("broad goal : diagnostic used %d sessions, budget %d", diag, NewDefaultPhaseConfig().NDiagnosticMax)
+	}
+	if art.Summary.FirstMaintenanceAt > 0 && art.Summary.FirstMaintenanceAt <= art.Summary.FirstInstructionAt {
+		t.Errorf("broad goal : MAINTENANCE (session %d) preceded the end of the diagnostic (session %d)",
+			art.Summary.FirstMaintenanceAt, art.Summary.FirstInstructionAt)
 	}
 	if art.Summary.FinalPhase != string(models.PhaseMaintenance) {
 		t.Errorf("broad goal : expected final phase MAINTENANCE, got %s", art.Summary.FinalPhase)
@@ -395,8 +404,8 @@ func TestOrchestrate_E2E_FullCycle_30Sessions(t *testing.T) {
 	cfg.AntiRepeatWindow = 1 // 2-concept domain — N>=2 starves the pool.
 	art := runE2ESimulation(t, "full_cycle", concepts, nil, goal, 30, cfg)
 
-	// At least DIAGNOSTIC → INSTRUCTION must have occurred (NDiagnosticMax=8
-	// guarantees exit after 8 interactions).
+	// At least DIAGNOSTIC → INSTRUCTION must have occurred (the placement
+	// classifies two concepts in at most four items).
 	if art.Summary.FirstInstructionAt == 0 {
 		t.Errorf("expected DIAGNOSTIC→INSTRUCTION transition within 30 sessions")
 	}

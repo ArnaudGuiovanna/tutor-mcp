@@ -1,26 +1,37 @@
 # Institution service: phase 2
 
+> **Current state.** This phase plan predates the removal of the browser
+> surfaces: the institution console (`/console`, `/console/admin/`,
+> `/console/progress`), the learner portal (`/learn`), self-service signup and
+> email invitations no longer exist. Institutions are provisioned by the
+> operator with native key identities; members are managed through
+> `POST /api/client/v1/institution/actions`, formations, cohorts and admissions
+> through the `/admin/catalog` HTTP API, and staff read progress through the
+> MCP tools (`list_trainer_cohorts`, `get_learner_progress`,
+> `get_cohort_insights`, `get_cohort_statistics`). Passages below that named the
+> removed surfaces have been updated accordingly.
+
 ## Audit and scope (29 September 2026)
 
 Baseline: `adf81b34cf321fd82cd1e187edf3d6c10b55264a`, shared by `main`
 and `staging` after promotion of PR #183. Phase 0 is merged. Phase 1 supplies
-signup, verified invitations, a separate console session, confirmed TOTP,
-recovery codes, member management and an institution smoke using real accounts.
+signup, verified invitations, a separate browser session (since removed),
+confirmed TOTP, recovery codes, member management and an institution smoke using
+real accounts.
 It does not yet satisfy every identity prerequisite for the next phase:
 
 - `GetPrincipal`, authorization codes and refresh tokens still require a learner
   profile. The smoke gives the manager both `pedagogy_manager` and `learner`.
-- `/admin/catalog` accepts the same OAuth bearer as `/mcp`. Console cookies are
-  separate, but the administrative HTTP API is not yet separated.
+- `/admin/catalog` accepts the same OAuth bearer as `/mcp`; the administrative
+  HTTP API was not yet separated.
 - Enrollment creates a catalogue row without a tutor domain. The smoke creates
   a separate free domain, so its success does not demonstrate the catalogue bridge.
 - Catalogue JSON is exported Go field names; formation ownership, version reads,
   cloning, archive, pedagogical metadata and version migration are absent.
 
-Invitations are emailed only: the security corrections in PR #183 deliberately
-removed invitee bearer links from the inviter's console. Preserve that behavior;
-operator bootstrap still prints its explicit owner invitation. Public opening,
-email-provider configuration, GDPR erasure and the learner portal are later phases.
+Email invitations and operator owner invitations were later replaced by native
+key provisioning. Public opening, GDPR erasure and the learner journey are later
+phases.
 
 The maintainer authorized fixing the identity prerequisites and implementing
 phase 2. No server-side model inference is introduced.
@@ -34,12 +45,10 @@ OAuth authorization-code/refresh flow, including routing, token revocation and
 MFA. Do not create a fictitious learner to make a staff identity work. Existing
 learner and local/hobby authentication remain compatible.
 
-An institution's administrative HTTP API uses the verified console session
-under `/console/admin/`, with CSRF protection on writes. Public-client OAuth
-bearers cannot access it. The old `/admin/` institution endpoints fail closed.
 MCP exposes only the explicit pedagogical operations described below, authorized
 by permission and by formation ownership/assignment; membership and tenant
-administration stay in the console. A learner OAuth grant must not implicitly
+administration go through the native institution actions
+(`/api/client/v1/institution/actions`) and the operator CLI. A learner OAuth grant must not implicitly
 grant new pedagogical capabilities.
 
 ### 2b. Catalogue and formation rights
@@ -99,7 +108,7 @@ as if it had been collected on the new definition.
 ## Acceptance gates
 
 - SQLite and PostgreSQL: staff OAuth without a learner, refresh, MFA, revocation,
-  console cookie/CSRF boundaries and rejection of an MCP bearer on admin routes.
+  and administrative-route authorization boundaries.
 - Ownership and assignments: learners and unrelated managers cannot read/change
   a formation or replay a cached administrative response; cross-tenant IDs fail.
 - Catalogue: snake_case, typed metadata, valid prerequisite graph, immutable
@@ -116,6 +125,6 @@ as if it had been collected on the new definition.
   with PostgreSQL runtime roles. Run required local checks, then publish to
   `staging`; promote to `main` only after required GitHub checks pass.
 
-Phase 3 (learner catalogue/join/leave tools and `/learn`), trainer dashboards,
+Phase 3 (learner catalogue/join/leave tools), trainer dashboards,
 badges and collective statistics are not part of phase 2. This phase's bridge
 is a prerequisite for them, not proof that milestone M1 is complete.

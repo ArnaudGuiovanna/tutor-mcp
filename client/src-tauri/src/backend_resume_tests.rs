@@ -13,7 +13,7 @@ fn packet(presentation: &str, activity_type: &str) -> Value {
         "presentation":presentation,"permissions":{"read":true,"prepare_activity":true},
         "conversation":{"conversation_id":"unused","training_id":"personal:algebra","domain_id":"algebra","revision":"2","selection_version":4,"name":"Algèbre"},
         "training":{"id":"personal:algebra","domain_id":"algebra","name":"Algèbre"},
-        "activity":{"activity":{"type":activity_type,"concept":"equations"},"session_id":"session-algebra","decision_id":"decision-algebra","pedagogical_contract":{"competency":{"outcomes":[]}}},
+        "decision":{"activity":{"type":activity_type,"concept":"equations"},"session_id":"session-algebra","pedagogical_contract":{"decision_id":"decision-algebra","competency":{"outcomes":[]}}},
         "attempt":{"id":"attempt-1","domain_id":"algebra","concept":"equations","status":"prepared","rubric":rubric()}
     })
 }
@@ -58,16 +58,13 @@ async fn queued_native_resume_opens_one_isolated_session_without_immediate_reloa
             .await
             .unwrap();
         let conversation = backend.start_conversation(None, None).await.unwrap();
-        // The first grant already matches the upcoming native formulation;
-        // creation has not selected, prepared or graded anything server-side.
-        let sessions: Value = serde_json::from_slice(
-            &std::fs::read(directory.path().join("fixture-agent-sessions.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            sessions[conversation.agent_session_id.as_deref().unwrap()]["mcpServers"],
-            json!([])
-        );
+        // The upcoming native formulation runs in the private session: no MCP
+        // session is opened for it, and creation has not selected, prepared
+        // or graded anything server-side.
+        assert!(conversation.agent_session_id.is_none());
+        assert!(!latency_requests(directory.path())
+            .iter()
+            .any(|row| row["method"] == "session/new"));
         assert!(calls(directory.path()).is_empty());
         send_with_consent(&backend, &mut events, &conversation.id, text)
             .await
@@ -84,6 +81,14 @@ async fn queued_native_resume_opens_one_isolated_session_without_immediate_reloa
                 "{method}, button={by_button}"
             );
         }
+        let sessions: Value = serde_json::from_slice(
+            &std::fs::read(directory.path().join("fixture-agent-sessions.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            sessions[private_session_of(&backend, &conversation.id).await]["mcpServers"],
+            json!([])
+        );
         assert_eq!(
             calls(directory.path())[0]["name"],
             "prepare_pedagogical_turn"
@@ -261,20 +266,22 @@ async fn button_and_text_resume_select_natively_before_one_isolated_formulation(
             .as_str()
             .is_some_and(|key| !key.is_empty()));
         let records = latency_requests(directory.path());
+        // The native formulation never reaches the MCP grants: it runs in the
+        // conversation's private session (one more session/new, no reload).
         assert_eq!(
             records
                 .iter()
                 .filter(|row| row["method"] == "session/new")
                 .count(),
-            1
+            2
         );
         assert_eq!(
             records
                 .iter()
                 .filter(|row| row["method"] == "session/load")
                 .count(),
-            1,
-            "existing MCP grants must be revoked before native formulation"
+            0,
+            "alternating sessions are never reloaded"
         );
         let prepare = records
             .iter()
@@ -289,8 +296,15 @@ async fn button_and_text_resume_select_natively_before_one_isolated_formulation(
         assert!(prepare < prompts[0].0);
         assert!(!records
             .iter()
-            .any(|row| row["tool"] == "select_conversation_training"
-                || row["tool"] == "get_next_activity"));
+            .any(|row| row["tool"] == "select_conversation_training"));
+        // One canonical activity call; no separate get_next_activity anymore.
+        assert_eq!(
+            records
+                .iter()
+                .filter(|row| row["tool"] == "prepare_pedagogical_turn")
+                .count(),
+            1
+        );
 
         let state = backend.snapshot().await;
         let current = &state["conversations"][0];
@@ -306,7 +320,11 @@ async fn button_and_text_resume_select_natively_before_one_isolated_formulation(
         )
         .unwrap();
         assert_eq!(
-            sessions[current["agentSessionId"].as_str().unwrap()]["mcpServers"],
+            sessions[current["agentSessionId"].as_str().unwrap()]["mcpServers"][0]["name"],
+            "tutor"
+        );
+        assert_eq!(
+            sessions[private_session_of(&backend, &conversation.id).await]["mcpServers"],
             json!([])
         );
 
@@ -345,7 +363,7 @@ async fn ambiguous_or_missing_training_returns_server_choices_without_a_harness_
         } else {
             "not_found"
         });
-        packet["activity"] = Value::Null;
+        packet["decision"] = Value::Null;
         packet["training_choices"] = if with_choices {
             json!([
                 {"id":"personal:algebra","name":"Algèbre","domain_id":"algebra"},
@@ -576,7 +594,7 @@ async fn exercise_is_frozen_before_display_help_is_not_submitted_and_answer_prec
     assert_eq!(hint_context["arguments"]["mode"], "context");
     assert_eq!(hint_context["arguments"]["attempt_id"], "attempt-1");
 
-    let evaluation = json!({"version":1,"attempt_id":"attempt-1","rubric_score_json":json!({"criteria_scores":[{"id":"equivalence","score":1,"max_score":1,"evidence":"Subtracted three from both sides"}],"total":1,"max_total":1,"confidence":0.8}).to_string(),"feedback":"Retour enregistré sur la transformation observée."});
+    let evaluation = json!({"version":1,"attempt_id":"attempt-1","rubric_score":{"criteria_scores":[{"id":"equivalence","score":1,"max_score":1,"evidence":"Subtracted three from both sides"}],"total":1,"max_total":1,"confidence":0.8},"feedback":"Retour enregistré sur la transformation observée."});
     write_fixture(
         directory.path(),
         &packet,
@@ -632,5 +650,93 @@ async fn exercise_is_frozen_before_display_help_is_not_submitted_and_answer_prec
             .count(),
         1
     );
+    backend.shutdown().await;
+}
+
+#[tokio::test]
+async fn alternating_private_and_mcp_turns_keep_two_stable_sessions_without_reload() {
+    let directory = tempfile::tempdir().unwrap();
+    let introduction = json!({"version":1,"trainingId":"personal:algebra","domainId":"algebra","concept":"equations","sessionId":"session-algebra","decisionId":"decision-algebra","body":"UNIQUE_PRIVATE_INTRODUCTION"});
+    let private_output = envelope("tutor-introduction", &introduction);
+    let packet = packet("instruction", "NEW_CONCEPT");
+    let (backend, mut events) = connected(directory.path()).await;
+    // Closing replaced sessions requires the advertised capability.
+    backend.agent.lock().await.as_mut().unwrap().capabilities["sessionCapabilities"] =
+        json!({"close":{}});
+    let conversation = backend.start_conversation(None, None).await.unwrap();
+    let mcp_session = conversation.agent_session_id.clone().unwrap();
+    std::fs::write(directory.path().join("fixture-rpc.jsonl"), "").unwrap();
+    for (turn, private) in [true, false, true, false].into_iter().enumerate() {
+        let text = if private {
+            write_fixture(directory.path(), &packet, &private_output);
+            resume_button()
+        } else {
+            write_fixture(directory.path(), &packet, "Une explication contextuelle.");
+            format!("Explique encore, tour {turn}.")
+        };
+        assert_eq!(
+            send_with_consent(&backend, &mut events, &conversation.id, text)
+                .await
+                .unwrap()["stopReason"],
+            "end_turn"
+        );
+    }
+    let records = latency_requests(directory.path());
+    let count = |method: &str| records.iter().filter(|row| row["method"] == method).count();
+    assert_eq!(
+        count("session/new"),
+        1,
+        "only the private session is created"
+    );
+    assert_eq!(count("session/load"), 0);
+    assert_eq!(count("session/prompt"), 4);
+    let private_session = private_session_of(&backend, &conversation.id).await;
+    let sessions: Value = serde_json::from_slice(
+        &std::fs::read(directory.path().join("fixture-agent-sessions.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(sessions[&mcp_session]["promptCount"], 2);
+    assert_eq!(sessions[&private_session]["promptCount"], 2);
+    assert_eq!(sessions[&mcp_session]["mcpServers"][0]["name"], "tutor");
+    assert_eq!(sessions[&private_session]["mcpServers"], json!([]));
+    // The MCP session missed the private turn: its next prompt carries it.
+    assert!(sessions[&mcp_session]["lastPrompt"]
+        .as_str()
+        .unwrap()
+        .contains("UNIQUE_PRIVATE_INTRODUCTION"));
+    assert!(backend
+        .store
+        .lock()
+        .await
+        .data
+        .stale_agent_sessions
+        .is_empty());
+    // A private turn in another conversation retires this one's private
+    // session (one per process) with session/close.
+    let other = backend.start_conversation(None, None).await.unwrap();
+    write_fixture(directory.path(), &packet, &private_output);
+    send_with_consent(&backend, &mut events, &other.id, resume_button())
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !latency_requests(directory.path()).iter().any(|row| {
+            row["method"] == "session/close" && row["sessionId"] == private_session.as_str()
+        }) {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let agent = backend.agent.lock().await;
+    let registry = &agent.as_ref().unwrap().private_sessions;
+    assert_eq!(registry.len(), 1);
+    assert!(registry.contains_key(&other.id));
+    drop(agent);
+    // The first conversation's MCP session is marked as having missed nothing
+    // (its last turn was MCP); the other conversation's MCP session missed the
+    // private turn, durably.
+    let stale = backend.store.lock().await.data.stale_agent_sessions.clone();
+    assert!(stale.contains(other.agent_session_id.as_ref().unwrap()));
+    assert!(!stale.contains(&mcp_session));
     backend.shutdown().await;
 }

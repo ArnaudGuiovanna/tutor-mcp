@@ -32,7 +32,7 @@ def passing(result):
     return all(c['passed'] for c in result['checks'] + [c for r in result.get('cases', []) for c in r['checks']])
 
 
-def permission(tool='get_learner_context', args=None):
+def permission(tool='get_learner_state', args=None):
     return {'jsonrpc': '2.0', 'id': 'permission:op-1', 'method': 'session/request_permission', 'params': {'sessionId': 'session', 'toolCall': {'toolCallId': 'op-1', 'rawInput': {'server': 'tutor', 'tool': tool, 'arguments': args if args is not None else {'domain_id': TRAINING['domain_id']}}}, 'options': [{'kind': 'allow_once', 'optionId': 'allow'}, {'kind': 'reject_once', 'optionId': 'reject'}]}}
 
 
@@ -104,18 +104,18 @@ class CheckerTests(unittest.TestCase):
         self.assertNotEqual(expected, CONTRACT['profile']['heading'])
 
     def test_permission_exact_domain_and_id(self):
-        self.assertEqual(b.validate_permission(permission(), 'session', 'get_learner_context', {'domain_id': TRAINING['domain_id']}, 0, probe), 'op-1')
+        self.assertEqual(b.validate_permission(permission(), 'session', 'get_learner_state', {'domain_id': TRAINING['domain_id']}, 0, probe), 'op-1')
         for modify in (lambda v: v.update(id='permission:other'), lambda v: v['params'].update(sessionId='wrong'), lambda v: v['params']['toolCall']['rawInput']['arguments'].update(domain_id='other'), lambda v: v['params']['toolCall']['rawInput']['arguments'].update(extra=1)):
             value = permission(); modify(value)
             with self.assertRaises(probe.QualificationError):
-                b.validate_permission(value, 'session', 'get_learner_context', {'domain_id': TRAINING['domain_id']}, 0, probe)
+                b.validate_permission(value, 'session', 'get_learner_state', {'domain_id': TRAINING['domain_id']}, 0, probe)
         with self.assertRaises(probe.QualificationError):
-            b.validate_permission(permission(), 'session', 'get_learner_context', {'domain_id': TRAINING['domain_id']}, 1, probe)
+            b.validate_permission(permission(), 'session', 'get_learner_state', {'domain_id': TRAINING['domain_id']}, 1, probe)
 
     def replay(self, *, kind='profile', allowed=True, mutate=None, updates=True, wire=True, generations=1):
         audit = self.root / 'audit.jsonl'
         if audit.exists(): audit.unlink()
-        tool = 'list_training_library' if kind == 'library' else 'get_learner_context'
+        tool = 'list_training_library' if kind == 'library' else 'get_learner_state'
         args = {'limit': 10} if kind == 'library' else {'domain_id': TRAINING['domain_id']}
         def update(status):
             return {'method': 'session/update', 'params': {'sessionId': 'session', 'update': {'sessionUpdate': 'tool_call_update', 'title': tool, 'toolCallId': 'op-1', 'status': status}}}
@@ -160,7 +160,7 @@ class CheckerTests(unittest.TestCase):
         def mutate(value, frames, audit):
             chunk = frames[-1]
             def late_dispatch():
-                audit.write_bytes(b.canonical({'event': 'call_sent', 'tool': 'get_learner_context', 'argumentsSha256': b.digest({'domain_id': TRAINING['domain_id']})}) + b'\n')
+                audit.write_bytes(b.canonical({'event': 'call_sent', 'tool': 'get_learner_state', 'argumentsSha256': b.digest({'domain_id': TRAINING['domain_id']})}) + b'\n')
                 return chunk
             frames[-1] = late_dispatch
         row, _ = self.replay(allowed=False, mutate=mutate)
@@ -199,7 +199,7 @@ class CheckerTests(unittest.TestCase):
         envelope = {'structuredContent': {k: v for k, v in PROFILE.items() if not k.startswith('_')}}
         text = answer if answer is not None else CONTRACT['deniedProfile'] if denial else b.profile_answer(PROFILE, TRAINING, CONTRACT)
         args = {'domain_id': TRAINING['domain_id']}
-        row = {'case': 'fake', 'kind': 'profile', 'prompt': 'donne moii mon profil', 'permissionAllowed': not denial, 'permissionOperationIds': ['op-1'], 'answerSynthetic': text, 'generation': {'inputTokens': 32, 'outputTokens': 7}, 'wireEvents': [] if denial else [{'event': 'call_result', 'tool': 'get_learner_context', 'argumentsSha256': b.digest(args), 'resultSha256': b.digest(envelope), 'rpcError': False}]}
+        row = {'case': 'fake', 'kind': 'profile', 'prompt': 'donne moii mon profil', 'permissionAllowed': not denial, 'permissionOperationIds': ['op-1'], 'answerSynthetic': text, 'generation': {'inputTokens': 32, 'outputTokens': 7}, 'wireEvents': [] if denial else [{'event': 'call_result', 'tool': 'get_learner_state', 'argumentsSha256': b.digest(args), 'resultSha256': b.digest(envelope), 'rpcError': False}]}
         with closing(sqlite3.connect(path)) as db:
             db.executescript('CREATE TABLE turns(sequence INTEGER,id TEXT,payload BLOB,payload_sha256 BLOB); CREATE TABLE events(sequence INTEGER,turn_id TEXT,kind TEXT,payload BLOB,payload_sha256 BLOB); CREATE TABLE operations(id TEXT,turn_id TEXT,tool TEXT,arguments BLOB,state TEXT,mutating INTEGER); CREATE TABLE results(operation_id TEXT,payload BLOB); CREATE TABLE transitions(sequence INTEGER,operation_id TEXT,from_state TEXT,to_state TEXT);')
             raw = b.canonical({'user': row['prompt']})
@@ -208,7 +208,7 @@ class CheckerTests(unittest.TestCase):
             for n, (turn, kind, value) in enumerate(events):
                 raw = b.canonical(value)
                 db.execute('INSERT INTO events VALUES(?,?,?,?,?)', (n, turn, kind, raw, hashlib.sha256(raw).digest()))
-            db.execute('INSERT INTO operations VALUES(?,?,?,?,?,?)', ('op-1', 'turn-1', 'tutor/get_learner_context', b.canonical(args), 'rejected' if denial else 'completed', 0))
+            db.execute('INSERT INTO operations VALUES(?,?,?,?,?,?)', ('op-1', 'turn-1', 'tutor/get_learner_state', b.canonical(args), 'rejected' if denial else 'completed', 0))
             if not denial:
                 db.execute('INSERT INTO results VALUES(?,?)', ('op-1', b.canonical(envelope)))
             transitions = [(None, 'prepared'), ('prepared', 'rejected')] if denial else [(None, 'prepared'), ('prepared', 'dispatched'), ('dispatched', 'completed')]

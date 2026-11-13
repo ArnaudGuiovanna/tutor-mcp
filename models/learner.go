@@ -63,6 +63,9 @@ func NewConceptState(learnerID, concept string) *ConceptState {
 // "probability" from sharing BKT/FSRS/IRT state across unrelated subjects.
 func NewConceptStateInDomain(learnerID, domainID, concept string) *ConceptState {
 	reference := BKTReferenceParams()
+	// PMastery 0.1 is the instruction bootstrap: an untouched concept is
+	// introduced, not practised. A cold diagnostic does not start from it; the
+	// adaptive placement uses its own uninformative prior (engine.PlacementPrior).
 	return &ConceptState{
 		LearnerID:  learnerID,
 		DomainID:   domainID,
@@ -101,10 +104,9 @@ type Interaction struct {
 	// BKTSlip / BKTGuess capture the slip/guess parameters actually used by
 	// the BKT update for this observation, so the run can be replayed
 	// deterministically. The runtime applies the declared fixed parameters
-	// (reference or collective policy); error_type no longer adjusts them
-	// (the former heuristic, algorithms.BKTUpdateHeuristicSlipByErrorType, is
-	// deprecated). Pointers so a NULL on pre-issue-#51 rows stays
-	// distinguishable from a legitimate zero. See issue #51 / #8.
+	// (reference or collective policy); error_type does not adjust them.
+	// Pointers so a NULL on pre-issue-#51 rows stays distinguishable from a
+	// legitimate zero. See issue #51 / #8.
 	BKTSlip         *float64
 	BKTGuess        *float64
 	RubricJSON      string

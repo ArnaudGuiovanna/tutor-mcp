@@ -21,7 +21,7 @@ type RecordLearningEventParams struct {
 }
 
 func registerRecordLearningEvent(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{Name: "record_learning_event", Description: "After delivering feedback or instruction, record that exposure once. Server receipt time is used. This does not score a response, advance BKT or award an FSRS success; submit_assessment_attempt records bound responses separately."}, func(ctx context.Context, _ *mcp.CallToolRequest, p RecordLearningEventParams) (*mcp.CallToolResult, any, error) {
+	addTool(server, deps, &mcp.Tool{Name: "record_learning_event", Description: "After delivering feedback or instruction, record that exposure once. Server receipt time is used. This does not score a response, advance BKT or award an FSRS success; submit_assessment_attempt records bound responses separately."}, func(ctx context.Context, _ *mcp.CallToolRequest, p RecordLearningEventParams) (*mcp.CallToolResult, any, error) {
 		actor, ok := auth.GetPrincipal(ctx)
 		if !ok {
 			r, _ := errorResult("authenticated principal required")

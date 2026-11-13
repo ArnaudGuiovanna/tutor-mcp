@@ -43,13 +43,33 @@ describe('étape de la configuration guidée', () => {
     expect(onboardingStep(local)).toBe(1);
   });
 
-  it('considère configuré un profil distant avec agent et adresse enregistrée, même sans conversation ni sauvegarde confirmée', () => {
+  it('reprend une configuration neuve interrompue après l’enregistrement de l’adresse distante', () => {
+    // Key saved, agent chosen, address saved, institution not yet reached (awaiting authorisation).
+    const interrupted = fresh(); interrupted.settings.targetId = 'bundled:claude'; interrupted.settings.tutor.url = 'https://tutor.example.org';
+    interrupted.identity = { exists: true, backupConfirmed: true, needsBackup: false };
+    expect(legacySetupComplete(interrupted)).toBe(false);
+    expect(onboardingStep(interrupted)).toBe(3);
+    // A connection to another server proves nothing for this one.
+    interrupted.settings.tutorConnectedOrigin = 'https://elsewhere.example';
+    expect(onboardingStep(interrupted)).toBe(3);
+    interrupted.settings.permissionPolicy = { origin: 'https://elsewhere.example', institutionId: 'tenant-1', agentId: 'bundled:claude', defaultDecision: 'ask', tools: {} };
+    expect(onboardingStep(interrupted)).toBe(3);
+  });
+
+  it('considère configuré un profil distant déjà connecté avec succès, même sans conversation ni sauvegarde confirmée', () => {
     const remote = fresh(); remote.settings.targetId = 'bundled:claude'; remote.settings.tutor.url = 'https://tutor.example.org';
     remote.identity = { exists: true, backupConfirmed: false, needsBackup: true };
+    remote.settings.tutorConnectedOrigin = 'https://tutor.example.org';
     expect(legacySetupComplete(remote)).toBe(true);
     expect(onboardingStep(remote)).toBe('done');
+    // Older backends: a permission policy for this institution also proves a past connection.
+    const policy = fresh(); policy.settings.targetId = 'bundled:claude'; policy.settings.tutor.url = 'https://tutor.example.org/';
+    policy.settings.permissionPolicy = { origin: 'https://tutor.example.org', institutionId: 'tenant-1', agentId: 'bundled:claude', defaultDecision: 'ask', tools: {} };
+    expect(legacySetupComplete(policy)).toBe(true);
+    policy.settings.permissionPolicy.institutionId = '';
+    expect(legacySetupComplete(policy)).toBe(false);
     // An address alone, without an agent, is not a configured profile.
-    const addressOnly = fresh(); addressOnly.settings.tutor.url = 'https://tutor.example.org';
+    const addressOnly = fresh(); addressOnly.settings.tutor.url = 'https://tutor.example.org'; addressOnly.settings.tutorConnectedOrigin = 'https://tutor.example.org';
     expect(legacySetupComplete(addressOnly)).toBe(false);
     const blank = fresh(); blank.settings.targetId = 'bundled:claude'; blank.settings.tutor.url = '   ';
     expect(legacySetupComplete(blank)).toBe(false);

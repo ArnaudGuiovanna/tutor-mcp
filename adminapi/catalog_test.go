@@ -20,6 +20,8 @@ import (
 type catalogStoreStub struct {
 	createCalls int
 	lastKey     string
+	lastModule  models.FormationModuleInput
+	lastConcept models.FormationConceptInput
 }
 
 func (s *catalogStoreStub) CreateFormationDraftIdempotent(_ context.Context, actor models.Principal, key, name, description string) (*models.Formation, *models.FormationVersion, bool, error) {
@@ -28,11 +30,13 @@ func (s *catalogStoreStub) CreateFormationDraftIdempotent(_ context.Context, act
 	return &models.Formation{ID: "formation-1", TenantID: actor.TenantID, Name: name, Description: description},
 		&models.FormationVersion{ID: "version-1", TenantID: actor.TenantID}, s.createCalls > 1, nil
 }
-func (*catalogStoreStub) AddFormationModuleIdempotent(context.Context, models.Principal, string, string, models.FormationModuleInput) (string, bool, error) {
-	return "", false, nil
+func (s *catalogStoreStub) AddFormationModuleIdempotent(_ context.Context, _ models.Principal, _ string, _ string, input models.FormationModuleInput) (string, bool, error) {
+	s.lastModule = input
+	return "module-1", false, nil
 }
-func (*catalogStoreStub) AddFormationConceptIdempotent(context.Context, models.Principal, string, string, models.FormationConceptInput) (string, bool, error) {
-	return "", false, nil
+func (s *catalogStoreStub) AddFormationConceptIdempotent(_ context.Context, _ models.Principal, _ string, _ string, input models.FormationConceptInput) (string, bool, error) {
+	s.lastConcept = input
+	return "concept-1", false, nil
 }
 func (*catalogStoreStub) PublishFormationVersionIdempotent(context.Context, models.Principal, string, string) (*models.FormationVersion, bool, error) {
 	return &models.FormationVersion{}, false, nil
@@ -111,5 +115,33 @@ func TestCatalogAdminHTTPPaginationIsBounded(t *testing.T) {
 		models.OAuthScopeLearnerRead, nil)
 	if good.Code != http.StatusOK || !strings.Contains(good.Body.String(), "f0next") {
 		t.Fatalf("good page status=%d body=%s", good.Code, good.Body.String())
+	}
+}
+
+// Module and concept metadata travel as JSON objects; the former string field
+// is unknown and rejected.
+func TestCatalogAdminHTTPMetadataIsAnObject(t *testing.T) {
+	store := &catalogStoreStub{}
+	handler := New(store, slog.New(slog.NewTextHandler(io.Discard, nil))).Handler()
+	headers := map[string]string{"Idempotency-Key": "metadata-1"}
+	module := adminRequest(t, handler, http.MethodPost, "/admin/catalog/formation-versions/v1/modules",
+		`{"stable_key":"m","title":"Module","position":0,"metadata":{"color":"blue","weight":2}}`, models.OAuthScopeLearnerWrite, headers)
+	if module.Code != http.StatusCreated || store.lastModule.Metadata["color"] != "blue" || store.lastModule.Metadata["weight"] != float64(2) {
+		t.Fatalf("module status=%d body=%s metadata=%v", module.Code, module.Body.String(), store.lastModule.Metadata)
+	}
+	concept := adminRequest(t, handler, http.MethodPost, "/admin/catalog/formation-versions/v1/concepts",
+		`{"module_stable_key":"m","stable_key":"c","label":"Concept","position":0,"metadata":{"source":"syllabus"}}`, models.OAuthScopeLearnerWrite, headers)
+	if concept.Code != http.StatusCreated || store.lastConcept.Metadata["source"] != "syllabus" {
+		t.Fatalf("concept status=%d body=%s metadata=%v", concept.Code, concept.Body.String(), store.lastConcept.Metadata)
+	}
+	for _, body := range []string{
+		`{"stable_key":"m","title":"Module","position":0,"metadata_json":"{}"}`,
+		`{"stable_key":"m","title":"Module","position":0,"metadata":"{}"}`,
+	} {
+		rejected := adminRequest(t, handler, http.MethodPost, "/admin/catalog/formation-versions/v1/modules",
+			body, models.OAuthScopeLearnerWrite, headers)
+		if rejected.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status=%d body=%s", body, rejected.Code, rejected.Body.String())
+		}
 	}
 }

@@ -61,9 +61,12 @@ export function limitLabel(kind: AgentLimitKind, until: number): string {
  * native supervisor; this view only reports them and offers a manual retry
  * once it has given up.
  */
-export function HarnessStatus({ connected, reconnect, limit, loss, busy, onReconnect }: {
+export function HarnessStatus({ connected, reconnect, limit, loss, busy, blockedReason = '', onReconnect }: {
   connected: boolean; reconnect: AgentReconnect; limit: { kind: AgentLimitKind; until: number } | null;
-  loss?: AgentLoss; busy: boolean; onReconnect: () => void;
+  loss?: AgentLoss; busy: boolean;
+  /** Why the manual reconnection is unavailable (a model turn is running); announced with the disabled button. */
+  blockedReason?: string;
+  onReconnect: () => void;
 }) {
   const waiting = !connected && reconnect.state === 'waiting';
   const connecting = !connected && reconnect.state === 'connecting';
@@ -73,20 +76,21 @@ export function HarnessStatus({ connected, reconnect, limit, loss, busy, onRecon
   const nextAttempt = Date.parse(reconnect.nextAttemptAt || '');
   const cause = reconnect.state === 'failed' ? reconnect.cause || loss?.message : loss?.message;
   return <section className="harness-status" aria-label={t('État de l’agent')}>
-    {waiting && <div className="harness-status-line" role="status">
+    {waiting && <div className="harness-status-line info" role="status">
       <span className="harness-status-mark" aria-hidden="true"/>
       <p>{Number.isFinite(nextAttempt)
         ? <><span aria-hidden="true">{t('Reconnexion à l’agent dans {seconds} s (tentative {attempt})', { seconds: Math.max(0, Math.ceil((nextAttempt - now) / 1000)), attempt: reconnect.attempt })}</span>
           <span className="visually-hidden">{t('Reconnexion à l’agent programmée (tentative {attempt})', { attempt: reconnect.attempt })}</span></>
         : t('Reconnexion à l’agent programmée (tentative {attempt})', { attempt: reconnect.attempt })}</p>
     </div>}
-    {connecting && <div className="harness-status-line" role="status"><span className="spinner" aria-hidden="true"/><p>{t('Reconnexion à l’agent en cours…')}</p></div>}
+    {connecting && <div className="harness-status-line info" role="status"><span className="spinner" aria-hidden="true"/><p>{t('Reconnexion à l’agent en cours…')}</p></div>}
     {failed && <div className="harness-status-line failed">
       <div>
         <p role="alert">{t('La connexion à l’agent a échoué.')}{cause ? <> {t(cause)}</> : null}</p>
         {loss?.stderrTail && <details className="harness-status-details"><summary>{t('Détails techniques')}</summary><pre>{loss.stderrTail}</pre></details>}
       </div>
-      <button type="button" className="button secondary" disabled={busy} onClick={onReconnect}>{t('Reconnecter')}</button>
+      <button type="button" className="button secondary" disabled={busy || !!blockedReason} aria-describedby={blockedReason ? 'harness-reconnect-blocked' : undefined} onClick={onReconnect}>{t('Reconnecter')}</button>
+      {blockedReason && <span id="harness-reconnect-blocked" className="visually-hidden">{blockedReason}</span>}
     </div>}
     {limit && <div className="harness-status-line limited" role="status">
       <span className="harness-status-mark" aria-hidden="true"/>

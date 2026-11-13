@@ -81,7 +81,7 @@ func TestPedagogicalTurnContextIsReadOnlyAndVersionBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.SchemaVersion != models.PedagogicalTurnSchemaVersion || out.Mode != "context" || out.Session != nil || out.Activity != nil || out.Provenance.ModelUpdated || !reflect.DeepEqual(out.Conversation, selected) {
+	if out.SchemaVersion != models.PedagogicalTurnSchemaVersion || out.Mode != "context" || out.Session != nil || out.Decision != nil || out.Provenance.ModelUpdated || !reflect.DeepEqual(out.Conversation, selected) {
 		t.Fatalf("context = %#v", out)
 	}
 	if out.Curriculum.Version != domain.GraphVersion || len(out.Curriculum.Concepts) != 2 || !reflect.DeepEqual(out.Curriculum.Prerequisites["inference"], []string{"premise"}) {
@@ -125,8 +125,10 @@ func TestPedagogicalTurnSelectionAndPrincipalIsolation(t *testing.T) {
 			return copy
 		}(), PreparePedagogicalTurnParams{ConversationID: selected.ConversationID}, true},
 		{"other learner", models.LegacyPrincipal("L_attacker"), PreparePedagogicalTurnParams{ConversationID: selected.ConversationID}, false},
-		{"missing conversation", p, PreparePedagogicalTurnParams{}, true},
-		{"activity missing key", p, PreparePedagogicalTurnParams{ConversationID: selected.ConversationID, Mode: "activity"}, true},
+		{"no conversation resolves the domain", p, PreparePedagogicalTurnParams{}, false},
+		{"activity without key", p, PreparePedagogicalTurnParams{ConversationID: selected.ConversationID, Mode: "activity"}, false},
+		{"selection without key", p, PreparePedagogicalTurnParams{ConversationID: selected.ConversationID, Mode: "activity", TrainingName: "Go"}, true},
+		{"domain override of a conversation", p, PreparePedagogicalTurnParams{ConversationID: selected.ConversationID, DomainName: "Go"}, true},
 		{"unselected activity", p, PreparePedagogicalTurnParams{ConversationID: "unselected", Mode: "activity", IdempotentMutationParams: IdempotentMutationParams{IdempotencyKey: "one"}}, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -141,7 +143,7 @@ func TestPedagogicalTurnSelectionAndPrincipalIsolation(t *testing.T) {
 			if test.name == "other learner" && (!out.NeedsSelection || out.Curriculum != nil || out.Conversation.DomainID != "") {
 				t.Fatal("another learner borrowed selection")
 			}
-			if test.name == "unselected activity" && (!out.NeedsSelection || out.SelectionReason != "missing" || out.Activity != nil || out.Session != nil) {
+			if test.name == "unselected activity" && (!out.NeedsSelection || out.SelectionReason != "missing" || out.Decision != nil || out.Session != nil) {
 				t.Fatal("unselected activity guessed a training or opened a session")
 			}
 			if test.name == "read-only" && out.Permissions.PrepareActivity {
@@ -174,11 +176,11 @@ func TestPedagogicalTurnCanonicalActivityIsIdempotent(t *testing.T) {
 	if err := json.Unmarshal([]byte(resultText(one)), &out); err != nil {
 		t.Fatal(err)
 	}
-	contract, ok := out.Activity["pedagogical_contract"].(map[string]any)
-	if !ok || contract["decision_id"] == "" || out.Activity["decision_id"] != contract["decision_id"] || contract["policy_version"] != models.PedagogicalPolicyVersion || out.Session == nil || out.Session.ID != out.Activity["session_id"] {
+	contract, ok := out.Decision["pedagogical_contract"].(map[string]any)
+	if !ok || contract["decision_id"] == "" || out.Decision["decision_id"] != nil || contract["policy_version"] != models.PedagogicalPolicyVersion || out.Session == nil || out.Session.ID != out.Decision["session_id"] {
 		t.Fatalf("canonical contract=%#v", out)
 	}
-	if _, ok := out.Activity["consolidation_request"]; ok {
+	if _, ok := out.Decision["consolidation_request"]; ok {
 		t.Fatal("foreground maintenance returned")
 	}
 	var count int

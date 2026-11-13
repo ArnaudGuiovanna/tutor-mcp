@@ -88,7 +88,7 @@ func TestGetAvailabilityModel_PersistedRow(t *testing.T) {
 func TestUpdateAvailabilityModelValidatesAndRejectsStaleVersion(t *testing.T) {
 	_, deps := setupToolsTest(t)
 	args := map[string]any{
-		"expected_version":             0,
+		"expected_revision":            0,
 		"timezone":                     "America/New_York",
 		"preferred_windows":            []map[string]any{{"day": "monday", "start": "09:00", "end": "11:00"}},
 		"avg_session_duration_minutes": 45,
@@ -117,7 +117,7 @@ func TestUpdateAvailabilityModelValidatesAndRejectsStaleVersion(t *testing.T) {
 func TestUpdateAvailabilityModelRejectsInvalidTimezoneAndOverlap(t *testing.T) {
 	_, deps := setupToolsTest(t)
 	base := map[string]any{
-		"expected_version":             0,
+		"expected_revision":            0,
 		"timezone":                     "Not/A_Real_Zone",
 		"preferred_windows":            []map[string]any{},
 		"avg_session_duration_minutes": 30,

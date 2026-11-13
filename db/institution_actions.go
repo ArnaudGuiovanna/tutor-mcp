@@ -272,7 +272,7 @@ func (s *Store) inviteNativeInstitutionMember(ctx context.Context, p models.Prin
 	if err != nil {
 		return nil, err
 	}
-	if _, err = s.exec(ctx, `INSERT INTO tenant_memberships(id,tenant_id,user_id,learner_id,roles_json,status,version,created_at,updated_at,mfa_required) VALUES(?,?,?,NULL,?,'active',1,?,?,0)`, member, p.TenantID, userID, roles, now, now); err != nil {
+	if _, err = s.exec(ctx, `INSERT INTO tenant_memberships(id,tenant_id,user_id,learner_id,roles_json,status,version,created_at,updated_at) VALUES(?,?,?,NULL,?,'active',1,?,?)`, member, p.TenantID, userID, roles, now, now); err != nil {
 		return nil, err
 	}
 	if slices.Contains(in.Roles, models.RoleLearner) {
@@ -287,10 +287,7 @@ func (s *Store) inviteNativeInstitutionMember(ctx context.Context, p models.Prin
 }
 
 func (s *Store) revokeInstitutionMemberSessions(ctx context.Context, tenantID, memberID string) error {
-	if _, err := s.exec(ctx, `UPDATE native_sessions SET revoked_at=? WHERE tenant_id=? AND membership_id=? AND revoked_at IS NULL`, time.Now().UTC(), tenantID, memberID); err != nil {
-		return err
-	}
-	_, err := s.exec(ctx, `DELETE FROM console_sessions WHERE tenant_id=? AND membership_id=?`, tenantID, memberID)
+	_, err := s.exec(ctx, `UPDATE native_sessions SET revoked_at=? WHERE tenant_id=? AND membership_id=? AND revoked_at IS NULL`, time.Now().UTC(), tenantID, memberID)
 	return err
 }
 

@@ -41,7 +41,7 @@ func TestMCPHTTPToolPolicyRestrictsDiscoveryAndDirectInvocation(t *testing.T) {
 			t.Cleanup(transport.CloseIdleConnections)
 			httpClient := &http.Client{Transport: tutorPolicyTransport{
 				base:   bearerRoundTripper{base: transport, token: token},
-				policy: `{"default":"deny","tools":{"get_pending_alerts":"allow"}}`,
+				policy: `{"default":"deny","tools":{"get_learner_state":"allow"}}`,
 			}, Timeout: 30 * time.Second}
 			ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 			defer cancel()
@@ -52,14 +52,14 @@ func TestMCPHTTPToolPolicyRestrictsDiscoveryAndDirectInvocation(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = session.Close() })
 			listed, err := session.ListTools(ctx, nil)
-			if err != nil || len(listed.Tools) != 1 || listed.Tools[0].Name != "get_pending_alerts" {
+			if err != nil || len(listed.Tools) != 1 || listed.Tools[0].Name != "get_learner_state" {
 				t.Fatalf("HTTP policy did not restrict real discovery: tools=%+v err=%v", listed, err)
 			}
-			allowed, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "get_pending_alerts", Arguments: map[string]any{}})
+			allowed, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "get_learner_state", Arguments: map[string]any{"view": "progress"}})
 			if err != nil || allowed == nil || allowed.IsError {
 				t.Fatalf("allowed read could not reach institution authorization: result=%+v err=%v", allowed, err)
 			}
-			for _, name := range []string{"init_domain", "delete_domain"} {
+			for _, name := range []string{"init_domain", "manage_domain"} {
 				result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: map[string]any{}})
 				if err != nil || result == nil || !result.IsError {
 					t.Fatalf("denied direct invocation %q was not blocked: result=%+v err=%v", name, result, err)

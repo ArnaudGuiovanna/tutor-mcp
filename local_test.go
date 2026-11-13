@@ -116,7 +116,7 @@ func TestLocalStdioConcurrentPersistenceAndCrashRecovery(t *testing.T) {
 	}
 	wg.Wait()
 	localCall(t, ctx, clients[0], "get_memory_state", map[string]any{})
-	localCall(t, ctx, clients[0], "get_next_activity", map[string]any{})
+	localCall(t, ctx, clients[0], "prepare_pedagogical_turn", map[string]any{"mode": "activity"})
 	localCall(t, ctx, clients[0], "record_interaction", map[string]any{"concept": "fractions", "activity_type": "DIAGNOSTIC_ASSESSMENT", "success": true, "response_time_seconds": 20, "confidence": 0.7, "notes": "acceptance", "idempotency_key": "progress"})
 	// Lose one process without closing SQLite; its sibling continues normally.
 	if err := clients[0].cmd.Process.Kill(); err != nil {
@@ -282,7 +282,7 @@ func TestLocalCancellationAndNoHTTPListener(t *testing.T) {
 	if err := tx.Rollback(); err != nil {
 		t.Fatal(err)
 	}
-	localCall(t, ctx, client, "get_learner_context", map[string]any{})
+	localCall(t, ctx, client, "get_learner_state", map[string]any{"view": "overview"})
 	var count int
 	if err := store.RawDB().QueryRow(`SELECT COUNT(*) FROM domains WHERE name = 'Must be cancelled'`).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("cancelled mutation committed: count=%d err=%v", count, err)

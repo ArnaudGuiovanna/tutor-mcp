@@ -247,7 +247,7 @@ func TestInstitutionProgressMigrationAndTenantIsolation(t *testing.T) {
 		t.Fatalf("historical contamination exposed: %+v %v", old, err)
 	}
 	// Genuine memberships in a separate tenant, not a forged principal.
-	otherOwner, _ := verifiedOwner(t, s, seedInstitutionOwner(t, s, "progress-foreign", "owner@foreign.test"))
+	otherOwner, _ := verifiedOwner(t, s, seedInstitutionOwner(t, s, "progress-foreign"))
 	otherOwner = progressReader(otherOwner)
 	if _, err := s.GetCohortInsights(ctx, otherOwner, cohort.ID, "", "", 10); !errors.Is(err, storeport.ErrNotFound) {
 		t.Fatalf("foreign cohort: %v", err)

@@ -46,7 +46,7 @@ func TestSelectAction_Misconception_OverridesAll(t *testing.T) {
 		MisconceptionType: "channel_blocking_assumption",
 		Status:            "active",
 	}
-	a := SelectAction("Goroutines", cs, mc, ActionHistory{InteractionsAboveBKT: 5})
+	a := SelectActionAt("Goroutines", cs, mc, ActionHistory{InteractionsAboveBKT: 5}, time.Now().UTC())
 	if a.Type != models.ActivityDebugMisconception {
 		t.Fatalf("expected DEBUG_MISCONCEPTION, got %s", a.Type)
 	}
@@ -67,7 +67,7 @@ func TestSelectAction_MisconceptionBeatsLowRetention(t *testing.T) {
 		MisconceptionType: "deadlock_unaware",
 		Status:            "active",
 	}
-	a := SelectAction("Channels", cs, mc, ActionHistory{})
+	a := SelectActionAt("Channels", cs, mc, ActionHistory{}, time.Now().UTC())
 	if a.Type != models.ActivityDebugMisconception {
 		t.Fatalf("OQ-5.4 violated: with mc+low retention, expected DEBUG_MISCONCEPTION, got %s", a.Type)
 	}
@@ -77,7 +77,7 @@ func TestSelectAction_RetentionLow_TriggersRecall(t *testing.T) {
 	cs := reviewedConceptState("Channels", 0.5)
 	cs.Stability = 1.0
 	setActionCardAge(cs, 30)
-	a := SelectAction("Channels", cs, nil, ActionHistory{})
+	a := SelectActionAt("Channels", cs, nil, ActionHistory{}, time.Now().UTC())
 	if a.Type != models.ActivityRecall {
 		t.Fatalf("expected RECALL_EXERCISE, got %s", a.Type)
 	}
@@ -126,7 +126,7 @@ func TestSelectAction_RetentionRecallRoutingBoundary(t *testing.T) {
 			cs.Stability = stabilityForRetention(t, tc.retention)
 			setActionCardAge(cs, 1)
 
-			a := SelectAction("Channels", cs, nil, ActionHistory{})
+			a := SelectActionAt("Channels", cs, nil, ActionHistory{}, time.Now().UTC())
 			if a.Type != tc.want {
 				t.Fatalf("action type: got %s, want %s", a.Type, tc.want)
 			}
@@ -136,7 +136,7 @@ func TestSelectAction_RetentionRecallRoutingBoundary(t *testing.T) {
 
 func TestSelectAction_NewCardSkipsRetentionCheck(t *testing.T) {
 	cs := models.NewConceptState("L1", "Slices") // CardState=new, PMastery=0.1
-	a := SelectAction("Slices", cs, nil, ActionHistory{})
+	a := SelectActionAt("Slices", cs, nil, ActionHistory{}, time.Now().UTC())
 	if a.Type != models.ActivityNewConcept {
 		t.Fatalf("expected NEW_CONCEPT for fresh card, got %s", a.Type)
 	}
@@ -166,7 +166,7 @@ func TestSelectActionForPhaseAt_DiagnosticIsColdAcrossDomains(t *testing.T) {
 
 func TestSelectAction_MasteryUnder30_NewConcept(t *testing.T) {
 	cs := reviewedConceptState("Maps", 0.20)
-	a := SelectAction("Maps", cs, nil, ActionHistory{})
+	a := SelectActionAt("Maps", cs, nil, ActionHistory{}, time.Now().UTC())
 	if a.Type != models.ActivityNewConcept {
 		t.Fatalf("expected NEW_CONCEPT, got %s", a.Type)
 	}
@@ -174,7 +174,7 @@ func TestSelectAction_MasteryUnder30_NewConcept(t *testing.T) {
 
 func TestSelectAction_Mastery30To70_PracticeStandard(t *testing.T) {
 	cs := reviewedConceptState("Maps", 0.50)
-	a := SelectAction("Maps", cs, nil, ActionHistory{})
+	a := SelectActionAt("Maps", cs, nil, ActionHistory{}, time.Now().UTC())
 	if a.Type != models.ActivityPractice {
 		t.Fatalf("expected PRACTICE, got %s", a.Type)
 	}
@@ -189,7 +189,7 @@ func TestSelectAction_Mastery30To70_PracticeStandard(t *testing.T) {
 func TestSelectAction_Mastery70To85_PracticeZPD(t *testing.T) {
 	cs := reviewedConceptState("Maps", 0.78)
 	cs.Theta = 0.847 // legacy estimate must not determine task difficulty
-	a := SelectAction("Maps", cs, nil, ActionHistory{})
+	a := SelectActionAt("Maps", cs, nil, ActionHistory{}, time.Now().UTC())
 	if a.Type != models.ActivityPractice {
 		t.Fatalf("expected PRACTICE, got %s", a.Type)
 	}
@@ -205,7 +205,7 @@ func TestSelectAction_Mastery70To85_PracticeZPD(t *testing.T) {
 
 func TestSelectAction_HighMastery_FirstIsMasteryChallenge(t *testing.T) {
 	cs := reviewedConceptState("Goroutines", 0.90)
-	a := SelectAction("Goroutines", cs, nil, ActionHistory{InteractionsAboveBKT: 3})
+	a := SelectActionAt("Goroutines", cs, nil, ActionHistory{InteractionsAboveBKT: 3}, time.Now().UTC())
 	if a.Type != models.ActivityMasteryChallenge {
 		t.Fatalf("expected MASTERY_CHALLENGE on first high-mastery activity, got %s", a.Type)
 	}
@@ -213,10 +213,11 @@ func TestSelectAction_HighMastery_FirstIsMasteryChallenge(t *testing.T) {
 
 func TestSelectAction_HighMastery_RotatesToFeynman(t *testing.T) {
 	cs := reviewedConceptState("Goroutines", 0.90)
-	a := SelectAction("Goroutines", cs, nil, ActionHistory{
+	a := SelectActionAt("Goroutines", cs, nil, ActionHistory{
 		InteractionsAboveBKT:  5,
 		MasteryChallengeCount: 1,
-	})
+	}, time.Now().UTC())
+
 	if a.Type != models.ActivityFeynmanPrompt {
 		t.Fatalf("expected FEYNMAN_PROMPT after 1 mastery challenge, got %s", a.Type)
 	}
@@ -224,11 +225,12 @@ func TestSelectAction_HighMastery_RotatesToFeynman(t *testing.T) {
 
 func TestSelectAction_HighMastery_RotatesToTransfer(t *testing.T) {
 	cs := reviewedConceptState("Goroutines", 0.90)
-	a := SelectAction("Goroutines", cs, nil, ActionHistory{
+	a := SelectActionAt("Goroutines", cs, nil, ActionHistory{
 		InteractionsAboveBKT:  5,
 		MasteryChallengeCount: 1,
 		FeynmanCount:          1,
-	})
+	}, time.Now().UTC())
+
 	if a.Type != models.ActivityTransferProbe {
 		t.Fatalf("expected TRANSFER_PROBE after MC+F, got %s", a.Type)
 	}
@@ -236,12 +238,13 @@ func TestSelectAction_HighMastery_RotatesToTransfer(t *testing.T) {
 
 func TestSelectAction_HighMastery_CycleRestartsAtMasteryChallenge(t *testing.T) {
 	cs := reviewedConceptState("Goroutines", 0.90)
-	a := SelectAction("Goroutines", cs, nil, ActionHistory{
+	a := SelectActionAt("Goroutines", cs, nil, ActionHistory{
 		InteractionsAboveBKT:  10,
 		MasteryChallengeCount: 1,
 		FeynmanCount:          1,
 		TransferCount:         1,
-	})
+	}, time.Now().UTC())
+
 	if a.Type != models.ActivityMasteryChallenge {
 		t.Fatalf("expected MasteryChallenge on cycle restart (1,1,1), got %s", a.Type)
 	}
@@ -262,7 +265,7 @@ func TestSelectAction_HighMastery_FullCycleOrder(t *testing.T) {
 		models.ActivityTransferProbe,
 	}
 	for i, want := range expected {
-		a := SelectAction("Goroutines", cs, nil, history)
+		a := SelectActionAt("Goroutines", cs, nil, history, time.Now().UTC())
 		if a.Type != want {
 			t.Fatalf("step %d: expected %s, got %s (history=%+v)", i, want, a.Type, history)
 		}
@@ -283,7 +286,7 @@ func TestSelectAction_HighMastery_Unstable_StaysInPracticeZPD(t *testing.T) {
 	// p ≥ 0.85 but stability window not yet met → must NOT emit MasteryChallenge.
 	cs := reviewedConceptState("Goroutines", 0.86)
 	cs.Theta = 1.0
-	a := SelectAction("Goroutines", cs, nil, ActionHistory{InteractionsAboveBKT: 1})
+	a := SelectActionAt("Goroutines", cs, nil, ActionHistory{InteractionsAboveBKT: 1}, time.Now().UTC())
 	if a.Type != models.ActivityPractice {
 		t.Fatalf("expected PRACTICE while unstable, got %s", a.Type)
 	}
@@ -310,7 +313,7 @@ func TestSelectAction_OscillationAroundThreshold(t *testing.T) {
 	}
 	for _, s := range scenarios {
 		cs := reviewedConceptState("OscConcept", s.p)
-		a := SelectAction("OscConcept", cs, nil, ActionHistory{InteractionsAboveBKT: s.stab})
+		a := SelectActionAt("OscConcept", cs, nil, ActionHistory{InteractionsAboveBKT: s.stab}, time.Now().UTC())
 		if a.Type == models.ActivityMasteryChallenge {
 			t.Fatalf("OQ-5.5 violated at %q (p=%.2f stab=%d): MasteryChallenge fired", s.label, s.p, s.stab)
 		}
@@ -320,7 +323,7 @@ func TestSelectAction_OscillationAroundThreshold(t *testing.T) {
 func TestSelectAction_HighMastery_StabilityExactlyAtWindow(t *testing.T) {
 	cs := reviewedConceptState("Concept", 0.90)
 	// Exactly N=3 → eligible.
-	a := SelectAction("Concept", cs, nil, ActionHistory{InteractionsAboveBKT: HighMasteryStabilityWindow})
+	a := SelectActionAt("Concept", cs, nil, ActionHistory{InteractionsAboveBKT: HighMasteryStabilityWindow}, time.Now().UTC())
 	if a.Type != models.ActivityMasteryChallenge {
 		t.Fatalf("expected MasteryChallenge at exactly N=%d, got %s", HighMasteryStabilityWindow, a.Type)
 	}
@@ -328,7 +331,7 @@ func TestSelectAction_HighMastery_StabilityExactlyAtWindow(t *testing.T) {
 
 func TestSelectAction_HighMastery_StabilityJustUnder(t *testing.T) {
 	cs := reviewedConceptState("Concept", 0.90)
-	a := SelectAction("Concept", cs, nil, ActionHistory{InteractionsAboveBKT: HighMasteryStabilityWindow - 1})
+	a := SelectActionAt("Concept", cs, nil, ActionHistory{InteractionsAboveBKT: HighMasteryStabilityWindow - 1}, time.Now().UTC())
 	if a.Type != models.ActivityPractice {
 		t.Fatalf("expected PRACTICE at N=%d (one below), got %s", HighMasteryStabilityWindow-1, a.Type)
 	}
@@ -337,51 +340,38 @@ func TestSelectAction_HighMastery_StabilityJustUnder(t *testing.T) {
 // ─── NaN / nil guard (OQ-5.6 = B) ──────────────────────────────────────────
 
 func TestSelectAction_NaN_PMastery_FallsBackToRest(t *testing.T) {
-	before := NaNFallbackCount()
 	cs := reviewedConceptState("Concept", math.NaN())
-	a := SelectAction("Concept", cs, nil, ActionHistory{})
+	a := SelectActionAt("Concept", cs, nil, ActionHistory{}, time.Now().UTC())
 	if a.Type != models.ActivityRest {
 		t.Fatalf("expected REST on NaN PMastery, got %s", a.Type)
-	}
-	if NaNFallbackCount() != before+1 {
-		t.Errorf("expected nanFallbackCount to increment by 1, got delta %d", NaNFallbackCount()-before)
 	}
 }
 
 func TestSelectAction_NaN_LegacyThetaDoesNotBlockPractice(t *testing.T) {
-	before := NaNFallbackCount()
 	cs := reviewedConceptState("Concept", 0.5)
 	cs.Theta = math.NaN()
-	a := SelectAction("Concept", cs, nil, ActionHistory{})
+	a := SelectActionAt("Concept", cs, nil, ActionHistory{}, time.Now().UTC())
 	if a.Type != models.ActivityPractice {
 		t.Fatalf("unused legacy theta must not block PRACTICE, got %s", a.Type)
-	}
-	if NaNFallbackCount() != before {
-		t.Errorf("unused legacy theta triggered a fallback")
 	}
 }
 
 func TestSelectAction_NilState_FallsBackToRest(t *testing.T) {
-	before := NaNFallbackCount()
-	a := SelectAction("Concept", nil, nil, ActionHistory{})
+	a := SelectActionAt("Concept", nil, nil, ActionHistory{}, time.Now().UTC())
 	if a.Type != models.ActivityRest {
 		t.Fatalf("expected REST on nil state, got %s", a.Type)
-	}
-	if NaNFallbackCount() != before+1 {
-		t.Errorf("expected nanFallbackCount to increment by 1, got delta %d", NaNFallbackCount()-before)
 	}
 }
 
 // ─── MasteryBKT accessor (no literal 0.85 in code) ─────────────────────────
 
 func TestSelectAction_RespectsMasteryBKTAccessor(t *testing.T) {
-	t.Setenv("REGULATION_THRESHOLD", "off")
 	// MasteryBKT() resolves to the unified 0.85 threshold; this test asserts
 	// the accessor is invoked, not the literal. p=0.84 sits in the
 	// practice_zpd branch.
 	cs := reviewedConceptState("Concept", 0.84)
 	cs.Theta = 1.0
-	a := SelectAction("Concept", cs, nil, ActionHistory{InteractionsAboveBKT: 5})
+	a := SelectActionAt("Concept", cs, nil, ActionHistory{InteractionsAboveBKT: 5}, time.Now().UTC())
 	if a.Type != models.ActivityPractice || a.Format != "practice_zpd" {
 		t.Errorf("expected practice_zpd at p=0.84, got %s/%s", a.Type, a.Format)
 	}
@@ -390,11 +380,11 @@ func TestSelectAction_RespectsMasteryBKTAccessor(t *testing.T) {
 func TestPracticeDecisionIndependentOfLegacyThetaAndFSRSDifficulty(t *testing.T) {
 	for _, mastery := range []float64{0.5, 0.75, 0.90} {
 		cs := reviewedConceptState("Concept", mastery)
-		want := SelectAction("Concept", cs, nil, ActionHistory{})
+		want := SelectActionAt("Concept", cs, nil, ActionHistory{}, time.Now().UTC())
 		for _, theta := range []float64{-4, 0, 4, math.NaN(), math.Inf(1)} {
 			for _, difficulty := range []float64{1, 5, 10} {
 				cs.Theta, cs.Difficulty = theta, difficulty
-				got := SelectAction("Concept", cs, nil, ActionHistory{})
+				got := SelectActionAt("Concept", cs, nil, ActionHistory{}, time.Now().UTC())
 				if got != want {
 					t.Errorf("unvalidated estimates changed practice: mastery=%f theta=%f memoryDifficulty=%f got=%+v want=%+v", mastery, theta, difficulty, got, want)
 				}
@@ -405,11 +395,40 @@ func TestPracticeDecisionIndependentOfLegacyThetaAndFSRSDifficulty(t *testing.T)
 
 func TestPracticeTargetIsExplicitlyHeuristic(t *testing.T) {
 	cs := reviewedConceptState("Concept", 0.75)
-	got := SelectAction("Concept", cs, nil, ActionHistory{})
+	got := SelectActionAt("Concept", cs, nil, ActionHistory{}, time.Now().UTC())
 	if got.DifficultyTarget != PracticeDifficultyTarget || !strings.Contains(got.Rationale, "heuristic") {
 		t.Errorf("practice must expose a heuristic generation target, got %+v", got)
 	}
 	if strings.Contains(got.Rationale, "IRT") || strings.Contains(got.Rationale, "70%") {
 		t.Errorf("practice must not claim calibrated IRT success probability, got %+v", got)
+	}
+}
+
+func TestEaseDifficultyAfterFailureStreak(t *testing.T) {
+	drift := []models.Alert{{Type: models.AlertZPDDrift, Concept: "loops"}}
+	practice := Action{Type: models.ActivityPractice, DifficultyTarget: 0.55, Rationale: "practice"}
+
+	eased := easeDifficultyAfterFailureStreak(practice, drift, "loops")
+	if math.Abs(eased.DifficultyTarget-0.35) > 1e-9 || !strings.Contains(eased.Rationale, "ZPD_DRIFT") {
+		t.Fatalf("practice after a failure streak must be easier, got %+v", eased)
+	}
+	if got := easeDifficultyAfterFailureStreak(practice, drift, "other"); got != practice {
+		t.Fatalf("another concept's streak must not change the action, got %+v", got)
+	}
+	if got := easeDifficultyAfterFailureStreak(Action{Type: models.ActivityNewConcept, DifficultyTarget: 0.40}, drift, "loops"); got.DifficultyTarget != 0.30 {
+		t.Fatalf("eased difficulty must stay above the floor, got %v", got.DifficultyTarget)
+	}
+	floor := Action{Type: models.ActivityPractice, DifficultyTarget: 0.30, Rationale: "floor"}
+	if got := easeDifficultyAfterFailureStreak(floor, drift, "loops"); got != floor {
+		t.Fatalf("an action already at the floor is unchanged, got %+v", got)
+	}
+	for _, assessment := range []models.ActivityType{
+		models.ActivityDiagnosticAssessment, models.ActivityMasteryChallenge, models.ActivityTransferProbe,
+		models.ActivityRecall, models.ActivityDebugMisconception,
+	} {
+		action := Action{Type: assessment, DifficultyTarget: 0.75}
+		if got := easeDifficultyAfterFailureStreak(action, drift, "loops"); got != action {
+			t.Fatalf("%s difficulty must not be lowered, got %+v", assessment, got)
+		}
 	}
 }

@@ -41,12 +41,12 @@ func TestAssessmentUsesCurriculumCriterionIdentity(t *testing.T) {
 				t.Fatal(resultText(created))
 			}
 			domainID := decodeResult(t, created)["domain_id"].(string)
-			next := callTool(t, deps, registerGetNextActivity, learnerID, "get_next_activity", map[string]any{"domain_id": domainID})
+			next := callNextActivity(t, deps, learnerID, map[string]any{"domain_id": domainID})
 			if next.IsError {
 				t.Fatal(resultText(next))
 			}
 			activity := decodeResult(t, next)
-			decision, err := s.GetPedagogicalDecision(t.Context(), models.LegacyPrincipal(learnerID).TenantScope(), activity["decision_id"].(string))
+			decision, err := s.GetPedagogicalDecision(t.Context(), models.LegacyPrincipal(learnerID).TenantScope(), decisionIDOf(activity))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -61,7 +61,7 @@ func TestAssessmentUsesCurriculumCriterionIdentity(t *testing.T) {
 			args := map[string]any{
 				"domain_id": domainID, "concept": decision.Contract.TargetConcept, "session_id": decision.SessionID, "decision_id": decision.ID,
 				"activity_type": string(decision.Contract.RecommendedActivityType), "observable": criterion.Description,
-				"task_text": "Solve x + 3 = 7, showing equivalent transformations.", "rubric_json": string(rubric), "idempotency_key": "freeze-criterion-once",
+				"task_text": "Solve x + 3 = 7, showing equivalent transformations.", "rubric": json.RawMessage(rubric), "idempotency_key": "freeze-criterion-once",
 			}
 			prepared := callTool(t, deps, register, learnerID, "prepare_assessment_attempt", args)
 			if prepared.IsError {
@@ -80,7 +80,7 @@ func TestAssessmentUsesCurriculumCriterionIdentity(t *testing.T) {
 			grade := assessmentEvaluationArgs(domainID, decision.SessionID, attemptID, true)
 			grade["concept"], grade["activity_type"] = decision.Contract.TargetConcept, string(decision.Contract.RecommendedActivityType)
 			score, _ := json.Marshal(map[string]any{"criteria_scores": []map[string]any{{"id": criterion.ID, "score": 1, "evidence": "Subtracts 3 from both sides"}}})
-			grade["rubric_score_json"] = string(score)
+			grade["rubric_score"] = json.RawMessage(score)
 			if result := callTool(t, deps, registerRecordInteraction, learnerID, "record_interaction", grade); result.IsError {
 				t.Fatal(resultText(result))
 			}

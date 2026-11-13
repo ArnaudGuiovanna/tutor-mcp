@@ -21,6 +21,7 @@ import (
 
 	"tutor-mcp/auth"
 	"tutor-mcp/db"
+	"tutor-mcp/internal/testsupport"
 	"tutor-mcp/memory"
 	"tutor-mcp/models"
 	storeport "tutor-mcp/store"
@@ -37,6 +38,7 @@ type mcpHTTPFixture struct {
 	admin, runtime *db.Store
 	postgres       bool
 	role           string
+	owners         map[string]*models.NativeIdentity // tenant slug -> bootstrapped owner
 }
 
 // The migrator/seed store is deliberately separate from the PostgreSQL HTTP
@@ -172,10 +174,6 @@ func configureMCPHTTPPostgres(t *testing.T, f *mcpHTTPFixture) {
 	}
 }
 
-func mcpHTTPMembershipScope(m *models.TenantMembership) models.TenantScope {
-	return models.TenantScope{TenantID: m.TenantID, UserID: m.UserID, MembershipID: m.ID, LearnerID: m.LearnerID}
-}
-
 func (f *mcpHTTPFixture) seedTenant(t *testing.T, slug string, count int) []models.Principal {
 	t.Helper()
 	ctx := t.Context()
@@ -184,18 +182,12 @@ func (f *mcpHTTPFixture) seedTenant(t *testing.T, slug string, count int) []mode
 	if err != nil {
 		t.Fatal(err)
 	}
-	ownerToken, err := f.admin.CreateOwnerInvitation(ctx, operator, tenant.ID, "owner@"+slug+".test", time.Now().Add(time.Hour))
-	if err != nil {
-		t.Fatal(err)
+	ownerIdentity := testsupport.BootstrapOwner(t, f.admin, tenant.ID)
+	if f.owners == nil {
+		f.owners = map[string]*models.NativeIdentity{}
 	}
-	membership, err := f.admin.AcceptTenantInvitationWithNewUser(ctx, models.InvitationCredential{Token: ownerToken}, "test-password-hash")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ownerScope := mcpHTTPMembershipScope(membership)
-	if _, err := f.admin.RecordMembershipMFAVerification(ctx, ownerScope, time.Now().UTC()); err != nil {
-		t.Fatal(err)
-	}
+	f.owners[slug] = ownerIdentity
+	ownerScope := testsupport.Scope(ownerIdentity)
 	owner, err := f.admin.GetPrincipal(ctx, ownerScope, []string{models.OAuthScopeLearner})
 	if err != nil {
 		t.Fatal(err)
@@ -205,15 +197,8 @@ func (f *mcpHTTPFixture) seedTenant(t *testing.T, slug string, count int) []mode
 	}
 	learners := make([]models.Principal, 0, count)
 	for i := range count {
-		_, token, err := f.admin.CreateTenantInvitation(ctx, owner, fmt.Sprintf("learner%d@%s.test", i, slug), []string{models.RoleLearner}, time.Now().Add(time.Hour))
-		if err != nil {
-			t.Fatal(err)
-		}
-		member, err := f.admin.AcceptTenantInvitationWithNewUser(ctx, models.InvitationCredential{Token: token}, "test-password-hash")
-		if err != nil {
-			t.Fatal(err)
-		}
-		principal, err := f.admin.GetPrincipal(ctx, mcpHTTPMembershipScope(member), []string{models.OAuthScopeLearner})
+		member := testsupport.ProvisionMember(t, f.admin, tenant.ID, fmt.Sprintf("Learner %d", i), models.RoleLearner)
+		principal, err := f.admin.GetPrincipal(ctx, testsupport.Scope(member), []string{models.OAuthScopeLearner})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -223,6 +208,20 @@ func (f *mcpHTTPFixture) seedTenant(t *testing.T, slug string, count int) []mode
 		learners = append(learners, principal)
 	}
 	return learners
+}
+
+// ownerPrincipal resolves the owner bootstrapped by seedTenant for slug.
+func (f *mcpHTTPFixture) ownerPrincipal(t *testing.T, slug string) models.Principal {
+	t.Helper()
+	identity := f.owners[slug]
+	if identity == nil {
+		t.Fatalf("tenant %q was not seeded", slug)
+	}
+	principal, err := f.admin.GetPrincipal(t.Context(), testsupport.Scope(identity), []string{models.OAuthScopeLearner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return principal
 }
 
 func (f *mcpHTTPFixture) assertPostgresRLS(t *testing.T, actors []models.Principal) {
@@ -433,7 +432,7 @@ func TestMCPHTTPConcurrentIdentityAndReplay(t *testing.T) {
 						errors <- fmt.Errorf("replay %s did not return its original response: %v", actor.LearnerID, err)
 						return
 					}
-					_, payload, err = callMCPHTTPTool(ctx, sessions[i], "get_learner_context", map[string]any{"domain_id": domains[i].ID})
+					_, payload, err = callMCPHTTPTool(ctx, sessions[i], "get_learner_state", map[string]any{"view": "overview", "domain_id": domains[i].ID})
 					if err == nil {
 						err = checkMCPHTTPContext(payload, actor.LearnerID, domains[i].ID, finalObjective)
 					}
@@ -469,11 +468,11 @@ func TestMCPHTTPConcurrentIdentityAndReplay(t *testing.T) {
 			}
 			// A's bearer cannot read or modify B's domain. Accompany each
 			// rejection with a positive owner read, including durable contents.
-			for _, tool := range []string{"get_learner_context", "add_concepts"} {
+			for _, tool := range []string{"get_learner_state", "add_concepts"} {
 				args := map[string]any{"domain_id": domains[2].ID}
 				if tool == "add_concepts" {
 					args["concepts"] = []string{"foreign-intrusion"}
-					args["expected_version"] = domains[2].GraphVersion
+					args["expected_revision"] = domains[2].GraphVersion
 					args["prerequisites"] = map[string][]string{}
 					args["idempotency_key"] = "foreign-mutation"
 				}
@@ -486,7 +485,7 @@ func TestMCPHTTPConcurrentIdentityAndReplay(t *testing.T) {
 					t.Fatalf("%s failed before the domain authorization boundary: %s, %v", tool, encoded, err)
 				}
 			}
-			_, ownerPayload, err := callMCPHTTPTool(ctx, sessions[2], "get_learner_context", map[string]any{"domain_id": domains[2].ID})
+			_, ownerPayload, err := callMCPHTTPTool(ctx, sessions[2], "get_learner_state", map[string]any{"view": "overview", "domain_id": domains[2].ID})
 			if err != nil {
 				t.Fatal(err)
 			}

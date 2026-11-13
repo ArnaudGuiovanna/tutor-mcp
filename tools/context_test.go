@@ -16,7 +16,7 @@ import (
 
 func TestGetLearnerContext_NoAuth(t *testing.T) {
 	_, deps := setupToolsTest(t)
-	res := callTool(t, deps, registerGetLearnerContext, "", "get_learner_context", map[string]any{})
+	res := callLearnerView(t, deps, "", "overview", map[string]any{})
 	if !res.IsError {
 		t.Fatalf("expected auth error")
 	}
@@ -33,7 +33,7 @@ func TestGetLearnerContext_ExposesCanonicalProfileAndObjective(t *testing.T) {
 		t.Fatalf("update profile: %q", resultText(updated))
 	}
 
-	res := callTool(t, deps, registerGetLearnerContext, "L_owner", "get_learner_context", map[string]any{})
+	res := callLearnerView(t, deps, "L_owner", "overview", map[string]any{})
 	if res.IsError {
 		t.Fatalf("get context: %q", resultText(res))
 	}
@@ -63,7 +63,7 @@ func TestGetLearnerContext_InteractionsTodayUsesCalendarDay(t *testing.T) {
 		}
 	}
 
-	res := callTool(t, deps, registerGetLearnerContext, "L_owner", "get_learner_context", map[string]any{
+	res := callLearnerView(t, deps, "L_owner", "overview", map[string]any{
 		"domain_id": domain.ID,
 	})
 	if res.IsError {
@@ -78,7 +78,7 @@ func TestGetLearnerContext_InteractionsTodayUsesCalendarDay(t *testing.T) {
 
 func TestGetLearnerContext_NeedsDomainSetup(t *testing.T) {
 	_, deps := setupToolsTest(t)
-	res := callTool(t, deps, registerGetLearnerContext, "L_owner", "get_learner_context", map[string]any{})
+	res := callLearnerView(t, deps, "L_owner", "overview", map[string]any{})
 	if res.IsError {
 		t.Fatalf("got %q", resultText(res))
 	}
@@ -95,7 +95,7 @@ func TestGetLearnerContext_ActiveSessionBackendFailureIsVisible(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	deps.Store = &failingLearningSessionLookupStore{Store: store, activeErr: context.DeadlineExceeded}
 
-	res := callTool(t, deps, registerGetLearnerContext, "L_owner", "get_learner_context", map[string]any{})
+	res := callLearnerView(t, deps, "L_owner", "overview", map[string]any{})
 	if !res.IsError || resultText(res) != "failed to load active learning session" {
 		t.Fatalf("active-session backend failure was hidden: error=%v text=%q", res.IsError, resultText(res))
 	}
@@ -116,7 +116,7 @@ func TestGetLearnerContext_WithDomain(t *testing.T) {
 	_ = store.InsertConceptStateIfNotExists(context.Background(), cs)
 	_ = store.UpsertConceptState(context.Background(), cs)
 
-	res := callTool(t, deps, registerGetLearnerContext, "L_owner", "get_learner_context", map[string]any{
+	res := callLearnerView(t, deps, "L_owner", "overview", map[string]any{
 		"domain_id": d.ID,
 	})
 	if res.IsError {
@@ -145,7 +145,7 @@ func TestGetLearnerContext_OmitsPriorityConceptDomainIDWithoutPriority(t *testin
 	store, deps := setupToolsTest(t)
 	d := makeOwnerDomain(t, store, "L_owner", "math")
 
-	res := callTool(t, deps, registerGetLearnerContext, "L_owner", "get_learner_context", map[string]any{
+	res := callLearnerView(t, deps, "L_owner", "overview", map[string]any{
 		"domain_id": d.ID,
 	})
 	if res.IsError {
@@ -206,7 +206,7 @@ func TestGetLearnerContext_PriorityConceptDomainIDUsesSourceDomain(t *testing.T)
 		t.Fatalf("upsert default state: %v", err)
 	}
 
-	res := callTool(t, deps, registerGetLearnerContext, "L_owner", "get_learner_context", map[string]any{})
+	res := callLearnerView(t, deps, "L_owner", "overview", map[string]any{})
 	if res.IsError {
 		t.Fatalf("got %q", resultText(res))
 	}
@@ -226,7 +226,7 @@ func TestGetLearnerContext_DomainsExposePriorityRank(t *testing.T) {
 		t.Fatalf("set domain priority: %v", err)
 	}
 
-	res := callTool(t, deps, registerGetLearnerContext, "L_owner", "get_learner_context", map[string]any{
+	res := callLearnerView(t, deps, "L_owner", "overview", map[string]any{
 		"domain_id": d.ID,
 	})
 	if res.IsError {
@@ -252,7 +252,7 @@ func TestGetLearnerContextUsesSpecializedReadModel(t *testing.T) {
 	counting := &learnerContextReadCountingStore{Store: store}
 	deps.Store = counting
 
-	res := callTool(t, deps, registerGetLearnerContext, "L_owner", "get_learner_context", map[string]any{
+	res := callLearnerView(t, deps, "L_owner", "overview", map[string]any{
 		"domain_id": domain.ID,
 	})
 	if res.IsError {
@@ -300,7 +300,7 @@ func TestGetLearnerContextScopesGroupedTodayCountsToActiveDomains(t *testing.T) 
 		}
 	}
 
-	res := callTool(t, deps, registerGetLearnerContext, "L_owner", "get_learner_context", map[string]any{
+	res := callLearnerView(t, deps, "L_owner", "overview", map[string]any{
 		"domain_id": active.ID,
 	})
 	if res.IsError {

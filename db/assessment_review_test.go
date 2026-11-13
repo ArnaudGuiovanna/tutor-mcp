@@ -149,9 +149,6 @@ func reviewRoleForTest(t *testing.T, s *Store, learnerID string, roles ...string
 	if _, err := s.SetMembershipAuthorization(ctx, scope, models.MembershipStatusActive, roles); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.RecordMembershipMFAVerification(ctx, scope, time.Now().UTC()); err != nil {
-		t.Fatal(err)
-	}
 	actor, err := s.GetPrincipal(ctx, scope, []string{models.OAuthScopeLearnerRead})
 	if err != nil {
 		t.Fatal(err)

@@ -38,7 +38,7 @@ func TestPedagogicalTurnSelectsBeforeDecisionAndReplaysWholeTurn(t *testing.T) {
 	if err := json.Unmarshal([]byte(resultText(one)), &out); err != nil {
 		t.Fatal(err)
 	}
-	if out.NeedsSelection || out.Training == nil || out.Training.ID != "personal:"+target.ID || out.Training.Description != target.PersonalGoal || out.Conversation.SelectionVersion != selected.SelectionVersion+1 || out.Curriculum.DomainID != target.ID || out.Activity["domain_id"] != target.ID || out.Session == nil || out.Session.DomainID != target.ID {
+	if out.NeedsSelection || out.Training == nil || out.Training.ID != "personal:"+target.ID || out.Training.Description != target.PersonalGoal || out.Conversation.SelectionVersion != selected.SelectionVersion+1 || out.Curriculum.DomainID != target.ID || out.Decision["domain_id"] != target.ID || out.Session == nil || out.Session.DomainID != target.ID {
 		t.Fatalf("resume did not bind target before decision: %#v", out)
 	}
 	if out.Presentation == "" || out.PresentationReason == "" {
@@ -116,7 +116,7 @@ func TestPedagogicalTurnAmbiguityAndMissingTargetDoNotSelect(t *testing.T) {
 		if err := json.Unmarshal([]byte(resultText(res)), &out); err != nil {
 			t.Fatal(err)
 		}
-		if !out.NeedsSelection || out.SelectionReason != test.reason || out.Conversation.SelectionVersion != 0 || out.Session != nil || out.Activity != nil || out.Training != nil {
+		if !out.NeedsSelection || out.SelectionReason != test.reason || out.Conversation.SelectionVersion != 0 || out.Session != nil || out.Decision != nil || out.Training != nil {
 			t.Fatalf("choice changed pedagogy: %#v", out)
 		}
 		if test.reason == "ambiguous" && len(out.TrainingChoices) != 2 {
@@ -160,8 +160,8 @@ func TestPedagogicalTurnBundledMutationHonorsRevokedToolPermission(t *testing.T)
 		denied                     bool
 	}{
 		{"selection denied", `{"default":"allow","tools":{"select_conversation_training":"deny"}}`, "activity", "personal:" + domain.ID, true},
-		{"decision denied", `{"default":"allow","tools":{"get_next_activity":"deny"}}`, "activity", "", true},
-		{"context remains read only", `{"default":"allow","tools":{"select_conversation_training":"deny","get_next_activity":"deny"}}`, "context", "", false},
+		{"activity without selection", `{"default":"allow","tools":{"select_conversation_training":"deny"}}`, "activity", "", false},
+		{"context remains read only", `{"default":"allow","tools":{"select_conversation_training":"deny"}}`, "context", "", false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			policy, err := parseToolPolicy(test.policy)

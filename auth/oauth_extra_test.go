@@ -22,6 +22,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
+	"tutor-mcp/db"
 	"tutor-mcp/models"
 )
 
@@ -1121,7 +1122,7 @@ func TestAuthorizeParameterErrorsDoNotLogUntrustedScope(t *testing.T) {
 				}
 				req = httptest.NewRequest(method, "/authorize", strings.NewReader(form.Encode()))
 				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-				req.AddCookie(&http.Cookie{Name: "csrf_token", Value: csrf})
+				req.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: csrf})
 			}
 
 			rec := httptest.NewRecorder()
@@ -1507,7 +1508,7 @@ func TestAuthorizePost_LoginRequiresClientApproval(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "tkn"})
+	req.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: "tkn"})
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
 
@@ -1544,7 +1545,7 @@ func TestAuthorizePost_LoginSuccess_Redirects302WithCodeAndIss(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "tkn"})
+	req.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: "tkn"})
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
 
@@ -1594,7 +1595,7 @@ func TestAuthorizePost_LoginSuccess_NoState_OmitsStateParam(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "tkn"})
+	req.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: "tkn"})
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
 
@@ -1630,7 +1631,7 @@ func TestAuthorizePost_RegisterRequiresEmailVerificationBeforeRedirect(t *testin
 
 	req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "tkn"})
+	req.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: "tkn"})
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
 	drainBackgroundMail(t, s)
@@ -1681,7 +1682,7 @@ func TestAuthorizePost_RegisterRequiresEmailVerificationBeforeRedirect(t *testin
 	}
 	verifyReq := httptest.NewRequest(http.MethodPost, "/verify-email", strings.NewReader(verifyForm.Encode()))
 	verifyReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	verifyReq.AddCookie(&http.Cookie{Name: accountCSRFCookieName, Value: csrf})
+	verifyReq.AddCookie(&http.Cookie{Name: accountCSRFCookieName("/verify-email"), Value: csrf})
 	verifyRec := httptest.NewRecorder()
 	s.HandleVerifyEmailPost(verifyRec, verifyReq)
 	if verifyRec.Code != http.StatusFound {
@@ -1727,7 +1728,7 @@ func TestAuthorizePost_MissingEmail_RendersForm(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "tkn"})
+	req.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: "tkn"})
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
 
@@ -1759,7 +1760,7 @@ func TestAuthorizePost_RegisterDoesNotAcceptInitiatorCredential(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "tkn"})
+	req.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: "tkn"})
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
 	drainBackgroundMail(t, s)
@@ -1797,7 +1798,7 @@ func TestAuthorizePost_RegisterNeedsOnlyEmail(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "tkn"})
+	req.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: "tkn"})
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
 	drainBackgroundMail(t, s)
@@ -1830,7 +1831,7 @@ func TestAuthorizePost_RegisterDuplicateEmail(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "tkn"})
+	req.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: "tkn"})
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
 	drainBackgroundMail(t, s)
@@ -1864,7 +1865,7 @@ func TestAuthorizePost_LoginUnknownEmail(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "tkn"})
+	req.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: "tkn"})
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
 
@@ -1943,7 +1944,7 @@ func TestAuthorizePost_PublicClientWithoutPKCERejected(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "tkn"})
+	req.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: "tkn"})
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
 
@@ -2013,7 +2014,7 @@ func TestRequirePKCEForPublicClient_Branches(t *testing.T) {
 	}
 }
 
-// ─── Persisted client approval (R001) ───────────────────────────────────────
+// ─── Persisted client approval ─────────────────────────────────────────────
 
 // loginRequest builds an /authorize POST form for a learner login. When
 // approveClient is false, the approve_client field is omitted entirely (which
@@ -2040,11 +2041,11 @@ func loginRequest(t *testing.T, clientID, redirectURI, email, password string, a
 	}
 	req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: csrf})
+	req.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: csrf})
 	return req
 }
 
-// TestAuthorizePost_LoginSkipsApprovalAfterFirstConsent verifies R001: once a
+// TestAuthorizePost_LoginSkipsApprovalAfterFirstConsent verifies that once a
 // learner has consented to an OAuth client for a specific redirect_uri, the
 // next /authorize POST for the same triple must NOT re-prompt for approval.
 // Changing the redirect_uri (legitimately, within the client's registered
@@ -2098,9 +2099,9 @@ func TestAuthorizePost_LoginSkipsApprovalAfterFirstConsent(t *testing.T) {
 	}
 }
 
-// ─── Case-insensitive email (R002) ─────────────────────────────────────────
+// ─── Case-insensitive email ───────────────────────────────────────────────
 
-// TestAuthorizePost_LoginEmailIsCaseInsensitive verifies R002: a learner who
+// TestAuthorizePost_LoginEmailIsCaseInsensitive verifies that a learner who
 // registered as "bob@x.com" can sign back in with "Bob@x.com". Without
 // normalisation the lookup runs under SQLite's default BINARY collation and
 // silently fails — which both annoys the learner AND means the per-account
@@ -2127,7 +2128,7 @@ func TestAuthorizePost_LoginEmailIsCaseInsensitive(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "tkn"})
+	req.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: "tkn"})
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
 
@@ -2170,7 +2171,7 @@ func TestAuthorizePost_LoginFailureThresholdRequiresRecoverableDeviceChallenge(t
 		form.Set("csrf_token", csrf)
 		req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		req.AddCookie(&http.Cookie{Name: "csrf_token", Value: csrf})
+		req.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: csrf})
 		for _, cookie := range cookies {
 			req.AddCookie(cookie)
 		}
@@ -2219,7 +2220,7 @@ func TestAuthorizePost_LoginFailureThresholdRequiresRecoverableDeviceChallenge(t
 	}
 	var accountCookie *http.Cookie
 	for _, cookie := range getRec.Result().Cookies() {
-		if cookie.Name == accountCSRFCookieName {
+		if cookie.Name == accountCSRFCookieName("/login-challenge") {
 			accountCookie = cookie
 			break
 		}
@@ -2261,7 +2262,7 @@ func TestAuthorizePost_LoginFailureThresholdRequiresRecoverableDeviceChallenge(t
 	replayForm := url.Values{"token": {rawToken}, "csrf_token": {replayCSRF}}
 	replayReq := httptest.NewRequest(http.MethodPost, "/login-challenge", strings.NewReader(replayForm.Encode()))
 	replayReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	replayReq.AddCookie(&http.Cookie{Name: accountCSRFCookieName, Value: replayCSRF})
+	replayReq.AddCookie(&http.Cookie{Name: accountCSRFCookieName("/login-challenge"), Value: replayCSRF})
 	replayRec := httptest.NewRecorder()
 	s.HandleLoginChallengePost(replayRec, replayReq)
 	if replayRec.Code != http.StatusBadRequest {
@@ -2269,7 +2270,7 @@ func TestAuthorizePost_LoginFailureThresholdRequiresRecoverableDeviceChallenge(t
 	}
 }
 
-// TestAuthorizePost_RegisterRejectsCaseDuplicate verifies R002 register-side:
+// TestAuthorizePost_RegisterRejectsCaseDuplicate verifies the register side:
 // once "alice@x.com" exists, "Alice@x.com" must not create a second account.
 // The public response is intentionally identical to a pending registration.
 // Without normalisation the duplicate-check at
@@ -2295,7 +2296,7 @@ func TestAuthorizePost_RegisterRejectsCaseDuplicate(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "tkn"})
+	req.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: "tkn"})
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
 	drainBackgroundMail(t, s)
@@ -2309,7 +2310,7 @@ func TestAuthorizePost_RegisterRejectsCaseDuplicate(t *testing.T) {
 	}
 }
 
-// TestHandleRegister_CapsClientNameAt120Bytes verifies R001 hardening: an
+// TestHandleRegister_CapsClientNameAt120Bytes verifies the client name cap: an
 // attacker registering a client with a multi-KB phishing name (e.g. an entire
 // fake consent paragraph in client_name) is truncated to a manageable length
 // before the value is echoed back or surfaced in the consent screen.
@@ -2335,4 +2336,47 @@ func TestHandleRegister_CapsClientNameAt120Bytes(t *testing.T) {
 	if len(name) > 120 {
 		t.Fatalf("client_name not capped: len=%d (want ≤ 120 bytes); got=%q…", len(name), name[:40])
 	}
+}
+
+// A refresh token outlives the DCR client it was issued to when the client
+// is purged: refresh_tokens has no foreign key to oauth_clients (CIMD client
+// identifiers are never stored there), and under PostgreSQL row-level
+// security the purge transaction cannot reach other tenants' tokens. The
+// token endpoint must therefore reject the grant because the client itself
+// no longer resolves.
+func assertPurgedDCRClientRefreshRejected(t *testing.T, s *OAuthServer, store *db.Store) {
+	t.Helper()
+	ctx := context.Background()
+	seedClient(t, store, "cid-purged", "https://app.example/cb")
+	learner := seedLearner(t, store, "u-purged@e.com", "pw")
+	rt, err := store.CreateRefreshToken(ctx, learner, "cid-purged", testOAuthResource)
+	if err != nil {
+		t.Fatalf("seed rt: %v", err)
+	}
+	if _, err := store.RawDB().ExecContext(ctx,
+		`UPDATE oauth_clients SET expires_at = '2000-01-01 00:00:00' WHERE client_id = 'cid-purged'`); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := store.CleanupExpiredOAuthClients(ctx)
+	if err != nil || removed != 1 {
+		t.Fatalf("cleanup removed=%d err=%v, want 1", removed, err)
+	}
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("resource", testOAuthResource)
+	form.Set("refresh_token", rt.Token)
+	form.Set("client_id", "cid-purged")
+	req := httptest.NewRequest("POST", "/token", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	s.HandleToken(rec, req)
+	if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Body.String(), "invalid_client") {
+		t.Fatalf("refresh with a purged client: status=%d body=%q, want 401 invalid_client", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleToken_RefreshToken_PurgedDCRClientRejected(t *testing.T) {
+	setTestSecret(t)
+	s, store := newTestServer(t)
+	assertPurgedDCRClientRefreshRejected(t, s, store)
 }

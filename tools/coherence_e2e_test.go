@@ -17,6 +17,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -50,7 +51,7 @@ func TestCoherenceE2E_SingleConceptDomain_TransitionsToMaintenance(t *testing.T)
 			"activity_type": "DIAGNOSTIC_ASSESSMENT",
 			"observable":    "Cold response without hints",
 			"task_text":     "Solve diagnostic item independently.",
-			"rubric_json":   `{"criteria":[{"id":"correctness","max_score":1}],"passing_score":0.6}`,
+			"rubric":        json.RawMessage(`{"criteria":[{"id":"correctness","max_score":1}],"passing_score":0.6}`),
 		})
 		if prepared.IsError {
 			t.Fatalf("iter %d: prepare diagnostic errored: %s", i, resultText(prepared))
@@ -75,7 +76,7 @@ func TestCoherenceE2E_SingleConceptDomain_TransitionsToMaintenance(t *testing.T)
 			"attempt_id":            attemptID,
 			"evaluator_id":          "host-test-v1",
 			"evaluation_method":     "host_llm",
-			"rubric_score_json":     `{"criteria_scores":[{"id":"correctness","score":1}]}`,
+			"rubric_score":          json.RawMessage(`{"criteria_scores":[{"id":"correctness","score":1}]}`),
 		})
 		if recRes.IsError {
 			t.Fatalf("iter %d: record_interaction errored: %s", i, resultText(recRes))
@@ -84,7 +85,7 @@ func TestCoherenceE2E_SingleConceptDomain_TransitionsToMaintenance(t *testing.T)
 
 	// The first orchestration pass evaluates the persisted DIAGNOSTIC phase and
 	// advances exactly one FSM edge.
-	firstRes := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{})
+	firstRes := callNextActivity(t, deps, "L_owner", map[string]any{})
 	if firstRes.IsError {
 		t.Fatalf("first get_next_activity errored: %s", resultText(firstRes))
 	}
@@ -99,7 +100,7 @@ func TestCoherenceE2E_SingleConceptDomain_TransitionsToMaintenance(t *testing.T)
 	// The next pass evaluates the newly persisted INSTRUCTION phase. Since the
 	// sole goal-relevant concept is already above the routing threshold, it can
 	// now advance to MAINTENANCE.
-	actRes := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{})
+	actRes := callNextActivity(t, deps, "L_owner", map[string]any{})
 	if actRes.IsError {
 		t.Fatalf("second get_next_activity errored: %s", resultText(actRes))
 	}
@@ -167,10 +168,10 @@ func TestCoherenceE2E_AddConceptsCycleRejected(t *testing.T) {
 	// Add concepts c, d with a 2-cycle in the new batch's prereqs:
 	//   c depends on d AND d depends on c.
 	res := callTool(t, deps, registerAddConcepts, "L_owner", "add_concepts", map[string]any{
-		"domain_id":        d.ID,
-		"expected_version": 1,
-		"concepts":         []string{"c", "d"},
-		"prerequisites":    map[string][]string{"c": {"d"}, "d": {"c"}},
+		"domain_id":         d.ID,
+		"expected_revision": 1,
+		"concepts":          []string{"c", "d"},
+		"prerequisites":     map[string][]string{"c": {"d"}, "d": {"c"}},
 	})
 	if !res.IsError {
 		t.Fatalf("expected cycle rejection, got success: %s", resultText(res))
@@ -214,7 +215,7 @@ func TestCoherenceE2E_CalibrationRoundTrip_BiasReflectsPrediction(t *testing.T) 
 
 	// predicted_mastery=5 → internal predicted = 1.0 (full confidence).
 	checkRes := callTool(t, deps, registerCalibrationCheck, "L_owner", "calibration_check", map[string]any{
-		"concept_id":        "a",
+		"concept":           "a",
 		"predicted_mastery": 5.0,
 	})
 	if checkRes.IsError {
@@ -286,7 +287,7 @@ func TestCoherenceE2E_AffectScaffolding_AdjustsDifficulty(t *testing.T) {
 	// Seed a few interactions so we move out of the bootstrap noise and
 	// the orchestrator returns a real activity (not REST/setup).
 	for i := 0; i < 5; i++ {
-		actRes := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{})
+		actRes := callNextActivity(t, deps, "L_owner", map[string]any{})
 		if actRes.IsError {
 			t.Fatalf("seed iter %d: get_next_activity errored: %s", i, resultText(actRes))
 		}
@@ -324,7 +325,7 @@ func TestCoherenceE2E_AffectScaffolding_AdjustsDifficulty(t *testing.T) {
 	}
 
 	// Next activity should reflect the scaffolding tutor_mode.
-	actRes := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{})
+	actRes := callNextActivity(t, deps, "L_owner", map[string]any{})
 	if actRes.IsError {
 		t.Fatalf("post-affect get_next_activity errored: %s", resultText(actRes))
 	}
@@ -407,7 +408,7 @@ func TestCoherenceE2E_MisconceptionPersistsAcrossSession(t *testing.T) {
 	// out of attempts. The test fails if we never see one.
 	var seenMisconceptionType string
 	for i := 0; i < 5; i++ {
-		actRes := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{})
+		actRes := callNextActivity(t, deps, "L_owner", map[string]any{})
 		if actRes.IsError {
 			t.Fatalf("iter %d: get_next_activity errored: %s", i, resultText(actRes))
 		}

@@ -291,7 +291,7 @@ async fn qualify_tutor(binary: &Path, temporary: &Path) -> Result<Value, String>
     let first = async {
         let list = client.request("tools/list", json!({})).await?;
         let tools = list.get("tools").and_then(Value::as_array).ok_or("Inventaire d’outils Tutor absent.")?;
-        for required in ["init_domain", "get_learner_context", "start_learning_session"] {
+        for required in ["init_domain", "get_learner_state", "start_learning_session"] {
             if !tools.iter().any(|tool| tool["name"] == required) {
                 return Err(format!("L’outil Tutor {required} est absent."));
             }
@@ -316,7 +316,7 @@ async fn qualify_tutor(binary: &Path, temporary: &Path) -> Result<Value, String>
     let (domain, session, tool_count) = first?;
     stopped?;
     let resumed = open_tutor(binary, &directory).await?;
-    let context = call_tool(&resumed, "get_learner_context", json!({"domain_id":domain})).await;
+    let context = call_tool(&resumed, "get_learner_state", json!({"domain_id":domain})).await;
     let stopped = resumed.stop().await;
     let context = context?;
     stopped?;

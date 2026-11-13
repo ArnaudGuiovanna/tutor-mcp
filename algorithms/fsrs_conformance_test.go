@@ -23,7 +23,7 @@ func TestFSRS5InitialStateReference(t *testing.T) {
 		{Easy, 3.224501589371368, 15.69105, 16},
 	}
 	for _, tc := range cases {
-		got := ReviewCard(NewFSRSCard(), tc.rating, now)
+		got := ReviewCard(FSRSCard{State: New}, tc.rating, now)
 		if !approxEqual(got.Difficulty, tc.d, 1e-12) || !approxEqual(got.Stability, tc.s, 1e-12) || got.ScheduledDays != tc.days {
 			t.Errorf("rating %d: got D=%f S=%f days=%d; want D=%f S=%f days=%d", tc.rating, got.Difficulty, got.Stability, got.ScheduledDays, tc.d, tc.s, tc.days)
 		}

@@ -21,7 +21,6 @@ type LearnerFormationStore interface {
 }
 
 type FormationAdmissionStore interface {
-	FindFormationLearner(context.Context, models.Principal, string, string) (string, error)
 	ListFormationAdmissions(context.Context, models.Principal, string, string, int) ([]models.FormationAdmission, error)
 	DecideFormationAdmission(context.Context, models.Principal, string, string, string, string, int64) (*models.FormationAdmission, bool, error)
 }

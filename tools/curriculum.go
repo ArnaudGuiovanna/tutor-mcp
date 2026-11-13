@@ -64,7 +64,7 @@ type GetCurriculumSnapshotParams struct {
 }
 
 func registerGetCurriculumSnapshot(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name:        "get_curriculum_snapshot",
 		Description: "Read the latest or a historical immutable curriculum snapshot, including stable concept IDs, outcomes, criteria, provenance, and review state.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params GetCurriculumSnapshotParams) (*mcp.CallToolResult, any, error) {
@@ -115,7 +115,7 @@ func registerGetCurriculumSnapshot(server *mcp.Server, deps *Deps) {
 type ReviseCurriculumParams struct {
 	IdempotentMutationParams
 	DomainID         string                        `json:"domain_id" jsonschema:"target domain ID"`
-	ExpectedVersion  int                           `json:"expected_version" jsonschema:"current graph_version; stale revisions are rejected"`
+	ExpectedVersion  int                           `json:"expected_revision" jsonschema:"current curriculum version (version from get_curriculum_snapshot); stale revisions are rejected"`
 	Operation        string                        `json:"operation" jsonschema:"rename (presentation only) | update_metadata (changed definition invalidates prior learning evidence) | split | merge | remove | repair_prerequisites"`
 	SourceConceptIDs []string                      `json:"source_concept_ids" jsonschema:"stable concept IDs affected by the operation"`
 	NewLabel         string                        `json:"new_label,omitempty" jsonschema:"new display label for rename"`
@@ -127,7 +127,7 @@ type ReviseCurriculumParams struct {
 }
 
 func registerReviseCurriculum(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name:        "publish_curriculum_revision",
 		Description: "Publish an immutable curriculum revision using optimistic concurrency. Supports presentation-only rename, definition update, split, merge, safe leaf removal and explicit prerequisite repair. Changed definitions reset estimates and invalidate old evidence for routing; history and stable IDs are preserved.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params ReviseCurriculumParams) (*mcp.CallToolResult, any, error) {
@@ -138,7 +138,7 @@ func registerReviseCurriculum(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 		if params.DomainID == "" || params.ExpectedVersion < 1 {
-			r, _ := errorResult("domain_id and expected_version >= 1 are required")
+			r, _ := errorResult("domain_id and expected_revision >= 1 are required")
 			return r, nil, nil
 		}
 		if err := validateCurriculumProvenanceInput(params.Provenance); err != nil {
@@ -206,7 +206,7 @@ func registerReviseCurriculum(server *mcp.Server, deps *Deps) {
 			// the newly published version. Return the known commit metadata and
 			// require an explicit get_curriculum_snapshot read to recover the
 			// immutable envelope.
-			deps.Logger.Warn("publish_curriculum_revision: committed snapshot readback degraded", "err", err, "learner", learnerID, "domain", domain.ID, "version", params.ExpectedVersion+1)
+			deps.Logger.Warn("publish_curriculum_revision: committed snapshot readback degraded", append(diagnosticErrorAttrs(err), "learner", learnerID, "domain", domain.ID, "version", params.ExpectedVersion+1)...)
 			r, _ := jsonResult(map[string]any{
 				"domain_id":        domain.ID,
 				"previous_version": params.ExpectedVersion,
@@ -232,7 +232,7 @@ func registerReviseCurriculum(server *mcp.Server, deps *Deps) {
 }
 
 func curriculumConflictResult(expected, current int) (*mcp.CallToolResult, any) {
-	return errorResult(fmt.Sprintf("curriculum version conflict: expected_version=%d current_version=%d; reload get_curriculum_snapshot and rebase", expected, current))
+	return errorResult(fmt.Sprintf("curriculum version conflict: expected_revision=%d current_version=%d; reload get_curriculum_snapshot and rebase", expected, current))
 }
 
 func validateCurriculumProvenanceInput(in CurriculumProvenanceInput) error {

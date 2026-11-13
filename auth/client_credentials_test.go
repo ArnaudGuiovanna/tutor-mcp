@@ -29,9 +29,6 @@ func createOAuthServiceAccount(t *testing.T, store *db.Store) (*models.ServiceAc
 		models.MembershipStatusActive, []string{models.RoleOwner}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.RecordMembershipMFAVerification(ctx, learner.TenantScope(), time.Now().UTC()); err != nil {
-		t.Fatal(err)
-	}
 	owner, err := store.GetPrincipalForLearner(ctx, learnerID, []string{models.OAuthScopeLearner})
 	if err != nil {
 		t.Fatal(err)
@@ -137,9 +134,6 @@ func TestClientCredentialsGrantRejectsCredentialTargetScopeAndRevocation(t *test
 	// tenant owner may revoke any service credential in that tenant.
 	if _, err := store.SetMembershipAuthorization(context.Background(), owner.TenantScope(),
 		models.MembershipStatusActive, []string{models.RoleOwner}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.RecordMembershipMFAVerification(context.Background(), owner.TenantScope(), time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	owner, err = store.GetPrincipalForLearner(context.Background(), ownerID, []string{models.OAuthScopeLearner})

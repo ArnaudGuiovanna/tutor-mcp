@@ -27,15 +27,29 @@ const (
 
 type PreparePedagogicalTurnParams struct {
 	IdempotentMutationParams
-	ConversationID    string `json:"conversation_id,omitempty" jsonschema:"native conversation identifier; the bound MCP session takes precedence"`
-	Mode              string `json:"mode,omitempty" jsonschema:"context (default) reads without opening a learning session; activity freezes the canonical engine decision and requires an idempotency_key"`
-	ExpectedSelection *int   `json:"expected_selection,omitempty" jsonschema:"optional confirmed conversation selection_version; reject stale selection"`
-	ExpectedRevision  string `json:"expected_revision,omitempty" jsonschema:"optional confirmed curriculum revision; reject stale revision"`
-	Intent            string `json:"intent,omitempty" jsonschema:"auto or review; used only in activity mode"`
+	Mode              string `json:"mode,omitempty" jsonschema:"context (default) reads the teaching context without opening a session or changing progression; activity also opens or resumes the learning session and freezes the canonical engine decision"`
+	ConversationID    string `json:"conversation_id,omitempty" jsonschema:"native conversation identifier; the bound MCP session takes precedence. Without a conversation the domain comes from domain_id, domain_name or the learner's last active domain"`
+	DomainID          string `json:"domain_id,omitempty" jsonschema:"target domain ID when no conversation is bound; if absent, domain_name or the learner's last active domain is used. With a conversation it must equal the selected training's domain"`
+	DomainName        string `json:"domain_name,omitempty" jsonschema:"target domain name when the learner names a subject but its domain_id is unknown; not accepted with a conversation (use training_name)"`
+	Intent            string `json:"intent,omitempty" jsonschema:"activity mode only: auto (default) or review when the learner asks to revise already studied material"`
 	AttemptID         string `json:"attempt_id,omitempty" jsonschema:"optional assessment attempt belonging to this learner and selected domain; returned unchanged"`
-	TrainingID        string `json:"training_id,omitempty" jsonschema:"activity only: explicitly selected existing training; mutually exclusive with training_name. Expected selection and revision refer to the conversation BEFORE this selection"`
-	TrainingName      string `json:"training_name,omitempty" jsonschema:"activity only: exact name of an existing active learning training, case insensitive; ambiguous or missing names return needs_selection without an activity"`
+	TrainingID        string `json:"training_id,omitempty" jsonschema:"activity mode with a conversation: explicitly select this existing training first; mutually exclusive with training_name. expected_selection and expected_revision refer to the conversation BEFORE this selection"`
+	TrainingName      string `json:"training_name,omitempty" jsonschema:"activity mode with a conversation: exact name of an existing active learning training, case insensitive; ambiguous or missing names return needs_selection without an activity"`
+	ExpectedSelection *int   `json:"expected_selection,omitempty" jsonschema:"conversation only: confirmed selection_version; a stale value is rejected"`
+	ExpectedRevision  string `json:"expected_revision,omitempty" jsonschema:"conversation only: confirmed curriculum revision; a stale value is rejected"`
 }
+
+// preparePedagogicalTurnDescription is the single entry point of the
+// learning loop. It replaces get_next_activity (mode=activity) and keeps the
+// native conversation contract.
+const preparePedagogicalTurnDescription = "Main tool of the learning loop: prepare one authorized teaching turn for the learner. " +
+	"mode=context (default) is read-only: learner profile and accessibility, focused curriculum, difficulties, recent observations, active session and narrative memory. " +
+	"mode=activity also opens or resumes the learning session and freezes the canonical engine decision in `decision`: activity, pedagogical_contract (follow llm_instruction, constraints and allowed_variants; keep audit_rationale internal), session_id, tutor_mode, motivation_brief, metacognitive_mirror, active_misconceptions, mastery_evidence, mastery_uncertainty and transfer_profile. Alert-aware routing is already applied. " +
+	"Pass an idempotency_key so a retried activity call replays the same decision. " +
+	"Without a conversation, the domain comes from domain_id, domain_name or the last active domain; needs_domain_setup=true means the learner has no domain yet. " +
+	"Bound native conversations select trainings with training_id or an exact training_name; ambiguous names return needs_selection with bounded choices - never guess or enroll implicitly. " +
+	"presentation distinguishes instruction, assessment and guidance. Freeze an assessment with prepare_assessment_attempt before display, submit the actual answer, then record_interaction. " +
+	"When pedagogical_contract.reasoning_request is present, write a 2-3 sentence interpretation_brief (a hypothesis about the learner's state from the supplied traces, without inventing facts) before generating the activity and pass it to record_interaction."
 
 func normalizePedagogicalTurnMode(mode string) (string, error) {
 	switch mode {
@@ -66,11 +80,25 @@ func pedagogicalTurnModeFromRequest(req *mcp.CallToolRequest) (string, error) {
 }
 
 func registerPreparePedagogicalTurn(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name:        "prepare_pedagogical_turn",
-		Description: "Prepare one versioned, authorized teaching context for this conversation. context reads without opening a session or changing progression. activity optionally selects training_id or resolves an exact training_name before freezing the canonical engine decision, in one transaction with a stable idempotency_key. Ambiguous names return needs_selection and bounded authorized choices; never guess or enroll implicitly. Expected selection/revision refer to the previous conversation selection. The packet includes training metadata, curriculum, observations, session and full pedagogical_contract, replacing cascading context/activity/training reads. presentation distinguishes instruction, assessment and guidance without changing the canonical decision. Freeze an assessment before display, then submit actual answers, evaluate and record evidence; acknowledge instruction/feedback only after display. No narrative consolidation is required before responding. Later writes revalidate ownership and versions.",
+		Description: preparePedagogicalTurnDescription,
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in PreparePedagogicalTurnParams) (*mcp.CallToolResult, any, error) {
 		out, err := preparePedagogicalTurn(ctx, deps, in)
+		var direct *turnCallerError
+		var labeled *turnBackendError
+		switch {
+		case errors.Is(err, errTurnAuthRequired):
+			logAuthFailure(deps, "prepare_pedagogical_turn", err)
+			r, _ := errorResult("authentication required")
+			return r, nil, nil
+		case errors.As(err, &direct):
+			r, _ := errorResult(direct.message)
+			return r, nil, nil
+		case errors.As(err, &labeled):
+			r, _ := safeErrorResult(deps.Logger, labeled.label, labeled.err)
+			return r, nil, nil
+		}
 		if errors.Is(err, storeport.ErrCurriculumVersionConflict) {
 			r, _ := errorResult("pedagogical turn unavailable: the conversation selection or curriculum revision changed; prepare a context turn again and pass its current selection_version and revision")
 			return r, nil, nil
@@ -84,6 +112,25 @@ func registerPreparePedagogicalTurn(server *mcp.Server, deps *Deps) {
 	})
 }
 
+var errTurnAuthRequired = errors.New("authentication required")
+
+// turnCallerError is a complete caller-facing answer (for example an unknown
+// domain with the learner's active domains), returned without the generic
+// "pedagogical turn unavailable" prefix.
+type turnCallerError struct{ message string }
+
+func (e *turnCallerError) Error() string { return e.message }
+
+// turnBackendError names the failed step of a backend error; only the label
+// reaches the caller.
+type turnBackendError struct {
+	label string
+	err   error
+}
+
+func (e *turnBackendError) Error() string { return e.label + ": " + e.err.Error() }
+func (e *turnBackendError) Unwrap() error { return e.err }
+
 func preparePedagogicalTurn(ctx context.Context, deps *Deps, in PreparePedagogicalTurnParams) (*models.PedagogicalTurn, error) {
 	mode, err := normalizePedagogicalTurnMode(in.Mode)
 	if err != nil {
@@ -91,7 +138,7 @@ func preparePedagogicalTurn(ctx context.Context, deps *Deps, in PreparePedagogic
 	}
 	principal, ok := auth.GetPrincipal(ctx)
 	if !ok || principal.LearnerID == "" {
-		return nil, storeport.Invalid("authenticated learner principal required")
+		return nil, errTurnAuthRequired
 	}
 	if err := principal.Validate(); err != nil {
 		return nil, err
@@ -102,21 +149,25 @@ func preparePedagogicalTurn(ctx context.Context, deps *Deps, in PreparePedagogic
 	if !canRead || (mode == "activity" && !canWrite) {
 		return nil, storeport.Invalid("learner permission required for requested mode")
 	}
+	selecting := in.TrainingID != "" || in.TrainingName != ""
+	if selecting && mode != "activity" {
+		return nil, storeport.Invalid("training selection requires activity mode")
+	}
 	if mode == "activity" {
-		if policy, ok := ctx.Value(toolPolicyKey{}).(*toolPolicy); ok && (policy.denies("get_next_activity") || ((in.TrainingID != "" || in.TrainingName != "") && policy.denies("select_conversation_training"))) {
-			return nil, storeport.Invalid("a required activity or training selection tool is disabled in your Tutor permission settings")
+		if policy, ok := ctx.Value(toolPolicyKey{}).(*toolPolicy); ok && selecting && policy.denies("select_conversation_training") {
+			return nil, storeport.Invalid("a required training selection tool is disabled in your Tutor permission settings")
 		}
 		key := in.IdempotencyKey
 		if key == "" {
 			key = idempotencyKeyFromContext(ctx)
 		}
-		if !validIdempotencyKey.MatchString(key) {
-			return nil, storeport.Invalid("activity mode requires a valid idempotency_key")
+		if key != "" && !validIdempotencyKey.MatchString(key) {
+			return nil, storeport.Invalid("idempotency_key must use 1..128 letters, digits, '.', '_', ':', or '-'")
+		}
+		if selecting && key == "" {
+			return nil, storeport.Invalid("training selection requires an idempotency_key")
 		}
 		in.IdempotencyKey = key
-	}
-	if (in.TrainingID != "" || in.TrainingName != "") && mode != "activity" {
-		return nil, storeport.Invalid("training selection requires activity mode")
 	}
 	if in.TrainingID != "" && in.TrainingName != "" {
 		return nil, storeport.Invalid("training_id and training_name are mutually exclusive")
@@ -127,42 +178,19 @@ func preparePedagogicalTurn(ctx context.Context, deps *Deps, in PreparePedagogic
 	if err := validateString("training_name", in.TrainingName, 200); err != nil {
 		return nil, invalidInput(err)
 	}
+	intent, err := normalizeActivityIntent(in.Intent)
+	if err != nil {
+		return nil, invalidInput(err)
+	}
 	if bound := storeport.ConversationID(ctx); bound != "" {
 		if in.ConversationID != "" && in.ConversationID != bound {
 			return nil, storeport.Invalid("conversation does not match this MCP session")
 		}
 		in.ConversationID = bound
 	}
-	if in.ConversationID == "" {
-		return nil, storeport.Invalid("conversation_id is required")
-	}
-	for name, value := range map[string]string{"conversation_id": in.ConversationID, "attempt_id": in.AttemptID, "expected_revision": in.ExpectedRevision, "training_id": in.TrainingID} {
+	for name, value := range map[string]string{"conversation_id": in.ConversationID, "attempt_id": in.AttemptID, "expected_revision": in.ExpectedRevision, "training_id": in.TrainingID, "domain_id": in.DomainID, "domain_name": in.DomainName} {
 		if err := validateString(name, value, maxShortLabelLen); err != nil {
 			return nil, invalidInput(err)
-		}
-	}
-	ctx = storeport.WithConversation(ctx, in.ConversationID)
-	training, ok := deps.Store.(storeport.TrainingStore)
-	if !ok {
-		return nil, errors.New("conversation context unavailable")
-	}
-	selected, err := training.TrainingAction(ctx, principal, "get_conversation_context", models.TrainingRequest{ConversationID: in.ConversationID})
-	if err != nil {
-		return nil, err
-	}
-	conversation, ok := selected.(*models.ConversationContext)
-	if !ok || conversation == nil {
-		return nil, errors.New("invalid conversation context")
-	}
-	if (in.ExpectedSelection != nil && *in.ExpectedSelection != conversation.SelectionVersion) || (in.ExpectedRevision != "" && in.ExpectedRevision != conversation.Revision) {
-		return nil, storeport.ErrCurriculumVersionConflict
-	}
-	var choices models.ResumeTrainingChoices
-	selectionReason := ""
-	if mode == "activity" && (in.TrainingID != "" || in.TrainingName != "" || conversation.DomainID == "") {
-		conversation, choices, selectionReason, err = selectPedagogicalTurnTraining(ctx, deps, principal, in, conversation)
-		if err != nil {
-			return nil, err
 		}
 	}
 	learner, err := deps.Store.GetLearnerByID(ctx, principal.LearnerID)
@@ -170,13 +198,11 @@ func preparePedagogicalTurn(ctx context.Context, deps *Deps, in PreparePedagogic
 		return nil, err
 	}
 	out := &models.PedagogicalTurn{
-		SchemaVersion: models.PedagogicalTurnSchemaVersion, Mode: mode, GeneratedAt: time.Now().UTC(), Conversation: conversation, Training: conversation.Training,
+		SchemaVersion: models.PedagogicalTurnSchemaVersion, Mode: mode, GeneratedAt: time.Now().UTC(),
 		Learner:      models.PedagogicalTurnLearner{ID: principal.LearnerID, Objective: learner.Objective},
 		Permissions:  models.PedagogicalTurnPermissions{Read: canRead, PrepareActivity: canWrite},
 		Difficulties: []models.PedagogicalTurnDifficulty{}, RecentObservations: []models.PedagogicalTurnObservation{},
-		NeedsSelection:  conversation.DomainID == "" || selectionReason != "",
-		SelectionReason: selectionReason, TrainingChoices: choices.Items, TrainingChoicesHasMore: choices.HasMore,
-		Provenance: models.PedagogicalTurnProvenance{Source: "tutor-mcp", PolicyVersion: models.PedagogicalPolicyVersion, SelectionVersion: conversation.SelectionVersion, Revision: conversation.Revision, ModelUpdated: false, ContextBudgetBytes: pedagogicalTurnBudgetBytes, Reductions: []models.PedagogicalTurnReduction{}},
+		Provenance: models.PedagogicalTurnProvenance{Source: "tutor-mcp", PolicyVersion: models.PedagogicalPolicyVersion, ModelUpdated: false, ContextBudgetBytes: pedagogicalTurnBudgetBytes, Reductions: []models.PedagogicalTurnReduction{}},
 	}
 	if learner.ProfileJSON != "" {
 		if err := json.Unmarshal([]byte(learner.ProfileJSON), &out.Learner.Profile); err != nil {
@@ -191,16 +217,52 @@ func preparePedagogicalTurn(ctx context.Context, deps *Deps, in PreparePedagogic
 	if err != nil {
 		return nil, err
 	}
-	if out.NeedsSelection {
-		if in.AttemptID != "" {
-			return nil, storeport.Invalid("select a training before preparing an activity or assessment context")
+
+	var domain *models.Domain
+	revision := ""
+	if in.ConversationID != "" {
+		domain, revision, err = conversationTurnDomain(ctx, deps, principal, &in, mode, out)
+		if err != nil || domain == nil {
+			if err == nil {
+				out.Training = nil
+				return boundedPedagogicalTurn(out)
+			}
+			return nil, err
 		}
-		out.Training = nil
-		return boundedPedagogicalTurn(out)
-	}
-	domain, err := deps.Store.GetLearnerDomainByID(ctx, principal.LearnerID, conversation.DomainID)
-	if err != nil {
-		return nil, err
+		ctx = storeport.WithConversation(ctx, in.ConversationID)
+	} else {
+		if selecting {
+			return nil, storeport.Invalid("training selection requires a conversation_id")
+		}
+		if in.ExpectedSelection != nil || in.ExpectedRevision != "" {
+			return nil, storeport.Invalid("expected_selection and expected_revision require a conversation_id")
+		}
+		domain, err = resolveActivityDomain(ctx, deps.Store, principal.LearnerID, in.DomainID, in.DomainName)
+		var selectionErr *activityDomainSelectionError
+		switch {
+		case errors.As(err, &selectionErr):
+			return nil, &turnCallerError{message: selectionErr.Error()}
+		case err != nil && !errors.Is(err, storeport.ErrNotFound):
+			return nil, &turnBackendError{label: "failed to resolve activity domain", err: err}
+		case domain == nil && in.DomainName != "":
+			return nil, &turnCallerError{message: "domain not found"}
+		case domain == nil && in.DomainID != "":
+			// An explicit identifier that is unknown, archived or owned by
+			// someone else is not a setup precondition: answering
+			// needs_domain_setup would invite a duplicate init_domain.
+			domains, listErr := deps.Store.GetDomainsByLearner(ctx, principal.LearnerID, false)
+			if listErr != nil {
+				return nil, &turnBackendError{label: "failed to list active domains", err: listErr}
+			}
+			return nil, &turnCallerError{message: fmt.Sprintf("domain not found: domain_id is unknown or archived; active domains: %s. Retry with one of these domain_id values, or omit domain_id to use the most recent active domain.", domainNames(domains))}
+		case domain == nil:
+			if in.AttemptID != "" {
+				return nil, storeport.Invalid("create a domain before preparing an assessment context")
+			}
+			out.NeedsDomainSetup = true
+			out.SetupInstruction = domainSetupInstruction(deps)
+			return boundedPedagogicalTurn(out)
+		}
 	}
 	if domain.Archived || domain.DeletedAt != nil {
 		return nil, storeport.Invalid("selected domain is not active")
@@ -209,6 +271,10 @@ func preparePedagogicalTurn(ctx context.Context, deps *Deps, in PreparePedagogic
 	if err != nil {
 		return nil, fmt.Errorf("selected curriculum snapshot unavailable: %w", err)
 	}
+	if revision == "" {
+		revision = strconv.Itoa(snapshot.Version)
+	}
+	out.Provenance.Revision = revision
 	// Load and validate all assessment evidence before any activity mutation.
 	focus, focusSource := "", ""
 	if in.AttemptID != "" {
@@ -230,7 +296,7 @@ func preparePedagogicalTurn(ctx context.Context, deps *Deps, in PreparePedagogic
 		return nil, err
 	}
 	if len(observations) > pedagogicalTurnObservationLimit {
-		out.Provenance.Reductions = append(out.Provenance.Reductions, models.PedagogicalTurnReduction{Field: "recent_observations", Reason: "latest eight observations only; available is a lower bound from a bounded query; older durable evidence is retained", SourceVersion: conversation.Revision, Available: len(observations), Returned: pedagogicalTurnObservationLimit})
+		out.Provenance.Reductions = append(out.Provenance.Reductions, models.PedagogicalTurnReduction{Field: "recent_observations", Reason: "latest eight observations only; available is a lower bound from a bounded query; older durable evidence is retained", SourceVersion: revision, Available: len(observations), Returned: pedagogicalTurnObservationLimit})
 		observations = observations[:pedagogicalTurnObservationLimit]
 	}
 	for _, observation := range observations {
@@ -241,12 +307,12 @@ func preparePedagogicalTurn(ctx context.Context, deps *Deps, in PreparePedagogic
 		out.RecentObservations = append(out.RecentObservations, models.PedagogicalTurnObservation{ID: observation.ID, Concept: observation.Concept, ActivityType: observation.ActivityType, ObservedSuccess: observation.Success, HintsRequested: observation.HintsRequested, AssessmentAttemptID: observation.AssessmentAttemptID, EvidenceKind: kind, CreatedAt: observation.CreatedAt})
 	}
 	if mode == "activity" {
-		result, _, err := nextActivityResult(ctx, deps, GetNextActivityParams{IdempotentMutationParams: in.IdempotentMutationParams, DomainID: domain.ID, Intent: in.Intent})
+		result, _, err := nextActivityResult(ctx, deps, nextActivityParams{IdempotencyKey: in.IdempotencyKey, DomainID: domain.ID, Intent: intent})
 		if err != nil {
 			return nil, err
 		}
 		if result == nil || result.IsError {
-			// get_next_activity error texts are already written for the caller
+			// Activity pipeline error texts are already written for the caller
 			// (domain not found, invalid intent, ...); keep them actionable.
 			if detail := resultErrorText(result); detail != "" {
 				return nil, storeport.Invalid("canonical activity preparation failed: %s", detail)
@@ -257,7 +323,7 @@ func preparePedagogicalTurn(ctx context.Context, deps *Deps, in PreparePedagogic
 		if !ok {
 			return nil, errors.New("invalid canonical activity context")
 		}
-		out.Activity = activity
+		out.Decision = activity
 		if chosen, ok := activity["activity"].(models.Activity); ok {
 			out.Presentation, out.PresentationReason = pedagogicalTurnPresentation(chosen.Type)
 			if chosen.Concept != "" {
@@ -319,6 +385,55 @@ func preparePedagogicalTurn(ctx context.Context, deps *Deps, in PreparePedagogic
 		out.Provenance.Reductions = append(out.Provenance.Reductions, models.PedagogicalTurnReduction{Field: "memory", Reason: "bounded narrative projection: 40 KiB, at most three domain sessions and two archives; per-field limits and explicit truncation markers; complete durable narratives remain available", SourceVersion: "episodic-context/v1"})
 	}
 	return boundedPedagogicalTurn(out)
+}
+
+// conversationTurnDomain resolves the training selected for a native
+// conversation, performing an explicit activity-mode selection first when
+// requested. A nil domain without error means the turn needs a selection and
+// out already carries the choices.
+func conversationTurnDomain(ctx context.Context, deps *Deps, principal models.Principal, in *PreparePedagogicalTurnParams, mode string, out *models.PedagogicalTurn) (*models.Domain, string, error) {
+	ctx = storeport.WithConversation(ctx, in.ConversationID)
+	training, ok := deps.Store.(storeport.TrainingStore)
+	if !ok {
+		return nil, "", errors.New("conversation context unavailable")
+	}
+	selected, err := training.TrainingAction(ctx, principal, "get_conversation_context", models.TrainingRequest{ConversationID: in.ConversationID})
+	if err != nil {
+		return nil, "", err
+	}
+	conversation, ok := selected.(*models.ConversationContext)
+	if !ok || conversation == nil {
+		return nil, "", errors.New("invalid conversation context")
+	}
+	if (in.ExpectedSelection != nil && *in.ExpectedSelection != conversation.SelectionVersion) || (in.ExpectedRevision != "" && in.ExpectedRevision != conversation.Revision) {
+		return nil, "", storeport.ErrCurriculumVersionConflict
+	}
+	var choices models.ResumeTrainingChoices
+	selectionReason := ""
+	if mode == "activity" && (in.TrainingID != "" || in.TrainingName != "" || conversation.DomainID == "") {
+		conversation, choices, selectionReason, err = selectPedagogicalTurnTraining(ctx, deps, principal, *in, conversation)
+		if err != nil {
+			return nil, "", err
+		}
+	}
+	out.Conversation, out.Training = conversation, conversation.Training
+	out.NeedsSelection = conversation.DomainID == "" || selectionReason != ""
+	out.SelectionReason, out.TrainingChoices, out.TrainingChoicesHasMore = selectionReason, choices.Items, choices.HasMore
+	out.Provenance.SelectionVersion, out.Provenance.Revision = conversation.SelectionVersion, conversation.Revision
+	if out.NeedsSelection {
+		if in.AttemptID != "" {
+			return nil, "", storeport.Invalid("select a training before preparing an activity or assessment context")
+		}
+		return nil, "", nil
+	}
+	if in.DomainName != "" || (in.DomainID != "" && in.DomainID != conversation.DomainID) {
+		return nil, "", storeport.Invalid("domain_id and domain_name cannot override this conversation's selected training; select another training with training_id or training_name")
+	}
+	domain, err := deps.Store.GetLearnerDomainByID(ctx, principal.LearnerID, conversation.DomainID)
+	if err != nil {
+		return nil, "", err
+	}
+	return domain, conversation.Revision, nil
 }
 
 func boundedPedagogicalTurn(out *models.PedagogicalTurn) (*models.PedagogicalTurn, error) {

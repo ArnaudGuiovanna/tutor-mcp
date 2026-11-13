@@ -22,7 +22,7 @@ func TestPublishCurriculumRevision_RenamePreservesIdentityAndRejectsStaleWriter(
 
 	args := map[string]any{
 		"domain_id":          domain.ID,
-		"expected_version":   1,
+		"expected_revision":  1,
 		"operation":          "rename",
 		"source_concept_ids": []string{concept.ID},
 		"new_label":          "Foundational reasoning",
@@ -81,7 +81,7 @@ func TestPublishCurriculumRevision_SplitMergeAndSafeRemovalAreAuditable(t *testi
 
 	split := callTool(t, deps, registerReviseCurriculum, "L_owner", "publish_curriculum_revision", map[string]any{
 		"domain_id":          domain.ID,
-		"expected_version":   1,
+		"expected_revision":  1,
 		"operation":          "split",
 		"source_concept_ids": []string{sourceB.ID},
 		"new_concepts": []map[string]any{
@@ -133,7 +133,7 @@ func TestPublishCurriculumRevision_SplitMergeAndSafeRemovalAreAuditable(t *testi
 
 	merge := callTool(t, deps, registerReviseCurriculum, "L_owner", "publish_curriculum_revision", map[string]any{
 		"domain_id":          domain.ID,
-		"expected_version":   2,
+		"expected_revision":  2,
 		"operation":          "merge",
 		"source_concept_ids": v2.Operation.TargetConceptIDs,
 		"new_concepts": []map[string]any{{
@@ -167,7 +167,7 @@ func TestPublishCurriculumRevision_SplitMergeAndSafeRemovalAreAuditable(t *testi
 	}
 	blocked := callTool(t, deps, registerReviseCurriculum, "L_owner", "publish_curriculum_revision", map[string]any{
 		"domain_id":          domain.ID,
-		"expected_version":   3,
+		"expected_revision":  3,
 		"operation":          "remove",
 		"source_concept_ids": []string{conceptA.ID},
 		"provenance": map[string]any{
@@ -181,7 +181,7 @@ func TestPublishCurriculumRevision_SplitMergeAndSafeRemovalAreAuditable(t *testi
 
 	removed := callTool(t, deps, registerReviseCurriculum, "L_owner", "publish_curriculum_revision", map[string]any{
 		"domain_id":          domain.ID,
-		"expected_version":   3,
+		"expected_revision":  3,
 		"operation":          "remove",
 		"source_concept_ids": []string{merged.ID},
 		"provenance": map[string]any{
@@ -254,7 +254,7 @@ func TestPublishCurriculumRevision_CannotSelfApproveReview(t *testing.T) {
 	}
 	res := callTool(t, deps, registerReviseCurriculum, "L_owner", "publish_curriculum_revision", map[string]any{
 		"domain_id":          domain.ID,
-		"expected_version":   1,
+		"expected_revision":  1,
 		"operation":          "rename",
 		"source_concept_ids": []string{baseline.Concepts[0].ID},
 		"new_label":          "Reviewed safety",
@@ -287,7 +287,7 @@ func TestPublishCurriculumRevision_MetadataIDsStayOwnedAndStable(t *testing.T) {
 
 	created := callTool(t, deps, registerReviseCurriculum, "L_owner", "publish_curriculum_revision", map[string]any{
 		"domain_id":          domain.ID,
-		"expected_version":   1,
+		"expected_revision":  1,
 		"operation":          "update_metadata",
 		"source_concept_ids": []string{source.ID},
 		"metadata": map[string]any{
@@ -315,7 +315,7 @@ func TestPublishCurriculumRevision_MetadataIDsStayOwnedAndStable(t *testing.T) {
 
 	partial := callTool(t, deps, registerReviseCurriculum, "L_owner", "publish_curriculum_revision", map[string]any{
 		"domain_id":          domain.ID,
-		"expected_version":   2,
+		"expected_revision":  2,
 		"operation":          "update_metadata",
 		"source_concept_ids": []string{source.ID},
 		"metadata": map[string]any{
@@ -340,7 +340,7 @@ func TestPublishCurriculumRevision_MetadataIDsStayOwnedAndStable(t *testing.T) {
 
 	forged := callTool(t, deps, registerReviseCurriculum, "L_owner", "publish_curriculum_revision", map[string]any{
 		"domain_id":          domain.ID,
-		"expected_version":   3,
+		"expected_revision":  3,
 		"operation":          "update_metadata",
 		"source_concept_ids": []string{source.ID},
 		"metadata": map[string]any{
@@ -355,7 +355,7 @@ func TestPublishCurriculumRevision_MetadataIDsStayOwnedAndStable(t *testing.T) {
 
 	updated := callTool(t, deps, registerReviseCurriculum, "L_owner", "publish_curriculum_revision", map[string]any{
 		"domain_id":          domain.ID,
-		"expected_version":   3,
+		"expected_revision":  3,
 		"operation":          "update_metadata",
 		"source_concept_ids": []string{source.ID},
 		"metadata": map[string]any{

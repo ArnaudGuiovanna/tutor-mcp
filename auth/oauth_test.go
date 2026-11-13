@@ -352,7 +352,7 @@ func TestAuthorizeGet_ValidRedirectURI_SetsCSRFCookie(t *testing.T) {
 	}
 	var csrfCookie *http.Cookie
 	for _, c := range rec.Result().Cookies() {
-		if c.Name == "csrf_token" {
+		if c.Name == authorizeCSRFCookieName {
 			csrfCookie = c
 		}
 	}
@@ -362,7 +362,7 @@ func TestAuthorizeGet_ValidRedirectURI_SetsCSRFCookie(t *testing.T) {
 	if !csrfCookie.HttpOnly || !csrfCookie.Secure || csrfCookie.SameSite != http.SameSiteStrictMode {
 		t.Fatalf("cookie flags wrong: %+v", csrfCookie)
 	}
-	if csrfCookie.Path != "/authorize" {
+	if csrfCookie.Path != "/" {
 		t.Fatalf("cookie path = %s", csrfCookie.Path)
 	}
 	if !strings.Contains(rec.Body.String(), csrfCookie.Value) {
@@ -384,7 +384,7 @@ func TestAuthorizePost_UnregisteredRedirectURI(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "tkn"})
+	req.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: "tkn"})
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
 
@@ -430,7 +430,7 @@ func TestAuthorizePost_CSRFMismatch(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "cookie-value-different"})
+	req.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: "cookie-value-different"})
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
 
@@ -459,7 +459,7 @@ func TestAuthorizePost_RotatesCSRFAndRejectsReplay(t *testing.T) {
 	post := func(cookieValue string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/authorize", strings.NewReader(form.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		req.AddCookie(&http.Cookie{Name: "csrf_token", Value: cookieValue})
+		req.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: cookieValue})
 		rec := httptest.NewRecorder()
 		s.HandleAuthorizePost(rec, req)
 		return rec
@@ -471,7 +471,7 @@ func TestAuthorizePost_RotatesCSRFAndRejectsReplay(t *testing.T) {
 	}
 	var rotated *http.Cookie
 	for _, cookie := range first.Result().Cookies() {
-		if cookie.Name == "csrf_token" && cookie.MaxAge > 0 {
+		if cookie.Name == authorizeCSRFCookieName && cookie.MaxAge > 0 {
 			rotated = cookie
 		}
 	}
@@ -504,7 +504,7 @@ func TestAuthorizePost_CSRFReplayRejectedAcrossNodes(t *testing.T) {
 	post := func(server *OAuthServer) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/authorize", strings.NewReader(form.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "fleet-one-time-token"})
+		req.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: "fleet-one-time-token"})
 		rec := httptest.NewRecorder()
 		server.HandleAuthorizePost(rec, req)
 		return rec
@@ -537,7 +537,7 @@ func TestAuthorizePost_SuccessClearsCSRFCookie(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/authorize", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "success-token"})
+	req.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: "success-token"})
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
 	if rec.Code != http.StatusFound {
@@ -545,7 +545,7 @@ func TestAuthorizePost_SuccessClearsCSRFCookie(t *testing.T) {
 	}
 	cleared := false
 	for _, cookie := range rec.Result().Cookies() {
-		if cookie.Name == "csrf_token" && cookie.MaxAge < 0 {
+		if cookie.Name == authorizeCSRFCookieName && cookie.MaxAge < 0 {
 			cleared = true
 		}
 	}
@@ -625,7 +625,7 @@ func TestAuthorizePost_CSRFMatch_InvalidCreds(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "matching-token"})
+	req.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: "matching-token"})
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
 
@@ -656,7 +656,7 @@ func TestAuthorizePost_InvalidEmailRejectedBeforePersistence(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/authorize", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.AddCookie(&http.Cookie{Name: "csrf_token", Value: "matching-token"})
+	req.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: "matching-token"})
 	rec := httptest.NewRecorder()
 	s.HandleAuthorizePost(rec, req)
 	drainBackgroundMail(t, s)
@@ -787,7 +787,7 @@ func driveAuthorizePostWithScope(t *testing.T, s *OAuthServer, clientID, redirec
 	}
 	var csrf string
 	for _, c := range getRec.Result().Cookies() {
-		if c.Name == "csrf_token" {
+		if c.Name == authorizeCSRFCookieName {
 			csrf = c.Value
 		}
 	}
@@ -814,7 +814,7 @@ func driveAuthorizePostWithScope(t *testing.T, s *OAuthServer, clientID, redirec
 
 	postReq := httptest.NewRequest("POST", "/authorize", strings.NewReader(form.Encode()))
 	postReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	postReq.AddCookie(&http.Cookie{Name: "csrf_token", Value: csrf})
+	postReq.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: csrf})
 	postRec := httptest.NewRecorder()
 	s.HandleAuthorizePost(postRec, postReq)
 
@@ -1382,7 +1382,7 @@ func TestAuthorizePost_RejectsCrossOriginFormBeforeCSRFConsumption(t *testing.T)
 		for name, value := range headers {
 			req.Header.Set(name, value)
 		}
-		req.AddCookie(&http.Cookie{Name: "csrf_token", Value: token})
+		req.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: token})
 		rec := httptest.NewRecorder()
 		s.HandleAuthorizePost(rec, req)
 		return rec.Code
@@ -1416,14 +1416,14 @@ func TestAccountFormRejectsCrossOriginSubmission(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/recover", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Origin", "https://evil.example")
-	req.AddCookie(&http.Cookie{Name: accountCSRFCookieName, Value: "account-token"})
+	req.AddCookie(&http.Cookie{Name: accountCSRFCookieName("/recover"), Value: "account-token"})
 	if s.validateAccountCSRF(req) {
 		t.Fatal("cross-origin account form accepted")
 	}
 	req = httptest.NewRequest(http.MethodPost, "/recover", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Origin", strings.ToUpper(s.baseURL))
-	req.AddCookie(&http.Cookie{Name: accountCSRFCookieName, Value: "account-token"})
+	req.AddCookie(&http.Cookie{Name: accountCSRFCookieName("/recover"), Value: "account-token"})
 	if !s.validateAccountCSRF(req) {
 		t.Fatal("same-origin account form rejected")
 	}

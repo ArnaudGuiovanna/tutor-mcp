@@ -201,7 +201,7 @@ func TestComposeBrief_CompetenceValue(t *testing.T) {
 		Concept:      "Goroutines",
 		ConceptState: &models.ConceptState{PMastery: 0.1},
 	}
-	brief := ComposeBrief(in, models.MotivationKindCompetenceValue, "financial")
+	brief := composeBrief(in, models.MotivationKindCompetenceValue, "financial", nil, false)
 	if brief.ValueFraming == nil {
 		t.Fatal("expected ValueFraming populated")
 	}
@@ -215,7 +215,7 @@ func TestComposeBrief_CompetenceValue(t *testing.T) {
 
 // TestComposeBrief_Silent — empty kind yields empty brief.
 func TestComposeBrief_Silent(t *testing.T) {
-	brief := ComposeBrief(BriefInput{}, "", "")
+	brief := composeBrief(BriefInput{}, "", "", nil, false)
 	if brief.Kind != "" {
 		t.Errorf("expected empty kind, got %q", brief.Kind)
 	}

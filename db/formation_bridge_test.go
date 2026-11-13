@@ -230,9 +230,6 @@ func TestFormationAssignmentsRecheckedOnReplayAndReads(t *testing.T) {
 	if _, err := s.SetMembershipAuthorization(ctx, manager.TenantScope(), models.MembershipStatusActive, []string{models.RolePedagogyManager}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.RecordMembershipMFAVerification(ctx, manager.TenantScope(), time.Now()); err != nil {
-		t.Fatal(err)
-	}
 	manager, err := s.GetPrincipalForLearner(ctx, manager.LearnerID, []string{models.OAuthScopeFormationWrite})
 	if err != nil {
 		t.Fatal(err)
@@ -268,7 +265,12 @@ func TestFormationAssignmentsRecheckedOnReplayAndReads(t *testing.T) {
 func TestStaffOAuthWithoutLearnerProfile(t *testing.T) {
 	s := institutionTestStore(t)
 	ctx := context.Background()
-	scope := seedInstitutionOwner(t, s, "staff-only", "staff@bridge.test")
+	scope := seedInstitutionOwner(t, s, "staff-only")
+	// OAuth codes without a learner profile are issued to verified email
+	// staff accounts; give the provisioned owner such an identity.
+	if _, err := s.exec(ctx, `UPDATE users SET email = 'staff@staff-only.test', normalized_email = 'staff@staff-only.test', password_hash = 'hash', email_verified_at = ?, identity_mode = 'email' WHERE id = ?`, time.Now().UTC(), scope.UserID); err != nil {
+		t.Fatal(err)
+	}
 	owner, _ := verifiedOwner(t, s, scope)
 	principal, err := s.GetPrincipal(ctx, scope, []string{models.OAuthScopeFormationRead, models.OAuthScopeFormationWrite})
 	if err != nil || principal.LearnerID != "" {

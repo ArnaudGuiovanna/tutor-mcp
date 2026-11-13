@@ -21,6 +21,7 @@ import (
 
 	"tutor-mcp/auth"
 	"tutor-mcp/db"
+	"tutor-mcp/internal/testsupport"
 	"tutor-mcp/models"
 	storeport "tutor-mcp/store"
 )
@@ -121,9 +122,6 @@ func (f *parameterPolicyFixture) formation(t *testing.T) (models.Principal, *mod
 	f.deps.Institution = true
 	owner := f.learner(t, "owner")
 	if _, err := f.s.SetMembershipAuthorization(t.Context(), owner.TenantScope(), models.MembershipStatusActive, []string{models.RoleOwner}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.s.RecordMembershipMFAVerification(t.Context(), owner.TenantScope(), time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	owner, err := f.s.GetPrincipalForLearner(t.Context(), owner.LearnerID, []string{models.OAuthScopeLearner})
@@ -320,8 +318,8 @@ func TestCommonBKTCalibrationSourceThroughFrozenMCPAssessmentHandlers(t *testing
 			return f.callTool(t, p, name, args)
 		}
 		for i := 0; i < 2; i++ {
-			activity := call("get_next_activity", map[string]any{"domain_id": enrollment.DomainID})
-			decisionID, _ := activity["decision_id"].(string)
+			activity, _ := call("prepare_pedagogical_turn", map[string]any{"mode": "activity", "domain_id": enrollment.DomainID})["decision"].(map[string]any)
+			decisionID := decisionIDOf(activity)
 			decision, err := f.s.GetPedagogicalDecision(t.Context(), p.TenantScope(), decisionID)
 			if err != nil {
 				t.Fatal(err)
@@ -330,7 +328,7 @@ func TestCommonBKTCalibrationSourceThroughFrozenMCPAssessmentHandlers(t *testing
 				"domain_id": enrollment.DomainID, "session_id": decision.SessionID, "decision_id": decisionID,
 				"concept": decision.Contract.TargetConcept, "activity_type": string(decision.Contract.RecommendedActivityType),
 				"observable": "Compare independently", "task_text": "Which is larger, 2 or 4?",
-				"rubric_json": `{"criteria":[{"id":"correct","description":"Answer 4","max_score":1}],"passing_score":1}`,
+				"rubric": json.RawMessage(`{"criteria":[{"id":"correct","description":"Answer 4","max_score":1}],"passing_score":1}`),
 			})
 			attemptID := prepared["attempt_id"].(string)
 			call("submit_assessment_attempt", map[string]any{"attempt_id": attemptID, "learner_response": "4"})
@@ -339,8 +337,8 @@ func TestCommonBKTCalibrationSourceThroughFrozenMCPAssessmentHandlers(t *testing
 				"concept": decision.Contract.TargetConcept, "activity_type": string(decision.Contract.RecommendedActivityType),
 				"attempt_id": attemptID, "success": true, "confidence": .8, "response_time_seconds": 5,
 				"evaluator_id": "mcp-host", "evaluation_method": "host_llm",
-				"rubric_score_json": `{"criteria_scores":[{"id":"correct","score":1,"evidence":"The learner committed the answer 4."}]}`,
-				"idempotency_key":   fmt.Sprintf("mcp-calibration-evaluation-%d", i),
+				"rubric_score":    json.RawMessage(`{"criteria_scores":[{"id":"correct","score":1,"evidence":"The learner committed the answer 4."}]}`),
+				"idempotency_key": fmt.Sprintf("mcp-calibration-evaluation-%d", i),
 			}
 			graded := call("record_interaction", args)
 			obs := graded["observation"].(map[string]any)
@@ -368,18 +366,7 @@ func TestCommonBKTCalibrationSourceThroughFrozenMCPAssessmentHandlers(t *testing
 func TestNativeInstitutionFreeDomainUsesFixedPersonalParameters(t *testing.T) {
 	runParameterPolicyStores(t, func(t *testing.T, f *parameterPolicyFixture) {
 		f.deps.Institution = true
-		credential := models.SignupCredential{Token: "native-free-domain-" + rand.Text()}
-		if err := f.s.CreatePendingSignup(t.Context(), credential, "owner-"+rand.Text()+"@native-free.test", "Free domain institution", "native-free-domain", time.Now().UTC().Add(time.Hour)); err != nil {
-			t.Fatal(err)
-		}
-		membership, err := f.s.CompleteSignup(t.Context(), credential, "plan_legacy", "", "hash")
-		if err != nil {
-			t.Fatal(err)
-		}
-		scope := models.TenantScope{TenantID: membership.TenantID, UserID: membership.UserID, MembershipID: membership.ID}
-		if _, err := f.s.RecordMembershipMFAVerification(t.Context(), scope, time.Now().UTC()); err != nil {
-			t.Fatal(err)
-		}
+		scope := testsupport.ProvisionInstitution(t, f.s, "native-free-domain-"+strings.ToLower(rand.Text()[:8]))
 		owner, err := f.s.GetPrincipal(t.Context(), scope, []string{models.OAuthScopeLearner})
 		if err != nil {
 			t.Fatal(err)

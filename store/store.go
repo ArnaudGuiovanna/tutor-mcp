@@ -41,15 +41,8 @@ var ErrInvalidPrincipal = errors.New("invalid tenant principal")
 var ErrTenantDSARBlocked = errors.New("tenant DSAR is blocked by an active legal hold")
 var ErrAmbiguousIdentity = errors.New("ambiguous global identity")
 
-// ErrAccountExists reports that an address already has a local account, whose
-// holder must sign in instead of creating a second one.
-var ErrAccountExists = errors.New("an account already exists for this email")
-
 // ErrAlreadyMember reports that the user already belongs to the tenant.
 var ErrAlreadyMember = errors.New("already a member of this institution")
-
-// ErrTenantSlugTaken reports that another institution already uses the slug.
-var ErrTenantSlugTaken = errors.New("institution identifier already taken")
 
 // ErrInvalidAuthCode deliberately collapses unknown, expired, client-bound and
 // already-consumed authorization codes into OAuth's invalid_grant response.
@@ -173,15 +166,6 @@ type LoginFailureBackend interface {
 	Reset(ctx context.Context, key string) error
 }
 
-// SecondFactorAttemptBackend reserves verification attempts in a fixed window
-// anchored at its first reservation. The returned count is capped at limit+1;
-// counts above limit are denied. retryAfter is the remaining window duration.
-// Password-failure accounting deliberately keeps its separate legacy contract.
-// Supported budgets are 1..100 attempts and a window greater than zero up to 24h.
-type SecondFactorAttemptBackend interface {
-	ReserveSecondFactorAttempt(context.Context, string, int, time.Duration, time.Time) (count int, retryAfter time.Duration, err error)
-}
-
 // ---------------------------------------------------------------------------
 // Sub-interfaces — segregated by domain concern
 // ---------------------------------------------------------------------------
@@ -210,48 +194,24 @@ type IdentityStore interface {
 	ListMembershipsForUser(ctx context.Context, userID string) ([]models.TenantMembership, error)
 	ListActiveMembershipsForUser(ctx context.Context, userID string) ([]models.TenantMembership, error)
 	SetMembershipAuthorization(ctx context.Context, scope models.TenantScope, status string, roles []string) (int64, error)
-	RecordMembershipMFAVerification(ctx context.Context, scope models.TenantScope, verifiedAt time.Time) (int64, error)
-	CreateTenantInvitation(ctx context.Context, actor models.Principal, email string, roles []string, expiresAt time.Time) (*models.TenantInvitation, string, error)
-	AcceptTenantInvitation(ctx context.Context, rawToken, userID string) (*models.TenantMembership, error)
 	LinkExternalIdentity(ctx context.Context, userID string, identity models.ExternalIdentityInput) (*models.ExternalIdentity, error)
 	AppendAuditEvent(ctx context.Context, actor models.Principal, event models.AuditEvent) error
 }
 
-// InstitutionAccountStore backs the browser console: its sessions, the TOTP
-// ceremony, member administration, invitations and self-service institution
-// signup. It is separate from IdentityStore so OAuth-only stores need not
-// implement it.
-type InstitutionAccountStore interface {
-	BeginTOTPEnrollment(ctx context.Context, actor models.Principal, label string) (string, string, error)
-	ConfirmTOTPEnrollment(ctx context.Context, actor models.Principal, credentialID, code string, at time.Time) ([]string, error)
-	HasConfirmedTOTP(ctx context.Context, scope models.TenantScope) (bool, error)
-	VerifySecondFactor(ctx context.Context, scope models.TenantScope, code string, at time.Time) error
-	EnsureMembershipMFAVerified(ctx context.Context, scope models.TenantScope, at time.Time) (int64, error)
-
-	CreateConsoleSession(ctx context.Context, credential models.ConsoleSessionCredential, scope models.TenantScope, membershipVersion int64, mfaVerifiedAt *time.Time, expiresAt time.Time) error
-	GetConsoleSession(ctx context.Context, credential models.ConsoleSessionCredential) (*models.ConsoleSession, error)
-	UpdateConsoleSession(ctx context.Context, credential models.ConsoleSessionCredential, seenAt time.Time, membershipVersion int64, mfaVerifiedAt *time.Time) error
-	DeleteConsoleSession(ctx context.Context, credential models.ConsoleSessionCredential) error
-	GetConsoleMembership(ctx context.Context, scope models.TenantScope) (*models.ConsoleMembership, error)
-
-	ListTenantMembers(ctx context.Context, actor models.Principal) ([]models.TenantMember, error)
-	ListTenantInvitations(ctx context.Context, actor models.Principal) ([]models.TenantInvitation, error)
-	RevokeTenantInvitation(ctx context.Context, actor models.Principal, invitationID string) error
-	UpdateTenantMember(ctx context.Context, actor models.Principal, membershipID, status string, roles []string) error
-
-	PreviewTenantInvitation(ctx context.Context, credential models.InvitationCredential) (*models.InvitationPreview, error)
-	AcceptTenantInvitationWithNewUser(ctx context.Context, credential models.InvitationCredential, passwordHash string) (*models.TenantMembership, error)
-	CreateOwnerInvitation(ctx context.Context, actor models.ControlPlanePrincipal, tenantID, email string, expiresAt time.Time) (string, error)
-
-	TenantSlugAvailable(ctx context.Context, slug string) (bool, error)
-	PlanIsActive(ctx context.Context, planID string) (bool, error)
-	CreatePendingSignup(ctx context.Context, credential models.SignupCredential, email, tenantName, slug string, expiresAt time.Time) error
-	GetPendingSignup(ctx context.Context, credential models.SignupCredential) (*models.PendingSignup, error)
-	CompleteSignup(ctx context.Context, credential models.SignupCredential, planID, existingUserID, newPasswordHash string) (*models.TenantMembership, error)
-
-	CreateUserPasswordReset(ctx context.Context, credential models.PasswordResetCredential, email string) (bool, error)
-	UserPasswordResetValid(ctx context.Context, credential models.PasswordResetCredential) bool
-	ResetUserPassword(ctx context.Context, credential models.PasswordResetCredential, passwordHash string) error
+// QualifiedDiagnosticObservationReader is a tenant-scoped read of the
+// qualified diagnostic observations of one learner and domain: each
+// evaluated, unassisted DIAGNOSTIC_ASSESSMENT answer of the current curriculum
+// with its outcome and time, oldest first (the same qualification as
+// GetQualifiedDiagnosticConceptsSinceInDomain). scope.LearnerID selects the
+// learner.
+type QualifiedDiagnosticObservationReader interface {
+	ListQualifiedDiagnosticObservationsInDomain(ctx context.Context, scope models.TenantScope, domainID string, since time.Time) ([]models.DiagnosticObservation, error)
+	// ListConceptsWithNonPlacementEvidenceInDomain returns, sorted, every
+	// concept of the domain with at least one current interaction, over the
+	// whole history, that is not a qualified diagnostic observation made since
+	// since: practice, hinted or unevaluated answers, and diagnostics of an
+	// earlier phase.
+	ListConceptsWithNonPlacementEvidenceInDomain(ctx context.Context, scope models.TenantScope, domainID string, since time.Time) ([]string, error)
 }
 
 // IntegrationSecretStore keeps credential access out of the general learner
@@ -682,6 +642,24 @@ type CatalogStore interface {
 	EnrollMembership(ctx context.Context, actor models.Principal, cohortID, membershipID, objectivesJSON string) (*models.Enrollment, error)
 }
 
+// TxStore runs a callback inside one legacy (non-tenant-bound) transaction.
+type TxStore interface {
+	WithTx(ctx context.Context, fn func(s Store) error) error
+}
+
+// TenantTxStore is the writer entry point for tenant-owned data on
+// PostgreSQL. It binds SET LOCAL settings to one transaction and passes the
+// transaction context to every nested Store call.
+type TenantTxStore interface {
+	WithTenantTx(ctx context.Context, scope models.TenantScope, fn func(context.Context, Store) error) error
+}
+
+// TenantReadTxStore uses a database-enforced read-only transaction. Nested
+// calls inherit the existing transaction and cannot promote a reader.
+type TenantReadTxStore interface {
+	WithTenantReadTx(ctx context.Context, scope models.TenantScope, fn func(context.Context, Store) error) error
+}
+
 // ---------------------------------------------------------------------------
 // Aggregate interface — the full persistence port
 // ---------------------------------------------------------------------------
@@ -712,16 +690,12 @@ type Store interface {
 	SchedulerStore
 	LearnerContextReadStore
 	CatalogStore
+	QualifiedDiagnosticObservationReader
 
-	// Lifecycle methods — implemented on *db.Store in the next task.
-	WithTx(ctx context.Context, fn func(s Store) error) error
-	// WithTenantTx is the writer entry point for tenant-owned data on
-	// PostgreSQL. It binds SET LOCAL settings to one transaction and passes the
-	// transaction context to every nested Store call.
-	WithTenantTx(ctx context.Context, scope models.TenantScope, fn func(context.Context, Store) error) error
-	// WithTenantReadTx uses a database-enforced read-only transaction. Nested
-	// calls inherit the existing transaction and cannot promote a reader.
-	WithTenantReadTx(ctx context.Context, scope models.TenantScope, fn func(context.Context, Store) error) error
+	// Transaction and lifecycle methods.
+	TxStore
+	TenantTxStore
+	TenantReadTxStore
 	Migrate(ctx context.Context) error
 	Ping(ctx context.Context) error
 	Close() error

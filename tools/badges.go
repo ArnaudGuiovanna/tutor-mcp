@@ -24,7 +24,7 @@ func registerBadgeTools(server *mcp.Server, deps *Deps) {
 		{"get_my_badges", "Read your dated mastery, formation completion and FSRS retention badges (7, 30, 90 days) for an enrollment from get_my_formations. Follow next_after for all badges. Badges retain evidence identifiers and its current evidence_status; they do not assert current memory strength or external certification.", false},
 		{"get_learner_badges", "Read dated badges for an enrollment in your current staff assignments. Requires progress:read. Mastery, formation completion and FSRS retention badges cite their supporting evidence. Follow next_after, respect evidence_status, and never present a historical badge as proof of current memory strength or external certification.", true},
 	} {
-		addTool(server, &mcp.Tool{Name: entry.name, Description: entry.description}, func(ctx context.Context, _ *mcp.CallToolRequest, input BadgeParams) (*mcp.CallToolResult, any, error) {
+		addTool(server, deps, &mcp.Tool{Name: entry.name, Description: entry.description}, func(ctx context.Context, _ *mcp.CallToolRequest, input BadgeParams) (*mcp.CallToolResult, any, error) {
 			p, _ := auth.GetPrincipal(ctx)
 			s, ok := deps.Store.(storeport.BadgeStore)
 			if !ok {

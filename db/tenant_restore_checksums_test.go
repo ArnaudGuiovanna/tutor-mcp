@@ -115,7 +115,7 @@ func TestRestoreChecksumsIgnoreOtherTenantsAndRejectOldKeyOnlyFormat(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	other := seedInstitutionOwner(t, c.s, "restore-other", "other@restore.test")
+	other := seedInstitutionOwner(t, c.s, "restore-other")
 	if _, err := c.s.exec(t.Context(), `UPDATE tenant_memberships SET status = 'suspended' WHERE tenant_id = ?`, other.TenantID); err != nil {
 		t.Fatal(err)
 	}

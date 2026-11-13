@@ -164,10 +164,10 @@ func (s *Store) decryptIntegrationSecret(learnerID, stored string) (string, erro
 	return s.secretKeyring.decrypt(learnerID, stored)
 }
 
-// RotateIntegrationSecrets upgrades plaintext legacy webhook rows and DCR
-// replay-secret envelopes made with older retained keys to the current key.
-// All values are authenticated before the write transaction, so one bad row
-// leaves every integration-secret family intact.
+// RotateIntegrationSecrets upgrades plaintext legacy webhook rows and
+// envelopes made with older retained keys to the current key. All values are
+// authenticated before the write transaction, so one bad row leaves every
+// stored secret intact.
 func (s *Store) RotateIntegrationSecrets(ctx context.Context) (int64, error) {
 	if s.secretKeyring == nil {
 		return 0, fmt.Errorf("integration secret keyring is not configured")
@@ -216,48 +216,7 @@ func (s *Store) RotateIntegrationSecrets(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("close integration secret rows: %w", err)
 	}
 
-	type dcrRotation struct {
-		clientID, fingerprint, previous, ciphertext string
-	}
-	var dcrRotations []dcrRotation
-	dcrRows, err := s.query(ctx,
-		`SELECT client_id, registration_fingerprint, registration_secret_ciphertext
-		 FROM oauth_clients WHERE registration_secret_ciphertext <> ''`,
-	)
-	if err != nil {
-		return 0, fmt.Errorf("list DCR replay secrets: %w", err)
-	}
-	for dcrRows.Next() {
-		var clientID, fingerprint, stored string
-		if err := dcrRows.Scan(&clientID, &fingerprint, &stored); err != nil {
-			_ = dcrRows.Close()
-			return 0, fmt.Errorf("scan DCR replay secret: %w", err)
-		}
-		plaintext, err := s.secretKeyring.decryptWithAAD(stored, dcrRegistrationSecretAAD(clientID, fingerprint))
-		if err != nil || plaintext == "" {
-			_ = dcrRows.Close()
-			return 0, fmt.Errorf("authenticate DCR replay secret")
-		}
-		if integrationSecretKeyID(stored) == s.secretKeyring.currentID {
-			continue
-		}
-		ciphertext, err := s.secretKeyring.encryptWithAAD(plaintext, dcrRegistrationSecretAAD(clientID, fingerprint))
-		if err != nil {
-			_ = dcrRows.Close()
-			return 0, fmt.Errorf("encrypt DCR replay secret: %w", err)
-		}
-		dcrRotations = append(dcrRotations, dcrRotation{
-			clientID: clientID, fingerprint: fingerprint, previous: stored, ciphertext: ciphertext,
-		})
-	}
-	if err := dcrRows.Err(); err != nil {
-		_ = dcrRows.Close()
-		return 0, fmt.Errorf("iterate DCR replay secrets: %w", err)
-	}
-	if err := dcrRows.Close(); err != nil {
-		return 0, fmt.Errorf("close DCR replay secret rows: %w", err)
-	}
-	if len(rotations) == 0 && len(dcrRotations) == 0 {
+	if len(rotations) == 0 {
 		return 0, nil
 	}
 	err = s.inTx(ctx, nil, func(txs *Store) error {
@@ -266,21 +225,7 @@ func (s *Store) RotateIntegrationSecrets(ctx context.Context) (int64, error) {
 				return fmt.Errorf("rotate integration secret: %w", err)
 			}
 		}
-		for _, item := range dcrRotations {
-			result, err := txs.exec(ctx,
-				`UPDATE oauth_clients SET registration_secret_ciphertext = ?
-				 WHERE client_id = ? AND registration_fingerprint = ?
-				   AND registration_secret_ciphertext = ?`,
-				item.ciphertext, item.clientID, item.fingerprint, item.previous,
-			)
-			if err != nil {
-				return fmt.Errorf("rotate DCR replay secret: %w", err)
-			}
-			if rows, _ := result.RowsAffected(); rows != 1 {
-				return fmt.Errorf("rotate DCR replay secret: concurrent modification")
-			}
-		}
 		return nil
 	})
-	return int64(len(rotations) + len(dcrRotations)), err
+	return int64(len(rotations)), err
 }

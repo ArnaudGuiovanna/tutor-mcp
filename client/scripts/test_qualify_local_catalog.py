@@ -119,7 +119,7 @@ CREATE TABLE transitions(sequence INTEGER PRIMARY KEY AUTOINCREMENT, operation_i
             event(turn, 'turn_finished', 'complete')
             operation = 'op-' + str(index)
             value['permissionOperationIds'] = [operation]
-            db.execute('INSERT INTO operations VALUES(?,?,?,?,?,?,?)', (operation, turn, 'tutor/get_learner_context', json.dumps({'domain_id': 'verified-domain'}).encode(), 'completed' if allowed else 'rejected', 0, index))
+            db.execute('INSERT INTO operations VALUES(?,?,?,?,?,?,?)', (operation, turn, 'tutor/get_learner_state', json.dumps({'domain_id': 'verified-domain'}).encode(), 'completed' if allowed else 'rejected', 0, index))
             states = [(None, 'prepared'), ('prepared', 'dispatched'), ('dispatched', 'completed')] if allowed else [(None, 'prepared'), ('prepared', 'rejected')]
             db.executemany('INSERT INTO transitions(operation_id,from_state,to_state) VALUES(?,?,?)', [(operation, before, after) for before, after in states])
             if allowed:

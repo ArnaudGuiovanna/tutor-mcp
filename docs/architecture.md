@@ -73,7 +73,7 @@ the logical memory scopes remain stable across backends. See
 
 1. **Open or resume a session.** The client reads learner context, goals and
    pending alerts. A new domain starts with a concept graph and prerequisites.
-2. **Request an activity.** `get_next_activity` gathers current state, applies
+2. **Request an activity.** `prepare_pedagogical_turn(mode="activity")` gathers current state, applies
    the regulation pipeline and returns guidance, relevant memory and a recorded
    decision contract.
 3. **Generate and present the task.** The LLM writes the lesson or exercise.
@@ -99,7 +99,7 @@ See [learning integrity](learning-integrity.md) and [learning events](learning-e
 | Authentication | [auth/](../auth/) | OAuth/PKCE, CIMD and dynamic client registration, JWT validation, accounts, consent, rate limits and request budgets. |
 | MCP interface | [tools/](../tools/) | Tool schemas and handlers, tutor prompt, principal checks, idempotency and transaction orchestration. |
 | Teaching engine | [engine/](../engine/) | Phase control, concept/action selection, evidence gates, mastery views, uncertainty, misconceptions, motivation, calibration, negotiation, alerts and decision replay. |
-| Cognitive algorithms | [algorithms/](../algorithms/) | BKT, information gain, FSRS-5, prerequisite graph operations and thresholds; standalone legacy IRT helpers. See [algorithm status](algorithms.md). |
+| Cognitive algorithms | [algorithms/](../algorithms/) | BKT, FSRS-5, prerequisite graph operations, entropy and thresholds. Adaptive placement lives in [engine/placement.go](../engine/placement.go). See [algorithm status](algorithms.md). |
 | Assessment contracts | [assessment/](../assessment/) | Curriculum definitions, bounded JSON parsing, frozen rubrics and deterministic score validation. |
 | Certification | [certification/](../certification/) | Verification of signed, tenant-bound assessment attestations from configured external authorities. |
 | Administrative API | [adminapi/](../adminapi/) | Catalog operations, curriculum opinions and assessment review under administrative permissions. |

@@ -549,10 +549,11 @@ fn french_action(token: &str) -> &str {
 fn french_aliases(name: &str) -> &'static str {
     match name {
         "start_learning_session" => "commencer demarrer ouvrir reprendre seance apprentissage",
-        "get_learner_context" => "contexte apprenant profil historique debut seance",
-        "get_pending_alerts" => "consulter alertes notifications attente action",
-        "get_next_activity" => {
-            "prochaine activite exercice continuer apprendre recommandation suite"
+        "get_learner_state" => {
+            "contexte apprenant profil historique debut seance consulter alertes notifications attente tableau bord progression bilan statistiques avancement modele preuves notions acquis retenu demontre transfert"
+        }
+        "prepare_pedagogical_turn" => {
+            "prochaine activite exercice continuer apprendre recommandation suite miroir metacognitif reflexion comportement recul apprentissage"
         }
         "prepare_assessment_attempt" => {
             "preparer preparation evaluation quiz rubrique criteres tentative avant reponse"
@@ -562,12 +563,10 @@ fn french_aliases(name: &str) -> &'static str {
         }
         "cancel_assessment_attempt" => "annuler abandonner tentative evaluation",
         "record_interaction" => {
-            "enregistrer evaluation resultat observation reussite erreur progression interaction"
+            "enregistrer evaluation resultat observation reussite erreur progression interaction transfert situation"
         }
         "record_learning_event" => "enregistrer retour feedback explication instruction delivree",
         "check_mastery" => "verifier maitrise competence pret defi",
-        "get_olm_snapshot" => "modele apprenant preuves notions acquis retenu demontre transfert",
-        "get_dashboard_state" => "tableau bord progression bilan statistiques avancement",
         "init_domain" => {
             "creer creation formation domaine programme cours concepts prerequis objectif"
         }
@@ -581,9 +580,9 @@ fn french_aliases(name: &str) -> &'static str {
         "validate_domain_graph" => {
             "verifier valider graphe prerequis cycles orphelins incoherences"
         }
-        "archive_domain" => "archiver formation domaine programme",
-        "unarchive_domain" => "desarchiver reactiver restaurer domaine progression activites",
-        "delete_domain" => "supprimer effacer formation domaine programme",
+        "manage_domain" => {
+            "archiver desarchiver reactiver restaurer supprimer effacer formation domaine programme progression activites"
+        }
         "set_domain_priority" => "prioriser priorite classement formation domaine programme",
         "mark_domain_high_stakes" => {
             "classer domaine sensible risque enjeux eleves supervision humaine"
@@ -600,9 +599,6 @@ fn french_aliases(name: &str) -> &'static str {
             "enregistrer resultat calibration prediction biais confiance"
         }
         "get_autonomy_metrics" => "consulter autonomie metriques observation precision prediction",
-        "get_metacognitive_mirror" => {
-            "miroir metacognitif reflexion comportement recul apprentissage"
-        }
         "update_learner_profile" => {
             "modifier mettre jour profil apprenant langue objectif preference"
         }
@@ -621,7 +617,6 @@ fn french_aliases(name: &str) -> &'static str {
         "transfer_challenge" => {
             "defi transfert appliquer autre situation proche lointain creativite debogage"
         }
-        "record_transfer_result" => "enregistrer resultat transfert situation preuve",
         "learning_negotiation" => "negocier negociation plan compromis alternatives choix activite",
         "update_learner_memory" => "actualiser modifier memoire apprenant souvenir notes recit",
         "read_raw_session" => "lire relire seance historique brut complet",
@@ -668,14 +663,8 @@ fn french_aliases(name: &str) -> &'static str {
             "modifier acces audience formation commune inviter membre autoriser editeur droit editer publication libre"
         }
         "join_training" => "rejoindre inscrire inscription offre formation choisie invitation admission",
-        "preview_training_edit" => {
-            "previsualiser voir effet consequences pedagogiques edition modification programme revision simulation"
-        }
-        "propose_training_edit" => {
-            "proposer deposer enregistrer modification programme document complet editeur examen proposition"
-        }
-        "save_training_edit" => {
-            "sauvegarder appliquer enregistrer modification programme document complet edition revue revision"
+        "edit_training" => {
+            "previsualiser voir effet consequences pedagogiques edition modification programme revision simulation proposer deposer enregistrer sauvegarder appliquer document complet editeur examen proposition revue"
         }
         "share_training" => {
             "partager copier conception formation privee contribution commune institution audience"
@@ -689,20 +678,8 @@ fn french_aliases(name: &str) -> &'static str {
         "publish_training" => {
             "publier publication programme formation relu revue audience public choisi"
         }
-        "preview_training_lifecycle" => {
-            "previsualiser voir consequences effets cycle vie formation archivage restauration retrait suppression confirmation"
-        }
-        "archive_training" => {
-            "archiver formation revision versions inscrits confirmation"
-        }
-        "restore_training" => {
-            "restaurer formation archivee confirmation preuves versions inscrits"
-        }
-        "delete_training" => {
-            "supprimer formation personnelle brouillon inedit non publie confirmation"
-        }
-        "withdraw_training" => {
-            "retirer retrait formation commune publiee admissions inscrits version confirmation"
+        "manage_training_lifecycle" => {
+            "previsualiser voir consequences effets cycle vie formation archivage archiver restauration restaurer archivee retrait retirer suppression supprimer personnelle brouillon inedit non publie commune publiee admissions revision versions inscrits preuves confirmation"
         }
         _ => "",
     }
@@ -733,28 +710,25 @@ mod tests {
         catalog
     }
 
-    // Based on Tutor's assessment.go: rubric_json stays a JSON string, with a
-    // nested contentSchema. Do not turn it into an invented object parameter.
+    // Based on Tutor's assessment.go: rubric is a nested JSON object whose
+    // criteria reference local $defs. Search must not leak its inner schema.
     fn assessment_schema() -> Value {
         json!({
             "type":"object", "additionalProperties":false,
-            "required":["concept","activity_type","observable","rubric_json"],
+            "required":["concept","activity_type","observable","rubric"],
             "properties":{
                 "concept":{"type":"string"},
                 "activity_type":{"type":"string","enum":["retention","demonstration","transfer"]},
                 "observable":{"type":"string"},
                 "domain_id":{"type":"string"},
-                "rubric_json":{
-                    "type":"string","contentMediaType":"application/json",
-                    "contentSchema":{
-                        "type":"object","required":["criteria","passing_score"],
-                        "properties":{
-                            "criteria":{"type":"array","items":{"$ref":"#/$defs/criterion"}},
-                            "passing_score":{"type":"number","exclusiveMinimum":0},
-                            "answer_key":{"type":"string","minLength":1}
-                        }
+                "rubric":{
+                    "type":"object","required":["criteria","passing_score"],
+                    "properties":{
+                        "criteria":{"type":"array","items":{"$ref":"#/$defs/criterion"}},
+                        "passing_score":{"type":"number","exclusiveMinimum":0},
+                        "answer_key":{"type":"string","minLength":1}
                     },
-                    "examples":["private-rubric-example-never-in-search"]
+                    "examples":[{"answer_key":"private-rubric-example-never-in-search"}]
                 },
                 "response_ref":{"oneOf":[{"type":"string"},{"type":"null"}]}
             },
@@ -794,7 +768,7 @@ mod tests {
         assert!(!serialized.contains("private-rubric-example"));
         assert!(!serialized.contains("demonstration"));
         assert!(!serialized.contains("anchors"));
-        assert!(summary[0].signature.contains("rubric_json: string"));
+        assert!(summary[0].signature.contains("rubric: object"));
         assert!(summary[0].signature.contains("domain_id?: string"));
         assert!(summary[0].signature.contains("response_ref?: value"));
         let described = catalog
@@ -811,15 +785,14 @@ mod tests {
     fn french_queries_find_real_tutor_names_without_a_model() {
         let names = [
             "start_learning_session",
-            "get_learner_context",
-            "get_next_activity",
+            "get_learner_state",
+            "prepare_pedagogical_turn",
             "prepare_assessment_attempt",
             "submit_assessment_attempt",
             "cancel_assessment_attempt",
             "record_interaction",
             "record_learning_event",
             "check_mastery",
-            "get_dashboard_state",
             "init_domain",
             "get_curriculum_snapshot",
             "get_misconceptions",
@@ -831,7 +804,10 @@ mod tests {
         let catalog = catalog(names.into_iter().map(|n| tool("tutor", n)).collect());
         for (query, expected) in [
             ("Démarrer une séance", "start_learning_session"),
-            ("Quelle est la prochaine activité ?", "get_next_activity"),
+            (
+                "Quelle est la prochaine activité ?",
+                "prepare_pedagogical_turn",
+            ),
             (
                 "Préparer une évaluation avec une rubrique",
                 "prepare_assessment_attempt",
@@ -843,7 +819,7 @@ mod tests {
             ("Annuler la tentative", "cancel_assessment_attempt"),
             ("Enregistrer le feedback donné", "record_learning_event"),
             ("Vérifier ma maîtrise", "check_mastery"),
-            ("Tableau de bord de progression", "get_dashboard_state"),
+            ("Tableau de bord de progression", "get_learner_state"),
             ("Créer une nouvelle formation", "init_domain"),
             (
                 "Consulter le programme et sa version",
@@ -898,10 +874,10 @@ mod tests {
             BTreeSet::from(["mer".into(), "hiver".into(), "dossier".into()])
         );
         // Identifiers and arguments still require exact live tool identities.
-        let catalog = catalog(vec![tool("tutor", "delete_training")]);
+        let catalog = catalog(vec![tool("tutor", "manage_training_lifecycle")]);
         assert_eq!(
             catalog.search("Supprime le brouillon", 3).unwrap()[0].id,
-            "tutor/delete_training"
+            "tutor/manage_training_lifecycle"
         );
         assert_eq!(
             catalog.resolve(BINDING, "supprimer").err(),
@@ -938,7 +914,7 @@ mod tests {
                 annotations: tool["annotations"].clone(),
             })
             .collect();
-        assert_eq!(entries.len(), 68);
+        assert_eq!(entries.len(), 57);
         let catalog = catalog(entries);
         let cases = corpus["queries"].as_array().unwrap();
         assert_eq!(cases.len(), 80);
@@ -979,7 +955,7 @@ mod tests {
                 ));
             }
         }
-        assert_eq!(expected_ids.len(), 68);
+        assert_eq!(expected_ids.len(), 55);
         assert!(
             (cases.len() - misses.len()) * 100 >= cases.len() * 95,
             "top-three misses: {misses:?}"
@@ -988,39 +964,42 @@ mod tests {
 
     #[test]
     fn identical_names_across_servers_remain_distinct_and_execution_is_exact() {
-        let mut catalog = catalog(vec![tool("tutor", "get_next_activity")]);
+        let mut catalog = catalog(vec![tool("tutor", "prepare_pedagogical_turn")]);
         catalog
             .replace_server_tools(
                 BINDING,
                 "another",
-                vec![tool("another", "get_next_activity")],
+                vec![tool("another", "prepare_pedagogical_turn")],
             )
             .unwrap();
         let found = catalog.search("prochaine activité", 3).unwrap();
         assert_eq!(
             found.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
-            vec!["another/get_next_activity", "tutor/get_next_activity"]
+            vec![
+                "another/prepare_pedagogical_turn",
+                "tutor/prepare_pedagogical_turn"
+            ]
         );
         assert_eq!(
             catalog
-                .resolve(BINDING, "tutor/get_next_activity")
+                .resolve(BINDING, "tutor/prepare_pedagogical_turn")
                 .unwrap()
                 .server_id,
             "tutor"
         );
         assert_eq!(
             catalog
-                .resolve(BINDING, "another/get_next_activity")
+                .resolve(BINDING, "another/prepare_pedagogical_turn")
                 .unwrap()
                 .server_id,
             "another"
         );
         for id in [
-            "get_next_activity",
+            "prepare_pedagogical_turn",
             "prochaine activité",
-            "TUTOR/get_next_activity",
+            "TUTOR/prepare_pedagogical_turn",
             "tutor/get_next_activit",
-            "tutor/get_next_activity/extra",
+            "tutor/prepare_pedagogical_turn/extra",
         ] {
             assert_eq!(
                 catalog.resolve(BINDING, id).err(),
@@ -1028,14 +1007,14 @@ mod tests {
             );
         }
         assert_eq!(
-            catalog.search("tutor/get_next_activity", 3).unwrap()[0].id,
-            "tutor/get_next_activity"
+            catalog.search("tutor/prepare_pedagogical_turn", 3).unwrap()[0].id,
+            "tutor/prepare_pedagogical_turn"
         );
     }
 
     #[test]
     fn changed_binding_clears_tools_and_rejects_stale_updates_and_selection() {
-        let mut catalog = catalog(vec![tool("tutor", "get_next_activity")]);
+        let mut catalog = catalog(vec![tool("tutor", "prepare_pedagogical_turn")]);
         assert!(!catalog.set_binding(BINDING.into()).unwrap());
         assert_eq!(catalog.len(), 1);
         let fresh = "account-2/server-epoch-2/rights-8";
@@ -1046,28 +1025,38 @@ mod tests {
             catalog.replace_server_tools(
                 BINDING,
                 "tutor",
-                vec![tool("tutor", "get_next_activity")]
+                vec![tool("tutor", "prepare_pedagogical_turn")]
             ),
             Err(CatalogError::StaleBinding)
         );
         catalog
-            .replace_server_tools(fresh, "tutor", vec![tool("tutor", "get_next_activity")])
+            .replace_server_tools(
+                fresh,
+                "tutor",
+                vec![tool("tutor", "prepare_pedagogical_turn")],
+            )
             .unwrap();
         assert_eq!(
-            catalog.describe(BINDING, "tutor/get_next_activity").err(),
+            catalog
+                .describe(BINDING, "tutor/prepare_pedagogical_turn")
+                .err(),
             Some(CatalogError::StaleBinding)
         );
-        assert!(catalog.resolve(fresh, "tutor/get_next_activity").is_ok());
+        assert!(catalog
+            .resolve(fresh, "tutor/prepare_pedagogical_turn")
+            .is_ok());
         assert_eq!(
             catalog.set_binding(String::new()),
             Err(CatalogError::InvalidBinding)
         );
-        assert!(catalog.resolve(fresh, "tutor/get_next_activity").is_ok());
+        assert!(catalog
+            .resolve(fresh, "tutor/prepare_pedagogical_turn")
+            .is_ok());
     }
 
     #[test]
     fn duplicate_or_invalid_updates_preserve_previous_snapshot_atomically() {
-        let old = tool("tutor", "get_next_activity");
+        let old = tool("tutor", "prepare_pedagogical_turn");
         let mut catalog = catalog(vec![old.clone()]);
         catalog
             .replace_server_tools(BINDING, "other", vec![tool("other", "unchanged")])
@@ -1091,7 +1080,12 @@ mod tests {
             ),
             Err(CatalogError::ServerMismatch)
         );
-        assert!(catalog.resolve(BINDING, "tutor/get_next_activity").unwrap() == &old);
+        assert!(
+            catalog
+                .resolve(BINDING, "tutor/prepare_pedagogical_turn")
+                .unwrap()
+                == &old
+        );
         assert!(catalog
             .resolve(BINDING, "tutor/prepare_assessment_attempt")
             .is_err());
@@ -1303,7 +1297,7 @@ mod tests {
 
     #[test]
     fn errors_never_echo_binding_or_server_payloads() {
-        let mut catalog = catalog(vec![tool("tutor", "get_next_activity")]);
+        let mut catalog = catalog(vec![tool("tutor", "prepare_pedagogical_turn")]);
         let error = catalog
             .replace_server_tools("private-secret-binding", "tutor", vec![])
             .unwrap_err();

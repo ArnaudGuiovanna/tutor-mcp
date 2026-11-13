@@ -43,7 +43,12 @@ func (s *Store) ListFormationVersions(ctx context.Context, actor models.Principa
 		for rows.Next() {
 			v := models.FormationVersion{TenantID: actor.TenantID, FormationID: formationID}
 			var published sql.NullTime
-			if err := rows.Scan(&v.ID, &v.Version, &v.Status, &v.MetadataJSON, &v.CreatedBy, &v.CreatedAt, &published); err != nil {
+			var metadata string
+			if err := rows.Scan(&v.ID, &v.Version, &v.Status, &metadata, &v.CreatedBy, &v.CreatedAt, &published); err != nil {
+				return err
+			}
+			var err error
+			if v.Metadata, err = decodeFormationMetadata(metadata); err != nil {
 				return err
 			}
 			if published.Valid {

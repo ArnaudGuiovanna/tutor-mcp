@@ -243,7 +243,7 @@ func buildMigrations() []migration {
 		Version: "0007_index_pending_consolidations_learner_status",
 		Body:    `CREATE INDEX IF NOT EXISTS idx_pending_consolidations_learner_status ON pending_consolidations(learner_id, status)`,
 	})
-	// R001: persist learner consent for an OAuth client + redirect_uri so
+	// persist learner consent for an OAuth client + redirect_uri so
 	// returning logins don't re-prompt and the consent screen stays
 	// meaningful (i.e. only shown when there's genuinely something to
 	// approve). Keyed on (learner_id, client_id, redirect_uri) — a new
@@ -258,7 +258,7 @@ func buildMigrations() []migration {
     PRIMARY KEY (learner_id, client_id, redirect_uri)
 )`,
 	})
-	// R002: fold existing learner emails to lowercase so case-variants
+	// fold existing learner emails to lowercase so case-variants
 	// share a single row. If two rows differ only by case (e.g. legacy
 	// data created when the handler accepted both Bob@x.com and
 	// bob@x.com), this UPDATE fails on the existing UNIQUE(email)
@@ -269,7 +269,7 @@ func buildMigrations() []migration {
 		Version: "0009_lowercase_learner_emails",
 		Body:    `UPDATE learners SET email = lower(email) WHERE email != lower(email)`,
 	})
-	// R002: defence-in-depth against direct-DB inserts that skip the
+	// defence-in-depth against direct-DB inserts that skip the
 	// handler-side NormalizeEmail. A functional UNIQUE index on lower(email)
 	// rejects any future row whose case-folded form collides with an
 	// existing learner, independently of how it arrives.
@@ -1976,6 +1976,11 @@ END;`,
 	out = append(out, migration{Version: "0082_conversation_training", Body: trainingMigration})
 	out = append(out, migration{Version: "0083_consolidation_maintenance", Body: consolidationMaintenanceMigration})
 	out = append(out, migration{Version: "0084_pedagogical_snapshot_interaction_index", Body: pedagogicalSnapshotInteractionIndexMigration})
+	out = append(out, migration{Version: "0085_close_open_learning_sessions", Body: sqliteCloseOpenLearningSessionsMigration})
+	out = append(out, migration{Version: "0086_drop_dcr_replay_secret", Body: sqliteDropDCRReplaySecretMigration})
+	out = append(out, migration{Version: "0087_drop_institution_console", Body: sqliteDropInstitutionConsoleMigration})
+	out = append(out, migration{Version: "0088_drop_pending_signups", Body: dropPendingSignupsMigration})
+	out = append(out, migration{Version: "0089_drop_membership_mfa_and_invitations", Body: sqliteDropMembershipMFAAndInvitationsMigration})
 	markRemovedAlterColumns(out)
 	return out
 }

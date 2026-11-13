@@ -87,7 +87,7 @@ func applyInteraction(
 	}
 	input.TransferDimension = transferDimension
 
-	// R008 / security-todo F-5.1: group the read-modify-write cycle
+	// Group the read-modify-write cycle
 	// (concept_states + interaction + pedagogical_snapshot) under a
 	// serializable transaction. Without this, concurrent record_interaction
 	// calls on the same (learner, concept) both read a stale snapshot and
@@ -417,6 +417,21 @@ func applyInteraction(
 		// Persist updated concept state.
 		if err := s.UpsertConceptState(ctx, cs); err != nil {
 			return fmt.Errorf("upsert concept state: %w", err)
+		}
+		// An attempt-linked diagnostic replays the adaptive placement of the
+		// domain and writes its P(L) estimates (never FSRS fields), so the
+		// result propagates to prerequisites and dependents.
+		if models.ActivityType(input.ActivityType) == models.ActivityDiagnosticAssessment && input.AssessmentAttemptID != "" && input.DomainID != "" {
+			placed, err := engine.ApplyPlacementEstimates(ctx, s, learnerTenantScope(ctx, learnerID), input.DomainID, engine.NewDefaultPhaseConfig())
+			if err != nil {
+				return fmt.Errorf("apply placement: %w", err)
+			}
+			if estimate, ok := placed[input.Concept]; ok {
+				cs.PMastery = estimate
+			}
+			if placed != nil {
+				observation["placement_estimates"] = placed
+			}
 		}
 		if err := s.CreatePedagogicalSnapshot(ctx, &models.PedagogicalSnapshot{
 			InteractionID:       interaction.ID,

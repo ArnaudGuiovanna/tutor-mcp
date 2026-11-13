@@ -20,19 +20,19 @@ import (
 
 func TestTrainingMutationSchemaRequiresStableKey(t *testing.T) {
 	_, deps := setupToolsTest(t)
-	for _, name := range []string{"select_conversation_training", "save_training_edit", "propose_training_edit", "share_training", "submit_training", "decide_training", "publish_training", "archive_training", "restore_training", "delete_training", "withdraw_training", "set_training_access", "set_training_policy", "join_training"} {
+	for _, name := range []string{"select_conversation_training", "share_training", "submit_training", "decide_training", "publish_training", "set_training_access", "set_training_policy", "join_training"} {
 		schema := advertisedInputSchema(t, registerTrainingTools, deps, name)
 		var required []string
 		for _, field := range schema["required"].([]any) {
 			required = append(required, field.(string))
 		}
-		if !slices.Contains(required, "key") {
+		if !slices.Contains(required, "idempotency_key") {
 			t.Fatalf("%s advertises its mandatory key as optional", name)
 		}
-		if name == "select_conversation_training" && (!slices.Contains(required, "id") || !slices.Contains(required, "expected_selection")) {
+		if name == "select_conversation_training" && (!slices.Contains(required, "training_id") || !slices.Contains(required, "expected_selection")) {
 			t.Fatal("selection inputs are optional in advertised schema")
 		}
-		key := schemaProperty(t, schema, "key")
+		key := schemaProperty(t, schema, "idempotency_key")
 		if key["minLength"] != float64(1) || key["maxLength"] != float64(128) {
 			t.Fatalf("key bounds=%v", key)
 		}
@@ -100,13 +100,13 @@ func TestTrainingThreeCreationsRestartThenExplicitGoSelectionAndActivity(t *test
 	}
 	// Reproduce the actual Claude request: correct expected_selection, but no
 	// key. It must now fail at the advertised contract with a useful key error.
-	raw, _ := json.Marshal(map[string]any{"id": "personal:" + ids[0], "conversation_id": conversation, "expected_selection": 3})
+	raw, _ := json.Marshal(map[string]any{"training_id": "personal:" + ids[0], "conversation_id": conversation, "expected_selection": 3})
 	missing, missingErr := session.CallTool(t.Context(), &mcp.CallToolParams{Name: "select_conversation_training", Arguments: json.RawMessage(raw)})
 	if missingErr == nil && (missing == nil || !missing.IsError) {
 		t.Fatal("selection without key was accepted")
 	}
 	diagnostic := fmt.Sprint(missingErr) + resultText(missing)
-	if !strings.Contains(diagnostic, "key") {
+	if !strings.Contains(diagnostic, "idempotency_key") {
 		t.Fatalf("missing key failure is opaque: %s", diagnostic)
 	}
 	var seq int
@@ -135,7 +135,7 @@ func TestTrainingThreeCreationsRestartThenExplicitGoSelectionAndActivity(t *test
 	if current["selection_version"] != float64(3) || current["domain_id"] != ids[2] {
 		t.Fatalf("restart changed context: %v", current)
 	}
-	selected := call(resumed, "select_conversation_training", map[string]any{"id": "personal:" + ids[0], "conversation_id": conversation, "expected_selection": 3, "key": "resume-existing-go"})
+	selected := call(resumed, "select_conversation_training", map[string]any{"training_id": "personal:" + ids[0], "conversation_id": conversation, "expected_selection": 3, "idempotency_key": "resume-existing-go"})
 	if selected.IsError {
 		t.Fatalf("explicit Go selection failed: %s", resultText(selected))
 	}
@@ -143,7 +143,7 @@ func TestTrainingThreeCreationsRestartThenExplicitGoSelectionAndActivity(t *test
 	if goContext["domain_id"] != ids[0] || goContext["selection_version"] != float64(4) {
 		t.Fatalf("Go selection did not commit: %v", goContext)
 	}
-	activity := call(resumed, "get_next_activity", map[string]any{"domain_id": ids[0], "idempotency_key": "resumed-go-activity"})
+	activity := nextActivityFromTurn(t, call(resumed, "prepare_pedagogical_turn", map[string]any{"mode": "activity", "conversation_id": conversation, "idempotency_key": "resumed-go-activity"}))
 	if activity.IsError {
 		t.Fatalf("Go activity after restart: %s", resultText(activity))
 	}

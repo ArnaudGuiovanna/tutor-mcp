@@ -655,26 +655,29 @@ fn run_fixed_connected<C: Connection>(
         json!({"route":match selected { Route::Alerts => "alerts", Route::Profile => "profile", _ => "context" }}),
     )?;
     state.refresh(client, handle, cancel)?;
-    let tools: &[&str] = if selected == Route::Profile {
+    // get_learner_state views: progress carries every pending alert with
+    // has_critical; overview is the session-start learner context.
+    const ALERTS: &str = "progress";
+    let views: &[&str] = if selected == Route::Profile {
         // Reading the explicitly requested profile does not start a learning
         // activity. It remains possible when no domain has been configured.
-        &["get_learner_context"]
+        &["overview"]
     } else if selected == Route::Context {
-        &["get_pending_alerts", "get_learner_context"]
+        &[ALERTS, "overview"]
     } else {
-        &["get_pending_alerts"]
+        &[ALERTS]
     };
-    'workflow: for name in tools {
+    'workflow: for view in views {
         check_cancel(cancel)?;
         if client.changed() {
             state.refresh(client, handle, cancel)?;
         }
-        let id = format!("tutor/{name}");
+        let id = "tutor/get_learner_state".to_owned();
         for action in [
             Action::Describe { id: id.clone() },
             Action::Call {
                 id,
-                arguments: json!({}),
+                arguments: json!({"view":view}),
             },
         ] {
             match step(action, &mut state, turn, ui, client)? {
@@ -695,12 +698,15 @@ fn run_fixed_connected<C: Connection>(
         .map_err(|_| "harness_result_invalid")?;
         let payload =
             call_validation::result_payload(&envelope).map_err(|_| "harness_result_invalid")?;
-        if *name == "get_pending_alerts" && !payload.get("alerts").is_some_and(Value::is_array) {
+        // Without any active domain the progress view answers only the
+        // canonical needs_domain_setup payload, which is a fact, not an error.
+        let needs_setup = payload["needs_domain_setup"] == true;
+        if *view == ALERTS && !needs_setup && !payload.get("alerts").is_some_and(Value::is_array) {
             state.feedback(store, input.turn_id, "result_payload_unavailable")?;
             break;
         }
         let alias = receipt.alias.clone();
-        let pointers: Vec<&str> = if *name == "get_pending_alerts" {
+        let pointers: Vec<&str> = if *view == ALERTS {
             ["/alerts", "/has_critical", "/needs_domain_setup"]
                 .into_iter()
                 .filter(|p| payload.pointer(p).is_some())
@@ -748,9 +754,9 @@ fn run_fixed_connected<C: Connection>(
                 }
             }
         }
-        if *name == "get_pending_alerts"
+        if *view == ALERTS
             && selected == Route::Context
-            && (payload["has_critical"] != false || payload["needs_domain_setup"] != false)
+            && (needs_setup || payload["has_critical"] != false)
         {
             state.feedback(store, input.turn_id, "context_read_blocked_by_alerts")?;
             break;
@@ -2097,7 +2103,7 @@ mod tests {
     impl Port {
         fn new() -> Self {
             Self {
-                entries: ["get_pending_alerts", "get_learner_context", "get_next_activity"].iter().map(|name| ToolEntry { server_id: "tutor".into(), name: (*name).into(), description: "Lire les alertes du contexte pédagogique".into(), input_schema: json!({"type":"object","properties":{"limit":{"type":"integer"},"choice":{"enum":["SCHEMA_ONLY_ENUM_MARKER"]}},"additionalProperties":false}), annotations: json!({"readOnlyHint":true}) }).collect(),
+                entries: ["get_learner_state", "get_misconceptions", "prepare_pedagogical_turn"].iter().map(|name| ToolEntry { server_id: "tutor".into(), name: (*name).into(), description: "Lire les alertes du contexte pédagogique".into(), input_schema: json!({"type":"object","properties":{"view":{"type":"string"},"limit":{"type":"integer"},"choice":{"enum":["SCHEMA_ONLY_ENUM_MARKER"]}},"additionalProperties":false}), annotations: json!({"readOnlyHint":true}) }).collect(),
                 calls: Vec::new(), result: Ok(json!({"content":[],"structuredContent":{"alerts":["Réponse exacte 日本語"],"private_value":"VALUE_NEVER_PROJECT"}})), changed: Arc::new(AtomicBool::new(false)), lists: 0, remove_on_refresh: false,
             }
         }
@@ -2216,8 +2222,8 @@ mod tests {
             .unwrap();
         run_connected(model, &f.store, &f.input(), cancel, rt.handle(), ui, port)
     }
-    const DESCRIBE: &str = r#"{"action":"describe","id":"tutor/get_pending_alerts"}"#;
-    const CALL: &str = r#"{"action":"call","id":"tutor/get_pending_alerts","arguments":{}}"#;
+    const DESCRIBE: &str = r#"{"action":"describe","id":"tutor/get_learner_state"}"#;
+    const CALL: &str = r#"{"action":"call","id":"tutor/get_learner_state","arguments":{}}"#;
     const READ: &str = r#"{"action":"read_result","reference":"result_1","pointer":"/alerts"}"#;
     const ANSWER: &str = r#"{"action":"answer"}"#;
 
@@ -2225,11 +2231,11 @@ mod tests {
         use crate::mcp::tests::{initialization, mock, Reply};
         mock(|request| initialization(request).unwrap_or_else(|| {
             let result = match request["method"].as_str().unwrap() {
-                "tools/list" => json!({"tools":[{"name":"get_learner_context","description":"Read learner context",
-                    "inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]}),
+                "tools/list" => json!({"tools":[{"name":"get_learner_state","description":"Read learner state",
+                    "inputSchema":{"type":"object","properties":{"view":{"type":"string"}},"additionalProperties":false}}]}),
                 "tools/call" => {
-                    assert_eq!(request["params"]["name"], "get_learner_context");
-                    assert_eq!(request["params"]["arguments"], json!({}));
+                    assert_eq!(request["params"]["name"], "get_learner_state");
+                    assert_eq!(request["params"]["arguments"], json!({"view":"overview"}));
                     json!({"content":[],"structuredContent":{"profile":{"language":"fr"},
                         "objective":"Cultiver le jardin fixture","unselected":"FIXTURE_PRIVATE_RESULT"}})
                 }
@@ -2331,13 +2337,13 @@ mod tests {
             initialization(request).unwrap_or_else(|| {
                 assert_eq!(request["method"], "tools/list");
                 let schema = if server_changed.load(Ordering::Acquire) {
-                    json!({"type":"object","properties":{"flavor":{"type":"string"}},
+                    json!({"type":"object","properties":{"view":{"type":"string"},"flavor":{"type":"string"}},
                         "required":["flavor"],"additionalProperties":false})
                 } else {
-                    json!({"type":"object","properties":{},"additionalProperties":false})
+                    json!({"type":"object","properties":{"view":{"type":"string"}},"additionalProperties":false})
                 };
                 Reply::json(json!({"jsonrpc":"2.0","id":request["id"],"result":{
-                    "tools":[{"name":"get_learner_context","inputSchema":schema}]}}))
+                    "tools":[{"name":"get_learner_state","inputSchema":schema}]}}))
             })
         }));
         let mut fixture = Fixture::for_user("donne moi mon profil");
@@ -2423,7 +2429,7 @@ mod tests {
                 assert_eq!(ui.approvals.len(), 1);
                 assert_eq!(
                     ui.approvals[0]["toolCall"]["rawInput"]["tool"],
-                    "get_learner_context"
+                    "get_learner_state"
                 );
                 assert_eq!(ui.observations.len(), 1);
                 assert_eq!(ui.observations[0].connect_total_ms.is_some(), turn == 0);
@@ -2823,7 +2829,10 @@ mod tests {
             assert_eq!(ui.approvals.len(), 1);
             assert_eq!(port.calls.len(), usize::from(allow));
             if allow {
-                assert_eq!(port.calls[0], ("get_learner_context".into(), json!({})));
+                assert_eq!(
+                    port.calls[0],
+                    ("get_learner_state".into(), json!({"view":"overview"}))
+                );
             }
             assert_eq!(ui.text.contains("Cultiver un potager"), allow);
             assert_eq!(
@@ -2948,9 +2957,15 @@ mod tests {
             )
             .unwrap();
             assert_eq!(port.calls.len(), expected_calls);
-            assert_eq!(port.calls[0], ("get_pending_alerts".into(), json!({})));
+            assert_eq!(
+                port.calls[0],
+                ("get_learner_state".into(), json!({"view":"progress"}))
+            );
             if expected_calls == 2 {
-                assert_eq!(port.calls[1], ("get_learner_context".into(), json!({})));
+                assert_eq!(
+                    port.calls[1],
+                    ("get_learner_state".into(), json!({"view":"overview"}))
+                );
             }
             assert_eq!(model.requests.len(), 1);
         }
@@ -3034,9 +3049,9 @@ mod tests {
         for raw in [
             r#"{"action":"answer","text":"fabricated"}"#,
             r#"{"action":"shell","command":"anything"}"#,
-            r#"{"action":"call","id":"other/get_pending_alerts","arguments":{}}"#,
+            r#"{"action":"call","id":"other/get_learner_state","arguments":{}}"#,
             r#"{"action":"read_result","reference":"result_1","pointer":"/bad~9"}"#,
-            r#"{"action":"call","id":"tutor/get_pending_alerts","arguments":[]}"#,
+            r#"{"action":"call","id":"tutor/get_learner_state","arguments":[]}"#,
             "{}{}",
         ] {
             assert!(parse_action(raw).is_err());
@@ -3066,7 +3081,7 @@ mod tests {
         assert!(ui
             .updates
             .iter()
-            .all(|v| v["title"] == "get_pending_alerts" && v.get("rawOutput").is_none()));
+            .all(|v| v["title"] == "get_learner_state" && v.get("rawOutput").is_none()));
         let prompts: Vec<String> = model
             .requests
             .iter()
@@ -3117,8 +3132,8 @@ mod tests {
         let mut ui = UserInterface::new(&f, &cancel);
         let mut port = Port::new();
         let mut model = Model::new(&[
-            r#"{"action":"describe","id":"tutor/get_next_activity"}"#,
-            r#"{"action":"call","id":"tutor/get_next_activity","arguments":{}}"#,
+            r#"{"action":"describe","id":"tutor/prepare_pedagogical_turn"}"#,
+            r#"{"action":"call","id":"tutor/prepare_pedagogical_turn","arguments":{}}"#,
             "Cette opération nécessite le workflow pédagogique.",
         ]);
         drive(&f, &mut model, &mut port, &cancel, &mut ui).unwrap();
@@ -3208,8 +3223,8 @@ mod tests {
             DESCRIBE,
             CALL,
             READ,
-            r#"{"action":"describe","id":"tutor/get_learner_context"}"#,
-            r#"{"action":"call","id":"tutor/get_learner_context","arguments":{}}"#,
+            r#"{"action":"describe","id":"tutor/get_misconceptions"}"#,
+            r#"{"action":"call","id":"tutor/get_misconceptions","arguments":{}}"#,
             r#"{"action":"read_result","reference":"result_2","pointer":"/alerts"}"#,
             CALL,
             "Deux lectures ont été effectuées.",
@@ -3281,8 +3296,8 @@ mod tests {
             DESCRIBE,
             CALL,
             READ,
-            r#"{"action":"describe","id":"tutor/get_learner_context"}"#,
-            r#"{"action":"call","id":"tutor/get_learner_context","arguments":{}}"#,
+            r#"{"action":"describe","id":"tutor/get_misconceptions"}"#,
+            r#"{"action":"call","id":"tutor/get_misconceptions","arguments":{}}"#,
             r#"{"action":"read_result","reference":"result_2","pointer":"/alerts"}"#,
             "Les deux résultats ont été consultés.",
         ]);
@@ -3343,7 +3358,7 @@ mod tests {
         let validator = jsonschema::validator_for(&schema).unwrap();
         assert!(!validator.is_valid(&serde_json::from_str::<Value>(DESCRIBE).unwrap()));
         assert!(!validator.is_valid(&serde_json::from_str::<Value>(CALL).unwrap()));
-        assert!(validator.is_valid(&json!({"action":"describe","id":"tutor/get_learner_context"})));
+        assert!(validator.is_valid(&json!({"action":"describe","id":"tutor/get_misconceptions"})));
         assert!(validator.is_valid(&serde_json::from_str::<Value>(ANSWER).unwrap()));
     }
 
@@ -3500,8 +3515,8 @@ mod tests {
     #[test]
     fn model_argument_grammar_excludes_host_fields_and_business_types_still_validate() {
         for invalid in [
-            r#"{"action":"call","id":"tutor/get_pending_alerts","arguments":{"domain_id":"invented"}}"#,
-            r#"{"action":"call","id":"tutor/get_pending_alerts","arguments":{"limit":"wrong type"}}"#,
+            r#"{"action":"call","id":"tutor/get_learner_state","arguments":{"domain_id":"invented"}}"#,
+            r#"{"action":"call","id":"tutor/get_learner_state","arguments":{"limit":"wrong type"}}"#,
         ] {
             let f = Fixture::new();
             let cancel = AtomicBool::new(false);
@@ -3509,21 +3524,21 @@ mod tests {
             let mut port = Port::new();
             port.entries[0].input_schema["properties"]["domain_id"] = json!({"type":"string"});
             let good =
-                r#"{"action":"call","id":"tutor/get_pending_alerts","arguments":{"limit":2}}"#;
+                r#"{"action":"call","id":"tutor/get_learner_state","arguments":{"limit":2}}"#;
             let mut model =
                 Model::new(&[DESCRIBE, invalid, good, READ, ANSWER, "Voici tes alertes."]);
             drive(&f, &mut model, &mut port, &cancel, &mut ui).unwrap();
             assert_eq!(
                 port.calls,
-                vec![("get_pending_alerts".into(), json!({"limit":2}))]
+                vec![("get_learner_state".into(), json!({"limit":2}))]
             );
             let schema: Value =
                 serde_json::from_str(model.requests[1].grammar.as_ref().unwrap()).unwrap();
             let validator = jsonschema::validator_for(&schema).unwrap();
             assert!(validator.is_valid(&serde_json::from_str::<Value>(good).unwrap()));
-            assert!(!validator.is_valid(&json!({"action":"call","id":"tutor/get_pending_alerts","arguments":{"domain_id":"invented"}})));
+            assert!(!validator.is_valid(&json!({"action":"call","id":"tutor/get_learner_state","arguments":{"domain_id":"invented"}})));
             assert!(!validator.is_valid(
-                &json!({"action":"call","id":"tutor/get_pending_alerts","arguments":{"unknown":1}})
+                &json!({"action":"call","id":"tutor/get_learner_state","arguments":{"unknown":1}})
             ));
             assert!(
                 f.records("harness_selected_contract")[0]["input_schema"]["properties"]

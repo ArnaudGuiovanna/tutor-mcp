@@ -20,7 +20,9 @@ ProtectSystem=strict
 ProtectHome=true
 Restart=on-failure
 RestartSec=5s
-TimeoutStopSec=40s
+# Graceful HTTP drain = max(30s, MCP_TOOL_CALL_TIMEOUT_SECONDS + 10s), then
+# cleanup; keep this above it (docs/configuration.md).
+TimeoutStopSec=50s
 
 [Install]
 WantedBy=multi-user.target

@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-	"time"
 
 	"tutor-mcp/models"
 )
@@ -21,9 +20,6 @@ func TestLearnerFormationMCPJourney(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := s.SetMembershipAuthorization(ctx, owner.TenantScope(), models.MembershipStatusActive, []string{models.RoleOwner}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.RecordMembershipMFAVerification(ctx, owner.TenantScope(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	owner, err = s.GetPrincipalForLearner(ctx, "L_attacker", []string{models.OAuthScopeLearner})
@@ -61,7 +57,7 @@ func TestLearnerFormationMCPJourney(t *testing.T) {
 	}
 	var page models.LearnerFormationPage
 	var opening map[string]any
-	call("get_learner_context", map[string]any{}, &opening)
+	call("get_learner_state", map[string]any{"view": "overview"}, &opening)
 	if instruction, _ := opening["next_action_for_llm"].(string); !strings.Contains(instruction, "join_formation") {
 		t.Fatalf("institution setup guidance: %+v", opening)
 	}

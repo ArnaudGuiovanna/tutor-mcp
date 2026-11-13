@@ -1,6 +1,6 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { AgentConfiguration, McpTool, AgentConnection, AgentTarget, Conversation, FormationReview, FormationVersion, Intent, Institution, PublicIdentity, JsonRecord, LocalModelStatus, Settings, Snapshot, TutorOverview, TutorStatus } from './types';
+import type { AgentConfiguration, McpTool, AgentConnection, AgentTarget, Conversation, FormationReview, FormationVersion, Intent, Institution, PublicIdentity, JsonRecord, LocalModelStatus, PromptResult, Settings, Snapshot, TutorOverview, TutorStatus } from './types';
 
 function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (!isTauri()) {
@@ -40,7 +40,7 @@ export const bridge = {
   connectAgent: (target: AgentTarget, cwd: string) => call<AgentConnection>('connect_agent', { target, cwd }),
   authenticateAgent: (methodId: string) => call<unknown>('authenticate_agent', { methodId }),
   startConversation: (intentId?: string, resumeId?: string) => call<Conversation>('start_conversation', { intentId, resumeId }),
-  sendPrompt: (conversationId: string, text: string) => call<{ stopReason: string }>('send_prompt', { conversationId, text }),
+  sendPrompt: (conversationId: string, text: string) => call<PromptResult>('send_prompt', { conversationId, text }),
   acknowledgeLearningDelivery: (conversationId: string, messageId: string) => call<void>('acknowledge_learning_delivery', { conversationId, messageId }),
   cancelPrompt: (conversationId: string) => call<void>('cancel_prompt', { conversationId }),
   answerPermission: (requestId: unknown, optionId: string | null) => call<void>('answer_permission', { requestId, optionId }),

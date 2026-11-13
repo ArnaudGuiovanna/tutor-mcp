@@ -20,7 +20,7 @@ updates, prerequisites, review timing and the evidence used for progress claims.
 |---|---|---|---|
 | **Bayesian Knowledge Tracing (BKT)** | How does this response change the estimate of knowledge? | Computes a posterior using success/failure, slip and guess. Diagnostic, mastery and transfer probes update the observation only; practice/instruction activities retain a modeled learning opportunity. A success with hints applies the learning transition without the "correct" observation. | [BKT](../algorithms/bkt.go), [update policy](../engine/bkt_policy.go) |
 | **Individualized BKT** | What independent parameter estimate can recent observations provide? | Estimates bounded adjustments from a fixed reference for common-formation calibration. Personal effective parameters remain fixed. These remain heuristics requiring empirical calibration. | [Individualized BKT](../algorithms/individual_bkt.go), [parameter policy](bkt-parameter-policy.md) |
-| **Information gain** | Which diagnostic concept could reduce uncertainty? | Uses expected reduction in the binary entropy of the knowledge estimate to help choose diagnostic activities. | [Information gain](../algorithms/bkt_info_gain.go) |
+| **Adaptive placement** | Where does the learner stand on the prerequisite graph? | During the diagnostic, each cold item targets the concept of median prerequisite depth among the unclassified concepts. A hint-free success is applied to the concept and all its prerequisites, a failure to the concept and all concepts that require it, starting from an uninformative 0.5 estimate. A concept gets at most two items, the second only while its estimate stays between 0.15 and 0.85. The diagnostic ends when every concept is classified or after 12 qualified items. | [Placement](../engine/placement.go) |
 | **FSRS-5** | When should the learner review a concept? | Maintains stability, difficulty and retrievability with FSRS-5 equations. The scheduling adapter uses whole-day intervals; a same-day success on a reviewed card leaves the memory state unchanged. The rating comes from checkable facts (failure, hints, margin over the rubric floor, calibrated full marks), not from the host's confidence. | [FSRS](../algorithms/fsrs.go) |
 | **Knowledge Space Theory-inspired prerequisite graph (KST)** | What is accessible given the learner's current state? | Validates the graph and identifies concepts whose prerequisite conditions are satisfied. | [KST](../algorithms/kst.go) |
 | **Threshold resolver** | Which thresholds should the pipeline use? | Centralizes the configured progression thresholds so components agree. | [Thresholds](../algorithms/thresholds.go) |
@@ -31,7 +31,7 @@ calibrated probability of answering correctly.
 
 ## Activity selection
 
-`get_next_activity` invokes the orchestrator with the learner's current state,
+`prepare_pedagogical_turn(mode="activity")` invokes the orchestrator with the learner's current state,
 goal relevance, alerts and evidence. The main flow is:
 
 ```mermaid
@@ -47,10 +47,10 @@ flowchart LR
 | Component | Responsibility | Source |
 |---|---|---|
 | **Goal relevance** | The LLM decomposes the learner's goal into relevance weights; the engine uses them when ranking concepts. | [Goal tools](../tools/goal_relevance.go) |
-| **Phase controller** | Chooses between diagnosis, instruction and maintenance using current observations. Review needs can stay within maintenance without restarting acquisition. Maintenance uses a hysteresis band: entry requires every goal-relevant estimate at 0.85 or above, exit requires one estimate below 0.70; concepts in between keep receiving practice within maintenance. | [Phase FSM](../engine/phase_fsm.go), [configuration](../engine/phase_config.go) |
+| **Phase controller** | Chooses between diagnosis, instruction and maintenance using current observations. Diagnosis ends when the adaptive placement has classified every concept or spent its item budget; entropy is reported for audit only. Review needs can stay within maintenance without restarting acquisition. Maintenance uses a hysteresis band: entry requires every goal-relevant estimate at 0.85 or above, exit requires one estimate below 0.70; concepts in between keep receiving practice within maintenance. | [Phase FSM](../engine/phase_fsm.go), [configuration](../engine/phase_config.go) |
 | **Gate** | Applies constraints before selecting an activity, including session conditions and candidate eligibility. A prerequisite without verified success (passed evaluated attempt or spaced FSRS success) counts at most 0.84 for unlocking. A started concept (0.10 < estimate < 0.85) is exempt from anti-repetition until it had two consecutive interactions. | [Gate](../engine/gate.go) |
-| **Concept selector** | Balances diagnostic uncertainty, goal relevance, prerequisites and review urgency according to the phase. Instruction scores `relEff × (1 − estimate) × (1 + 1.5 × started)`, where `relEff` is the highest relevance among the concept and the concepts that require it. Diversity preferences can relax when they would block all available work. | [Concept selection](../engine/concept_selector.go) |
-| **Action selector** | Chooses the kind of task: introduction, practice, recall, misconception work, explanation, mastery challenge or transfer probe. Supplies a generation difficulty target. | [Action selection](../engine/action_selector.go) |
+| **Concept selector** | Balances placement, goal relevance, prerequisites and review urgency according to the phase. Diagnosis picks the next placement item and ignores goal relevance. Instruction scores `relEff × (1 − estimate) × (1 + 1.5 × started)`, where `relEff` is the highest relevance among the concept and the concepts that require it. Diversity preferences can relax when they would block all available work. | [Concept selection](../engine/concept_selector.go) |
+| **Action selector** | Chooses the kind of task: introduction, practice, recall, misconception work, explanation, mastery challenge or transfer probe. Supplies a generation difficulty target, lowered by 0.20 (floor 0.30) on a concept with a `ZPD_DRIFT` alert (three consecutive failures); assessments keep their difficulty. | [Action selection](../engine/action_selector.go) |
 | **Orchestrator** | Loads inputs, combines the pure decision functions, handles bounded fallback and persists the settled phase. Routes spaced recall when FSRS `next_review` has passed (at most one recall per two instruction activities), a mastery challenge for an undemonstrated `MASTERY_READY` concept, and in fully demonstrated maintenance a transfer probe, an aged re-challenge or rest. | [Orchestrator](../engine/orchestrator.go) |
 | **Decision contract** | Records the selected competency, curriculum/policy versions and constraints so an assessment can be bound to the actual decision. | [Activity handler](../tools/activity.go), [learning integrity](learning-integrity.md) |
 
@@ -65,7 +65,7 @@ flowchart LR
 | **Calibration** | Compares self-predictions with outcomes using absolute errors and visible sample coverage. Missing observations remain distinguishable from good calibration. | [Calibration policy](../engine/calibration_policy.go) |
 | **Metacognition** | Produces descriptive observations, tutor-mode context and reflection intents from recorded behavior and affect. The LLM phrases the reflection. | [Metacognition](../engine/metacognition.go) |
 | **Motivation** | Selects one relevant angle, such as a milestone or the practical value of a skill, and supplies signals for the LLM to express. | [Motivation](../engine/motivation.go) |
-| **Alerts and nudges** | Identifies actionable learning conditions and plans delivery around consent, local availability and frequency limits. | [Alerts](../engine/alert.go), [nudge planner](../engine/nudge_planner.go) |
+| **Alerts and nudges** | Identifies actionable learning conditions and plans delivery around consent, local availability and frequency limits. `ZPD_DRIFT` reports the observed recent failure share and drives the difficulty relief above. | [Alerts](../engine/alert.go), [nudge planner](../engine/nudge_planner.go) |
 | **Audit and replay** | Preserves decision traces and reports missing rubrics, transfer gaps and replay coverage. | [Replay](../engine/replay.go), [audit tools](mcp-tools.md#audit--replay-3) |
 
 High-stakes domains require trusted human-reviewed evidence for demonstrated
@@ -94,17 +94,20 @@ the learner's responses faithfully. The [policy evaluation guide](learning-polic
 describes how to assess outcomes using independent evidence.
 
 - **PFA** has been removed from the runtime, including its plateau-alert producer.
-- **IRT helpers** remain in [irt.go](../algorithms/irt.go), marked deprecated:
-  historical theta is not updated or used to set task difficulty in the current
-  runtime. The error-type slip/guess heuristic and the individualized BKT
-  update are likewise deprecated and have no production caller.
-- **Automatic help withdrawal** from the composite autonomy score is disabled.
-  `REGULATION_FADE` is a compatibility flag for descriptive output, not a validated
-  policy for removing support.
+- **IRT**, the error-type slip/guess heuristic, the individualized BKT
+  learning update and the information-gain diagnostic selector have been
+  removed. Generated tasks have no calibrated item parameters; the stored
+  legacy theta is neither updated nor read. Individualized BKT survives only
+  as the observation-only estimator of the common-formation calibration
+  source.
+- **Automatic help withdrawal** from the composite autonomy score is not
+  implemented; the historical fade controller has been removed.
 - **Sub-day scheduling** remains deferred, despite FSRS-5's short-term equations:
   same-day successes on a reviewed card are not applied to the memory state.
-- **Adaptive placement** (a diagnostic that adapts across the prerequisite
-  graph) is not implemented; diagnosis covers concepts by information gain.
+- **Placement propagation** assumes the prerequisite graph is right: a wrong
+  edge propagates a success or failure to a concept that was never tested.
+  Propagated estimates only change P(L); they create no FSRS card and no
+  demonstrated-mastery evidence.
 
 The [current implementation notes](runtime-pedagogique-2026-09.md) (French)
 document the corrections in detail and supersede the

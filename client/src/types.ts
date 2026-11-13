@@ -32,6 +32,13 @@ export interface Settings {
   tutor: { mode: 'local' | 'remote'; activity?: 'auto' | 'author' | 'learn' | 'train'; url: string; command: string; args: string[] };
   /** JSON `setupCompleted` (Rust `setup_completed`): the guided setup was finished. */
   setupCompleted?: boolean;
+  /**
+   * JSON `tutorConnectedOrigin` (Rust `tutor_connected_origin`): origin of the
+   * last remote Tutor server reached successfully. Written by the native layer
+   * only (`save_settings` keeps the stored value); omitted while empty and
+   * cleared natively when the saved Tutor URL changes origin.
+   */
+  tutorConnectedOrigin?: string;
 }
 
 export type PermissionDecision = 'ask' | 'allow' | 'deny';
@@ -79,7 +86,12 @@ export interface Conversation {
   id: string;
   title: string;
   intentId?: string;
-  agentSessionId?: string;
+  /**
+   * MCP harness session of this conversation. `null` (or absent) until the
+   * harness creates one, for example when the first turn is native. Events of
+   * a private-output turn carry another session identifier.
+   */
+  agentSessionId?: string | null;
   targetId: string;
   tutorBinding: string;
   createdAt: string;
@@ -147,6 +159,26 @@ export interface PermissionRequest {
   title: string;
   description: string;
   options: { optionId: string; name: string; kind: string }[];
+}
+
+/** `send_prompt` result: `turnLimit` accompanies `max_turn_requests`. */
+export interface PromptResult { stopReason: string; turnLimit?: number }
+
+/**
+ * Every turn event of `acp:event` (forwarded `session/update` and permission
+ * requests, `provider_status`, `turn_error`, `turn_limit`) names the
+ * conversation of its turn and, when known, the turn itself (its assistant
+ * message identifier).
+ */
+export interface TurnEventTag { conversationId: string; turnId?: string }
+
+/**
+ * `acp:event` `turn_limit`: a turn stopped at its action budget, enforced by
+ * Tutor (`client`) or by the harness itself (`agent`, e.g. Claude maxTurns).
+ * `message` is the same notice the interface renders in its own language.
+ */
+export interface TurnLimitEvent extends TurnEventTag {
+  type: 'turn_limit'; stopReason: 'max_turn_requests'; limit: number; enforcedBy: 'client' | 'agent'; message: string;
 }
 
 export interface ToolActivity {
@@ -220,8 +252,8 @@ export interface CurriculumConcept {
 export interface TrainingProgramme {
   training: Training;
   curriculum?: { domain_id: string; version: number; parent_version?: number; graph: { concepts: string[]; prerequisites: Record<string, string[]> }; concepts: CurriculumConcept[]; [key: string]: unknown };
-  modules: { stable_key: string; title: string; position: number; metadata_json?: string }[];
-  concepts: { module_stable_key: string; stable_key: string; label: string; description?: string; level?: string; position: number; prerequisites?: string[]; outcomes?: CurriculumConcept['outcomes']; criteria?: CurriculumConcept['criteria']; metadata_json?: string }[];
+  modules: { stable_key: string; title: string; position: number; metadata?: Record<string, unknown> }[];
+  concepts: { module_stable_key: string; stable_key: string; label: string; description?: string; level?: string; position: number; prerequisites?: string[]; outcomes?: CurriculumConcept['outcomes']; criteria?: CurriculumConcept['criteria']; metadata?: Record<string, unknown> }[];
 }
 export interface TrainingDocument extends TrainingProgramme {
   proposal?: { id: string; expected_revision: string; document: TrainingProgramme };

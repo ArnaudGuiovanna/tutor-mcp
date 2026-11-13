@@ -170,9 +170,6 @@ func TestSaaSWorkerConsumesTenantDSARExportJob(t *testing.T) {
 		models.MembershipStatusActive, []string{models.RoleOwner}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.RecordMembershipMFAVerification(context.Background(), learner.TenantScope(), now); err != nil {
-		t.Fatal(err)
-	}
 	owner, err := store.GetPrincipalForLearner(context.Background(), "L1", []string{models.OAuthScopeLearner})
 	if err != nil {
 		t.Fatal(err)

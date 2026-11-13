@@ -25,9 +25,16 @@ type EvidenceSnapshot struct {
 	concepts             map[string]struct{}
 }
 
+// EvidenceStore is the persistence surface of an EvidenceSnapshot: batched
+// evaluated assessment attempts and transfer records of one domain.
+type EvidenceStore interface {
+	storeport.AssessmentStore
+	storeport.MetacognitionStore
+}
+
 // LoadEvidenceSnapshot fetches transfer and evaluated-assessment evidence for
 // the requested concepts without the former two-queries-per-concept pattern.
-func LoadEvidenceSnapshot(ctx context.Context, store storeport.Store, learnerID, domainID string, concepts []string) (*EvidenceSnapshot, error) {
+func LoadEvidenceSnapshot(ctx context.Context, store EvidenceStore, learnerID, domainID string, concepts []string) (*EvidenceSnapshot, error) {
 	concepts = uniqueEvidenceConcepts(concepts)
 	snapshot := &EvidenceSnapshot{
 		LearnerID:            learnerID,
@@ -56,6 +63,63 @@ func LoadEvidenceSnapshot(ctx context.Context, store storeport.Store, learnerID,
 	snapshot.TransfersByConcept = transfers
 	snapshot.AssessmentsByConcept = assessments
 	return snapshot, nil
+}
+
+// DomainEvidenceReader is the optional multi-domain evidence read of the SQL
+// store (db/learner_batch_reads.go): one statement per evidence kind answers
+// for every domain of a learner view. Results are grouped by domain then
+// concept, newest first.
+type DomainEvidenceReader interface {
+	GetTransferScoresByDomains(ctx context.Context, scope models.TenantScope, learnerID string, domainIDs []string) (map[string]map[string][]*models.TransferRecord, error)
+	GetEvaluatedAssessmentAttemptsByDomains(ctx context.Context, scope models.TenantScope, learnerID string, domainIDs []string, limitPerConcept int) (map[string]map[string][]*models.AssessmentAttempt, error)
+}
+
+// LoadEvidenceSnapshots loads the evidence snapshot of every domain, keyed by
+// domain ID, each restricted to the concepts of its graph. A store
+// implementing DomainEvidenceReader answers with two statements in total;
+// other stores fall back to LoadEvidenceSnapshot per domain.
+func LoadEvidenceSnapshots(ctx context.Context, store EvidenceStore, scope models.TenantScope, learnerID string, domains []*models.Domain) (map[string]*EvidenceSnapshot, error) {
+	out := make(map[string]*EvidenceSnapshot, len(domains))
+	reader, batched := store.(DomainEvidenceReader)
+	if !batched {
+		for _, domain := range domains {
+			snapshot, err := LoadEvidenceSnapshot(ctx, store, learnerID, domain.ID, domain.Graph.Concepts)
+			if err != nil {
+				return nil, err
+			}
+			out[domain.ID] = snapshot
+		}
+		return out, nil
+	}
+	ids := make([]string, 0, len(domains))
+	for _, domain := range domains {
+		ids = append(ids, domain.ID)
+	}
+	transfers, err := reader.GetTransferScoresByDomains(ctx, scope, learnerID, ids)
+	if err != nil {
+		return nil, fmt.Errorf("load evidence snapshot transfers: %w", err)
+	}
+	assessments, err := reader.GetEvaluatedAssessmentAttemptsByDomains(ctx, scope, learnerID, ids, evidenceAssessmentLimitPerConcept)
+	if err != nil {
+		return nil, fmt.Errorf("load evidence snapshot assessments: %w", err)
+	}
+	for _, domain := range domains {
+		concepts := uniqueEvidenceConcepts(domain.Graph.Concepts)
+		snapshot := &EvidenceSnapshot{
+			LearnerID:            learnerID,
+			DomainID:             domain.ID,
+			TransfersByConcept:   make(map[string][]*models.TransferRecord, len(concepts)),
+			AssessmentsByConcept: make(map[string][]*models.AssessmentAttempt, len(concepts)),
+			concepts:             make(map[string]struct{}, len(concepts)),
+		}
+		for _, concept := range concepts {
+			snapshot.concepts[concept] = struct{}{}
+			snapshot.TransfersByConcept[concept] = transfers[domain.ID][concept]
+			snapshot.AssessmentsByConcept[concept] = assessments[domain.ID][concept]
+		}
+		out[domain.ID] = snapshot
+	}
+	return out, nil
 }
 
 // ForConcept returns the evidence slices for one concept. Missing concepts and
@@ -95,7 +159,7 @@ func (s *EvidenceSnapshot) matches(learnerID, domainID string, concepts []string
 	return true
 }
 
-func ensureEvidenceSnapshot(ctx context.Context, store storeport.Store, learnerID, domainID string, concepts []string, snapshot *EvidenceSnapshot) (*EvidenceSnapshot, error) {
+func ensureEvidenceSnapshot(ctx context.Context, store EvidenceStore, learnerID, domainID string, concepts []string, snapshot *EvidenceSnapshot) (*EvidenceSnapshot, error) {
 	if snapshot.matches(learnerID, domainID, concepts) {
 		return snapshot, nil
 	}
@@ -116,22 +180,4 @@ func uniqueEvidenceConcepts(concepts []string) []string {
 		out = append(out, concept)
 	}
 	return out
-}
-
-// LoadMasteryAlertEvidence loads the same assessment/transfer facts consumed
-// by check_mastery. Keeping this read path shared prevents MASTERY_READY from
-// silently evaluating an empty transfer profile while the explicit mastery
-// tool sees a recent trusted failure.
-func LoadMasteryAlertEvidence(ctx context.Context, store storeport.Store, learnerID, domainID string, states []*models.ConceptState) (map[string]MasteryAlertEvidence, error) {
-	concepts := make([]string, 0, len(states))
-	for _, state := range states {
-		if state != nil {
-			concepts = append(concepts, state.Concept)
-		}
-	}
-	snapshot, err := LoadEvidenceSnapshot(ctx, store, learnerID, domainID, concepts)
-	if err != nil {
-		return nil, err
-	}
-	return snapshot.ForMasteryAlerts(states), nil
 }

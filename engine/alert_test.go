@@ -116,7 +116,7 @@ func TestComputeAlertsForgetting(t *testing.T) {
 		{Concept: "goroutines", Stability: 0.2, ElapsedDays: 5, PMastery: 0.5, CardState: "review",
 			LastReview: ptrTime(time.Now().AddDate(0, 0, -5))},
 	}
-	alerts := ComputeAlerts(states, nil, time.Time{})
+	alerts := ComputeAlertsWithEvidenceAt(states, nil, nil, time.Time{}, time.Now())
 	found := false
 	for _, a := range alerts {
 		if a.Type == models.AlertForgetting && a.Concept == "goroutines" {
@@ -166,7 +166,7 @@ func TestComputeAlertsForgettingRetentionBoundaries(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			states := []*models.ConceptState{alertStateAtRetention(t, "boundary", tc.retention)}
-			alerts := ComputeAlerts(states, nil, time.Time{})
+			alerts := ComputeAlertsWithEvidenceAt(states, nil, nil, time.Time{}, time.Now())
 
 			a, found := findAlert(alerts, models.AlertForgetting, "boundary")
 			if found != tc.wantAlert {
@@ -370,7 +370,7 @@ func TestComputeAlertsZPDDrift(t *testing.T) {
 		{Concept: "pointers", Success: false},
 	}
 	states := []*models.ConceptState{alertNonForgettingState("pointers", 0.3)}
-	alerts := ComputeAlerts(states, interactions, time.Time{})
+	alerts := ComputeAlertsWithEvidenceAt(states, interactions, nil, time.Time{}, time.Now())
 	found := false
 	for _, a := range alerts {
 		if a.Type == models.AlertZPDDrift && a.Concept == "pointers" {
@@ -379,6 +379,28 @@ func TestComputeAlertsZPDDrift(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected ZPD_DRIFT for pointers")
+	}
+}
+
+func TestComputeAlertsZPDDriftReportsObservedFailureShare(t *testing.T) {
+	interactions := []*models.Interaction{ // newest first
+		{Concept: "pointers", Success: false},
+		{Concept: "pointers", Success: false},
+		{Concept: "pointers", Success: false},
+		{Concept: "pointers", Success: true},
+		{Concept: "loops", Success: false},
+	}
+	states := []*models.ConceptState{alertNonForgettingState("pointers", 0.3)}
+	alerts := ComputeAlertsWithEvidenceAt(states, interactions, nil, time.Time{}, time.Now())
+	alert, ok := findAlert(alerts, models.AlertZPDDrift, "pointers")
+	if !ok {
+		t.Fatal("expected ZPD_DRIFT for pointers")
+	}
+	if alert.ErrorRate != 0.75 {
+		t.Fatalf("error rate = %v, want the observed share 3/4", alert.ErrorRate)
+	}
+	if _, ok := findAlert(alerts, models.AlertZPDDrift, "loops"); ok {
+		t.Fatal("one failure is not a failure streak")
 	}
 }
 
@@ -408,7 +430,7 @@ func TestComputeAlertsForgettingCriticalSuppressesFailureZPDDrift(t *testing.T) 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			states := []*models.ConceptState{alertStateAtRetention(t, "pointers", tc.retention)}
-			alerts := ComputeAlerts(states, interactions, time.Time{})
+			alerts := ComputeAlertsWithEvidenceAt(states, interactions, nil, time.Time{}, time.Now())
 
 			if _, found := findAlert(alerts, models.AlertForgetting, "pointers"); !found {
 				t.Fatal("expected FORGETTING alert in collision scenario")
@@ -431,7 +453,7 @@ func TestComputeAlertsLegacyThetaCannotPredictGeneratedItemDifficulty(t *testing
 	states[0].Theta = -1.0
 	states[0].Difficulty = 8.0
 	states[0].Reps = 3
-	alerts := ComputeAlerts(states, nil, time.Time{})
+	alerts := ComputeAlertsWithEvidenceAt(states, nil, nil, time.Time{}, time.Now())
 
 	found := false
 	for _, a := range alerts {
@@ -450,7 +472,7 @@ func TestComputeAlertsForgettingCriticalSuppressesPredictiveZPDDrift(t *testing.
 	cs.Difficulty = 8.0
 	cs.Reps = 3
 
-	alerts := ComputeAlerts([]*models.ConceptState{cs}, nil, time.Time{})
+	alerts := ComputeAlertsWithEvidenceAt([]*models.ConceptState{cs}, nil, nil, time.Time{}, time.Now())
 	if a, found := findAlert(alerts, models.AlertForgetting, "channels"); !found || a.Urgency != models.UrgencyCritical {
 		t.Fatalf("expected critical FORGETTING alert, got found=%v alert=%+v", found, a)
 	}
@@ -473,7 +495,7 @@ func TestComputeAlertsConsecutiveFailuresRemainActionableWithLegacyTheta(t *test
 		{Concept: "pointers", Success: false},
 		{Concept: "pointers", Success: false},
 	}
-	alerts := ComputeAlerts(states, interactions, time.Time{})
+	alerts := ComputeAlertsWithEvidenceAt(states, interactions, nil, time.Time{}, time.Now())
 
 	zpdCount := 0
 	for _, a := range alerts {
@@ -561,7 +583,7 @@ func TestComputeAlertsForgettingIgnoresNeverAcquiredCards(t *testing.T) {
 		{Concept: "never-learned", Stability: 0.2, ElapsedDays: 5, PMastery: 0.05, CardState: "learning",
 			LastReview: ptrTime(time.Now().AddDate(0, 0, -5))},
 	}
-	for _, a := range ComputeAlerts(states, nil, time.Time{}) {
+	for _, a := range ComputeAlertsWithEvidenceAt(states, nil, nil, time.Time{}, time.Now()) {
 		if a.Type == models.AlertForgetting {
 			t.Fatalf("FORGETTING must not fire on a concept that was never acquired: %+v", a)
 		}

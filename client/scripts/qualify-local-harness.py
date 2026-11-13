@@ -10,8 +10,9 @@ Run after building the native agent, for example:
 
 The mandatory repository GGUF pin and native executable checks are reused from
 qualify-local-agent.py. One public French prompt uses a fresh durable session and
-a loopback-only controlled HTTP MCP fixture: get_pending_alerts plus two real
-catalogue distractors. This is deliberately NOT the full 68-tool discovery test.
+a loopback-only controlled HTTP MCP fixture: get_learner_state(view=progress), which
+carries the pending alerts, plus two real catalogue distractors. This is
+deliberately NOT the full catalogue discovery test.
 Only the expected, read-only business call with exact host-bound arguments can
 be approved. No real Tutor server is contacted. After process shutdown, the
 SQLite journal must prove the fixed /alertes route, the validated contract,
@@ -64,11 +65,12 @@ finally:
 require = base.require
 QualificationError = base.QualificationError
 CATALOG = Path(__file__).resolve().parents[1] / "local-agent/fixtures/catalog-local.json"
-TOOL = "get_pending_alerts"
+TOOL = "get_learner_state"
 TOOL_ID = "tutor/" + TOOL
 DISTRACTORS = ("get_availability_model", "get_goal_relevance")
 DOMAIN = "qualification-domain"
-ARGUMENTS = {"domain_id": DOMAIN}
+# The /alertes route reads the progress view, which lists every pending alert.
+ARGUMENTS = {"view": "progress"}
 PROMPT = "/alertes"
 FACT = re.compile(r"(?<!\d)17\s*(?:h(?:eures?)?|:)\s*42(?!\d)", re.IGNORECASE)
 MAX_HTTP_HEADER = 16 * 1024
@@ -123,8 +125,9 @@ def load_catalog(deadline):
         selected.append(entry)
     schema = selected[0]["inputSchema"]
     require(schema.get("type") == "object" and schema.get("additionalProperties") is False
-            and schema.get("properties", {}).get("domain_id", {}).get("type") == "string"
-            and set(schema.get("required", [])) <= {"domain_id"}, "unexpected_alert_schema")
+            and schema.get("properties", {}).get("view", {}).get("type") == "string"
+            and ARGUMENTS["view"] in schema.get("properties", {}).get("view", {}).get("enum", [ARGUMENTS["view"]])
+            and not schema.get("required"), "unexpected_alert_schema")
     encoded = json.dumps(selected, sort_keys=True, ensure_ascii=False,
                          separators=(",", ":")).encode("utf-8")
     return selected, {"source": base.fingerprint(CATALOG, deadline),

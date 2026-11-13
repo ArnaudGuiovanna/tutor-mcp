@@ -14,28 +14,31 @@ const PedagogicalTurnSchemaVersion = "pedagogical-turn/v1"
 // It is never a capability token: each later mutation revalidates its principal,
 // selected domain, curriculum and assessment state against durable storage.
 type PedagogicalTurn struct {
-	SchemaVersion          string                       `json:"schema_version"`
-	Mode                   string                       `json:"mode"`
-	GeneratedAt            time.Time                    `json:"generated_at"`
-	Conversation           *ConversationContext         `json:"conversation"`
-	Training               *TrainingContext             `json:"training,omitempty"`
-	Learner                PedagogicalTurnLearner       `json:"learner"`
-	Permissions            PedagogicalTurnPermissions   `json:"permissions"`
-	Curriculum             *PedagogicalTurnCurriculum   `json:"curriculum,omitempty"`
-	Difficulties           []PedagogicalTurnDifficulty  `json:"difficulties"`
-	RecentObservations     []PedagogicalTurnObservation `json:"recent_observations"`
-	Session                *LearningSession             `json:"session,omitempty"`
-	Attempt                *PedagogicalTurnAttempt      `json:"attempt,omitempty"`
-	Memory                 json.RawMessage              `json:"memory,omitempty"`
-	Activity               map[string]any               `json:"activity,omitempty"`
-	NeedsSelection         bool                         `json:"needs_selection"`
-	SelectionReason        string                       `json:"selection_reason,omitempty"`
-	TrainingChoices        []TrainingContext            `json:"training_choices,omitempty"`
-	TrainingChoicesHasMore bool                         `json:"training_choices_has_more"`
-	Presentation           string                       `json:"presentation,omitempty"`
-	PresentationReason     string                       `json:"presentation_reason,omitempty"`
-	Provenance             PedagogicalTurnProvenance    `json:"provenance"`
-	DegradedComponents     []string                     `json:"degraded_components,omitempty"`
+	SchemaVersion      string                       `json:"schema_version"`
+	Mode               string                       `json:"mode"`
+	GeneratedAt        time.Time                    `json:"generated_at"`
+	Conversation       *ConversationContext         `json:"conversation,omitempty"`
+	Training           *TrainingContext             `json:"training,omitempty"`
+	Learner            PedagogicalTurnLearner       `json:"learner"`
+	Permissions        PedagogicalTurnPermissions   `json:"permissions"`
+	Curriculum         *PedagogicalTurnCurriculum   `json:"curriculum,omitempty"`
+	Difficulties       []PedagogicalTurnDifficulty  `json:"difficulties"`
+	RecentObservations []PedagogicalTurnObservation `json:"recent_observations"`
+	Session            *LearningSession             `json:"session,omitempty"`
+	Attempt            *PedagogicalTurnAttempt      `json:"attempt,omitempty"`
+	Memory             json.RawMessage              `json:"memory,omitempty"`
+	// Decision is the frozen canonical engine decision of an activity turn.
+	Decision               map[string]any            `json:"decision,omitempty"`
+	NeedsDomainSetup       bool                      `json:"needs_domain_setup,omitempty"`
+	SetupInstruction       string                    `json:"setup_instruction,omitempty"`
+	NeedsSelection         bool                      `json:"needs_selection"`
+	SelectionReason        string                    `json:"selection_reason,omitempty"`
+	TrainingChoices        []TrainingContext         `json:"training_choices,omitempty"`
+	TrainingChoicesHasMore bool                      `json:"training_choices_has_more"`
+	Presentation           string                    `json:"presentation,omitempty"`
+	PresentationReason     string                    `json:"presentation_reason,omitempty"`
+	Provenance             PedagogicalTurnProvenance `json:"provenance"`
+	DegradedComponents     []string                  `json:"degraded_components,omitempty"`
 }
 
 type PedagogicalTurnLearner struct {

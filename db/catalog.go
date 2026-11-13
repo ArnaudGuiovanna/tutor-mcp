@@ -38,7 +38,7 @@ func (s *Store) CreateFormationDraft(ctx context.Context, actor models.Principal
 	}
 	version := &models.FormationVersion{
 		ID: versionID, TenantID: actor.TenantID, FormationID: formationID,
-		Version: 1, Status: "draft", MetadataJSON: "{}", CreatedBy: actor.UserID, CreatedAt: now,
+		Version: 1, Status: "draft", Metadata: map[string]any{}, CreatedBy: actor.UserID, CreatedAt: now,
 	}
 	err = s.WithTenantTx(ctx, actor.TenantScope(), func(txCtx context.Context, scoped storeport.Store) error {
 		txs := scoped.(*Store)
@@ -86,14 +86,12 @@ func (s *Store) AddFormationModule(ctx context.Context, actor models.Principal, 
 	if !actor.Authorize(models.PermissionFormationWrite, models.AuthorizationResource{TenantID: actor.TenantID}) {
 		return "", fmt.Errorf("add module: %w", storeport.ErrInvalidPrincipal)
 	}
-	if strings.TrimSpace(input.StableKey) == "" || strings.TrimSpace(input.StableKey) != input.StableKey || len(input.StableKey) > 200 || strings.ContainsAny(input.StableKey, "\x00\r\n") || strings.TrimSpace(input.Title) == "" || len(input.Title) > 500 || len(input.MetadataJSON) > 65536 || input.Position < 0 {
+	if strings.TrimSpace(input.StableKey) == "" || strings.TrimSpace(input.StableKey) != input.StableKey || len(input.StableKey) > 200 || strings.ContainsAny(input.StableKey, "\x00\r\n") || strings.TrimSpace(input.Title) == "" || len(input.Title) > 500 || input.Position < 0 {
 		return "", fmt.Errorf("add module: stable key, title and non-negative position are required")
 	}
-	if input.MetadataJSON == "" {
-		input.MetadataJSON = "{}"
-	}
-	if !json.Valid([]byte(input.MetadataJSON)) {
-		return "", fmt.Errorf("add module: metadata must be JSON")
+	metadata, err := encodeFormationMetadata(input.Metadata)
+	if err != nil {
+		return "", err
 	}
 	id, err := generateID()
 	if err != nil {
@@ -119,7 +117,7 @@ func (s *Store) AddFormationModule(ctx context.Context, actor models.Principal, 
             (id, tenant_id, formation_version_id, stable_key, title, position, metadata_json)
             SELECT ?, ?, id, ?, ?, ?, ? FROM formation_versions
             WHERE tenant_id = ? AND id = ? AND status = 'draft'`, id, actor.TenantID,
-			input.StableKey, input.Title, input.Position, input.MetadataJSON, actor.TenantID, versionID)
+			input.StableKey, input.Title, input.Position, metadata, actor.TenantID, versionID)
 		if err != nil {
 			return fmt.Errorf("add module: %w", err)
 		}
@@ -138,13 +136,8 @@ func (s *Store) AddFormationConcept(ctx context.Context, actor models.Principal,
 	if strings.TrimSpace(input.ModuleStableKey) == "" || strings.TrimSpace(input.StableKey) == "" || strings.TrimSpace(input.Label) == "" || input.Position < 0 {
 		return "", fmt.Errorf("add concept: module, stable key, label and position are required")
 	}
-	if input.MetadataJSON == "" {
-		input.MetadataJSON = "{}"
-	}
-	if !json.Valid([]byte(input.MetadataJSON)) {
-		return "", fmt.Errorf("add concept: metadata must be JSON")
-	}
-	if err := normalizeFormationConcept(&input); err != nil {
+	metadata, err := normalizeFormationConcept(&input)
+	if err != nil {
 		return "", err
 	}
 	id, err := generateID()
@@ -177,7 +170,7 @@ func (s *Store) AddFormationConcept(ctx context.Context, actor models.Principal,
 		if _, err := txs.exec(txCtx, `INSERT INTO formation_concepts
             (id, tenant_id, formation_version_id, module_id, stable_key, label, position, metadata_json)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, id, actor.TenantID, versionID,
-			moduleID, input.StableKey, input.Label, input.Position, input.MetadataJSON); err != nil {
+			moduleID, input.StableKey, input.Label, input.Position, metadata); err != nil {
 			return fmt.Errorf("add concept: %w", err)
 		}
 		for _, prerequisite := range input.Prerequisites {
@@ -240,6 +233,10 @@ func (s *Store) PublishFormationVersion(ctx context.Context, actor models.Princi
 			actor.TenantID, versionID).Scan(&formationID, &version, &metadata, &createdBy, &createdAt); err != nil {
 			return fmt.Errorf("publish formation: incomplete or immutable draft: %w", err)
 		}
+		versionMetadata, err := decodeFormationMetadata(metadata)
+		if err != nil {
+			return err
+		}
 		detail, err := txs.loadFormationVersion(txCtx, actor.TenantID, versionID)
 		if err != nil {
 			return err
@@ -263,7 +260,7 @@ func (s *Store) PublishFormationVersion(ctx context.Context, actor models.Princi
 		}
 		published = &models.FormationVersion{
 			ID: versionID, TenantID: actor.TenantID, FormationID: formationID,
-			Version: version, Status: "published", MetadataJSON: metadata,
+			Version: version, Status: "published", Metadata: versionMetadata,
 			CreatedBy: createdBy, CreatedAt: createdAt, PublishedAt: &now,
 		}
 		if err := txs.AppendAuditEvent(txCtx, actor, models.AuditEvent{

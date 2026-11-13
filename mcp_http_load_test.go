@@ -19,7 +19,31 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-var mcpHTTPLoadTools = [...]string{"get_learner_context", "get_pending_alerts", "get_next_activity", "update_learner_profile"}
+// mcpHTTPLoadTools names the four calls of one learner turn: the overview and
+// progress views of get_learner_state, an activity turn and a profile write.
+var mcpHTTPLoadTools = [...]string{"get_learner_state:overview", "get_learner_state:progress", "prepare_pedagogical_turn:activity", "update_learner_profile"}
+
+// mcpHTTPLoadCall maps a load step onto its MCP tool and arguments.
+func mcpHTTPLoadCall(step string, args map[string]any) (string, map[string]any) {
+	switch step {
+	case "get_learner_state:overview":
+		args["view"] = "overview"
+		return "get_learner_state", args
+	case "get_learner_state:progress":
+		args["view"] = "progress"
+		return "get_learner_state", args
+	case "prepare_pedagogical_turn:activity":
+		args["mode"] = "activity"
+		return "prepare_pedagogical_turn", args
+	}
+	return step, args
+}
+
+// activityDecision returns the frozen decision of an activity turn.
+func activityDecision(turn map[string]any) map[string]any {
+	decision, _ := turn["decision"].(map[string]any)
+	return decision
+}
 
 type mcpHTTPLoadLearner struct {
 	actor             models.Principal
@@ -175,7 +199,8 @@ func assertMCPHTTPEncryptedHistory(t *testing.T, ctx context.Context, f *mcpHTTP
 }
 
 func checkMCPHTTPLoadActivity(payload map[string]any, learner *mcpHTTPLoadLearner) error {
-	if payload["needs_domain_setup"] != false || payload["domain_id"] != learner.domain.ID {
+	payload = activityDecision(payload)
+	if payload == nil || payload["domain_id"] != learner.domain.ID {
 		return fmt.Errorf("activity lost its initialized domain")
 	}
 	if degraded, present := payload["degraded_components"]; present {
@@ -189,10 +214,10 @@ func checkMCPHTTPLoadActivity(payload map[string]any, learner *mcpHTTPLoadLearne
 	if !ok || !typeOK || activityType == "" || !learner.concepts[fmt.Sprint(activity["concept"])] {
 		return fmt.Errorf("activity did not select an owned concept: %v", payload["activity"])
 	}
-	decision, _ := payload["decision_id"].(string)
-	session, _ := payload["session_id"].(string)
 	contract, ok := payload["pedagogical_contract"].(map[string]any)
-	if decision == "" || decision == learner.decision || session == "" || !ok || contract["decision_id"] != decision {
+	decision, _ := contract["decision_id"].(string)
+	session, _ := payload["session_id"].(string)
+	if decision == "" || decision == learner.decision || session == "" || !ok {
 		return fmt.Errorf("activity did not freeze a fresh decision linked to a coherent session")
 	}
 	episodic, ok := payload["episodic_context"].(map[string]any)
@@ -224,27 +249,28 @@ func runMCPHTTPLoadSequence(ctx context.Context, learner *mcpHTTPLoadLearner, ph
 		args := map[string]any{"domain_id": learner.domain.ID}
 		objective := phase + " objective for " + learner.actor.LearnerID
 		switch tool {
-		case "get_next_activity":
+		case "prepare_pedagogical_turn:activity":
 			args["idempotency_key"] = "http-load:" + phase + ":activity:" + learner.actor.LearnerID
 		case "update_learner_profile":
 			args = map[string]any{"objective": objective, "idempotency_key": "http-load:" + phase + ":profile:" + learner.actor.LearnerID}
 		}
+		name, args := mcpHTTPLoadCall(tool, args)
 		started := time.Now()
-		_, payload, err := callMCPHTTPTool(ctx, learner.client, tool, args)
+		_, payload, err := callMCPHTTPTool(ctx, learner.client, name, args)
 		durations[i] = time.Since(started) // transport, auth, waits, commit and decode
 		if err != nil {
 			return durations, err
 		}
 		switch tool {
-		case "get_learner_context":
+		case "get_learner_state:overview":
 			err = checkMCPHTTPContext(payload, learner.actor.LearnerID, learner.domain.ID, learner.objective)
 			if err == nil && (payload["needs_domain_setup"] != false || payload["concepts_count"] != float64(12)) {
 				err = fmt.Errorf("learner context lost the twelve seeded concept states")
 			}
-		case "get_pending_alerts":
+		case "get_learner_state:progress":
 			alerts, alertsOK := payload["alerts"].([]any)
 			_, criticalOK := payload["has_critical"].(bool)
-			if !alertsOK || !criticalOK || payload["needs_domain_setup"] != false {
+			if !alertsOK || !criticalOK || payload["needs_domain_setup"] != nil {
 				err = fmt.Errorf("pending alerts omitted its initialized domain view")
 				break
 			}
@@ -263,7 +289,7 @@ func runMCPHTTPLoadSequence(ctx context.Context, learner *mcpHTTPLoadLearner, ph
 					break
 				}
 			}
-		case "get_next_activity":
+		case "prepare_pedagogical_turn:activity":
 			err = checkMCPHTTPLoadActivity(payload, learner)
 		case "update_learner_profile":
 			if payload["updated"] != true || payload["fields_changed"] != float64(1) {
@@ -343,6 +369,19 @@ func seedMCPHTTPForeignHistory(t *testing.T, ctx context.Context, f *mcpHTTPFixt
 	}
 	assertMCPHTTPEncryptedHistory(t, ctx, f, learner, 1056) // below the 2048 quota
 }
+
+// HTTP budgets of TestMCPHTTPPerformanceBudget, set from GitHub Actions
+// measurements (ubuntu-latest, 4 workers, 50 learners, without -race). Across
+// the SQLite and PostgreSQL 17 jobs of 2026-11-12 the slowest tool p95 was
+// 290 ms and the slowest p99 319 ms (the activity turn on PostgreSQL); the
+// large-history call stayed under 75 ms. The budgets keep about 40 % headroom
+// on p95 for runner noise while failing on any regression of the hot path's
+// order of magnitude.
+const (
+	mcpHTTPBudgetP95          = 400 * time.Millisecond
+	mcpHTTPBudgetP99          = time.Second
+	mcpHTTPBudgetLargeHistory = time.Second
+)
 
 // TestMCPHTTPPerformanceBudget is deliberately non-race in CI. The always-on
 // identity/replay test covers correctness with race instrumentation separately.
@@ -426,8 +465,8 @@ func TestMCPHTTPPerformanceBudget(t *testing.T) {
 				}
 				p50, p95, p99 := mcpHTTPPercentile(samples, .5), mcpHTTPPercentile(samples, .95), mcpHTTPPercentile(samples, .99)
 				t.Logf("HTTP tool=%s samples=50 p50=%s p95=%s p99=%s (nearest-rank p99=max)", tool, p50, p95, p99)
-				if p95 >= 2*time.Second || p99 >= 5*time.Second {
-					t.Errorf("%s exceeded initial HTTP budgets: p95=%s (<2s) p99=%s (<5s)", tool, p95, p99)
+				if p95 >= mcpHTTPBudgetP95 || p99 >= mcpHTTPBudgetP99 {
+					t.Errorf("%s exceeded HTTP budgets: p95=%s (<%s) p99=%s (<%s)", tool, p95, mcpHTTPBudgetP95, p99, mcpHTTPBudgetP99)
 				}
 			}
 			pool := "writer"
@@ -449,7 +488,7 @@ func TestMCPHTTPPerformanceBudget(t *testing.T) {
 			large := learners[0]
 			seedMCPHTTPForeignHistory(t, ctx, f, large)
 			largeStarted := time.Now()
-			_, payload, err := callMCPHTTPTool(ctx, large.client, "get_next_activity", map[string]any{"domain_id": large.domain.ID, "idempotency_key": "http-load:large:" + large.actor.LearnerID})
+			_, payload, err := callMCPHTTPTool(ctx, large.client, "prepare_pedagogical_turn", map[string]any{"mode": "activity", "domain_id": large.domain.ID, "idempotency_key": "http-load:large:" + large.actor.LearnerID})
 			largeDuration := time.Since(largeStarted)
 			if err != nil {
 				t.Fatal(err)
@@ -458,9 +497,9 @@ func TestMCPHTTPPerformanceBudget(t *testing.T) {
 				t.Fatal(err)
 			}
 			assertMCPHTTPLoadDurable(t, ctx, f, large)
-			t.Logf("HTTP large_history samples=1 foreign_sessions=1024 requested_domain_sessions=32 latency=%s budget<5s (no percentile claim)", largeDuration)
-			if largeDuration >= 5*time.Second {
-				t.Fatal("large-history HTTP call exceeded its separate 5s budget")
+			t.Logf("HTTP large_history samples=1 foreign_sessions=1024 requested_domain_sessions=32 latency=%s budget<%s (no percentile claim)", largeDuration, mcpHTTPBudgetLargeHistory)
+			if largeDuration >= mcpHTTPBudgetLargeHistory {
+				t.Fatalf("large-history HTTP call exceeded its separate %s budget", mcpHTTPBudgetLargeHistory)
 			}
 		})
 	}

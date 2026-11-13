@@ -401,17 +401,19 @@ async fn verify(directory: &Path, url: &str) -> Result<(), String> {
     )
     .await?;
     let domain_id = id(&joined["enrollment"], &["domain_id"])?;
-    let activity = tool(
+    let turn = tool(
         &client,
         &learner_session,
-        "get_next_activity",
-        json!({"domain_id":domain_id}),
+        "prepare_pedagogical_turn",
+        json!({"mode":"activity","domain_id":domain_id}),
     )
     .await?;
+    let activity = &turn["decision"];
     let selected = &activity["activity"];
-    let prepared = tool(&client, &learner_session, "prepare_assessment_attempt", json!({"domain_id":domain_id,"session_id":activity["session_id"],"decision_id":activity["decision_id"],"concept":selected["concept"],"activity_type":selected["type"],"observable":"Explain an equinox","task_text":"Explain why days and nights have similar lengths near an equinox.","rubric_json":json!({"criteria":[{"id":"correct","description":"Explains approximately equal day and night","max_score":1}],"passing_score":1}).to_string()})).await?;
+    let decision_id = &activity["pedagogical_contract"]["decision_id"];
+    let prepared = tool(&client, &learner_session, "prepare_assessment_attempt", json!({"domain_id":domain_id,"session_id":activity["session_id"],"decision_id":decision_id,"concept":selected["concept"],"activity_type":selected["type"],"observable":"Explain an equinox","task_text":"Explain why days and nights have similar lengths near an equinox.","rubric":{"criteria":[{"id":"correct","description":"Explains approximately equal day and night","max_score":1}],"passing_score":1}})).await?;
     tool(&client, &learner_session, "submit_assessment_attempt", json!({"attempt_id":prepared["attempt_id"],"learner_response":"The Sun is near the celestial equator, giving approximately equal day and night."})).await?;
-    tool(&client, &learner_session, "record_interaction", json!({"domain_id":domain_id,"session_id":activity["session_id"],"concept":selected["concept"],"activity_type":selected["type"],"success":true,"response_time_seconds":5,"confidence":0.9,"attempt_id":prepared["attempt_id"],"evaluator_id":"native-qualification","evaluation_method":"host_llm","rubric_score_json":json!({"criteria_scores":[{"id":"correct","score":1,"evidence":"Explains the position of the Sun and approximately equal day and night."}],"total":1,"max_total":1}).to_string()})).await?;
+    tool(&client, &learner_session, "record_interaction", json!({"domain_id":domain_id,"session_id":activity["session_id"],"concept":selected["concept"],"activity_type":selected["type"],"success":true,"response_time_seconds":5,"confidence":0.9,"attempt_id":prepared["attempt_id"],"evaluator_id":"native-qualification","evaluation_method":"host_llm","rubric_score":{"criteria_scores":[{"id":"correct","score":1,"evidence":"Explains the position of the Sun and approximately equal day and night."}],"total":1,"max_total":1}})).await?;
     let old_pair = KeyPair::restore(&directory.join("owner-backup.json"), BACKUP_PHRASE)?;
     let replacement = KeyPair::generate();
     replacement.backup(

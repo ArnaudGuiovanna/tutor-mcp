@@ -655,7 +655,7 @@ func validateTrainingEdit(current *models.TrainingDocument, in models.TrainingRe
 				return nil, nil, storeport.Invalid("invalid concept or module")
 			}
 			keys[c.StableKey] = true
-			if err = normalizeFormationConcept(c); err != nil {
+			if _, err = normalizeFormationConcept(c); err != nil {
 				return nil, nil, err
 			}
 			detail.Concepts = append(detail.Concepts, models.FormationConcept{ID: c.StableKey, FormationConceptInput: *c})
@@ -779,12 +779,9 @@ func (s *Store) replaceTrainingContent(ctx context.Context, p models.Principal, 
 			return err
 		}
 		moduleIDs[m.StableKey] = id
-		metadata := m.MetadataJSON
-		if metadata == "" {
-			metadata = "{}"
-		}
-		if !json.Valid([]byte(metadata)) {
-			return storeport.Invalid("invalid module metadata")
+		metadata, err := encodeFormationMetadata(m.Metadata)
+		if err != nil {
+			return err
 		}
 		if _, err = s.exec(ctx, `INSERT INTO formation_modules(id,tenant_id,formation_version_id,stable_key,title,position,metadata_json) VALUES(?,?,?,?,?,?,?)`, id, p.TenantID, versionID, m.StableKey, m.Title, m.Position, metadata); err != nil {
 			return err
@@ -796,10 +793,11 @@ func (s *Store) replaceTrainingContent(ctx context.Context, p models.Principal, 
 			return err
 		}
 		conceptIDs[c.StableKey] = id
-		if err = normalizeFormationConcept(&c); err != nil {
+		metadata, err := normalizeFormationConcept(&c)
+		if err != nil {
 			return err
 		}
-		if _, err = s.exec(ctx, `INSERT INTO formation_concepts(id,tenant_id,formation_version_id,module_id,stable_key,label,position,metadata_json) VALUES(?,?,?,?,?,?,?,?)`, id, p.TenantID, versionID, moduleIDs[c.ModuleStableKey], c.StableKey, c.Label, c.Position, c.MetadataJSON); err != nil {
+		if _, err = s.exec(ctx, `INSERT INTO formation_concepts(id,tenant_id,formation_version_id,module_id,stable_key,label,position,metadata_json) VALUES(?,?,?,?,?,?,?,?)`, id, p.TenantID, versionID, moduleIDs[c.ModuleStableKey], c.StableKey, c.Label, c.Position, metadata); err != nil {
 			return err
 		}
 	}

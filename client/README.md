@@ -69,7 +69,7 @@ Le rôle est celui d’un coach d’apprentissage, pour tous les sujets.
 
 Les demandes entières « donne-moi mon profil » et « recherche mon profil ou ma
 formation » (ou `/profil`) déclenchent une lecture autorisée de
-`get_learner_context`. Rust affiche l’objectif, les préférences retournées et
+`get_learner_state`. Rust affiche l’objectif, les préférences retournées et
 la formation active confirmée, sans génération ni supposition du modèle. Cette
 lecture reste possible sans domaine configuré. « Affiche ma formation » (ou
 `/formation`) affiche directement la formation de la conversation, synchronisée

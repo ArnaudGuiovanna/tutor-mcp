@@ -27,8 +27,9 @@ import (
 // proof/nonce boundaries and tenant binding are documented in the contract.
 // SetMaxActiveDomainsPerLearner is a reviewed process-level configuration
 // setter (like SetHostLLMDemonstrationPolicy): called once at startup, it
-// reads and writes no tenant data.
-const legacyUnscopedStoreMethodSetSHA256 = "9912fe3c2eca545d0e8fb8f71bbc262abda38a2d31334ad94d26cccd06a65296"
+// reads and writes no tenant data. AcceptTenantInvitation left the set when
+// tenant invitations were retired.
+const legacyUnscopedStoreMethodSetSHA256 = "1403374a68d4d9d2bf7aaaedc1af43aa641804f1f75495dcd5821e89f7dc0059"
 
 func TestNoNewUnscopedStoreMethods(t *testing.T) {
 	fset := token.NewFileSet()
@@ -105,10 +106,6 @@ func hasTypedTenantBoundary(fields *ast.FieldList) bool {
 			selector.Sel.Name == "VerifiedFederatedIdentityAssertion" ||
 			selector.Sel.Name == "SupportAccessCredential" ||
 			selector.Sel.Name == "OAuthCSRFCredential" ||
-			selector.Sel.Name == "ConsoleSessionCredential" ||
-			selector.Sel.Name == "InvitationCredential" ||
-			selector.Sel.Name == "SignupCredential" ||
-			selector.Sel.Name == "PasswordResetCredential" ||
 			selector.Sel.Name == "WorkerPrincipal") {
 			return true
 		}

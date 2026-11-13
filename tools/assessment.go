@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -18,61 +19,32 @@ import (
 	"tutor-mcp/models"
 	storeport "tutor-mcp/store"
 
-	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 type PrepareAssessmentAttemptParams struct {
 	IdempotentMutationParams
-	DomainID        string   `json:"domain_id,omitempty" jsonschema:"domain ID (optional; active domain used when absent)"`
-	Concept         string   `json:"concept" jsonschema:"concept assessed"`
-	SessionID       string   `json:"session_id,omitempty" jsonschema:"durable learning session ID when available"`
-	ActivityID      string   `json:"activity_id,omitempty" jsonschema:"stable activity identifier; derived from immutable content when absent"`
-	ActivityVersion int      `json:"activity_version,omitempty" jsonschema:"positive activity version; defaults to 1"`
-	DecisionID      string   `json:"decision_id,omitempty" jsonschema:"decision_id returned by get_next_activity; omission explicitly creates an unbound standalone attempt"`
-	OutcomeIDs      []string `json:"outcome_ids,omitempty" jsonschema:"stable outcome IDs from the decision competency; required when bound competency defines outcomes"`
-	ActivityType    string   `json:"activity_type" jsonschema:"evidence-bearing activity type"`
-	Observable      string   `json:"observable" jsonschema:"observable learning outcome assessed by this task"`
-	TaskText        string   `json:"task_text,omitempty" jsonschema:"exact learner-facing task; task_content_hash may be used instead for sensitive artefacts"`
-	TaskContentHash string   `json:"task_content_hash,omitempty" jsonschema:"optional lowercase SHA-256 hex digest of the exact task"`
-	RubricJSON      string   `json:"rubric_json" jsonschema:"JSON-encoded rubric fixed before the learner response. With decision_id, criteria must be an array of objects with unique id, non-empty description and positive numeric max_score; passing_score must be a positive number no greater than their sum. When present, anchors must be an array of objects with numeric score and non-empty description, never an object keyed by score. When present, answer_key must be a non-empty string, never an object. Legacy shorthand is accepted only without decision_id."`
+	DomainID        string          `json:"domain_id,omitempty" jsonschema:"domain ID (optional; active domain used when absent)"`
+	Concept         string          `json:"concept" jsonschema:"concept assessed"`
+	SessionID       string          `json:"session_id,omitempty" jsonschema:"durable learning session ID when available"`
+	ActivityID      string          `json:"activity_id,omitempty" jsonschema:"stable activity identifier; derived from immutable content when absent"`
+	ActivityVersion int             `json:"activity_version,omitempty" jsonschema:"positive activity version; defaults to 1"`
+	DecisionID      string          `json:"decision_id,omitempty" jsonschema:"decision_id from pedagogical_contract.decision_id of prepare_pedagogical_turn(mode=activity); omission explicitly creates an unbound standalone attempt"`
+	OutcomeIDs      []string        `json:"outcome_ids,omitempty" jsonschema:"stable outcome IDs from the decision competency; required when bound competency defines outcomes"`
+	ActivityType    string          `json:"activity_type" jsonschema:"evidence-bearing activity type"`
+	Observable      string          `json:"observable" jsonschema:"observable learning outcome assessed by this task"`
+	TaskText        string          `json:"task_text,omitempty" jsonschema:"exact learner-facing task; task_content_hash may be used instead for sensitive artefacts"`
+	TaskContentHash string          `json:"task_content_hash,omitempty" jsonschema:"optional lowercase SHA-256 hex digest of the exact task"`
+	Rubric          json.RawMessage `json:"rubric" jsonschema:"rubric frozen before the learner response"`
 }
 
-const prepareAssessmentRubricExample = `{"criteria":[{"id":"correctness","description":"Produces the expected result.","max_score":2,"anchors":[{"score":0,"description":"The result is incorrect."},{"score":2,"description":"The result is correct."}]}],"passing_score":2,"answer_key":"The expected result and an acceptable explanation."}`
+const prepareAssessmentRubricDescription = "Rubric frozen before the learner response. With decision_id, criteria must be objects with unique id, non-empty description and positive max_score, and passing_score a positive number no greater than their sum. anchors, when present, is an array of {score, description}; answer_key, when present, is a non-empty string."
 
-func prepareAssessmentInputSchema() *jsonschema.Schema {
-	schema, err := jsonschema.For[PrepareAssessmentAttemptParams](nil)
-	if err != nil {
-		panic("cannot infer prepare_assessment_attempt input schema: " + err.Error())
-	}
-	// These are content annotations for the existing JSON string, not a new
-	// argument shape or an extra validator. Bound attempts keep the strict
-	// assessment parser; standalone attempts retain their legacy normalizer.
-	rubric := schema.Properties["rubric_json"]
-	rubric.ContentMediaType = "application/json"
-	rubric.Examples = []any{prepareAssessmentRubricExample}
-	zero, one, positive := 0.0, 1, 0.0
-	text := func() *jsonschema.Schema { return &jsonschema.Schema{Type: "string", MinLength: &one} }
-	rubric.ContentSchema = &jsonschema.Schema{
-		Type: "object", Description: "Canonical rubric required when decision_id is present. The server also checks unique IDs, score bounds and the passing threshold.",
-		Required: []string{"criteria", "passing_score"}, AdditionalProperties: &jsonschema.Schema{Not: &jsonschema.Schema{}},
-		Properties: map[string]*jsonschema.Schema{
-			"criteria": {Type: "array", MinItems: &one, Items: &jsonschema.Schema{
-				Type: "object", Required: []string{"id", "description", "max_score"}, AdditionalProperties: &jsonschema.Schema{Not: &jsonschema.Schema{}},
-				Properties: map[string]*jsonschema.Schema{
-					"id": {Type: "string", MinLength: &one, Description: "Unique, case-sensitive criterion identity containing letters, digits, underscores or hyphens (at least one letter or digit). Preserve curriculum criterion IDs exactly; never lowercase or replace their hyphens."}, "description": text(), "max_score": {Type: "number", ExclusiveMinimum: &positive},
-					"anchors": {Type: "array", Items: &jsonschema.Schema{
-						Type: "object", Required: []string{"score", "description"}, AdditionalProperties: &jsonschema.Schema{Not: &jsonschema.Schema{}},
-						Properties: map[string]*jsonschema.Schema{"score": {Type: "number", Minimum: &zero}, "description": text()},
-					}},
-				},
-			}},
-			"passing_score": {Type: "number", ExclusiveMinimum: &positive},
-			"answer_key":    text(),
-			"max_total":     {Type: "number", ExclusiveMinimum: &positive, Description: "Optional redundant sum of criteria max_score; must agree exactly."},
-		},
-	}
-	return schema
+var prepareAssessmentRubricExample = map[string]any{
+	"criteria": []any{map[string]any{"id": "correctness", "description": "Produces the expected result.", "max_score": 2, "anchors": []any{
+		map[string]any{"score": 0, "description": "The result is incorrect."}, map[string]any{"score": 2, "description": "The result is correct."},
+	}}},
+	"passing_score": 2, "answer_key": "The expected result and an acceptable explanation.",
 }
 
 type SubmitAssessmentAttemptParams struct {
@@ -88,10 +60,9 @@ type CancelAssessmentAttemptParams struct {
 }
 
 func registerPrepareAssessmentAttempt(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name:        "prepare_assessment_attempt",
-		Description: "Freeze an assessment task and passing rubric before showing it to the learner. Pass rubric_json as a JSON-encoded string using criteria:[{id,description,max_score,anchors?:[{score,description}]}], passing_score:number and optional answer_key:string. Returns attempt_id; submit_assessment_attempt must be called only after the learner has committed a response.",
-		InputSchema: prepareAssessmentInputSchema(),
+		Description: "Freeze an assessment task and passing rubric before showing it to the learner. rubric is an object: criteria:[{id,description,max_score,anchors?:[{score,description}]}], passing_score and optional answer_key. Returns attempt_id; submit_assessment_attempt must be called only after the learner has committed a response.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params PrepareAssessmentAttemptParams) (*mcp.CallToolResult, any, error) {
 		learnerID, err := getLearnerID(ctx)
 		if err != nil {
@@ -142,7 +113,7 @@ func registerPrepareAssessmentAttempt(server *mcp.Server, deps *Deps) {
 		var warnings []string
 		if params.DecisionID != "" {
 			var strict models.AssessmentRubric
-			strict, err = normalizeAssessmentRubric(params.RubricJSON)
+			strict, err = normalizeAssessmentRubric(rawJSONText(params.Rubric))
 			if err == nil {
 				// Surface the summative floor here: the store enforces it too,
 				// but its error is not shown to the host.
@@ -152,20 +123,20 @@ func registerPrepareAssessmentAttempt(server *mcp.Server, deps *Deps) {
 				rubric, warnings = assessmentRubricMap(strict), nil
 			}
 		} else {
-			rubric, warnings, err = normalizeRubricJSON(params.RubricJSON)
+			rubric, warnings, err = normalizeRubricJSON(rawJSONText(params.Rubric))
 		}
 		if err != nil {
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
 		}
 		if rubric == nil {
-			r, _ := errorResult("rubric_json is required")
+			r, _ := errorResult("rubric is required")
 			return r, nil, nil
 		}
-		passingScore, _, ok := rubricFiniteNumber(rubric["passing_score"])
+		passingScore, ok := rubricFiniteNumber(rubric["passing_score"])
 		_, maxTotal := rubricMaxScores(rubric)
 		if params.DecisionID == "" && (!ok || passingScore <= 0 || maxTotal <= 0 || passingScore > maxTotal) {
-			r, _ := errorResult("rubric_json must contain a positive passing_score no greater than the criteria maximum")
+			r, _ := errorResult("rubric must contain a positive passing_score no greater than the criteria maximum")
 			return r, nil, nil
 		}
 
@@ -260,7 +231,7 @@ func registerPrepareAssessmentAttempt(server *mcp.Server, deps *Deps) {
 }
 
 func registerSubmitAssessmentAttempt(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name:        "submit_assessment_attempt",
 		Description: "Persist the learner's committed response (or its integrity hash) against a previously frozen assessment attempt. The task and rubric cannot change at this stage.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params SubmitAssessmentAttemptParams) (*mcp.CallToolResult, any, error) {
@@ -312,7 +283,7 @@ func registerSubmitAssessmentAttempt(server *mcp.Server, deps *Deps) {
 }
 
 func registerCancelAssessmentAttempt(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name:        "cancel_assessment_attempt",
 		Description: "Cancel a prepared or submitted assessment attempt without changing the learner model or creating evidence.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params CancelAssessmentAttemptParams) (*mcp.CallToolResult, any, error) {
@@ -388,7 +359,7 @@ func deriveAssessmentOutcome(rubric, score map[string]any) (float64, bool, error
 	for _, id := range criterionIDs {
 		maxTotal += maxByID[id]
 	}
-	passing, _, ok := rubricFiniteNumber(rubric["passing_score"])
+	passing, ok := rubricFiniteNumber(rubric["passing_score"])
 	if !ok || passing <= 0 || maxTotal <= 0 || passing > maxTotal {
 		return 0, false, fmt.Errorf("assessment rubric has an invalid passing rule")
 	}
@@ -410,7 +381,7 @@ func deriveAssessmentOutcome(rubric, score map[string]any) (float64, bool, error
 		if _, duplicate := scoresByID[id]; duplicate {
 			return fmt.Errorf("assessment score contains duplicate criterion %q", id)
 		}
-		value, _, valid := rubricFiniteNumber(item["score"])
+		value, valid := rubricFiniteNumber(item["score"])
 		if !valid || value < 0 || value > max {
 			return fmt.Errorf("assessment score for %q must be between 0 and %v", id, max)
 		}
@@ -434,29 +405,8 @@ func deriveAssessmentOutcome(rubric, score map[string]any) (float64, bool, error
 				return 0, false, err
 			}
 		}
-	case map[string]any:
-		// normalizeRubricScoreCriteria already accepts this shape, so a score
-		// keyed by criterion id clears rubric validation. Rejecting it here
-		// would fail the attempt after the rubric had approved it.
-		for _, key := range sortedRubricKeys(items) {
-			item, isObject := items[key].(map[string]any)
-			if !isObject {
-				item = map[string]any{"score": items[key]}
-			}
-			if _, hasID := item["id"]; !hasID {
-				withID := make(map[string]any, len(item)+1)
-				for k, v := range item {
-					withID[k] = v
-				}
-				withID["id"] = key
-				item = withID
-			}
-			if err := add(item); err != nil {
-				return 0, false, err
-			}
-		}
 	default:
-		return 0, false, fmt.Errorf("assessment criteria_scores must be an array or object")
+		return 0, false, fmt.Errorf("assessment criteria_scores must be an array")
 	}
 	if len(scoresByID) != len(maxByID) {
 		return 0, false, fmt.Errorf("assessment score must cover every frozen rubric criterion")
@@ -470,7 +420,8 @@ func deriveAssessmentOutcome(rubric, score map[string]any) (float64, bool, error
 
 // Bound assessment rules are shared with the persistence boundary.
 func normalizeAssessmentRubric(raw string) (models.AssessmentRubric, error) {
-	return assessment.ParseRubric(raw)
+	rubric, err := assessment.ParseRubric(raw)
+	return rubric, publicRubricError(err)
 }
 
 func validateBoundAssessmentRubric(rubric models.AssessmentRubric) error {

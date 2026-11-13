@@ -26,8 +26,6 @@ const (
 	passwordResetTTL                    = 15 * time.Minute
 	loginChallengeTTL                   = 10 * time.Minute
 	trustedLoginDeviceTTL               = 30 * 24 * time.Hour
-	accountCSRFCookieName               = "account_csrf"
-	trustedLoginDeviceCookieName        = "tutor_trusted_device"
 	accountTokenEmailVerification       = "email_verification"
 	accountTokenPasswordReset           = "password_reset"
 )
@@ -50,15 +48,12 @@ func validRawAccountToken(raw string) bool {
 	return raw != "" && len(raw) <= accountTokenMaxLen && !strings.ContainsAny(raw, "\r\n\t ")
 }
 
-func setAccountCSRFCookie(w http.ResponseWriter, value, path string, maxAge int) {
-	cookie := &http.Cookie{
-		Name: accountCSRFCookieName, Value: value, Path: path, MaxAge: maxAge,
-		HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode,
-	}
-	if maxAge < 0 {
-		cookie.Expires = time.Unix(1, 0).UTC()
-	}
-	http.SetCookie(w, cookie)
+// setAccountCSRFCookie stores the double-submit token of the account form
+// served at path. These forms precede any authenticated session, so the token
+// is random rather than session-derived; validateAccountCSRF also requires a
+// same-origin submission and consumes the token once.
+func (s *OAuthServer) setAccountCSRFCookie(w http.ResponseWriter, value, path string, maxAge int) {
+	s.setCookie(w, accountCSRFCookieName(path), value, maxAge, http.SameSiteStrictMode)
 }
 
 // sameOriginFormPost rejects a browser form submission that declares another
@@ -85,10 +80,10 @@ func (s *OAuthServer) validateAccountCSRF(r *http.Request) bool {
 	if !s.sameOriginFormPost(r) {
 		return false
 	}
-	cookie, err := r.Cookie(accountCSRFCookieName)
+	cookieToken, hasCookie := s.cookieValue(r, accountCSRFCookieName(r.URL.Path))
 	formToken := r.FormValue("csrf_token")
-	if err != nil || cookie.Value == "" || formToken == "" ||
-		subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(formToken)) != 1 {
+	if !hasCookie || formToken == "" ||
+		subtle.ConstantTimeCompare([]byte(cookieToken), []byte(formToken)) != 1 {
 		return false
 	}
 	return s.consumeCSRF(r.Context(), formToken)
@@ -143,7 +138,7 @@ func (s *OAuthServer) renderEmailVerificationForm(w http.ResponseWriter, status 
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	setAccountCSRFCookie(w, csrfToken, "/verify-email", 1800)
+	s.setAccountCSRFCookie(w, csrfToken, "/verify-email", 1800)
 	renderAccountPage(w, status, accountPageData{
 		Title:            "Secure your account",
 		Message:          message,
@@ -206,32 +201,8 @@ func (s *OAuthServer) sendPasswordReset(ctx context.Context, learner *models.Lea
 }
 
 func (s *OAuthServer) passwordResetValid(r *http.Request, raw string) bool {
-	if s.accounts != nil {
-		return s.accounts.UserPasswordResetValid(r.Context(), models.PasswordResetCredential{Token: raw})
-	}
 	_, err := s.store.GetAccountToken(r.Context(), accountTokenHash(raw), accountTokenPasswordReset)
 	return err == nil
-}
-
-// sendUserPasswordReset mails a reset link to an institution email identity.
-// An unknown address sends nothing and returns no error.
-func (s *OAuthServer) sendUserPasswordReset(ctx context.Context, email string) error {
-	if s.emailSender == nil {
-		return fmt.Errorf("email delivery is not configured")
-	}
-	raw, err := newOpaqueToken()
-	if err != nil {
-		return err
-	}
-	created, err := s.accounts.CreateUserPasswordReset(ctx, models.PasswordResetCredential{Token: raw}, email)
-	if err != nil || !created {
-		return err
-	}
-	link := s.baseURL + "/reset-password?" + url.Values{"token": []string{raw}}.Encode()
-	if err := s.emailSender.SendPasswordReset(ctx, email, link); err != nil {
-		return fmt.Errorf("send password reset email: %w", err)
-	}
-	return nil
 }
 
 // sendLoginChallenge mails a device-approval link for the learner of scope to
@@ -272,19 +243,15 @@ func (s *OAuthServer) sendLoginChallenge(ctx context.Context, scope models.Tenan
 }
 
 func (s *OAuthServer) isTrustedLoginDevice(ctx context.Context, r *http.Request, learnerID string) (bool, error) {
-	cookie, err := r.Cookie(trustedLoginDeviceCookieName)
-	if err != nil || !validRawAccountToken(cookie.Value) {
+	raw, ok := s.cookieValue(r, trustedLoginDeviceCookieName)
+	if !ok || !validRawAccountToken(raw) {
 		return false, nil
 	}
-	return s.store.IsTrustedLoginDevice(ctx, learnerID, accountTokenHash(cookie.Value), time.Now().UTC())
+	return s.store.IsTrustedLoginDevice(ctx, learnerID, accountTokenHash(raw), time.Now().UTC())
 }
 
-func setTrustedLoginDeviceCookie(w http.ResponseWriter, raw string) {
-	http.SetCookie(w, &http.Cookie{
-		Name: trustedLoginDeviceCookieName, Value: raw, Path: "/authorize",
-		MaxAge: int(trustedLoginDeviceTTL / time.Second), HttpOnly: true,
-		Secure: true, SameSite: http.SameSiteLaxMode,
-	})
+func (s *OAuthServer) setTrustedLoginDeviceCookie(w http.ResponseWriter, raw string) {
+	s.setCookie(w, trustedLoginDeviceCookieName, raw, int(trustedLoginDeviceTTL/time.Second), http.SameSiteLaxMode)
 }
 
 func (s *OAuthServer) HandleLoginChallengeGet(w http.ResponseWriter, r *http.Request) {
@@ -303,7 +270,7 @@ func (s *OAuthServer) HandleLoginChallengeGet(w http.ResponseWriter, r *http.Req
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	setAccountCSRFCookie(w, csrfToken, "/login-challenge", int(loginChallengeTTL/time.Second))
+	s.setAccountCSRFCookie(w, csrfToken, "/login-challenge", int(loginChallengeTTL/time.Second))
 	renderAccountPage(w, http.StatusOK, accountPageData{
 		Title: "Confirm this sign-in", Message: "Unusual failed sign-in activity was detected before a correct password was entered.",
 		Token: raw, CSRFToken: csrfToken, ClientID: challenge.ClientID,
@@ -353,8 +320,8 @@ func (s *OAuthServer) HandleLoginChallengePost(w http.ResponseWriter, r *http.Re
 		query.Set("code_challenge_method", challenge.CodeChallengeMethod)
 	}
 	continuation.RawQuery = query.Encode()
-	setTrustedLoginDeviceCookie(w, raw)
-	setAccountCSRFCookie(w, "", "/login-challenge", -1)
+	s.setTrustedLoginDeviceCookie(w, raw)
+	s.setAccountCSRFCookie(w, "", "/login-challenge", -1)
 	http.Redirect(w, r, continuation.String(), http.StatusFound)
 }
 
@@ -443,7 +410,7 @@ func (s *OAuthServer) HandleVerifyEmailPost(w http.ResponseWriter, r *http.Reque
 	}
 	query.Set("iss", s.baseURL)
 	redirect.RawQuery = query.Encode()
-	setAccountCSRFCookie(w, "", "/verify-email", -1)
+	s.setAccountCSRFCookie(w, "", "/verify-email", -1)
 	http.Redirect(w, r, redirect.String(), http.StatusFound)
 }
 
@@ -453,7 +420,7 @@ func (s *OAuthServer) HandleRecoverGet(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	setAccountCSRFCookie(w, csrfToken, "/recover", 1800)
+	s.setAccountCSRFCookie(w, csrfToken, "/recover", 1800)
 	renderAccountPage(w, http.StatusOK, accountPageData{
 		Title: "Reset your password", Message: "Enter your account email.",
 		CSRFToken: csrfToken, ShowRecover: true,
@@ -472,26 +439,18 @@ func (s *OAuthServer) HandleRecoverPost(w http.ResponseWriter, r *http.Request) 
 	// The lookup and delivery run after the response so that neither the
 	// body nor the response time reveals whether the address has an account.
 	if validateEmail(email) == nil {
-		if s.accounts != nil {
-			// Institution accounts authenticate against users, and staff or
-			// invited members may have no learner row carrying their address.
-			s.runBackgroundMail(r.Context(), "password_reset", func(ctx context.Context) error {
-				return s.sendUserPasswordReset(ctx, email)
-			})
-		} else {
-			s.runBackgroundMail(r.Context(), "password_reset", func(ctx context.Context) error {
-				learner, err := s.store.GetLearnerByEmail(ctx, email)
-				if err != nil || learner == nil {
-					// An unknown address is the expected outcome for many
-					// requests, not a delivery failure.
-					s.logger.Debug("password reset lookup did not produce an account")
-					return nil
-				}
-				return s.sendPasswordReset(ctx, learner)
-			})
-		}
+		s.runBackgroundMail(r.Context(), "password_reset", func(ctx context.Context) error {
+			learner, err := s.store.GetLearnerByEmail(ctx, email)
+			if err != nil || learner == nil {
+				// An unknown address is the expected outcome for many
+				// requests, not a delivery failure.
+				s.logger.Debug("password reset lookup did not produce an account")
+				return nil
+			}
+			return s.sendPasswordReset(ctx, learner)
+		})
 	}
-	setAccountCSRFCookie(w, "", "/recover", -1)
+	s.setAccountCSRFCookie(w, "", "/recover", -1)
 	renderAccountPage(w, http.StatusAccepted, accountPageData{
 		Title:   "Check your email",
 		Message: "If an account can receive mail at that address, a short-lived reset link has been sent.",
@@ -513,7 +472,7 @@ func (s *OAuthServer) HandleResetPasswordGet(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	setAccountCSRFCookie(w, csrfToken, "/reset-password", 1800)
+	s.setAccountCSRFCookie(w, csrfToken, "/reset-password", 1800)
 	renderAccountPage(w, http.StatusOK, accountPageData{
 		Title: "Choose a new password", Token: raw, CSRFToken: csrfToken, ShowReset: true,
 	})
@@ -546,11 +505,7 @@ func (s *OAuthServer) HandleResetPasswordPost(w http.ResponseWriter, r *http.Req
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	if s.accounts != nil {
-		err = s.accounts.ResetUserPassword(r.Context(), models.PasswordResetCredential{Token: raw}, string(hash))
-	} else {
-		_, err = s.store.ResetPasswordWithToken(r.Context(), accountTokenHash(raw), string(hash))
-	}
+	_, err = s.store.ResetPasswordWithToken(r.Context(), accountTokenHash(raw), string(hash))
 	if err != nil {
 		if !errors.Is(err, storeport.ErrInvalidAccountToken) {
 			s.logger.Error("password reset failed", "err", err)
@@ -558,7 +513,7 @@ func (s *OAuthServer) HandleResetPasswordPost(w http.ResponseWriter, r *http.Req
 		renderAccountPage(w, http.StatusBadRequest, accountPageData{Title: "Could not reset password", Message: "The link or password is invalid."})
 		return
 	}
-	setAccountCSRFCookie(w, "", "/reset-password", -1)
+	s.setAccountCSRFCookie(w, "", "/reset-password", -1)
 	renderAccountPage(w, http.StatusOK, accountPageData{
 		Title: "Password updated", Message: "Stored sign-ins have been revoked. An already-issued access token can remain valid for up to 30 minutes; then sign in again from your MCP client.",
 	})

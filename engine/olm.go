@@ -65,16 +65,10 @@ const (
 	NodeFragile    NodeState = "fragile"
 	NodeInProgress NodeState = "in_progress"
 	NodeEstimated  NodeState = "estimated"
-	// NodeSolid retains the stable legacy classifier value. The full OLM only
-	// counts strong evidence as demonstrated/solid; use MasteryStatus for the
-	// authoritative distinction between estimated and demonstrated.
-	NodeSolid NodeState = "solid"
-	NodeFocus NodeState = "focus"
 )
 
 // NodeClassify maps a concept_state to its OLM node state, matching the
-// classification logic of BuildOLMSnapshot's bucket loop. The Focus state is
-// applied separately by the caller (when this concept is the snapshot focus).
+// classification logic of BuildOLMSnapshot's bucket loop.
 //
 // Rules (in order):
 //   - nil OR CardState == "new"             → NotStarted
@@ -107,7 +101,7 @@ func NodeClassifyAt(cs *models.ConceptState, now time.Time) NodeState {
 	return NodeInProgress
 }
 
-// Discord embed colors for FormatOLMEmbed, keyed on FocusUrgency.
+// Discord embed colors keyed on FocusUrgency (see discordEmbedFromBrief).
 const (
 	colorCritical = 0xFF6B6B // red
 	colorWarning  = 0xF5A623 // amber
@@ -163,24 +157,34 @@ type OLMSnapshot struct {
 	HasActionable bool `json:"has_actionable"`
 }
 
+// OLMStore is the persistence surface of a per-domain OLM snapshot: the
+// domain, its concept states and recent interactions, the evidence snapshot,
+// and the affect and calibration history.
+type OLMStore interface {
+	storeport.DomainStore
+	storeport.ConceptStateStore
+	storeport.InteractionStore
+	EvidenceStore
+}
+
 // BuildOLMSnapshot composes an OLMSnapshot for the given (learner, domain).
 // If domainID is empty, the most recently created non-archived domain is used.
 // Returns an error if no active domain exists or the requested domain is
 // archived.
-func BuildOLMSnapshot(ctx context.Context, store storeport.Store, learnerID, domainID string) (*OLMSnapshot, error) {
+func BuildOLMSnapshot(ctx context.Context, store OLMStore, learnerID, domainID string) (*OLMSnapshot, error) {
 	return BuildOLMSnapshotAt(ctx, store, learnerID, domainID, time.Now().UTC())
 }
 
 // BuildOLMSnapshotAt is the clock-injected OLM builder used where a caller
 // already owns a decision timestamp (orchestrator/scheduler/tests).
-func BuildOLMSnapshotAt(ctx context.Context, store storeport.Store, learnerID, domainID string, now time.Time) (*OLMSnapshot, error) {
+func BuildOLMSnapshotAt(ctx context.Context, store OLMStore, learnerID, domainID string, now time.Time) (*OLMSnapshot, error) {
 	return BuildOLMSnapshotAtWithEvidence(ctx, store, learnerID, domainID, now, nil)
 }
 
 // BuildOLMSnapshotAtWithEvidence is BuildOLMSnapshotAt with an optional
 // request-scoped evidence snapshot. Callers that already loaded the domain's
 // assessment and transfer facts avoid another pair of store round trips.
-func BuildOLMSnapshotAtWithEvidence(ctx context.Context, store storeport.Store, learnerID, domainID string, now time.Time, evidenceSnapshot *EvidenceSnapshot) (*OLMSnapshot, error) {
+func BuildOLMSnapshotAtWithEvidence(ctx context.Context, store OLMStore, learnerID, domainID string, now time.Time, evidenceSnapshot *EvidenceSnapshot) (*OLMSnapshot, error) {
 	domain, err := resolveActiveDomain(ctx, store, learnerID, domainID)
 	if err != nil {
 		return nil, err
@@ -349,7 +353,7 @@ func trendDirection(diff, threshold float64) string {
 // resolveActiveDomain returns the domain to use for the OLM. If domainID is
 // empty, picks the most recently created non-archived domain. Returns an error
 // if the learner has no active domain, or the requested domain is archived.
-func resolveActiveDomain(ctx context.Context, store storeport.Store, learnerID, domainID string) (*models.Domain, error) {
+func resolveActiveDomain(ctx context.Context, store storeport.DomainStore, learnerID, domainID string) (*models.Domain, error) {
 	if domainID == "" {
 		domains, err := store.GetDomainsByLearner(ctx, learnerID, false /*includeArchived*/)
 		if err != nil {
@@ -422,65 +426,6 @@ func formatFocusReason(a models.Alert) string {
 	return a.RecommendedAction
 }
 
-// FormatOLMEmbed renders an OLMSnapshot as a Discord embed, used by the
-// scheduler when no LLM-authored copy is queued. The text is intentionally
-// factual: distribution + focus + (one) metacognitive line if active +
-// goal progress phrase. No pep talk.
-func FormatOLMEmbed(snap *OLMSnapshot) DiscordEmbed {
-	title := "🧭 Current state"
-	color := colorInfo
-	switch snap.FocusUrgency {
-	case models.UrgencyCritical:
-		title = "🚨 State — one concept needs attention now"
-		color = colorCritical
-	case models.UrgencyWarning:
-		color = colorWarning
-	}
-
-	var lines []string
-
-	buckets := compactBuckets(snap)
-	if buckets != "" {
-		lines = append(lines, fmt.Sprintf("For **%s**:\n%s.", snap.DomainName, buckets))
-	}
-
-	if snap.FocusConcept != "" {
-		var prefix string
-		switch snap.FocusUrgency {
-		case models.UrgencyCritical:
-			prefix = "One concept needs attention now"
-		case models.UrgencyWarning:
-			prefix = "Current focus"
-		default:
-			prefix = "Next milestone"
-		}
-		lines = append(lines, fmt.Sprintf("%s : **%s** (%s).", prefix, snap.FocusConcept, snap.FocusReason))
-	}
-
-	if line := MetacogLine(snap); line != "" {
-		lines = append(lines, line)
-	}
-
-	if snap.PersonalGoal != "" {
-		lines = append(lines, fmt.Sprintf("Goal \"%s\": %s.", snap.PersonalGoal, progressPhrase(snap.EvidenceProgress)))
-	}
-
-	return DiscordEmbed{
-		Title:       title,
-		Description: strings.Join(lines, "\n\n"),
-		Color:       color,
-	}
-}
-
-// DiscordEmbed mirrors engine/scheduler.go's discordEmbed but is exported so
-// tests in this file (and the scheduler) can both build embeds. The scheduler
-// converts to its private discordEmbed by direct struct copy (same shape).
-type DiscordEmbed struct {
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Color       int    `json:"color"`
-}
-
 func compactBuckets(snap *OLMSnapshot) string {
 	parts := []string{}
 	if snap.Solid > 0 {
@@ -502,7 +447,7 @@ func compactBuckets(snap *OLMSnapshot) string {
 // in descending priority: calibration bias, then autonomy trend, then affect
 // trend. Empty string when no signal is active. Exported so any caller
 // that needs the metacog signal can produce the same text as the webhook's
-// FormatOLMEmbed.
+// OLM nudge brief.
 func MetacogLine(snap *OLMSnapshot) string {
 	if calibrationBiasIsActionable(snap.CalibrationBias, snap.CalibrationSamples) && snap.CalibrationBias > 0 {
 		return "You have been slightly over-estimating your knowledge for 3 sessions — a few cold exercises will help you recalibrate."

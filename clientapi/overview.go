@@ -28,11 +28,14 @@ const OverviewPath = "/api/client/v1/overview"
 const RequiredScope = models.OAuthScopeLearnerRead
 
 type API struct {
-	store  storeport.Store
+	store  storeport.TenantReadTxStore
 	logger *slog.Logger
 }
 
-func New(store storeport.Store, logger *slog.Logger) *API {
+// New serves the client views from store. Every learner read runs inside one
+// tenant read transaction; formation, catalogue, progress, training and
+// institution capabilities are optional ports discovered on the same value.
+func New(store storeport.TenantReadTxStore, logger *slog.Logger) *API {
 	if store == nil {
 		panic("clientapi: nil store")
 	}

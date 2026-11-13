@@ -278,7 +278,7 @@ impl WorkflowPermit {
         let expected_phase = match call.name() {
             "get_conversation_context" => "context_requested",
             "get_curriculum_snapshot" | "start_learning_session" => "context_confirmed",
-            "get_next_activity" => "session_open",
+            "prepare_pedagogical_turn" => "session_open",
             "prepare_assessment_attempt" => "activity_validated",
             "submit_assessment_attempt" => "response_committed",
             "record_interaction" => "evaluation_validated",
@@ -286,7 +286,7 @@ impl WorkflowPermit {
             "cancel_assessment_attempt" => "attempt_cancel_requested",
             "record_session_close" => "session_close_requested",
             "record_affect" => "affect_reported",
-            "get_memory_state" | "get_metacognitive_mirror" => "coaching_context_requested",
+            "get_memory_state" => "coaching_context_requested",
             _ => return Err(Error::Preconditions),
         };
         if value.get("operation_id").and_then(Value::as_str) != Some(call.operation_id())
@@ -818,7 +818,7 @@ mod tests {
             .replace_server_tools(
                 "epoch",
                 "tutor",
-                ["get_pending_alerts", "get_next_activity"]
+                ["get_learner_state", "prepare_pedagogical_turn"]
                     .into_iter()
                     .map(|name| ToolEntry {
                         server_id: "tutor".into(),
@@ -917,7 +917,12 @@ mod tests {
         drop(db);
         let mut journal = reopen(&root);
         let fields = VerifiedFields::new("epoch".into(), &journal).unwrap();
-        let proposed = call(&catalog, &fields, "get_next_activity", uuid::Uuid::new_v4());
+        let proposed = call(
+            &catalog,
+            &fields,
+            "prepare_pedagogical_turn",
+            uuid::Uuid::new_v4(),
+        );
         let id = proposed.operation_id().to_owned();
         let (authority, permit) = workflow(&mut journal, &proposed);
         let anchor = authority.state.anchor.clone();
@@ -967,11 +972,21 @@ mod tests {
     fn another_live_workflow_cannot_replace_a_retired_permits_authority() {
         let (_root, mut journal, catalog) = setup();
         let fields = VerifiedFields::new("epoch".into(), &journal).unwrap();
-        let first = call(&catalog, &fields, "get_next_activity", uuid::Uuid::new_v4());
+        let first = call(
+            &catalog,
+            &fields,
+            "prepare_pedagogical_turn",
+            uuid::Uuid::new_v4(),
+        );
         let (first_authority, first_permit) = workflow(&mut journal, &first);
         let source = first_permit.precondition.clone();
         drop(first_authority);
-        let second = call(&catalog, &fields, "get_next_activity", uuid::Uuid::new_v4());
+        let second = call(
+            &catalog,
+            &fields,
+            "prepare_pedagogical_turn",
+            uuid::Uuid::new_v4(),
+        );
         let (second_authority, _second_permit) = workflow(&mut journal, &second);
         assert!(matches!(
             WorkflowPermit::from_event(&journal, &source, "turn", &first, &second_authority),
@@ -983,12 +998,7 @@ mod tests {
     async fn a_finished_turn_also_retires_prepared_reads() {
         let (_root, mut journal, catalog) = setup();
         let fields = VerifiedFields::new("epoch".into(), &journal).unwrap();
-        let proposed = call(
-            &catalog,
-            &fields,
-            "get_pending_alerts",
-            uuid::Uuid::new_v4(),
-        );
+        let proposed = call(&catalog, &fields, "get_learner_state", uuid::Uuid::new_v4());
         let id = proposed.operation_id().to_owned();
         let prepared = ready(prepare(&mut journal, "turn", proposed, None).unwrap());
         journal
@@ -1016,12 +1026,7 @@ mod tests {
             journal.operation(&id).unwrap().unwrap().state,
             OperationState::Rejected
         );
-        let another = call(
-            &catalog,
-            &fields,
-            "get_pending_alerts",
-            uuid::Uuid::new_v4(),
-        );
+        let another = call(&catalog, &fields, "get_learner_state", uuid::Uuid::new_v4());
         assert!(matches!(
             prepare(&mut journal, "turn", another, None),
             Err(Error::Preconditions)
@@ -1055,7 +1060,12 @@ mod tests {
         }
         let (_root, mut journal, catalog) = setup();
         let fields = VerifiedFields::new("epoch".into(), &journal).unwrap();
-        let proposed = call(&catalog, &fields, "get_next_activity", uuid::Uuid::new_v4());
+        let proposed = call(
+            &catalog,
+            &fields,
+            "prepare_pedagogical_turn",
+            uuid::Uuid::new_v4(),
+        );
         let id = proposed.operation_id().to_owned();
         let (authority, permit) = workflow(&mut journal, &proposed);
         let prepared = ready(prepare(&mut journal, "turn", proposed, Some(permit)).unwrap());
@@ -1123,7 +1133,12 @@ mod tests {
         }
         let (_root, mut journal, catalog) = setup();
         let fields = VerifiedFields::new("epoch".into(), &journal).unwrap();
-        let proposed = call(&catalog, &fields, "get_next_activity", uuid::Uuid::new_v4());
+        let proposed = call(
+            &catalog,
+            &fields,
+            "prepare_pedagogical_turn",
+            uuid::Uuid::new_v4(),
+        );
         let id = proposed.operation_id().to_owned();
         let (authority, permit) = workflow(&mut journal, &proposed);
         let prepared = ready(prepare(&mut journal, "turn", proposed, Some(permit)).unwrap());
@@ -1159,9 +1174,9 @@ mod tests {
     #[test]
     fn contract_receipt_retains_exact_schema_arguments_keys_and_source_links() {
         for (name, phase, mechanism) in [
-            ("get_pending_alerts", None, "none"),
+            ("get_learner_state", None, "none"),
             (
-                "get_next_activity",
+                "prepare_pedagogical_turn",
                 Some("session_open"),
                 "params._meta.idempotency_key",
             ),
@@ -1263,7 +1278,7 @@ mod tests {
             }
             assert_eq!(
                 saved["effect"],
-                if name == "get_pending_alerts" {
+                if name == "get_learner_state" {
                     "read_only"
                 } else if name == "get_memory_state" {
                     "mutation_without_replay_contract"
@@ -1292,7 +1307,7 @@ mod tests {
             prepare(
                 &mut journal,
                 "turn",
-                call(&catalog, &fields, "get_pending_alerts", id),
+                call(&catalog, &fields, "get_learner_state", id),
                 None,
             )
             .unwrap(),
@@ -1302,7 +1317,7 @@ mod tests {
             prepare(
                 &mut journal,
                 "turn",
-                call(&catalog, &fields, "get_pending_alerts", id),
+                call(&catalog, &fields, "get_learner_state", id),
                 None,
             )
             .unwrap(),
@@ -1316,7 +1331,7 @@ mod tests {
                 "new-connection",
                 "tutor",
                 vec![catalog
-                    .resolve("epoch", "tutor/get_pending_alerts")
+                    .resolve("epoch", "tutor/get_learner_state")
                     .unwrap()
                     .clone()],
             )
@@ -1342,7 +1357,7 @@ mod tests {
         let call = validate_call(
             &fresh,
             "new-connection",
-            "tutor/get_pending_alerts",
+            "tutor/get_learner_state",
             &json!({}),
             &fields,
             id,
@@ -1376,7 +1391,7 @@ mod tests {
             prepare(
                 &mut original,
                 "turn",
-                call(&catalog, &fields, "get_pending_alerts", id),
+                call(&catalog, &fields, "get_learner_state", id),
                 None,
             )
             .unwrap(),
@@ -1420,7 +1435,7 @@ mod tests {
                     prepare(
                         &mut journal,
                         "turn",
-                        call(&catalog, &fields, "get_pending_alerts", id),
+                        call(&catalog, &fields, "get_learner_state", id),
                         None
                     ),
                     Err(Error::Preconditions)
@@ -1451,14 +1466,14 @@ mod tests {
             prepare(
                 &mut journal,
                 "turn",
-                call(&catalog, &fields, "get_pending_alerts", id),
+                call(&catalog, &fields, "get_learner_state", id),
                 None,
             )
             .unwrap(),
         );
         let original = journal.resolve_content(&prepared.contract).unwrap();
         let mut entry = catalog
-            .resolve("epoch", "tutor/get_pending_alerts")
+            .resolve("epoch", "tutor/get_learner_state")
             .unwrap()
             .clone();
         // The same arguments remain valid; schema equivalence is insufficient.
@@ -1470,7 +1485,7 @@ mod tests {
             prepare(
                 &mut journal,
                 "turn",
-                call(&catalog, &fields, "get_pending_alerts", id),
+                call(&catalog, &fields, "get_learner_state", id),
                 None
             ),
             Err(Error::Preconditions)
@@ -1508,7 +1523,7 @@ mod tests {
             match prepare(
                 &mut journal,
                 "turn",
-                call(&catalog, &fields, "get_pending_alerts", id),
+                call(&catalog, &fields, "get_learner_state", id),
                 None,
             ) {
                 Err(Error::Storage) => (),
@@ -1542,7 +1557,7 @@ mod tests {
                 prepare(
                     &mut journal,
                     "turn",
-                    call(&catalog, &fields, "get_pending_alerts", id),
+                    call(&catalog, &fields, "get_learner_state", id),
                     None,
                 )
                 .unwrap(),
@@ -1590,7 +1605,7 @@ mod tests {
                 .prepare_operation(OperationRequest {
                     id: &id.to_string(),
                     turn_id: Some("turn"),
-                    tool: "tutor/get_pending_alerts",
+                    tool: "tutor/get_learner_state",
                     arguments: &json!({}),
                     idempotency_key: None,
                     mutating: false,
@@ -1610,7 +1625,7 @@ mod tests {
                 prepare(
                     &mut journal,
                     "turn",
-                    call(&catalog, &fields, "get_pending_alerts", id),
+                    call(&catalog, &fields, "get_learner_state", id),
                     None
                 ),
                 Err(Error::RecoveryRequired)
@@ -1635,7 +1650,7 @@ mod tests {
             prepare(
                 &mut journal,
                 "turn",
-                call(&catalog, &fields, "get_pending_alerts", id),
+                call(&catalog, &fields, "get_learner_state", id),
                 None,
             )
             .unwrap(),
@@ -1644,12 +1659,7 @@ mod tests {
             prepare(
                 &mut journal,
                 "turn",
-                call(
-                    &catalog,
-                    &fields,
-                    "get_pending_alerts",
-                    uuid::Uuid::new_v4(),
-                ),
+                call(&catalog, &fields, "get_learner_state", uuid::Uuid::new_v4()),
                 None,
             )
             .unwrap(),
@@ -1693,7 +1703,7 @@ mod tests {
             prepare(
                 &mut journal,
                 "turn",
-                call(&catalog, &fields, "get_pending_alerts", denied_id),
+                call(&catalog, &fields, "get_learner_state", denied_id),
                 None,
             )
             .unwrap(),
@@ -1725,7 +1735,7 @@ mod tests {
             prepare(
                 &mut journal,
                 "turn",
-                call(&catalog, &fields, "get_pending_alerts", id),
+                call(&catalog, &fields, "get_learner_state", id),
                 None,
             )
             .unwrap(),
@@ -1750,7 +1760,7 @@ mod tests {
         let replay = prepare(
             &mut journal,
             "turn",
-            call(&catalog, &fields, "get_pending_alerts", id),
+            call(&catalog, &fields, "get_learner_state", id),
             None,
         )
         .unwrap();
@@ -1771,13 +1781,13 @@ mod tests {
             prepare(
                 &mut journal,
                 "turn",
-                call(&catalog, &fields, "get_next_activity", id),
+                call(&catalog, &fields, "prepare_pedagogical_turn", id),
                 None
             ),
             Err(Error::Preconditions)
         ));
         assert!(journal.operation(&id.to_string()).unwrap().is_none());
-        let proposed = call(&catalog, &fields, "get_next_activity", id);
+        let proposed = call(&catalog, &fields, "prepare_pedagogical_turn", id);
         let (_permit_authority, permit) = workflow(&mut journal, &proposed);
         let prepared = ready(prepare(&mut journal, "turn", proposed, Some(permit)).unwrap());
         let mut transport = FakeTransport {
@@ -1803,7 +1813,12 @@ mod tests {
             OperationState::Unknown
         );
         assert!(journal.has_unresolved_mutations().unwrap());
-        let next = call(&catalog, &fields, "get_next_activity", uuid::Uuid::new_v4());
+        let next = call(
+            &catalog,
+            &fields,
+            "prepare_pedagogical_turn",
+            uuid::Uuid::new_v4(),
+        );
         let (_next_permit_authority, next_permit) = workflow(&mut journal, &next);
         assert!(matches!(
             prepare(&mut journal, "turn", next, Some(next_permit)),
@@ -1813,12 +1828,7 @@ mod tests {
         assert!(prepare(
             &mut journal,
             "turn",
-            call(
-                &catalog,
-                &fields,
-                "get_pending_alerts",
-                uuid::Uuid::new_v4()
-            ),
+            call(&catalog, &fields, "get_learner_state", uuid::Uuid::new_v4()),
             None
         )
         .is_ok());
@@ -1834,7 +1844,7 @@ mod tests {
                 prepare(
                     &mut journal,
                     "turn",
-                    call(&catalog, &fields, "get_pending_alerts", id),
+                    call(&catalog, &fields, "get_learner_state", id),
                     None,
                 )
                 .unwrap(),
@@ -1869,7 +1879,12 @@ mod tests {
     async fn mutation_error_is_preserved_without_claiming_a_rollback() {
         let (_root, mut journal, catalog) = setup();
         let fields = VerifiedFields::new("epoch".into(), &journal).unwrap();
-        let proposed = call(&catalog, &fields, "get_next_activity", uuid::Uuid::new_v4());
+        let proposed = call(
+            &catalog,
+            &fields,
+            "prepare_pedagogical_turn",
+            uuid::Uuid::new_v4(),
+        );
         let id = proposed.operation_id().to_owned();
         let (_permit_authority, permit) = workflow(&mut journal, &proposed);
         let prepared = ready(prepare(&mut journal, "turn", proposed, Some(permit)).unwrap());
@@ -1913,10 +1928,20 @@ mod tests {
     async fn already_prepared_write_is_blocked_after_an_earlier_call_becomes_unknown() {
         let (_root, mut journal, catalog) = setup();
         let fields = VerifiedFields::new("epoch".into(), &journal).unwrap();
-        let a = call(&catalog, &fields, "get_next_activity", uuid::Uuid::new_v4());
+        let a = call(
+            &catalog,
+            &fields,
+            "prepare_pedagogical_turn",
+            uuid::Uuid::new_v4(),
+        );
         let (_a_permit_authority, a_permit) = workflow(&mut journal, &a);
         let a = ready(prepare(&mut journal, "turn", a, Some(a_permit)).unwrap());
-        let b = call(&catalog, &fields, "get_next_activity", uuid::Uuid::new_v4());
+        let b = call(
+            &catalog,
+            &fields,
+            "prepare_pedagogical_turn",
+            uuid::Uuid::new_v4(),
+        );
         let b_id = b.operation_id().to_owned();
         let (_b_permit_authority, b_permit) = workflow(&mut journal, &b);
         let b = ready(prepare(&mut journal, "turn", b, Some(b_permit)).unwrap());
@@ -1966,7 +1991,7 @@ mod tests {
             prepare(
                 &mut first,
                 "turn",
-                call(&catalog, &fields, "get_pending_alerts", id),
+                call(&catalog, &fields, "get_learner_state", id),
                 None,
             )
             .unwrap(),
@@ -1975,7 +2000,7 @@ mod tests {
             .prepare_operation(OperationRequest {
                 id: &id.to_string(),
                 turn_id: Some("turn"),
-                tool: "tutor/get_pending_alerts",
+                tool: "tutor/get_learner_state",
                 arguments: &json!({"limit":99}),
                 idempotency_key: None,
                 mutating: false,
@@ -2012,9 +2037,9 @@ mod tests {
         let first_fields = VerifiedFields::new("epoch".into(), &first).unwrap();
         let second_fields = VerifiedFields::new("epoch".into(), &second).unwrap();
         let id = uuid::Uuid::new_v4();
-        let a = call(&catalog, &first_fields, "get_next_activity", id);
+        let a = call(&catalog, &first_fields, "prepare_pedagogical_turn", id);
         let (_proof_authority, proof) = workflow(&mut first, &a);
-        let b = call(&catalog, &second_fields, "get_next_activity", id);
+        let b = call(&catalog, &second_fields, "prepare_pedagogical_turn", id);
         assert!(matches!(
             prepare(&mut second, "turn", b, Some(proof)),
             Err(Error::Preconditions)

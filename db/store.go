@@ -29,7 +29,6 @@ import (
 // signature drifts from store.Store (or the interface was mis-transcribed), this
 // line fails to build — caught here, never at runtime.
 var _ store.Store = (*Store)(nil)
-var _ store.InstitutionAccountStore = (*Store)(nil)
 
 // sqlExecutor is implemented by both *sql.DB and *sql.Tx, so Store methods run
 // transparently on a connection or inside a WithTx transaction.
@@ -79,7 +78,8 @@ func (e *DomainQuotaError) Error() string {
 }
 
 // SetMaxActiveDomainsPerLearner configures the per-learner active-domain
-// quota enforced at domain creation. Values below 1 restore the default.
+// quota enforced at domain creation and restoration. Values below 1 restore
+// the default.
 func (s *Store) SetMaxActiveDomainsPerLearner(limit int) {
 	if limit < 1 {
 		limit = 0
@@ -92,6 +92,23 @@ func (s *Store) activeDomainLimit() int {
 		return DefaultMaxActiveDomainsPerLearner
 	}
 	return s.maxActiveDomains
+}
+
+// lockLearnerDomainQuota serializes the COUNT-then-INSERT of domain creation
+// per learner. SQLite already runs every write transaction under BEGIN
+// IMMEDIATE (one writer); PostgreSQL READ COMMITTED would let two concurrent
+// creations both observe the last free slot, so a transaction-scoped advisory
+// lock keyed on the learner closes that window without locking the learner
+// row against unrelated foreign-key readers. It must run inside the
+// creation transaction and is released at COMMIT/ROLLBACK.
+func (s *Store) lockLearnerDomainQuota(ctx context.Context, learnerID string) error {
+	if s.dialect != DialectPostgres {
+		return nil
+	}
+	if _, err := s.exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended(?, 0))`, "tutor-mcp:domain-quota:"+learnerID); err != nil {
+		return fmt.Errorf("lock learner domain quota: %w", err)
+	}
+	return nil
 }
 
 type tenantTransactionContext struct {
@@ -290,7 +307,7 @@ func (f *flexTime) parse(s string) error {
 // Serializable isolation translates to BEGIN IMMEDIATE on modernc.org/sqlite,
 // which acquires the writer lock at tx start instead of at first write. Required
 // for read-modify-write patterns where concurrent goroutines would otherwise
-// both read a stale snapshot and one overwrite the other on commit (R008).
+// both read a stale snapshot and one overwrite the other on commit.
 func (s *Store) WithTx(ctx context.Context, fn func(s store.Store) error) error {
 	if scoped, ok := ctx.Value(tenantTransactionContextKey{}).(*tenantTransactionContext); ok {
 		if !s.matchesTenantTransaction(scoped) {
@@ -316,7 +333,7 @@ func (s *Store) WithTx(ctx context.Context, fn func(s store.Store) error) error 
 	if s.dialect == DialectPostgres {
 		iso = sql.LevelReadCommitted
 	}
-	tx, err := s.root.BeginTx(ctx, &sql.TxOptions{Isolation: iso})
+	tx, err := s.beginObservedTx(ctx, s.root, &sql.TxOptions{Isolation: iso})
 	if err != nil {
 		return err
 	}
@@ -388,21 +405,20 @@ func (s *Store) withTenantTransaction(ctx context.Context, scope models.TenantSc
 			defer func() { resultErr = errors.Join(resultErr, cleanup()) }()
 		}
 	} else {
-		tx, err = pool.BeginTx(ctx, &sql.TxOptions{Isolation: iso, ReadOnly: readOnly})
+		tx, err = s.beginObservedTx(ctx, pool, &sql.TxOptions{Isolation: iso, ReadOnly: readOnly})
 	}
 	if err != nil {
 		return fmt.Errorf("tenant transaction: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	if s.dialect == DialectPostgres {
-		for setting, value := range map[string]string{
-			"app.current_tenant":     scope.TenantID,
-			"app.current_user":       scope.UserID,
-			"app.current_membership": scope.MembershipID,
-		} {
-			if _, err := tx.ExecContext(ctx, `SELECT set_config($1, $2, true)`, setting, value); err != nil {
-				return fmt.Errorf("tenant transaction: set %s: %w", setting, err)
-			}
+		// One round trip binds the whole RLS identity. The settings are
+		// transaction-local (is_local = true) and vanish at COMMIT/ROLLBACK.
+		if _, err := tx.ExecContext(ctx, `SELECT set_config('app.current_tenant', $1, true),
+			set_config('app.current_user', $2, true),
+			set_config('app.current_membership', $3, true)`,
+			scope.TenantID, scope.UserID, scope.MembershipID); err != nil {
+			return fmt.Errorf("tenant transaction: bind identity: %w", err)
 		}
 	}
 	copyScope := scope
@@ -439,7 +455,7 @@ func (s *Store) inTx(ctx context.Context, opts *sql.TxOptions, fn func(txs *Stor
 	if s.root == nil {
 		return fn(s)
 	}
-	tx, err := s.root.BeginTx(ctx, opts)
+	tx, err := s.beginObservedTx(ctx, s.root, opts)
 	if err != nil {
 		return err
 	}
@@ -1059,8 +1075,7 @@ func (s *Store) RotateRefreshTokenWithScope(ctx context.Context, token, clientID
 			     WHERE tm.tenant_id = refresh_tokens.tenant_id AND tm.id = refresh_tokens.membership_id
 			       AND tm.user_id = refresh_tokens.user_id AND tm.status = 'active'
 			       AND tm.version = refresh_tokens.membership_version
-			       AND COALESCE(tm.learner_id, '') = COALESCE(refresh_tokens.learner_id, '')
-			       AND (tm.mfa_required = 0 OR tm.mfa_verified_at IS NOT NULL))
+			       AND COALESCE(tm.learner_id, '') = COALESCE(refresh_tokens.learner_id, ''))
 			 RETURNING user_id, tenant_id, membership_id, membership_version, COALESCE(learner_id, ''),
 			           client_id, resource, scope, family_id`,
 			now, successor.FamilyID, refreshTokenHash(token), now, clientID, resource,
@@ -1212,6 +1227,9 @@ func (s *Store) CreateDomainWithValueFramings(ctx context.Context, learnerID, na
 	err = s.inTx(ctx, nil, func(txs *Store) error {
 		identity, err := txs.domainLearnerScope(ctx, learnerID)
 		if err != nil {
+			return err
+		}
+		if err := txs.lockLearnerDomainQuota(ctx, learnerID); err != nil {
 			return err
 		}
 		if err := txs.ensureFreeDomainAllowed(ctx, learnerID); err != nil {
@@ -1494,21 +1512,54 @@ func (s *Store) ArchiveDomain(ctx context.Context, domainID, learnerID string) e
 	})
 }
 
+// UnarchiveDomain makes an archived domain active again. Restoring a free
+// (non-formation) domain consumes an active-domain slot exactly like creating
+// one, so it takes the same per-learner quota lock and count; formation
+// domains are provisioned by enrollment and stay outside the quota, as at
+// creation. Unarchiving an already active domain is a no-op success.
 func (s *Store) UnarchiveDomain(ctx context.Context, domainID, learnerID string) error {
-	result, err := s.exec(ctx,
-		`UPDATE domains SET archived = 0 WHERE id = ? AND learner_id = ? AND deleted_at IS NULL
-		 AND (formation_enrollment_id = '' OR EXISTS (SELECT 1 FROM enrollments e
-		 WHERE e.tenant_id = domains.tenant_id AND e.id = domains.formation_enrollment_id AND e.status = 'active'))`,
-		domainID, learnerID,
-	)
-	if err != nil {
-		return fmt.Errorf("unarchive domain: %w", err)
-	}
-	n, _ := result.RowsAffected()
-	if n == 0 {
-		return fmt.Errorf("domain not found")
-	}
-	return nil
+	return s.inTx(ctx, nil, func(txs *Store) error {
+		if err := txs.lockLearnerDomainQuota(ctx, learnerID); err != nil {
+			return err
+		}
+		var archived int
+		var enrollmentID string
+		err := txs.queryRow(ctx,
+			`SELECT archived, formation_enrollment_id FROM domains WHERE id = ? AND learner_id = ? AND deleted_at IS NULL`,
+			domainID, learnerID,
+		).Scan(&archived, &enrollmentID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("domain not found")
+		}
+		if err != nil {
+			return fmt.Errorf("unarchive domain: %w", err)
+		}
+		if archived != 0 && enrollmentID == "" {
+			var active int
+			if err := txs.queryRow(ctx,
+				`SELECT COUNT(*) FROM domains WHERE learner_id = ? AND deleted_at IS NULL AND archived = 0`, learnerID,
+			).Scan(&active); err != nil {
+				return fmt.Errorf("count active domains: %w", err)
+			}
+			if limit := txs.activeDomainLimit(); active >= limit {
+				return &DomainQuotaError{Limit: limit}
+			}
+		}
+		result, err := txs.exec(ctx,
+			`UPDATE domains SET archived = 0 WHERE id = ? AND learner_id = ? AND deleted_at IS NULL
+			 AND (formation_enrollment_id = '' OR EXISTS (SELECT 1 FROM enrollments e
+			 WHERE e.tenant_id = domains.tenant_id AND e.id = domains.formation_enrollment_id AND e.status = 'active'))`,
+			domainID, learnerID,
+		)
+		if err != nil {
+			return fmt.Errorf("unarchive domain: %w", err)
+		}
+		n, _ := result.RowsAffected()
+		if n == 0 {
+			return fmt.Errorf("domain not found")
+		}
+		return nil
+	})
 }
 
 // ActiveDomainConceptSet returns the set of concepts that belong to at least
@@ -2549,7 +2600,6 @@ func (s *Store) GetAuthCode(ctx context.Context, code, clientID string) (*models
                    WHERE tm.tenant_id = oauth_codes.tenant_id AND tm.id = oauth_codes.membership_id
                      AND tm.user_id = oauth_codes.user_id AND tm.status = 'active'
                      AND tm.version = oauth_codes.membership_version
-                     AND (tm.mfa_required = 0 OR tm.mfa_verified_at IS NOT NULL)
                      AND ((oauth_codes.learner_id IS NULL AND tm.learner_id IS NULL AND u.email_verified_at IS NOT NULL)
                        OR (l.id = oauth_codes.learner_id AND ((l.identity_mode = 'email' AND l.email_verified_at IS NOT NULL) OR l.identity_mode = 'username')))
 		   )`,
@@ -2599,7 +2649,6 @@ func (s *Store) ConsumeAuthCode(ctx context.Context, code, clientID string) (*mo
                    WHERE tm.tenant_id = oauth_codes.tenant_id AND tm.id = oauth_codes.membership_id
                      AND tm.user_id = oauth_codes.user_id AND tm.status = 'active'
                      AND tm.version = oauth_codes.membership_version
-                     AND (tm.mfa_required = 0 OR tm.mfa_verified_at IS NOT NULL)
                      AND ((oauth_codes.learner_id IS NULL AND tm.learner_id IS NULL AND u.email_verified_at IS NOT NULL)
                        OR (l.id = oauth_codes.learner_id AND ((l.identity_mode = 'email' AND l.email_verified_at IS NOT NULL) OR l.identity_mode = 'username')))
 		   )
@@ -2784,9 +2833,17 @@ func (s *Store) GetOAuthClient(ctx context.Context, clientID string) (*models.OA
 	return c, nil
 }
 
-// CleanupExpiredOAuthClients removes only ephemeral DCR clients. Long-lived
-// preregistered clients have NULL expires_at and are never selected. Related
-// credentials are invalidated first so no orphan can remain redeemable.
+// CleanupExpiredOAuthClients removes only ephemeral DCR clients: a client
+// whose first code exchange succeeded has NULL expires_at, as do
+// preregistered clients, and is never selected. Related credentials visible
+// to this transaction are invalidated first. Under PostgreSQL row-level
+// security this global transaction sees no tenant's oauth_codes or
+// refresh_tokens, so those rows survive the client: neither table has a
+// foreign key to oauth_clients (CIMD client identifiers are never stored
+// there). They stay unusable because the token endpoint resolves the client
+// before any grant and a purged DCR identifier no longer resolves
+// (invalid_client), so they are inert rows. Consents of other tenants are removed by the
+// cascading foreign key of learner_approved_clients.
 func (s *Store) CleanupExpiredOAuthClients(ctx context.Context) (int64, error) {
 	var removed int64
 	now := time.Now().UTC()
@@ -2846,7 +2903,7 @@ func (s *Store) CleanupExpiredOAuthClients(ctx context.Context) (int64, error) {
 }
 
 // IsClientApproved reports whether the learner has previously consented to the
-// given OAuth client for this exact redirect_uri. R001: the consent screen is
+// given OAuth client for this exact redirect_uri. the consent screen is
 // only meaningful when there's something to approve — once a (learner, client,
 // redirect_uri) triple is on file, the next /authorize POST may skip the
 // approve_client prompt. A different redirect_uri (even on the same client)
@@ -2877,7 +2934,7 @@ func (s *Store) IsClientApprovedForScope(ctx context.Context, learnerID, clientI
 
 // ApproveClient records that the learner has consented to the OAuth client for
 // this exact redirect_uri. Idempotent: re-approving the same triple is a no-op
-// (ON CONFLICT DO NOTHING preserves the original approved_at timestamp). R001.
+// (ON CONFLICT DO NOTHING preserves the original approved_at timestamp).
 func (s *Store) ApproveClient(ctx context.Context, learnerID, clientID, redirectURI string) error {
 	return s.ApproveClientForScope(ctx, learnerID, clientID, redirectURI, models.OAuthScopeLearner)
 }
@@ -2987,8 +3044,8 @@ func (s *Store) GetActivityStreak(ctx context.Context, learnerID string) (int, e
 
 // fragileThreshold mirrors the engine.NodeClassify fragile boundary. The
 // mastered-cutoff was previously a duplicate const here (mirrored from
-// algorithms.KSTMasteryThreshold = 0.70), but it now reads through
-// algorithms.MasteryKST() at the call site to honour REGULATION_THRESHOLD.
+// a former KST threshold constant), but it now reads through
+// algorithms.MasteryKST() at the call site.
 // The "db can't import algorithms" comment that lived here was outdated:
 // algorithms is a leaf package and motivation_queries.go already imports it.
 const fragileThreshold = 0.30

@@ -20,18 +20,7 @@ func TestMCPHTTPExistingSessionIsRevokedBeforeErasureDeletesData(t *testing.T) {
 			actors := f.seedTenant(t, "erasure-http", 2)
 			ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 			defer cancel()
-			ownerUser, err := f.admin.GetLocalUserByEmail(ctx, "owner@erasure-http.test")
-			if err != nil {
-				t.Fatal(err)
-			}
-			memberships, err := f.admin.ListActiveMembershipsForUser(ctx, ownerUser.ID)
-			if err != nil || len(memberships) != 1 {
-				t.Fatalf("owner memberships: %v %v", memberships, err)
-			}
-			owner, err := f.admin.GetPrincipal(ctx, mcpHTTPMembershipScope(&memberships[0]), []string{models.OAuthScopeLearner})
-			if err != nil {
-				t.Fatal(err)
-			}
+			owner := f.ownerPrincipal(t, "erasure-http")
 			server := startMCPHTTPFixture(t, f)
 			victim := connectMCPHTTPActor(t, ctx, server, actors[0])
 			sibling := connectMCPHTTPActor(t, ctx, server, actors[1])
@@ -58,7 +47,7 @@ func TestMCPHTTPExistingSessionIsRevokedBeforeErasureDeletesData(t *testing.T) {
 			if _, _, err := callMCPHTTPTool(ctx, victim, "update_learner_profile", args); err == nil {
 				t.Fatal("existing MCP session replayed a receipt after revocation")
 			}
-			for _, name := range []string{"get_learner_context", "update_learner_profile"} {
+			for _, name := range []string{"get_learner_state", "update_learner_profile"} {
 				body, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{
 					"name": name, "arguments": map[string]any{"objective": "forbidden rewrite", "idempotency_key": "after-erasure"},
 				}})

@@ -53,15 +53,12 @@ data and only sets the bound that domain creation enforces inside the caller's
 tenant transaction. Tenant-scoped Stores derived from the root Store inherit
 the value.
 
-Institution accounts (browser console, invitations and self-service signup)
-resolve their tenant from a typed secret, like the credentials above:
-`ConsoleSessionCredential`, `InvitationCredential`, `SignupCredential` and
-`PasswordResetCredential` carry the raw link or cookie token and the store keeps only its digest. Two
-global catalog reads are added to the fingerprint: `TenantSlugAvailable`
-checks whether an institution identifier is free before a signup email is
-sent, and `PlanIsActive` validates the configured signup plan at startup.
-Neither reads tenant-owned data. The MFA ceremony, console membership reads
-and member administration take a `models.TenantScope` or `models.Principal`.
+Institution provisioning goes through the control plane and native key
+identities. The password-based browser console, with its sessions, TOTP
+ceremony and institution password resets, was removed (2026-11-12), followed by
+self-service signup, tenant invitations and membership MFA gating
+(2026-11-13); their store methods and tables no longer exist.
+Member administration takes a `models.Principal`.
 
 `GetLearnerDomainByID` (2026-10-04) narrows the legacy `GetDomainByID`: it
 adds the owning learner to the query so that a domain identifier supplied by an
@@ -120,6 +117,7 @@ checks its exact persisted scopes, lifetime, revocation, current key version and
 live membership. Bootstrap, native member provisioning and exact-user migration
 require `models.ControlPlanePrincipal`; HTTP authentication cannot create an
 owner or choose membership roles. Native staff have no fabricated learner.
-Legacy email/username/local accounts retain their existing MFA requirements;
-only explicitly provisioned or operator-migrated public-key accounts use the
-native authentication policy.
+Legacy email/username/local accounts sign in with a password only for
+learner memberships; only explicitly provisioned or operator-migrated
+public-key accounts use the native authentication policy, which is the only
+way staff authenticate.

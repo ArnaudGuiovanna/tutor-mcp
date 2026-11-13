@@ -23,9 +23,10 @@ func TestEvidenceHotPathsUseOneBatchPerDomain(t *testing.T) {
 		name     string
 		register func(*mcp.Server, *Deps)
 		tool     string
+		args     map[string]any
 	}{
-		{name: "dashboard", register: registerGetDashboardState, tool: "get_dashboard_state"},
-		{name: "next_activity", register: registerGetNextActivity, tool: "get_next_activity"},
+		{name: "progress", register: registerGetLearnerState, tool: "get_learner_state", args: map[string]any{"view": "progress"}},
+		{name: "next_activity", register: registerPreparePedagogicalTurn, tool: "prepare_pedagogical_turn", args: map[string]any{"mode": "activity"}},
 	}
 
 	for _, tc := range tests {
@@ -39,9 +40,11 @@ func TestEvidenceHotPathsUseOneBatchPerDomain(t *testing.T) {
 			counting := &evidenceCountingStore{Store: store}
 			deps.Store = counting
 
-			res := callTool(t, deps, tc.register, "L_owner", tc.tool, map[string]any{
-				"domain_id": domain.ID,
-			})
+			args := map[string]any{"domain_id": domain.ID}
+			for key, value := range tc.args {
+				args[key] = value
+			}
+			res := callTool(t, deps, tc.register, "L_owner", tc.tool, args)
 			if res.IsError {
 				t.Fatalf("%s failed: %q", tc.tool, resultText(res))
 			}

@@ -117,7 +117,11 @@ func WithBoundedMCPRequestBody(r *http.Request, body []byte) *http.Request {
 // the receiving middleware remains the authorization fallback. The body is
 // independently bounded so a future wiring change cannot turn this preflight
 // into an unbounded read.
-func OAuthScopeHTTPMiddleware(baseURL string, maxBodyBytes int64, granular bool, next http.Handler) http.Handler {
+func OAuthScopeHTTPMiddleware(deps *Deps, maxBodyBytes int64, next http.Handler) http.Handler {
+	baseURL, granular := "", false
+	if deps != nil {
+		baseURL, granular = deps.BaseURL, deps.OAuthGranularScopes
+	}
 	if maxBodyBytes <= 0 {
 		panic("OAuth scope preflight body limit must be positive")
 	}
@@ -159,7 +163,7 @@ func OAuthScopeHTTPMiddleware(baseURL string, maxBodyBytes int64, granular bool,
 		}
 
 		required, known, scopeErr := requiredOAuthScopesForCall(&mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Name: call.Params.Name, Arguments: call.Params.Arguments}})
-		if scopeErr != nil || !known || !oauthToolAvailable(call.Params.Name) {
+		if scopeErr != nil || !known || !oauthToolAvailable(deps, call.Params.Name) {
 			next.ServeHTTP(w, r)
 			return
 		}

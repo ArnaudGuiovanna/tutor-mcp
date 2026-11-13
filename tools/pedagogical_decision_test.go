@@ -23,12 +23,12 @@ func TestPedagogicalDecisionBindingLifecycle(t *testing.T) {
 	if err := store.UpdateDomainPhase(context.Background(), domain.ID, models.PhaseDiagnostic, 0.469, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	activity := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{"domain_id": domain.ID})
+	activity := callNextActivity(t, deps, "L_owner", map[string]any{"domain_id": domain.ID})
 	if activity.IsError {
 		t.Fatal(resultText(activity))
 	}
 	out := decodeResult(t, activity)
-	id, _ := out["decision_id"].(string)
+	id := decisionIDOf(out)
 	if id == "" {
 		t.Fatalf("no decision: %v", out)
 	}
@@ -60,7 +60,7 @@ func TestPedagogicalDecisionBindingLifecycle(t *testing.T) {
 		"domain_id": domain.ID, "session_id": decision.SessionID, "decision_id": id,
 		"concept": decision.Contract.TargetConcept, "activity_type": string(decision.Contract.RecommendedActivityType),
 		"observable": "Explain the result", "task_text": "Generated task frozen before the learner responds",
-		"rubric_json": `{"criteria":[{"id":"correctness","description":"Correct result and explanation","max_score":1,"anchors":[{"score":1,"description":"Both correct"}]}],"passing_score":1,"answer_key":"Generated reference explanation"}`,
+		"rubric": json.RawMessage(`{"criteria":[{"id":"correctness","description":"Correct result and explanation","max_score":1,"anchors":[{"score":1,"description":"Both correct"}]}],"passing_score":1,"answer_key":"Generated reference explanation"}`),
 	}
 	wrong := map[string]any{}
 	for k, v := range args {
@@ -112,7 +112,7 @@ func TestPedagogicalDecisionBindingLifecycle(t *testing.T) {
 	}
 	eval := assessmentEvaluationArgs(domain.ID, decision.SessionID, attemptID, true)
 	eval["concept"], eval["activity_type"] = args["concept"], args["activity_type"]
-	eval["rubric_score_json"] = `{"criteria_scores":[{"id":"correctness","score":1,"evidence":"The committed answer explains the result"}]}`
+	eval["rubric_score"] = json.RawMessage(`{"criteria_scores":[{"id":"correctness","score":1,"evidence":"The committed answer explains the result"}]}`)
 	graded := callTool(t, deps, registerRecordInteraction, "L_owner", "record_interaction", eval)
 	if graded.IsError {
 		t.Fatal(resultText(graded))
@@ -152,11 +152,11 @@ func TestPedagogicalDecisionBindingLifecycle(t *testing.T) {
 func TestPedagogicalDecisionRejectsStaleCurriculum(t *testing.T) {
 	store, deps := setupToolsTest(t)
 	domain := makeOwnerDomain(t, store, "L_owner", "stale-decision")
-	res := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{"domain_id": domain.ID})
+	res := callNextActivity(t, deps, "L_owner", map[string]any{"domain_id": domain.ID})
 	if res.IsError {
 		t.Fatal(resultText(res))
 	}
-	id := decodeResult(t, res)["decision_id"].(string)
+	id := decisionIDOf(decodeResult(t, res))
 	decision, err := store.GetPedagogicalDecision(context.Background(), models.LegacyPrincipal("L_owner").TenantScope(), id)
 	if err != nil {
 		t.Fatal(err)
@@ -168,7 +168,7 @@ func TestPedagogicalDecisionRejectsStaleCurriculum(t *testing.T) {
 	res = callTool(t, deps, registerPrepareAssessmentAttempt, "L_owner", "prepare_assessment_attempt", map[string]any{
 		"domain_id": domain.ID, "session_id": decision.SessionID, "decision_id": id,
 		"concept": decision.Contract.TargetConcept, "activity_type": string(decision.Contract.RecommendedActivityType),
-		"observable": "Explain", "task_text": "Generated task", "rubric_json": `{"criteria":[{"id":"c","description":"Correct","max_score":1}],"passing_score":1}`,
+		"observable": "Explain", "task_text": "Generated task", "rubric": json.RawMessage(`{"criteria":[{"id":"c","description":"Correct","max_score":1}],"passing_score":1}`),
 	})
 	if !res.IsError {
 		t.Fatal("stale decision accepted")

@@ -27,7 +27,7 @@ func OpenDB(dbPath string) (*sql.DB, error) {
 	// _txlock=immediate: every BEGIN issued by database/sql uses BEGIN
 	// IMMEDIATE, which acquires the writer lock at tx start instead of
 	// at first write. Required for read-modify-write patterns (see
-	// applyInteraction for R008 / security-todo F-5.1) — without it,
+	// applyInteraction) — without it,
 	// two concurrent transactions both read a stale snapshot and one
 	// silently overwrites the other on commit. modernc.org/sqlite
 	// ignores sql.TxOptions.Isolation, so the DSN flag is the supported
@@ -121,12 +121,12 @@ var alterMigrations = []string{
 	// stay NULL and bypass the binding check (compat with v0.2 tokens
 	// that were issued before the migration).
 	`ALTER TABLE refresh_tokens ADD COLUMN client_id TEXT`,
-	// Issue #51: log the slip/guess values that the non-canonical
-	// error-type-aware heuristic (algorithms.BKTUpdateHeuristicSlipByErrorType)
-	// actually fed into the BKT update on each interaction so the
-	// run can be replayed deterministically. Nullable: pre-existing
-	// rows have no record (NULL means "unknown / heuristic not
-	// captured at write time").
+	// Issue #51: log the slip/guess values actually fed into the BKT
+	// update on each interaction so the run can be replayed
+	// deterministically. The error-type-aware slip heuristic that first
+	// motivated the columns has since been removed; the columns keep the
+	// parameters of each recorded update. Nullable: pre-existing rows have
+	// no record (NULL means "unknown / not captured at write time").
 	`ALTER TABLE interactions ADD COLUMN bkt_slip REAL`,
 	`ALTER TABLE interactions ADD COLUMN bkt_guess REAL`,
 	// Issue #55: PFA persisted state was written but never consumed —

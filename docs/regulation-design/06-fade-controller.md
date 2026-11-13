@@ -1,9 +1,10 @@
 # [6] FadeController — Design (Phase 1)
 
-> **Document historique, non normatif pour le runtime actuel.** `Decide` reste
-> une API autonome de compatibilité ; ses paramètres ne pilotent ni les aides,
-> ni la sélection d'activité, ni la cadence webhook. `REGULATION_FADE` expose
-> seulement des diagnostics descriptifs. Voir les
+> **Document historique, non normatif pour le runtime actuel.**
+> `engine/fade_controller.go` (`Decide`) a été supprimé faute d'appelant ; aucun
+> paramètre de fading ne pilote les aides, la sélection d'activité ou la
+> cadence webhook. `REGULATION_FADE` expose seulement des diagnostics
+> descriptifs. Voir les
 > [notes runtime actuelles](../runtime-pedagogique-2026-09.md) et la
 > [configuration](../configuration.md). Les branchements décrits ci-dessous
 > appartiennent à l'ancienne proposition.

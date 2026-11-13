@@ -4,13 +4,13 @@
   grid-column: 1 / -1; display: flex; align-items: flex-start; justify-content: center; min-height: 0; overflow-y: auto;
   padding: var(--space-12) var(--space-6); background: var(--bg);
 }
-.onboarding-panel { display: flex; flex-direction: column; gap: var(--space-4); width: 100%; max-width: 520px; }
-.onboarding-panel > h1 { margin: var(--space-4) 0 0; color: var(--fg); font-size: var(--text-xl); letter-spacing: -.02em; }
+.onboarding-panel { display: flex; flex-direction: column; gap: var(--space-4); width: 100%; max-width: var(--setup-w); }
+.onboarding-panel > h1 { margin: var(--space-4) 0 0; color: var(--fg); font-size: var(--text-xl); letter-spacing: var(--tracking-tight); }
 .onboarding-lead { margin: 0; color: var(--fg-2); font-size: var(--text-md); line-height: var(--leading-body); }
 .onboarding-progress { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
 .onboarding-progress p { margin: 0; color: var(--fg-2); font-size: var(--text-xs); }
 .onboarding-progress ol { display: flex; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
-.onboarding-progress li { width: var(--space-8); height: 4px; border-radius: var(--r-full); background: var(--line-strong); }
+.onboarding-progress li { width: var(--space-8); height: var(--meter-h); border-radius: var(--r-full); background: var(--line-strong); }
 .onboarding-progress li.complete { background: var(--blue-hi); }
 .onboarding-progress li.current { background: var(--blue); }
 
@@ -28,30 +28,30 @@
 
 .onboarding-summary {
   display: flex; align-items: flex-start; gap: var(--space-3); padding: var(--space-4);
-  border: 1px solid var(--line-strong); border-radius: var(--r-lg); background: var(--surface); color: var(--mastery);
+  border: var(--stroke) solid var(--line-strong); border-radius: var(--r-lg); background: var(--surface); color: var(--mastery);
 }
 .onboarding-summary p { margin: 0; color: var(--fg); font-size: var(--text-sm); line-height: var(--leading-body); overflow-wrap: anywhere; }
 .onboarding-summary p.mono { color: var(--fg-2); }
 .onboarding-institution { display: flex; align-items: center; gap: var(--space-2); margin: 0; color: var(--mastery); font-size: var(--text-sm); }
 .onboarding-callout {
   display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-4);
-  border: 1px solid var(--line-strong); border-radius: var(--r-lg); background: var(--raised);
+  border: var(--stroke) solid var(--line-strong); border-radius: var(--r-lg); background: var(--raised);
 }
 .onboarding-callout h2 { margin: 0; color: var(--review); font-size: var(--text-md); }
 .onboarding-callout p { margin: 0; font-size: var(--text-sm); line-height: var(--leading-body); }
 
-.harness-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--space-4); margin: 0; padding: 0; border: 0; }
+.harness-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(var(--choice-min-w), 1fr)); gap: var(--space-4); margin: 0; padding: 0; border: 0; }
 .harness-card {
-  position: relative; display: flex; flex-direction: column; gap: var(--space-2); min-height: 120px; padding: var(--card-pad) var(--space-5);
-  border: 1px solid var(--line-strong); border-radius: var(--r-lg); background: var(--surface); cursor: pointer;
+  position: relative; display: flex; flex-direction: column; gap: var(--space-2); min-height: var(--choice-min-h); padding: var(--card-pad) var(--space-5);
+  border: var(--stroke) solid var(--line-strong); border-radius: var(--r-lg); background: var(--surface); cursor: pointer;
 }
 .harness-card:hover { background: var(--hover); }
 .harness-card.selected { border-color: var(--blue); background: var(--blue-soft); }
 .harness-card.unavailable { color: var(--fg-2); cursor: not-allowed; }
 .harness-card.unavailable:hover { background: var(--surface); }
 .harness-card input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: inherit; }
-.harness-card:has(input:focus-visible) { outline: 2px solid var(--blue); outline-offset: 2px; }
-.harness-name { color: var(--fg); font-size: var(--text-lg); font-weight: var(--weight-semibold); letter-spacing: -.015em; }
+.harness-card:has(input:focus-visible) { outline: var(--stroke-accent) solid var(--blue); outline-offset: var(--focus-offset); }
+.harness-name { color: var(--fg); font-size: var(--text-lg); font-weight: var(--weight-semibold); letter-spacing: var(--tracking-snug); }
 .harness-card.unavailable .harness-name { color: var(--fg-2); }
 .harness-detail { color: var(--fg-2); font-size: var(--text-sm); line-height: var(--leading-ui); }
 .harness-check { position: absolute; top: var(--space-4); right: var(--space-4); color: var(--blue-hi); }
@@ -59,13 +59,13 @@
 /* Profil local illisible : état bloquant. */
 .load-error { grid-column: 1 / -1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--space-4); padding: var(--space-6); text-align: center; }
 .load-error h1 { margin: 0; font-size: var(--text-xl); }
-.load-error p { max-width: 520px; margin: 0; color: var(--fg-2); line-height: var(--leading-body); }
+.load-error p { max-width: var(--setup-w); margin: 0; color: var(--fg-2); line-height: var(--leading-body); }
 
 @media (max-width: 640px) {
   .onboarding { padding: var(--space-6) var(--space-4); }
 }
 .onboarding-exit { display: flex; justify-content: flex-end; margin-top: calc(-1 * var(--space-2)); }
-.onboarding-profiles { margin-top: var(--space-4); padding-top: var(--space-3); border-top: 1px solid var(--line); font-size: var(--text-sm); }
+.onboarding-profiles { margin-top: var(--space-4); padding-top: var(--space-3); border-top: var(--stroke) solid var(--line); font-size: var(--text-sm); }
 .onboarding-profiles summary { cursor: pointer; color: var(--fg-2); }
 .onboarding-profiles .button-row { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
-.onboarding-profiles .button-row > select, .onboarding-profiles .button-row > input { flex: 1 1 12rem; min-width: 0; }
+.onboarding-profiles .button-row > select, .onboarding-profiles .button-row > input { flex: 1 1 var(--search-min-w); min-width: 0; }

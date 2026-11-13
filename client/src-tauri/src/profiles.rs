@@ -472,7 +472,7 @@ impl ClientProfiles {
         )?;
         current.shutdown().await;
         let old = current.snapshot().await;
-        let disconnect = current.disconnect_tutor().await;
+        let disconnect = current.disconnect_tutor_now().await;
         if let Some(profile) = next.profiles.iter_mut().find(|p| p.id == next.selected) {
             profile.reconnect = old
                 .pointer("/tutorStatus/connected")

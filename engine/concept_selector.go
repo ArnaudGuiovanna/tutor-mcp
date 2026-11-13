@@ -54,49 +54,9 @@ type Selection struct {
 	Rationale string
 }
 
-// SelectConcept dispatches on phase to the appropriate sub-selector.
-// Returns ErrUnknownPhase (and slog.Error logs the corrupt phase) for
-// any value not in the {Instruction, Diagnostic, Maintenance} set —
-// no silent fallback (OQ-4.1 = A with explicit-error correction).
-//
-// goalRelevance:
-//   - nil           → uniform 1.0 fallback for every concept (per [1] §1.2)
-//   - non-nil, key present → score used as multiplier
-//   - non-nil, key absent  → concept EXCLUDED from the eligible pool
-//     (OQ-4.3 = B'). Forces the LLM to call set_goal_relevance for
-//     newly-added concepts; uncovered concepts are not silently
-//     defaulted. The caller (in production) surfaces NoFringe to
-//     prompt re-decomposition.
-//
-// Note that DIAGNOSTIC ignores goalRelevance entirely in v1 (OQ-4.2 sub
-// A1) — uncovered concepts are still eligible for diagnosis. This is
-// a v1 choice to be re-arbitrated with real data.
-func SelectConcept(
-	phase models.Phase,
-	states []*models.ConceptState,
-	graph models.KnowledgeSpace,
-	goalRelevance map[string]float64,
-) (Selection, error) {
-	return SelectConceptAt(phase, states, graph, goalRelevance, time.Now().UTC())
-}
-
-// SelectConceptAt is the clock-injected decision boundary used by the runtime.
-// In MAINTENANCE it derives card age from now - LastReview; ElapsedDays is the
-// historical interval that preceded the last FSRS review and is never used as
-// the current age.
-func SelectConceptAt(
-	phase models.Phase,
-	states []*models.ConceptState,
-	graph models.KnowledgeSpace,
-	goalRelevance map[string]float64,
-	now time.Time,
-) (Selection, error) {
-	return SelectConceptAtWithContext(phase, states, graph, goalRelevance, now, SelectionContext{})
-}
-
 // SelectionContext carries the per-call policy the orchestrator resolves
-// from its PhaseConfig and fixtures. The zero value keeps the historical
-// behaviour of SelectConceptAt.
+// from its PhaseConfig and fixtures. The zero value applies the default
+// policy of each phase.
 type SelectionContext struct {
 	// MaintenanceMasteryFloor is the lowest estimate admitted into the
 	// MAINTENANCE pool. Zero means algorithms.MasteryBKT(). The orchestrator
@@ -104,12 +64,10 @@ type SelectionContext struct {
 	// routing threshold keeps receiving practice without leaving MAINTENANCE.
 	MaintenanceMasteryFloor float64
 
-	// DiagnosedConcepts lists the concepts already covered by a qualified
-	// diagnostic since the phase started. DIAGNOSTIC selection prefers the
-	// remaining concepts: a concept answered once carries more information
-	// gain than an untested one, so pure argmax re-tested the same items
-	// instead of covering the curriculum.
-	DiagnosedConcepts map[string]bool
+	// Placement is the adaptive placement replayed by the orchestrator for
+	// DIAGNOSTIC. Nil starts a fresh placement over the selection graph
+	// (DomainGraph when set).
+	Placement *Placement
 
 	// VerifiedConcepts caps unverified prerequisites at
 	// UnverifiedPrerequisiteMasteryCap in the INSTRUCTION fringe, exactly as
@@ -131,7 +89,25 @@ func (c SelectionContext) maintenanceFloor() float64 {
 	return algorithms.MasteryBKT()
 }
 
-// SelectConceptAtWithContext is SelectConceptAt with an explicit policy.
+// SelectConceptAtWithContext dispatches on phase to the appropriate sub-selector.
+// Returns ErrUnknownPhase (and slog.Error logs the corrupt phase) for
+// any value not in the {Instruction, Diagnostic, Maintenance} set —
+// no silent fallback (OQ-4.1 = A with explicit-error correction).
+//
+// goalRelevance:
+//   - nil           → uniform 1.0 fallback for every concept (per [1] §1.2)
+//   - non-nil, key present → score used as multiplier
+//   - non-nil, key absent  → concept EXCLUDED from the eligible pool
+//     (OQ-4.3 = B'). Forces the LLM to call set_goal_relevance for
+//     newly-added concepts; uncovered concepts are not silently
+//     defaulted. The caller (in production) surfaces NoFringe to
+//     prompt re-decomposition.
+//
+// DIAGNOSTIC ignores goalRelevance: the adaptive placement locates the
+// learner on the whole prerequisite graph.
+//
+// In MAINTENANCE card age is derived from now - LastReview; ElapsedDays is
+// the historical interval that preceded the last FSRS review.
 func SelectConceptAtWithContext(
 	phase models.Phase,
 	states []*models.ConceptState,
@@ -150,7 +126,11 @@ func SelectConceptAtWithContext(
 	case models.PhaseMaintenance:
 		return selectMaintenance(states, graph, goalRelevance, now, sctx.maintenanceFloor()), nil
 	case models.PhaseDiagnostic:
-		return selectDiagnostic(states, graph, sctx.DiagnosedConcepts), nil
+		placementGraph := graph
+		if sctx.DomainGraph != nil {
+			placementGraph = *sctx.DomainGraph
+		}
+		return selectDiagnostic(states, graph, placementGraph, sctx.Placement), nil
 	default:
 		slog.Error("concept_selector: unknown phase",
 			"phase", string(phase))
@@ -465,97 +445,47 @@ func selectMaintenance(
 	}
 }
 
-// selectDiagnostic implements the DIAGNOSTIC branch via BKT info-gain.
-// OQ-4.2 sub A1: v1 ignores goal_relevance entirely — diagnosing is
-// about reducing uncertainty over the *whole* state, not the
-// goal-relevant subset. To be re-arbitrated with real data.
-//
-// Saturation pre-filter: P(L) <= 0.05 or >= 0.95 → info-gain ≈ 0
-// already, but excluding them up-front keeps the score interpretation
-// clean (the argmax is over genuinely ambiguous concepts only).
-//
-// Domain filter: states whose concept is absent from graph.Concepts are
-// excluded. pf.StatesList is learner-wide (GetConceptStatesByLearner),
-// so without this guard a concept mastered in another domain leaks into
-// the active domain's DIAGNOSTIC selection — symmetric to the
-// MAINTENANCE leak fixed for issue #93. An empty graph.Concepts is
-// treated as "no filter" to preserve existing call sites that pass
-// models.KnowledgeSpace{}; the orchestrator always supplies a non-empty
-// graph for the active domain.
-func selectDiagnostic(states []*models.ConceptState, graph models.KnowledgeSpace, diagnosed map[string]bool) Selection {
-	var domainSet map[string]struct{}
-	if len(graph.Concepts) > 0 {
-		domainSet = make(map[string]struct{}, len(graph.Concepts))
-		for _, c := range graph.Concepts {
-			domainSet[c] = struct{}{}
-		}
-	}
-
-	var candidates []*models.ConceptState
-	for _, cs := range states {
-		if cs == nil || math.IsNaN(cs.PMastery) {
-			continue
-		}
-		if cs.PMastery <= 0.05 || cs.PMastery >= 0.95 {
-			continue
-		}
-		if domainSet != nil {
-			if _, ok := domainSet[cs.Concept]; !ok {
-				continue
+// selectDiagnostic implements the DIAGNOSTIC branch: the next item of the
+// adaptive placement (see placement.go). The candidate pool is the selection
+// graph (the gate-filtered pool of the active domain); depth, propagation and
+// classification use placementGraph, the full domain graph. goal_relevance is
+// ignored: placement locates the learner on the whole graph. A concept whose
+// stored estimate is not finite is corrupted: it is never served, and the
+// placement does not count it as unclassified either (Unplaceable), so the
+// phase can still end.
+func selectDiagnostic(states []*models.ConceptState, graph, placementGraph models.KnowledgeSpace, placement *Placement) Selection {
+	if placement == nil {
+		stateMap := make(map[string]*models.ConceptState, len(states))
+		for _, cs := range states {
+			if cs != nil {
+				stateMap[cs.Concept] = cs
 			}
 		}
-		candidates = append(candidates, cs)
+		fresh := ReplayPlacement(placementGraph, stateMap, nil, 0)
+		placement = &fresh
 	}
-	if len(candidates) == 0 {
+	allowed := make(map[string]bool, len(graph.Concepts))
+	for _, concept := range graph.Concepts {
+		allowed[concept] = true
+	}
+	for _, cs := range states {
+		if unplaceableState(cs) {
+			delete(allowed, cs.Concept)
+		}
+	}
+	concept, rationale, ok := placement.NextConcept(allowed)
+	if !ok {
 		return Selection{
 			NoFringe:  true,
 			Phase:     models.PhaseDiagnostic,
-			Rationale: "tous concepts satures : aucune observation informative",
-		}
-	}
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].Concept < candidates[j].Concept
-	})
-
-	// First pass: concepts not yet covered by a qualified diagnostic. Only
-	// when every candidate has been diagnosed does the argmax run over all
-	// of them (coverage is then complete and the FSM exits on its own).
-	bestConcept := ""
-	bestScore := math.Inf(-1)
-	untested := 0
-	for _, cs := range candidates {
-		if diagnosed[cs.Concept] {
-			continue
-		}
-		untested++
-		ig := algorithms.BKTInfoGain(cs)
-		if ig > bestScore {
-			bestScore = ig
-			bestConcept = cs.Concept
-		}
-	}
-	if bestConcept != "" {
-		return Selection{
-			Concept: bestConcept,
-			Score:   bestScore,
-			Phase:   models.PhaseDiagnostic,
-			Rationale: fmt.Sprintf("max info-gain=%.3f sur %d candidats non encore diagnostiques (%d non satures)",
-				bestScore, untested, len(candidates)),
-		}
-	}
-	for _, cs := range candidates {
-		ig := algorithms.BKTInfoGain(cs)
-		if ig > bestScore {
-			bestScore = ig
-			bestConcept = cs.Concept
+			Rationale: "adaptive placement: no unclassified concept in the eligible pool",
 		}
 	}
 	return Selection{
-		Concept: bestConcept,
-		Score:   bestScore,
-		Phase:   models.PhaseDiagnostic,
-		Rationale: fmt.Sprintf("max info-gain=%.3f sur %d candidats non satures (tous deja diagnostiques)",
-			bestScore, len(candidates)),
+		Concept:   concept,
+		Score:     1 - math.Abs(placement.Concepts[concept].Estimate-0.5)*2,
+		Phase:     models.PhaseDiagnostic,
+		Rationale: rationale,
 	}
 }
 

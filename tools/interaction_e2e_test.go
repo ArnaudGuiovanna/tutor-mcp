@@ -35,7 +35,7 @@ func TestEndToEnd_TenSuccessesMoveMastery(t *testing.T) {
 
 	touched := map[string]bool{}
 	for i := 0; i < 10; i++ {
-		actRes := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{})
+		actRes := callNextActivity(t, deps, "L_owner", map[string]any{})
 		if actRes.IsError {
 			t.Fatalf("iter %d: get_next_activity errored: %s", i, resultText(actRes))
 		}
@@ -155,7 +155,7 @@ func TestEndToEnd_SharedConceptLabelsStayIsolatedByDomain(t *testing.T) {
 
 	// With no explicit domain, the router must notice the critically forgotten
 	// mathematics card even though the programming domain uses the same label.
-	next := callTool(t, deps, registerGetNextActivity, "L_owner", "get_next_activity", map[string]any{})
+	next := callNextActivity(t, deps, "L_owner", map[string]any{})
 	if next.IsError {
 		t.Fatalf("get next activity: %s", resultText(next))
 	}

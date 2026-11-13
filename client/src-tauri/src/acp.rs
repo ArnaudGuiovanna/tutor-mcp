@@ -1948,16 +1948,25 @@ mod tests {
     #[tokio::test]
     async fn an_invalid_line_is_skipped_and_counted_without_closing_a_healthy_agent() {
         let (client, mut events) = client().await;
+        // The invalid line is never a reply: the request can only end at its
+        // deadline, whatever the machine load.
         let result = client
             .request_with_deadline("test/invalid", json!({}), Duration::from_millis(300))
             .await;
         assert!(result.unwrap_err().contains("délai"));
+        // The agent writes the next reply after the invalid line and the
+        // reader handles lines in order: once this reply arrives, the invalid
+        // line has been processed. No timing assumption is needed.
+        let count = timeout(
+            Duration::from_secs(30),
+            client.request("test/count", json!({})),
+        )
+        .await
+        .expect("the healthy agent answers after an invalid line")
+        .unwrap();
+        assert_eq!(count["ignored"], 0);
         assert_eq!(client.invalid_frames(), 1);
         assert!(!client.inner.closed.load(Ordering::Acquire));
-        assert_eq!(
-            client.request("test/count", json!({})).await.unwrap()["ignored"],
-            0
-        );
         while let Ok(event) = events.try_recv() {
             assert_ne!(event["type"], "connection");
             assert!(!event.to_string().contains("private-payload"));
@@ -2223,10 +2232,12 @@ for line in sys.stdin:
     #[tokio::test]
     async fn a_late_permission_decision_restarts_the_inactivity_window() {
         let (events, mut receiver) = mpsc::unbounded_channel();
+        // The silent tool (250 ms) stays far below the inactivity limit, so a
+        // loaded machine cannot turn the success path into a timeout.
         let client = AcpClient::spawn(silent_tool_spec(250), events)
             .await
             .unwrap();
-        client.set_prompt_idle_timeout(Some(Duration::from_millis(400)));
+        client.set_prompt_idle_timeout(Some(Duration::from_millis(1500)));
         let worker = client.clone();
         let prompt = tokio::spawn(async move {
             worker
@@ -2243,9 +2254,8 @@ for line in sys.stdin:
         })
         .await
         .unwrap();
-        // The learner decides well after the inactivity limit, shortly
-        // before the waiter's next periodic check.
-        tokio::time::sleep(Duration::from_millis(1000)).await;
+        // The learner decides well after the inactivity limit.
+        tokio::time::sleep(Duration::from_millis(2500)).await;
         assert!(!prompt.is_finished());
         client
             .reply(

@@ -5,12 +5,13 @@ import (
 	"testing"
 	"time"
 
+	"tutor-mcp/models"
+	"tutor-mcp/observability"
+
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
-	"tutor-mcp/models"
-	"tutor-mcp/observability"
 )
 
 type panicSaaSObservationStore struct{ saasWorkerStore }

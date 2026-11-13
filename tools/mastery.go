@@ -16,13 +16,12 @@ import (
 )
 
 type CheckMasteryParams struct {
-	Concept   string `json:"concept,omitempty" jsonschema:"the concept to check for mastery; canonical key for concept-targeting tools; required unless concept_id is used"`
-	ConceptID string `json:"concept_id,omitempty" jsonschema:"deprecated compatibility alias for concept; prefer concept"`
-	DomainID  string `json:"domain_id,omitempty" jsonschema:"domain ID (optional)"`
+	Concept  string `json:"concept" jsonschema:"the concept to check for mastery (concept key from the domain graph)"`
+	DomainID string `json:"domain_id,omitempty" jsonschema:"domain ID (optional)"`
 }
 
 func registerCheckMastery(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name:        "check_mastery",
 		Description: "Check whether a concept is ready for the mastery challenge using BKT plus evidence diversity and uncertainty.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params CheckMasteryParams) (*mcp.CallToolResult, any, error) {
@@ -33,7 +32,7 @@ func registerCheckMastery(server *mcp.Server, deps *Deps) {
 			return r, nil, nil
 		}
 
-		concept, err := normalizeConceptParam(params.Concept, params.ConceptID)
+		concept, err := normalizeConceptParam(params.Concept)
 		if err != nil {
 			r, _ := errorResult(err.Error())
 			return r, nil, nil
@@ -50,7 +49,7 @@ func registerCheckMastery(server *mcp.Server, deps *Deps) {
 		domain, err := resolveDomain(ctx, deps.Store, learnerID, params.DomainID)
 		if err != nil || domain == nil {
 			if params.DomainID != "" {
-				deps.Logger.Error("check_mastery: domain not found", "err", err, "learner", learnerID, "domain_id", params.DomainID)
+				deps.Logger.Error("check_mastery: domain not found", append(diagnosticErrorAttrs(err), "learner", learnerID, "domain_id", params.DomainID)...)
 				r, _ := errorResult("domain not found")
 				return r, nil, nil
 			}
@@ -80,7 +79,7 @@ func registerCheckMastery(server *mcp.Server, deps *Deps) {
 		uncertainty := engine.ComputeMasteryUncertainty(cs, recent, engine.MasteryEvidenceProfile{Now: now})
 		transferRecords, err := deps.Store.GetTransferScoresInDomain(ctx, learnerID, domainID, concept)
 		if err != nil {
-			deps.Logger.Warn("check_mastery: transfer profile fetch failed", "err", err, "learner", learnerID, "concept", concept)
+			deps.Logger.Warn("check_mastery: transfer profile fetch failed", append(diagnosticErrorAttrs(err), "learner", learnerID, "concept", concept)...)
 			transferRecords = nil
 		}
 		assessments, err := deps.Store.GetEvaluatedAssessmentAttemptsInDomain(ctx, learnerID, domainID, concept, 100)

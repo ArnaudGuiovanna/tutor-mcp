@@ -11,6 +11,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"flag"
@@ -67,48 +68,68 @@ func main() {
 	// Packages using the package-level slog helpers must inherit the same
 	// privacy and level policy as explicitly injected components.
 	slog.SetDefault(logger)
+
+	// run owns every resource and releases it through its own defers before
+	// returning; main only turns the outcome into an exit status.
+	if err := run(options, logger); err != nil {
+		if !errors.Is(err, errReported) {
+			fmt.Fprintln(os.Stderr, err)
+		}
+		os.Exit(1)
+	}
+}
+
+// errReported marks a failure that was already logged with its context.
+var errReported = errors.New("failure already reported")
+
+// reportError logs a startup failure through the privacy-safe logger and
+// returns errReported, so the caller can unwind its deferred cleanup.
+func reportError(logger *slog.Logger, msg string, err error, attrs ...any) error {
+	if err != nil {
+		attrs = append(attrs, "err", err)
+	}
+	logger.Error(msg, attrs...)
+	return errReported
+}
+
+func run(options commandOptions, logger *slog.Logger) error {
 	if options.Command == "memory-index" {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		if err := runMemoryIndexCommand(ctx, options, os.Stdout); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		return
+		return runMemoryIndexCommand(ctx, options, os.Stdout)
 	}
 	if options.Local {
 		if err := runLocal(options, logger); err != nil && !errors.Is(err, context.Canceled) {
-			fmt.Fprintln(os.Stderr, "local startup/session:", err)
-			os.Exit(1)
+			return fmt.Errorf("local startup/session: %w", err)
 		}
-		return
+		return nil
 	}
-	if handled, err := configureProfileCommand(context.Background(), options, os.Stdout); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	} else if handled {
-		return
+	if handled, err := configureProfileCommand(context.Background(), options, os.Stdout); err != nil || handled {
+		return err
 	}
 	releaseServer, err := lockHobbyServer(options)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		return err
 	}
 	defer releaseServer()
+	return runServer(options, logger)
+}
 
+// runServer starts the process role selected by PROCESS_ROLE: migrator,
+// worker, api, or all (development).
+func runServer(options commandOptions, logger *slog.Logger) error {
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "3000"
 	}
 	cfg, err := loadStartupConfig(port)
 	if err != nil {
-		logger.Error("invalid startup configuration", "err", err)
-		os.Exit(1)
+		return reportError(logger, "invalid startup configuration", err)
 	}
 	shutdownTelemetry, err := observability.Setup(context.Background(), mcpVersion(), logger)
 	if err != nil {
 		logger.Error("initialize OpenTelemetry", "error_type", "otel_initialization")
-		os.Exit(1)
+		return errReported
 	}
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -117,27 +138,47 @@ func main() {
 			logger.Error("shutdown OpenTelemetry", "error_type", "otel_shutdown")
 		}
 	}()
+	if err := configureProcessLimits(cfg, logger); err != nil {
+		return err
+	}
+	store, closeStore, err := openStore(cfg, options, logger)
+	if err != nil {
+		return err
+	}
+	defer closeStore()
+	if cfg.ProcessRole == "migrator" {
+		logger.Info("database migrations complete", "driver", cfg.DBDriver)
+		return nil
+	}
+	if err := configureStoredSecrets(store, cfg, logger); err != nil {
+		return err
+	}
+	if memory.Enabled() && cfg.ProcessRole != "worker" {
+		stopRepair := startNarrativeIndexRepair(context.Background(), store, logger, cfg.NarrativeMemoryBackend == "database", 30*time.Second)
+		defer stopRepair() // cancel and join before the database's deferred Close
+	}
+	if cfg.ProcessRole == "worker" {
+		return runWorkerUntilSignal(store, logger, cfg.SchedulerMode, schedulerOptions(cfg))
+	}
+	return serveAPI(store, cfg, options, logger)
+}
+
+// configureProcessLimits applies process-wide budgets before any request or
+// database work: bcrypt concurrency, narrative memory limits and JWT keys.
+func configureProcessLimits(cfg startupConfig, logger *slog.Logger) error {
 	runsAPI := cfg.ProcessRole == "api" || cfg.ProcessRole == "all"
-	runsWorker := cfg.ProcessRole == "worker" || cfg.ProcessRole == "all"
-	runsMigrations := cfg.ProcessRole == "migrator" || cfg.ProcessRole == "all"
 	if runsAPI {
 		if err := auth.ConfigureBcryptMaxConcurrent(cfg.AuthBcryptMaxConcurrent); err != nil {
-			logger.Error("configure bcrypt concurrency budget", "err", err)
-			os.Exit(1)
+			return reportError(logger, "configure bcrypt concurrency budget", err)
 		}
 		logger.Info("bcrypt concurrency budget", "max_concurrent", cfg.AuthBcryptMaxConcurrent)
 	}
-	dbPath := cfg.DBPath
-	dbDriver := cfg.DBDriver
-	baseURL := cfg.BaseURL
 	memoryLimits, err := memory.LimitsFromEnv()
 	if err != nil {
-		logger.Error("invalid narrative memory limits", "err", err)
-		os.Exit(1)
+		return reportError(logger, "invalid narrative memory limits", err)
 	}
 	if err := memory.ConfigureLimits(memoryLimits); err != nil {
-		logger.Error("configure narrative memory limits", "err", err)
-		os.Exit(1)
+		return reportError(logger, "configure narrative memory limits", err)
 	}
 	logger.Info("narrative memory limits",
 		"max_write_bytes", memoryLimits.MaxWriteBytes,
@@ -146,84 +187,78 @@ func main() {
 		"max_files_per_learner", memoryLimits.MaxFilesPerLearner,
 		"max_concurrent_writes", memoryLimits.MaxConcurrentWrites,
 	)
-
-	// Init JWT
 	if runsAPI {
 		if err := auth.LoadJWTSecret(); err != nil {
-			logger.Error("failed to load JWT secret", "err", err)
-			os.Exit(1)
+			return reportError(logger, "failed to load JWT secret", err)
 		}
 	}
+	return nil
+}
 
-	// Open the store. Default: single-node SQLite (no external deps). Set
-	// DB_DRIVER=postgres + DATABASE_URL for horizontal Postgres deployments.
+// openStore opens, migrates or verifies the configured database and records
+// the installation profile. Default: single-node SQLite (no external deps);
+// DB_DRIVER=postgres + DATABASE_URL for horizontal deployments. The returned
+// close function releases pool metrics and the database.
+func openStore(cfg startupConfig, options commandOptions, logger *slog.Logger) (*db.Store, func(), error) {
+	runsMigrations := cfg.ProcessRole == "migrator" || cfg.ProcessRole == "all"
+	ctx := context.Background()
 	var store *db.Store
-	switch dbDriver {
+	switch cfg.DBDriver {
 	case "postgres":
 		dsn := os.Getenv("DATABASE_URL")
 		if dsn == "" {
-			logger.Error("DB_DRIVER=postgres requires DATABASE_URL")
-			os.Exit(1)
+			return nil, nil, reportError(logger, "DB_DRIVER=postgres requires DATABASE_URL", nil)
 		}
 		database, err := db.OpenPostgres(dsn, envInt("DB_MAX_CONNS", 10))
 		if err != nil {
-			logger.Error("failed to open postgres", "err", err)
-			os.Exit(1)
+			return nil, nil, reportError(logger, "failed to open postgres", err)
 		}
-		if runsMigrations {
-			if err := db.MigratePostgres(context.Background(), database); err != nil {
-				logger.Error("failed to migrate postgres", "err", err)
-				os.Exit(1)
-			}
-		} else if err := db.VerifyPostgresSchemaCurrent(context.Background(), database); err != nil {
-			logger.Error("incompatible postgres schema; run the migrator first", "err", err)
-			os.Exit(1)
-		}
-		if !runsMigrations && cfg.DeploymentProfile == "production" {
-			if err := db.VerifyPostgresRuntimeRole(context.Background(), database); err != nil {
-				logger.Error("unsafe postgres runtime credentials", "err", err)
-				os.Exit(1)
-			}
+		if err := preparePostgres(ctx, database, cfg, runsMigrations); err != nil {
+			_ = database.Close()
+			return nil, nil, reportError(logger, err.Error(), errors.Unwrap(err))
 		}
 		store = db.NewStoreWithDialect(database, db.DialectPostgres)
 		logger.Info("database ready", "driver", "postgres")
 	case "sqlite":
-		if err := ensureSQLiteParent(dbPath); err != nil {
-			logger.Error("failed to prepare sqlite directory", "err", err)
-			os.Exit(1)
+		if err := ensureSQLiteParent(cfg.DBPath); err != nil {
+			return nil, nil, reportError(logger, "failed to prepare sqlite directory", err)
 		}
-		database, err := db.OpenDB(dbPath)
+		database, err := db.OpenDB(cfg.DBPath)
 		if err != nil {
-			logger.Error("failed to open database", "err", err)
-			os.Exit(1)
+			return nil, nil, reportError(logger, "failed to open database", err)
 		}
 		if runsMigrations {
-			if err := db.Migrate(database); err != nil {
-				logger.Error("failed to migrate database", "err", err)
-				os.Exit(1)
-			}
-		} else if err := db.VerifySQLiteSchemaCurrent(context.Background(), database); err != nil {
-			logger.Error("incompatible SQLite schema; run the migrator first", "err", err)
-			os.Exit(1)
+			err = db.Migrate(database)
+		} else {
+			err = db.VerifySQLiteSchemaCurrent(ctx, database)
 		}
-		store, err = db.NewSQLiteStore(database, dbPath)
 		if err != nil {
 			_ = database.Close()
-			logger.Error("open SQLite reader pool", "err", err)
-			os.Exit(1)
+			msg := "incompatible SQLite schema; run the migrator first"
+			if runsMigrations {
+				msg = "failed to migrate database"
+			}
+			return nil, nil, reportError(logger, msg, err)
 		}
-		logger.Info("database ready", "driver", "sqlite", "path", dbPath)
+		store, err = db.NewSQLiteStore(database, cfg.DBPath)
+		if err != nil {
+			_ = database.Close()
+			return nil, nil, reportError(logger, "open SQLite reader pool", err)
+		}
+		logger.Info("database ready", "driver", "sqlite", "path", cfg.DBPath)
 	default:
-		logger.Error("unknown DB_DRIVER (want sqlite|postgres)", "driver", dbDriver)
-		os.Exit(1)
+		return nil, nil, reportError(logger, "unknown DB_DRIVER (want sqlite|postgres)", nil, "driver", cfg.DBDriver)
 	}
-	defer store.Close()
 	unregisterPoolMetrics, err := db.RegisterStoreDBPools(store)
 	if err != nil {
+		_ = store.Close()
 		logger.Error("register database pool metrics", "error_type", "otel_db_pool")
-		os.Exit(1)
+		return nil, nil, errReported
 	}
-	defer func() { _ = unregisterPoolMetrics() }()
+	closeStore := func() {
+		_ = unregisterPoolMetrics()
+		_ = store.Close()
+	}
 	store.SetHostLLMDemonstrationPolicy(cfg.AssessmentHostLLMDemonstrates)
 	store.SetMaxActiveDomainsPerLearner(cfg.MaxActiveDomainsPerLearner)
 	logger.Info("assessment evidence policy", "host_llm_demonstrates", cfg.AssessmentHostLLMDemonstrates)
@@ -234,25 +269,52 @@ func main() {
 	if options.Profile == "hobby" {
 		installationProfile = "hobby"
 	}
-	if err := store.EnsureInstallation(context.Background(), installationProfile); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	if err := store.EnsureInstallation(ctx, installationProfile); err != nil {
+		closeStore()
+		return nil, nil, err
 	}
-	if cfg.ProcessRole == "migrator" {
-		logger.Info("database migrations complete", "driver", dbDriver)
-		return
+	return store, closeStore, nil
+}
+
+// postgresStartupError carries the operator message of a PostgreSQL startup
+// gate; the wrapped error is logged only through the privacy-safe handler.
+type postgresStartupError struct {
+	msg string
+	err error
+}
+
+func (e *postgresStartupError) Error() string { return e.msg }
+func (e *postgresStartupError) Unwrap() error { return e.err }
+
+func preparePostgres(ctx context.Context, database *sql.DB, cfg startupConfig, runsMigrations bool) error {
+	if runsMigrations {
+		if err := db.MigratePostgres(ctx, database); err != nil {
+			return &postgresStartupError{"failed to migrate postgres", err}
+		}
+	} else if err := db.VerifyPostgresSchemaCurrent(ctx, database); err != nil {
+		return &postgresStartupError{"incompatible postgres schema; run the migrator first", err}
 	}
+	if !runsMigrations && cfg.DeploymentProfile == "production" {
+		if err := db.VerifyPostgresRuntimeRole(ctx, database); err != nil {
+			return &postgresStartupError{"unsafe postgres runtime credentials", err}
+		}
+	}
+	return nil
+}
+
+// configureStoredSecrets installs the tenant integration allowlist, the
+// integration secret keyring (rotating stored envelopes on the API) and the
+// narrative memory backend.
+func configureStoredSecrets(store *db.Store, cfg startupConfig, logger *slog.Logger) error {
 	if err := db.ConfigureTenantIntegrationAllowedHosts(store, cfg.TenantIntegrationHosts); err != nil {
-		logger.Error("invalid tenant integration allowlist", "err", err)
-		os.Exit(1)
+		return reportError(logger, "invalid tenant integration allowlist", err)
 	}
 	integrationEncryptionEnabled := false
 	var narrativeSecretsRotated int64
 	if encodedKeys := strings.TrimSpace(os.Getenv("INTEGRATION_SECRET_KEYS")); encodedKeys != "" {
 		keyring, err := db.NewIntegrationSecretKeyring(encodedKeys, os.Getenv("INTEGRATION_SECRET_CURRENT_KEY_ID"))
 		if err != nil {
-			logger.Error("invalid integration secret keyring", "err", err)
-			os.Exit(1)
+			return reportError(logger, "invalid integration secret keyring", err)
 		}
 		store.SetIntegrationSecretKeyring(keyring)
 		integrationEncryptionEnabled = true
@@ -261,16 +323,14 @@ func main() {
 			rotated, err := store.RotateIntegrationSecrets(ctx)
 			cancel()
 			if err != nil {
-				logger.Error("failed to rotate integration secrets", "err", err)
-				os.Exit(1)
+				return reportError(logger, "failed to rotate integration secrets", err)
 			}
 			logger.Info("integration secret encryption enabled", "rotated_records", rotated)
 			narrativeRotateCtx, narrativeRotateCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			narrativeSecretsRotated, err = store.RotateNarrativeSecrets(narrativeRotateCtx)
 			narrativeRotateCancel()
 			if err != nil {
-				logger.Error("failed to authenticate or rotate narrative objects", "err", err)
-				os.Exit(1)
+				return reportError(logger, "failed to authenticate or rotate narrative objects", err)
 			}
 		} else {
 			logger.Info("integration secret encryption enabled", "rotation", "delegated to the api process")
@@ -278,40 +338,35 @@ func main() {
 	} else {
 		logger.Warn("integration secret encryption disabled; webhook credentials remain plaintext")
 	}
-	if memory.Enabled() && cfg.NarrativeMemoryBackend == "database" {
-		if !integrationEncryptionEnabled {
-			logger.Error("database narrative memory requires the integration secret keyring")
-			os.Exit(1)
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		backfill, backfillErr := memory.BackfillLocalNarratives(ctx, store, memory.Root())
-		cancel()
-		if backfillErr != nil {
-			logger.Error("failed to reconcile local narrative memory", "err", backfillErr,
-				"scanned", backfill.Scanned, "imported", backfill.Imported,
-				"reconciled", backfill.Reconciled, "conflicts", backfill.Conflicts,
-			)
-			os.Exit(1)
-		}
-		memory.ConfigureNarrativeStore(store)
-		logger.Info("narrative memory backend ready",
-			"backend", "database", "encrypted", true, "rotated", narrativeSecretsRotated,
-			"backfill_scanned", backfill.Scanned, "backfill_imported", backfill.Imported,
-			"backfill_reconciled", backfill.Reconciled,
-		)
-	} else {
+	if !memory.Enabled() || cfg.NarrativeMemoryBackend != "database" {
 		memory.ConfigureNarrativeStore(nil)
 		logger.Info("narrative memory backend ready", "backend", cfg.NarrativeMemoryBackend, "enabled", memory.Enabled())
+		return nil
 	}
-	if memory.Enabled() && cfg.ProcessRole != "worker" {
-		stopRepair := startNarrativeIndexRepair(context.Background(), store, logger, cfg.NarrativeMemoryBackend == "database", 30*time.Second)
-		defer stopRepair() // cancel and join before the database's deferred Close
+	if !integrationEncryptionEnabled {
+		return reportError(logger, "database narrative memory requires the integration secret keyring", nil)
 	}
-	if cfg.ProcessRole == "worker" {
-		runWorkerUntilSignal(store, logger, cfg.SchedulerMode)
-		return
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	backfill, backfillErr := memory.BackfillLocalNarratives(ctx, store, memory.Root())
+	cancel()
+	if backfillErr != nil {
+		return reportError(logger, "failed to reconcile local narrative memory", backfillErr,
+			"scanned", backfill.Scanned, "imported", backfill.Imported,
+			"reconciled", backfill.Reconciled, "conflicts", backfill.Conflicts,
+		)
 	}
+	memory.ConfigureNarrativeStore(store)
+	logger.Info("narrative memory backend ready",
+		"backend", "database", "encrypted", true, "rotated", narrativeSecretsRotated,
+		"backfill_scanned", backfill.Scanned, "backfill_imported", backfill.Imported,
+		"backfill_reconciled", backfill.Reconciled,
+	)
+	return nil
+}
 
+// serveAPI wires the HTTP surface of an api (or all) process and serves it
+// until SIGINT/SIGTERM.
+func serveAPI(store *db.Store, cfg startupConfig, options commandOptions, logger *slog.Logger) error {
 	logger.Info("MCP transport limits",
 		"mode", "stateless",
 		"max_request_body_bytes", cfg.MCPMaxRequestBodyBytes,
@@ -319,63 +374,104 @@ func main() {
 		"max_concurrent_per_learner", cfg.MCPMaxConcurrentUser,
 		"tool_call_timeout", cfg.MCPToolCallTimeout,
 	)
-	mcpConcurrencyLimiter, err := auth.NewPrincipalConcurrencyLimiter(cfg.MCPMaxConcurrent, cfg.MCPMaxConcurrentUser)
+	concurrency, err := auth.NewPrincipalConcurrencyLimiter(cfg.MCPMaxConcurrent, cfg.MCPMaxConcurrentUser)
 	if err != nil {
-		logger.Error("invalid MCP concurrency limits", "err", err)
-		os.Exit(1)
+		return reportError(logger, "invalid MCP concurrency limits", err)
 	}
-
-	// OAuth server
-	oauthServer := auth.NewOAuthServer(store, baseURL, logger)
-	if options.Profile == "hobby" {
-		if err := oauthServer.EnableHobbyAccounts(); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
+	oauthServer, err := newOAuthServer(store, cfg, options, logger)
+	if err != nil {
+		return err
 	}
-	if options.Profile == "institution" && !cfg.NativeIdentity && (cfg.ProcessRole == "api" || cfg.ProcessRole == "all") {
-		institutionCfg, err := loadInstitutionAccountConfig()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		if institutionCfg.SignupMode == institutionSignupOpen {
-			planCtx, cancelPlan := context.WithTimeout(context.Background(), 10*time.Second)
-			active, err := store.PlanIsActive(planCtx, institutionCfg.SignupPlan)
-			cancelPlan()
-			if err != nil || !active {
-				logger.Error("SIGNUP_PLAN must name an active plan", "plan", institutionCfg.SignupPlan, "err", err)
-				os.Exit(1)
-			}
-		}
-		if err := oauthServer.EnableInstitutionAccounts(auth.InstitutionAccountOptions{
-			SignupOpen: institutionCfg.SignupMode == institutionSignupOpen,
-			SignupPlan: institutionCfg.SignupPlan,
-		}); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		logger.Info("institution accounts enabled", "signup", institutionCfg.SignupMode)
-	}
-	oauthServer.SetGranularScopesEnabled(cfg.OAuthGranularScopes)
-	if err := oauthServer.ConfigureDynamicClientRegistration(cfg.OAuthDCRMode, cfg.OAuthDCRInitialTokenHash); err != nil {
-		logger.Error("configure dynamic client registration", "err", err)
-		os.Exit(1)
-	}
-	logger.Info("dynamic client registration policy", "mode", cfg.OAuthDCRMode)
-	oauthServer.ConfigureCIMD(cfg.OAuthCIMD)
 	var nativeIdentity *auth.NativeIdentityServer
 	if cfg.NativeIdentity {
 		nativeIdentity, err = auth.NewNativeIdentityServer(store, auth.NativeIdentityOptions{
-			BaseURL: baseURL, InstitutionID: cfg.InstitutionID, InstitutionName: cfg.InstitutionName,
+			BaseURL: cfg.BaseURL, InstitutionID: cfg.InstitutionID, InstitutionName: cfg.InstitutionName,
 		})
 		if err != nil {
-			logger.Error("configure native key identity", "err", err)
-			os.Exit(1)
+			return reportError(logger, "configure native key identity", err)
 		}
+		defer nativeIdentity.Stop()
 		logger.Info("institution identity ready", "method", "nostr-key")
 	}
-	if smtpAddress := strings.TrimSpace(os.Getenv("SMTP_ADDR")); !cfg.NativeIdentity && smtpAddress != "" {
+
+	// Warn loudly if the deployment looks public but TRUSTED_PROXY_CIDRS is
+	// unset - without it every IP-limited request shares one bucket under the
+	// proxy's loopback IP (issue #37).
+	auth.WarnRateLimiterMisconfig(cfg.BaseURL)
+	limiters := newRouteLimiters(cfg)
+	defer limiters.Stop()
+	if cfg.RateLimitBackend == "postgres" {
+		// RATELIMIT_BACKEND=postgres (alias "db") opts every shared limiter,
+		// the native challenge budgets and the per-account login-failure
+		// tracker into one fleet-wide, DB-backed view. The default "memory"
+		// keeps independent per-process counters (single-node deployments).
+		backend := db.NewRateLimitBackend(store)
+		limiters.SetBackend(backend)
+		nativeIdentity.SetRateLimitBackend(backend)
+		oauthServer.SetLoginFailureBackend(db.NewLoginFailureBackend(store))
+		logger.Info("rate limit backend", "mode", "postgres (shared, fleet-wide)")
+	}
+
+	mux := http.NewServeMux()
+	// Liveness never depends on an external service. Readiness is bounded and
+	// reflects whether this instance can safely receive traffic. /health
+	// remains a backwards-compatible alias for readiness.
+	mux.HandleFunc("GET /live", livenessHandler)
+	ready := readinessHandler(store)
+	mux.HandleFunc("GET /ready", ready)
+	mux.HandleFunc("GET /health", ready)
+	mountOAuthRoutes(mux, oauthServer, nativeIdentity, limiters, cfg, options)
+	guards := mcpHTTPGuards{
+		IP: limiters.mcpIP, Learner: limiters.mcpLearner, Concurrency: concurrency,
+		NativeOnly: cfg.NativeIdentity,
+	}
+	mountMCPRoutes(mux, store, logger, cfg, options, guards)
+	if err := mountAdminRoutes(mux, store, logger, cfg, guards); err != nil {
+		return err
+	}
+
+	if cfg.ProcessRole == "all" {
+		// Development PROCESS_ROLE=all preserves the one-process experience.
+		scheduler, err := startScheduler(store, logger, cfg.SchedulerMode, schedulerOptions(cfg))
+		if err != nil {
+			return err
+		}
+		defer scheduler.Stop()
+	}
+
+	server := &http.Server{
+		Addr:              httpListenAddress(options, cfg.Port),
+		Handler:           wrapHTTPHandler(logger, cfg.BaseURL, mux),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1 MiB
+	}
+	logger.Info("tutor mcp starting", "port", cfg.Port, "base_url", cfg.BaseURL)
+	return serveUntilSignal(server, oauthServer, cfg.MCPToolCallTimeout, logger)
+}
+
+// newOAuthServer configures the authorization server: hobby accounts, scope
+// issuance, dynamic client registration, CIMD and account e-mail delivery.
+func newOAuthServer(store *db.Store, cfg startupConfig, options commandOptions, logger *slog.Logger) (*auth.OAuthServer, error) {
+	oauthServer := auth.NewOAuthServer(store, cfg.BaseURL, logger)
+	if options.Profile == "hobby" {
+		if err := oauthServer.EnableHobbyAccounts(); err != nil {
+			return nil, err
+		}
+	}
+	oauthServer.SetGranularScopesEnabled(cfg.OAuthGranularScopes)
+	if err := oauthServer.ConfigureDynamicClientRegistration(cfg.OAuthDCRMode, cfg.OAuthDCRInitialTokenHash); err != nil {
+		return nil, reportError(logger, "configure dynamic client registration", err)
+	}
+	logger.Info("dynamic client registration policy", "mode", cfg.OAuthDCRMode)
+	oauthServer.ConfigureCIMD(cfg.OAuthCIMD)
+	smtpAddress := strings.TrimSpace(os.Getenv("SMTP_ADDR"))
+	switch {
+	case cfg.NativeIdentity:
+		// Native identities have no mailbox or password workflow.
+	case smtpAddress != "":
 		emailSender, err := auth.NewSMTPEmailSender(auth.SMTPConfig{
 			Address:    smtpAddress,
 			ServerName: strings.TrimSpace(os.Getenv("SMTP_SERVER_NAME")),
@@ -384,195 +480,162 @@ func main() {
 			Password:   os.Getenv("SMTP_PASSWORD"),
 		})
 		if err != nil {
-			logger.Error("invalid SMTP configuration", "err", err)
-			os.Exit(1)
+			return nil, reportError(logger, "invalid SMTP configuration", err)
 		}
 		oauthServer.SetEmailSender(emailSender)
 		logger.Info("account email delivery enabled", "transport", "smtp_starttls")
-	} else if !cfg.NativeIdentity && options.Profile != "hobby" {
+	case options.Profile != "hobby":
 		logger.Warn("account email delivery disabled; public registration and password recovery cannot complete")
 	}
+	return oauthServer, nil
+}
 
-	// HTTP mux
-	mux := http.NewServeMux()
-
-	// Liveness never depends on an external service. Readiness is bounded and
-	// reflects whether this instance can safely receive traffic. /health remains
-	// a backwards-compatible alias for readiness.
-	mux.HandleFunc("GET /live", livenessHandler)
-	ready := readinessHandler(store)
-	mux.HandleFunc("GET /ready", ready)
-	mux.HandleFunc("GET /health", ready)
-
-	// Rate limiters (in-process). Warn loudly if the deployment looks public but
-	// TRUSTED_PROXY_CIDRS is unset - without it every IP-limited request shares
-	// one bucket under the proxy's loopback IP (issue #37).
-	auth.WarnRateLimiterMisconfig(baseURL)
-	authorizeLimiter := auth.NewRateLimiterWithNamespace("oauth_authorize", 30.0/60, 10) // consent/login page loads
-	loginLimiter := auth.NewRateLimiterWithNamespace("oauth_login", 5.0/60, 5)           // password verification
-	tokenLimiter := auth.NewRateLimiterWithNamespace("oauth_token", 20.0/60, 10)         // code exchange and refresh
-	registerLimiter := auth.NewRateLimiterWithNamespace("oauth_register", 5.0/60, 5)     // dynamic client registration
+// routeLimiters are the per-route token buckets of the API process.
+type routeLimiters struct {
+	authorize *auth.RateLimiter // consent/login page loads
+	login     *auth.RateLimiter // password verification
+	token     *auth.RateLimiter // code exchange and refresh
+	register  *auth.RateLimiter // dynamic client registration
 	// Process-local only: it runs before IAT admission, so an anonymous
 	// request reaches neither the database nor the shared limiter backend.
-	registerAdmissionLimiter := auth.NewRateLimiterWithNamespace("oauth_register_admission", 30.0/60, 30)
-	registerDailyLimiter := auth.NewRateLimiterWithNamespace("oauth_register_daily",
-		float64(cfg.OAuthDCRMaxRegistrationsPerIPPerDay)/(24*60*60), cfg.OAuthDCRMaxRegistrationsPerIPPerDay)
-	accountLimiter := auth.NewRateLimiterWithNamespace("oauth_account", 5.0/60, 5) // verification and recovery
-	consoleLimiter := auth.NewRateLimiterWithNamespace("console", 60.0/60, 20)     // signed-in console actions
+	registerAdmission *auth.RateLimiter
+	registerDaily     *auth.RateLimiter
+	account           *auth.RateLimiter // verification and recovery
 	// Native ceremonies prove a key rather than a guessable password. A normal
 	// connection, grant change or logout each needs a challenge and a signature.
-	nativeLimiter := auth.NewRateLimiterWithNamespace("native_identity", 30.0/60, 20)
+	native     *auth.RateLimiter
+	mcpIP      *auth.RateLimiter
+	mcpLearner *auth.RateLimiter
+}
+
+func newRouteLimiters(cfg startupConfig) *routeLimiters {
 	mcpRatePerMinute := envFloat("MCP_RATE_LIMIT_PER_MIN", 60)
 	mcpBurst := envInt("MCP_RATE_LIMIT_BURST", 60)
-	mcpIPLimiter := auth.NewRateLimiterWithNamespace("mcp_ip", mcpRatePerMinute/60, mcpBurst)
-	mcpLearnerLimiter := auth.NewRateLimiterWithNamespace("mcp_learner", mcpRatePerMinute/60, mcpBurst)
-
-	// RATELIMIT_BACKEND=postgres (alias "db") opts every rate limiter and the
-	// per-account login-failure tracker into a shared, DB-backed store so a
-	// multi-instance fleet enforces one combined view of throttling/risk
-	// instead of independent per-process counters. Default "memory" leaves the
-	// in-process behaviour byte-for-byte unchanged (single-node deployments).
-	switch cfg.RateLimitBackend {
-	case "postgres":
-		rlBackend := db.NewRateLimitBackend(store)
-		authorizeLimiter.SetBackend(rlBackend)
-		loginLimiter.SetBackend(rlBackend)
-		tokenLimiter.SetBackend(rlBackend)
-		registerLimiter.SetBackend(rlBackend)
-		registerDailyLimiter.SetBackend(rlBackend)
-		accountLimiter.SetBackend(rlBackend)
-		consoleLimiter.SetBackend(rlBackend)
-		nativeLimiter.SetBackend(rlBackend)
-		mcpIPLimiter.SetBackend(rlBackend)
-		mcpLearnerLimiter.SetBackend(rlBackend)
-		oauthServer.SetLoginFailureBackend(db.NewLoginFailureBackend(store))
-		logger.Info("rate limit backend", "mode", "postgres (shared, fleet-wide)")
-	case "", "memory":
-		// In-process default; no shared state.
+	return &routeLimiters{
+		authorize:         auth.NewRateLimiterWithNamespace("oauth_authorize", 30.0/60, 10),
+		login:             auth.NewRateLimiterWithNamespace("oauth_login", 5.0/60, 5),
+		token:             auth.NewRateLimiterWithNamespace("oauth_token", 20.0/60, 10),
+		register:          auth.NewRateLimiterWithNamespace("oauth_register", 5.0/60, 5),
+		registerAdmission: auth.NewRateLimiterWithNamespace("oauth_register_admission", 30.0/60, 30),
+		registerDaily: auth.NewRateLimiterWithNamespace("oauth_register_daily",
+			float64(cfg.OAuthDCRMaxRegistrationsPerIPPerDay)/(24*60*60), cfg.OAuthDCRMaxRegistrationsPerIPPerDay),
+		account:    auth.NewRateLimiterWithNamespace("oauth_account", 5.0/60, 5),
+		native:     auth.NewRateLimiterWithNamespace("native_identity", 30.0/60, 20),
+		mcpIP:      auth.NewRateLimiterWithNamespace("mcp_ip", mcpRatePerMinute/60, mcpBurst),
+		mcpLearner: auth.NewRateLimiterWithNamespace("mcp_learner", mcpRatePerMinute/60, mcpBurst),
 	}
+}
 
-	defer authorizeLimiter.Stop()
-	defer loginLimiter.Stop()
-	defer tokenLimiter.Stop()
-	defer registerLimiter.Stop()
-	defer registerAdmissionLimiter.Stop()
-	defer registerDailyLimiter.Stop()
-	defer accountLimiter.Stop()
-	defer consoleLimiter.Stop()
-	defer nativeLimiter.Stop()
-	defer mcpIPLimiter.Stop()
-	defer mcpLearnerLimiter.Stop()
+// shared lists the limiters that may use the fleet-wide backend.
+func (l *routeLimiters) shared() []*auth.RateLimiter {
+	return []*auth.RateLimiter{l.authorize, l.login, l.token, l.register, l.registerDaily, l.account, l.native, l.mcpIP, l.mcpLearner}
+}
 
-	// OAuth routes — rate-limit sensitive endpoints
+// SetBackend moves every shared limiter to backend. registerAdmission stays
+// process-local by design.
+func (l *routeLimiters) SetBackend(backend auth.RateLimitBackend) {
+	for _, limiter := range l.shared() {
+		limiter.SetBackend(backend)
+	}
+}
+
+// Stop releases every limiter's background cleanup.
+func (l *routeLimiters) Stop() {
+	for _, limiter := range append(l.shared(), l.registerAdmission) {
+		limiter.Stop()
+	}
+}
+
+// mountOAuthRoutes serves discovery and either the native key ceremonies or
+// the password OAuth flow with its account pages.
+func mountOAuthRoutes(mux *http.ServeMux, oauthServer *auth.OAuthServer, nativeIdentity *auth.NativeIdentityServer, limiters *routeLimiters, cfg startupConfig, options commandOptions) {
+	limit := func(limiter *auth.RateLimiter, handler http.HandlerFunc) http.Handler {
+		return auth.RateLimitMiddleware(limiter, handler)
+	}
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource", oauthServer.HandleProtectedResourceMetadata)
 	mux.HandleFunc("GET /.well-known/jwks.json", auth.HandleJWKS)
 	if nativeIdentity != nil {
-		mountNativeIdentity(mux, nativeIdentity, authorizeLimiter, nativeLimiter)
-	} else {
-		mux.HandleFunc("GET /.well-known/oauth-authorization-server", oauthServer.HandleAuthServerMetadata)
-		mux.Handle("GET /authorize", auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleAuthorizeGet)))
-		mux.Handle("POST /authorize", auth.RateLimitMiddleware(loginLimiter, http.HandlerFunc(oauthServer.HandleAuthorizePost)))
-		mux.Handle("POST /token", auth.RateLimitMiddleware(tokenLimiter, http.HandlerFunc(oauthServer.HandleToken)))
-		mountDynamicClientRegistration(mux, cfg.OAuthDCRMode, oauthServer, dcrRouteLimiters{
-			Admission: registerAdmissionLimiter, Requests: registerLimiter, Daily: registerDailyLimiter,
-		})
+		mountNativeIdentity(mux, nativeIdentity, limiters.authorize, limiters.native)
+		return
 	}
-	if !cfg.NativeIdentity && options.Profile == "hobby" {
-		for _, path := range []string{"/account/invite", "/account/reset"} {
-			mux.Handle("GET "+path, auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleHobbyAccountGet)))
-			mux.Handle("POST "+path, auth.RateLimitMiddleware(accountLimiter, http.HandlerFunc(oauthServer.HandleHobbyAccountPost)))
-		}
-	} else if !cfg.NativeIdentity {
-		mux.Handle("GET /verify-email", auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleVerifyEmailGet)))
-		mux.Handle("POST /verify-email", auth.RateLimitMiddleware(accountLimiter, http.HandlerFunc(oauthServer.HandleVerifyEmailPost)))
-		mux.Handle("GET /recover", auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleRecoverGet)))
-		mux.Handle("POST /recover", auth.RateLimitMiddleware(accountLimiter, http.HandlerFunc(oauthServer.HandleRecoverPost)))
-		mux.Handle("GET /reset-password", auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleResetPasswordGet)))
-		mux.Handle("POST /reset-password", auth.RateLimitMiddleware(accountLimiter, http.HandlerFunc(oauthServer.HandleResetPasswordPost)))
-		mux.Handle("GET /login-challenge", auth.RateLimitMiddleware(authorizeLimiter, http.HandlerFunc(oauthServer.HandleLoginChallengeGet)))
-		mux.Handle("POST /login-challenge", auth.RateLimitMiddleware(accountLimiter, http.HandlerFunc(oauthServer.HandleLoginChallengePost)))
-	}
-
-	if oauthServer.InstitutionAccountsEnabled() {
-		mountInstitutionAccounts(mux, oauthServer, authorizeLimiter, loginLimiter, accountLimiter, consoleLimiter)
-	}
-
-	// MCP route: per-IP shield before auth, then per-learner limiting after auth.
-	// The body limit runs after both guards so rejected callers cannot make the
-	// process buffer request bodies, while valid POSTs are bounded before the SDK.
-	initialOAuthScope := initialMCPOAuthScope(cfg.OAuthGranularScopes)
-	mux.Handle("/mcp", newMCPHTTPHandler(&tools.Deps{
-		Store: store, Logger: logger, BaseURL: baseURL, Institution: options.Profile == "institution",
-		OAuthGranularScopes: cfg.OAuthGranularScopes,
-	}, cfg.MCPMaxRequestBodyBytes, cfg.MCPToolCallTimeout, mcpHTTPGuards{
-		IP: mcpIPLimiter, Learner: mcpLearnerLimiter, Concurrency: mcpConcurrencyLimiter,
-		NativeOnly: cfg.NativeIdentity,
-	}))
-	mountClientAPI(mux, store, logger, baseURL, mcpHTTPGuards{
-		IP: mcpIPLimiter, Learner: mcpLearnerLimiter, Concurrency: mcpConcurrencyLimiter,
-		NativeOnly: cfg.NativeIdentity,
+	mux.HandleFunc("GET /.well-known/oauth-authorization-server", oauthServer.HandleAuthServerMetadata)
+	mux.Handle("GET /authorize", limit(limiters.authorize, oauthServer.HandleAuthorizeGet))
+	mux.Handle("POST /authorize", limit(limiters.login, oauthServer.HandleAuthorizePost))
+	mux.Handle("POST /token", limit(limiters.token, oauthServer.HandleToken))
+	mountDynamicClientRegistration(mux, cfg.OAuthDCRMode, oauthServer, dcrRouteLimiters{
+		Admission: limiters.registerAdmission, Requests: limiters.register, Daily: limiters.registerDaily,
 	})
-	mountAdmin := func(prefix string, handler http.Handler) {
-		protect := func(authenticate func(http.Handler) http.Handler, next http.Handler) http.Handler {
-			return administrativeHandler(mcpIPLimiter, mcpLearnerLimiter, mcpConcurrencyLimiter, authenticate, next)
+	if options.Profile == "hobby" {
+		for _, path := range []string{"/account/invite", "/account/reset"} {
+			mux.Handle("GET "+path, limit(limiters.authorize, oauthServer.HandleHobbyAccountGet))
+			mux.Handle("POST "+path, limit(limiters.account, oauthServer.HandleHobbyAccountPost))
 		}
-		if oauthServer.InstitutionAccountsEnabled() {
-			mux.Handle("/console"+prefix, protect(oauthServer.ConsoleAPIHandler, http.StripPrefix("/console", handler)))
-			mux.Handle(prefix, auth.RateLimitMiddleware(mcpIPLimiter, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				http.Error(w, "administrative API requires a console session", http.StatusForbidden)
-			})))
-		} else if cfg.NativeIdentity {
-			mux.Handle(prefix, protect(func(next http.Handler) http.Handler {
-				return auth.BearerMiddlewareWithNativePrincipalValidator(baseURL, initialOAuthScope, store,
-					nativeAdministrativeScope(prefix, next))
-			}, handler))
-		} else {
-			mux.Handle(prefix, protect(func(next http.Handler) http.Handler {
-				return auth.BearerMiddlewareWithPrincipalValidator(baseURL, initialOAuthScope, store, next)
-			}, handler))
-		}
+		return
 	}
-	if oauthServer.InstitutionAccountsEnabled() {
-		mux.Handle("GET /console/api-csrf", administrativeHandler(mcpIPLimiter, mcpLearnerLimiter, mcpConcurrencyLimiter,
-			oauthServer.ConsoleAPIHandler, http.HandlerFunc(oauthServer.HandleConsoleAPICSRF)))
+	mux.Handle("GET /verify-email", limit(limiters.authorize, oauthServer.HandleVerifyEmailGet))
+	mux.Handle("POST /verify-email", limit(limiters.account, oauthServer.HandleVerifyEmailPost))
+	mux.Handle("GET /recover", limit(limiters.authorize, oauthServer.HandleRecoverGet))
+	mux.Handle("POST /recover", limit(limiters.account, oauthServer.HandleRecoverPost))
+	mux.Handle("GET /reset-password", limit(limiters.authorize, oauthServer.HandleResetPasswordGet))
+	mux.Handle("POST /reset-password", limit(limiters.account, oauthServer.HandleResetPasswordPost))
+	mux.Handle("GET /login-challenge", limit(limiters.authorize, oauthServer.HandleLoginChallengeGet))
+	mux.Handle("POST /login-challenge", limit(limiters.account, oauthServer.HandleLoginChallengePost))
+}
+
+// mountMCPRoutes serves /mcp and the native client view. On /mcp the per-IP
+// shield runs before auth, then per-learner limiting after auth. The body
+// limit runs after both guards so rejected callers cannot make the process
+// buffer request bodies, while valid POSTs are bounded before the SDK.
+func mountMCPRoutes(mux *http.ServeMux, store *db.Store, logger *slog.Logger, cfg startupConfig, options commandOptions, guards mcpHTTPGuards) {
+	mux.Handle("/mcp", newMCPHTTPHandler(&tools.Deps{
+		Store: store, Logger: logger, BaseURL: cfg.BaseURL, Institution: options.Profile == "institution",
+		OAuthGranularScopes: cfg.OAuthGranularScopes,
+	}, cfg.MCPMaxRequestBodyBytes, cfg.MCPToolCallTimeout, guards))
+	mountClientAPI(mux, store, logger, cfg.BaseURL, guards)
+}
+
+// mountAdminRoutes serves the bearer-authenticated administrative APIs.
+// Native institutions delegate them through narrowly scoped key grants.
+func mountAdminRoutes(mux *http.ServeMux, store *db.Store, logger *slog.Logger, cfg startupConfig, guards mcpHTTPGuards) error {
+	initialOAuthScope := initialMCPOAuthScope(cfg.OAuthGranularScopes)
+	mountAdmin := func(prefix string, handler http.Handler) {
+		authenticate := func(next http.Handler) http.Handler {
+			if cfg.NativeIdentity {
+				return auth.BearerMiddlewareWithNativePrincipalValidator(cfg.BaseURL, initialOAuthScope, store,
+					nativeAdministrativeScope(prefix, next))
+			}
+			return auth.BearerMiddlewareWithPrincipalValidator(cfg.BaseURL, initialOAuthScope, store, next)
+		}
+		mux.Handle(prefix, administrativeHandler(guards.IP, guards.Learner, guards.Concurrency, authenticate, handler))
 	}
 	mountAdmin("/admin/catalog/", adminapi.New(store, logger).Handler())
-	// Raw response review and opinion recording are separate administrative capabilities;
-	// the MCP handler never receives a trusted evaluation mutation port.
-	assessmentCertifiers, err := certification.New(strings.TrimRight(baseURL, "/")+"/admin/assessment-reviews", os.Getenv("ASSESSMENT_CERTIFIERS_JSON"))
+	// Raw response review and opinion recording are separate administrative
+	// capabilities; the MCP handler never receives a trusted evaluation port.
+	assessmentCertifiers, err := certification.New(strings.TrimRight(cfg.BaseURL, "/")+"/admin/assessment-reviews", os.Getenv("ASSESSMENT_CERTIFIERS_JSON"))
 	if err != nil {
 		logger.Error("invalid independent assessment authority configuration")
-		os.Exit(1)
+		return errReported
 	}
 	mountAdmin("/admin/assessment-reviews/", adminapi.NewAssessmentReview(store, logger, db.NewAssessmentAdjudicator(store, assessmentCertifiers)).Handler())
 	mountAdmin("/admin/curriculum-reviews/", adminapi.NewCurriculumReview(store, logger).Handler())
+	return nil
+}
 
-	if runsWorker {
-		// Development PROCESS_ROLE=all preserves the one-process experience.
-		scheduler := startSchedulerOrExit(store, logger, cfg.SchedulerMode)
-		defer scheduler.Stop()
-	}
-
-	handler := wrapHTTPHandler(logger, baseURL, mux)
-
-	server := &http.Server{
-		Addr:              httpListenAddress(options, port),
-		Handler:           handler,
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       120 * time.Second,
-		MaxHeaderBytes:    1 << 20, // 1 MiB
-	}
-
-	// Graceful shutdown on SIGINT/SIGTERM.
+// serveUntilSignal serves until SIGINT/SIGTERM, then drains in-flight
+// requests within gracefulShutdownTimeout and flushes queued account e-mail.
+func serveUntilSignal(server *http.Server, oauthServer *auth.OAuthServer, toolCallTimeout time.Duration, logger *slog.Logger) error {
 	shutdownErr := make(chan error, 1)
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	stopWaiting := make(chan struct{})
 	go func() {
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-		sig := <-sigCh
-		logger.Info("shutdown signal received", "signal", sig.String())
-		ctx, cancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout(cfg.MCPToolCallTimeout))
+		select {
+		case sig := <-sigCh:
+			logger.Info("shutdown signal received", "signal", sig.String())
+		case <-stopWaiting:
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout(toolCallTimeout))
 		defer cancel()
 		err := server.Shutdown(ctx)
 		if drainErr := oauthServer.DrainBackgroundMail(ctx); drainErr != nil {
@@ -581,16 +644,17 @@ func main() {
 		shutdownErr <- err
 	}()
 
-	logger.Info("tutor mcp starting", "port", port, "base_url", baseURL)
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		logger.Error("server failed", "err", err)
-		os.Exit(1)
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		// Still drain mail already accepted by an earlier request.
+		close(stopWaiting)
+		<-shutdownErr
+		return reportError(logger, "server failed", err)
 	}
 	if err := <-shutdownErr; err != nil {
-		logger.Error("graceful shutdown failed", "err", err)
-		os.Exit(1)
+		return reportError(logger, "graceful shutdown failed", err)
 	}
 	logger.Info("server stopped cleanly")
+	return nil
 }
 
 const (
@@ -599,15 +663,20 @@ const (
 )
 
 // gracefulShutdownTimeout lets an in-flight MCP tool call finish within its
-// configured deadline before the HTTP server stops waiting for it.
+// configured deadline before the HTTP server stops waiting for it. Process
+// supervisors must allow more than this before SIGKILL: deploy/ uses 50 s for
+// the default 30 s tool deadline (see docs/configuration.md).
 func gracefulShutdownTimeout(toolCallTimeout time.Duration) time.Duration {
 	return max(minGracefulShutdownTimeout, toolCallTimeout+gracefulShutdownMargin)
 }
 
 // The native client view and MCP tools are two interfaces of the same OAuth
 // resource. Tokens retain their /mcp audience; reading this view does not grant
-// the independent browser-console administrative capabilities.
-func mountClientAPI(mux *http.ServeMux, backend storeport.Store, logger *slog.Logger, baseURL string, guards mcpHTTPGuards) {
+// the independent administrative capabilities.
+func mountClientAPI(mux *http.ServeMux, backend interface {
+	storeport.IdentityStore
+	storeport.TenantReadTxStore
+}, logger *slog.Logger, baseURL string, guards mcpHTTPGuards) {
 	mux.Handle("/api/client/v1/", clientapi.NoStore(administrativeHandler(
 		guards.IP, guards.Learner, guards.Concurrency,
 		func(next http.Handler) http.Handler {
@@ -624,93 +693,52 @@ func mountClientAPI(mux *http.ServeMux, backend storeport.Store, logger *slog.Lo
 }
 
 // rotatesSecretsAtStartup reports whether this process re-encrypts stored
-// integration, DCR replay and narrative secrets with the current key. Only the
-// API (or the single development process) does: the institutional worker's
+// integration and narrative secrets with the current key. Only the API (or
+// the single development process) does: the institutional worker's
 // least-privilege role can read what it delivers but deliberately cannot
-// select OAuth client secrets or rewrite narrative objects
-// (deploy/postgres-roles.sql). Rotation is idempotent and compare-and-swap, so
-// several API instances may run it concurrently.
+// rewrite narrative objects (deploy/postgres-roles.sql). Rotation is
+// idempotent and compare-and-swap, so several API instances may run it
+// concurrently.
 func rotatesSecretsAtStartup(processRole string) bool {
 	return processRole != "worker"
 }
 
-func startSchedulerOrExit(store *db.Store, logger *slog.Logger, mode string) *engine.Scheduler {
+// schedulerOptions carries the scheduler settings parsed by loadStartupConfig.
+func schedulerOptions(cfg startupConfig) engine.SchedulerOptions {
+	return engine.SchedulerOptions{ConsolidationDeliveryTimeout: cfg.ConsolidationDeliveryTimeout}
+}
+
+func startScheduler(store *db.Store, logger *slog.Logger, mode string, options engine.SchedulerOptions) (*engine.Scheduler, error) {
 	scheduler := engine.NewScheduler(store, logger)
 	if mode == "distributed" {
 		scheduler = engine.NewDistributedScheduler(store, logger)
 	}
+	scheduler.Configure(options)
 	if err := scheduler.Start(); err != nil {
-		logger.Error("failed to start worker scheduler", "mode", mode, "err", err)
-		os.Exit(1)
+		return nil, reportError(logger, "failed to start worker scheduler", err, "mode", mode)
 	}
 	logger.Info("worker scheduler ready", "mode", mode)
-	return scheduler
+	return scheduler, nil
 }
 
-func runWorkerUntilSignal(store *db.Store, logger *slog.Logger, mode string) {
+func runWorkerUntilSignal(store *db.Store, logger *slog.Logger, mode string, options engine.SchedulerOptions) error {
 	if mode != "distributed" {
-		logger.Error("dedicated tenant worker requires distributed scheduler mode")
-		os.Exit(1)
+		return reportError(logger, "dedicated tenant worker requires distributed scheduler mode", nil)
 	}
-	scheduler := engine.NewTenantDistributedScheduler(store, logger, "saas_worker")
-	if err := scheduler.Start(); err != nil {
-		logger.Error("failed to start tenant worker scheduler", "err", err)
-		os.Exit(1)
-	}
-	logger.Info("tenant worker scheduler ready")
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	scheduler := engine.NewTenantDistributedScheduler(store, logger, "saas_worker")
+	scheduler.Configure(options)
+	if err := scheduler.Start(); err != nil {
+		return reportError(logger, "failed to start tenant worker scheduler", err)
+	}
+	logger.Info("tenant worker scheduler ready")
 	sig := <-sigCh
 	logger.Info("worker drain requested", "signal", sig.String())
 	scheduler.Stop()
 	logger.Info("worker drained")
-}
-
-// mountInstitutionAccounts serves the browser console, invitation links and,
-// when enabled, self-service institution signup. Password and code checks
-// share the sign-in limiter; signed-in console actions have their own.
-func mountInstitutionAccounts(mux *http.ServeMux, oauthServer *auth.OAuthServer, pageLimiter, loginLimiter, accountLimiter, consoleLimiter *auth.RateLimiter) {
-	page := func(handler http.HandlerFunc) http.Handler { return auth.RateLimitMiddleware(pageLimiter, handler) }
-	login := func(handler http.HandlerFunc) http.Handler { return auth.RateLimitMiddleware(loginLimiter, handler) }
-	console := func(handler http.HandlerFunc) http.Handler { return auth.RateLimitMiddleware(consoleLimiter, handler) }
-	account := func(handler http.HandlerFunc) http.Handler { return auth.RateLimitMiddleware(accountLimiter, handler) }
-	mux.Handle("GET /learn", console(oauthServer.HandleLearnerHome))
-	mux.Handle("GET /learn/formations/{cohortID}", console(oauthServer.HandleLearnerFormation))
-	mux.Handle("GET /learn/badges", console(oauthServer.HandleLearnerBadges))
-	mux.Handle("GET /console/progress/badges", console(oauthServer.HandleConsoleBadges))
-	mux.Handle("GET /learn/login", page(oauthServer.HandleLearnerLoginGet))
-	mux.Handle("POST /learn/login", login(oauthServer.HandleLearnerLoginPost))
-	mux.Handle("POST /learn/logout", console(oauthServer.HandleLearnerLogoutPost))
-	mux.Handle("POST /learn/enrollment", console(oauthServer.HandleLearnerEnrollmentPost))
-	mux.Handle("GET /learn/mfa", console(oauthServer.HandleLearnerMFA))
-	mux.Handle("POST /learn/mfa", login(oauthServer.HandleLearnerMFA))
-	mux.Handle("GET /learn/mfa/setup", console(oauthServer.HandleLearnerMFA))
-	mux.Handle("POST /learn/mfa/setup", login(oauthServer.HandleLearnerMFA))
-
-	mux.Handle("GET /console", console(oauthServer.HandleConsoleHome))
-	mux.Handle("GET /console/progress", console(oauthServer.HandleConsoleProgress))
-	mux.Handle("POST /console/progress/trainers", console(oauthServer.HandleConsoleProgressAssignment))
-	mux.Handle("GET /console/admissions", console(oauthServer.HandleConsoleAdmissions))
-	mux.Handle("POST /console/admissions", console(oauthServer.HandleConsoleAdmissions))
-	mux.Handle("GET /console/members", console(oauthServer.HandleConsoleHome))
-	mux.Handle("GET /console/login", page(oauthServer.HandleConsoleLoginGet))
-	mux.Handle("POST /console/login", login(oauthServer.HandleConsoleLoginPost))
-	mux.Handle("POST /console/logout", console(oauthServer.HandleConsoleLogoutPost))
-	mux.Handle("GET /console/mfa", console(oauthServer.HandleConsoleMFAGet))
-	mux.Handle("POST /console/mfa", login(oauthServer.HandleConsoleMFAPost))
-	mux.Handle("GET /console/mfa/setup", console(oauthServer.HandleConsoleMFASetupGet))
-	mux.Handle("POST /console/mfa/setup", login(oauthServer.HandleConsoleMFASetupPost))
-	mux.Handle("POST /console/members/invite", console(oauthServer.HandleConsoleInvitePost))
-	mux.Handle("POST /console/members/update", console(oauthServer.HandleConsoleMemberUpdatePost))
-	mux.Handle("POST /console/invitations/revoke", console(oauthServer.HandleConsoleInvitationRevokePost))
-	mux.Handle("GET /invite", page(oauthServer.HandleInvitationGet))
-	mux.Handle("POST /invite", login(oauthServer.HandleInvitationPost))
-	if oauthServer.SignupOpen() {
-		mux.Handle("GET /signup", page(oauthServer.HandleSignupGet))
-		mux.Handle("POST /signup", account(oauthServer.HandleSignupPost))
-		mux.Handle("GET /signup/complete", page(oauthServer.HandleSignupCompleteGet))
-		mux.Handle("POST /signup/complete", login(oauthServer.HandleSignupCompletePost))
-	}
+	return nil
 }
 
 // dcrRouteLimiters are the per-IP budgets of POST /register. Admission must be

@@ -48,6 +48,14 @@ const learningSessionCols = `id, learner_id, domain_id, status, started_at, last
 // OpenLearningSession returns the learner's existing open session or creates
 // one. The partial unique index on open sessions is the final concurrency
 // guard, while ON CONFLICT makes racing callers converge on its winner.
+//
+// Session identifiers share one global namespace (learning_sessions.id is
+// the primary key referenced by every evidence table), so they must never be
+// chosen by an API client. An empty requestedID generates a random server
+// identifier; a non-empty one is reserved for trusted server-side callers
+// that resume an identifier previously issued by this method. The MCP tools
+// only forward a client's session_id after GetLearningSession has proven that
+// the learner owns it.
 func (s *Store) OpenLearningSession(ctx context.Context, learnerID, domainID, requestedID string, now time.Time) (*models.LearningSession, error) {
 	if learnerID == "" {
 		return nil, fmt.Errorf("learner is required")

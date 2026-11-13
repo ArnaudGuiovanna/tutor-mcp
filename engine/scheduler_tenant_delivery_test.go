@@ -13,11 +13,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/stdlib"
 	"tutor-mcp/db"
 	"tutor-mcp/models"
 	storeport "tutor-mcp/store"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 type failingTenantCompletionStore struct{ *db.Store }
@@ -299,9 +300,6 @@ func TestSaaSWorkerDSARHoldParksAndResumesThroughQueue(t *testing.T) {
 				t.Fatal(err)
 			}
 			if _, err := store.SetMembershipAuthorization(ctx, p.TenantScope(), models.MembershipStatusActive, []string{models.RoleOwner}); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := store.RecordMembershipMFAVerification(ctx, p.TenantScope(), time.Now().UTC()); err != nil {
 				t.Fatal(err)
 			}
 			owner, err := store.GetPrincipalForLearner(ctx, "L1", []string{models.OAuthScopeLearner})

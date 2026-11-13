@@ -82,6 +82,25 @@ version. Tutor MCP uses `x/crypto/bcrypt`; its dependency graph does not import
 OpenPGP. Keep these OpenPGP packages out of the application. This advisory is
 left visible in scan results; it is not suppressed.
 
+## Verifying release artifacts
+
+Each release archive (`tutor-mcp_<os>_<arch>.tar.gz` or `.zip`, notices included) carries a signed
+SLSA build-provenance attestation produced by the `Prepare release` workflow
+with GitHub's `actions/attest-build-provenance`. It binds the archive digest to
+this repository, the workflow file and the commit it was built from. Verify a
+downloaded archive with the GitHub CLI before installing it:
+
+```bash
+gh attestation verify tutor-mcp_linux_amd64.tar.gz \
+  --repo ArnaudGuiovanna/tutor-mcp \
+  --signer-workflow ArnaudGuiovanna/tutor-mcp/.github/workflows/release.yml
+```
+
+The command exits non-zero unless an attestation signed by that workflow
+matches the file's SHA-256 digest. `SHA256SUMS` remains available for a
+checksum comparison, but only the attestation proves where the archive was
+built.
+
 ## Hardening checklist for operators
 
 The runtime ships with reasonable defaults, but you are responsible for:

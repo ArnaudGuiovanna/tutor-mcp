@@ -5,6 +5,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -30,7 +31,7 @@ func TestPrepareAssessmentAttemptLinksCanonicalSession(t *testing.T) {
 		"activity_type": "PRACTICE",
 		"observable":    "Apply the concept without a hint.",
 		"task_text":     "Solve the task.",
-		"rubric_json":   `{"criteria":[{"id":"correctness","max_score":1}],"passing_score":1}`,
+		"rubric":        json.RawMessage(`{"criteria":[{"id":"correctness","max_score":1}],"passing_score":1}`),
 	})
 	if res.IsError {
 		t.Fatalf("prepare attempt: %q", resultText(res))
@@ -98,7 +99,7 @@ func prepareAndSubmitAssessment(t *testing.T, deps *Deps, domainID string) (atte
 		"activity_type": "PRACTICE",
 		"observable":    "Apply concept a without a hint.",
 		"task_text":     "Produce the learner answer.",
-		"rubric_json":   `{"criteria":[{"id":"correctness","max_score":2},{"id":"reasoning","max_score":1}],"passing_score":2.5}`,
+		"rubric":        json.RawMessage(`{"criteria":[{"id":"correctness","max_score":2},{"id":"reasoning","max_score":1}],"passing_score":2.5}`),
 	})
 	if prepared.IsError {
 		t.Fatalf("prepare attempt: %q", resultText(prepared))
@@ -122,19 +123,19 @@ func prepareAndSubmitAssessment(t *testing.T, deps *Deps, domainID string) (atte
 
 func assessmentEvaluationArgs(domainID, sessionID, attemptID string, success bool) map[string]any {
 	return map[string]any{
-		"domain_id":                  domainID,
-		"session_id":                 sessionID,
-		"concept":                    "a",
-		"activity_type":              "PRACTICE",
-		"success":                    success,
-		"response_time_seconds":      12.0,
-		"confidence":                 0.8,
-		"notes":                      "Evaluation of the committed response.",
-		"attempt_id":                 attemptID,
-		"evaluator_id":               "host-model-test-v1",
-		"evaluation_method":          "host_llm",
-		"evaluation_provenance_json": `{"trace_id":"trace-1"}`,
-		"rubric_score_json":          `{"criteria_scores":[{"id":"correctness","score":2,"evidence":"correct"},{"id":"reasoning","score":0.5,"evidence":"adequate"}]}`,
+		"domain_id":             domainID,
+		"session_id":            sessionID,
+		"concept":               "a",
+		"activity_type":         "PRACTICE",
+		"success":               success,
+		"response_time_seconds": 12.0,
+		"confidence":            0.8,
+		"notes":                 "Evaluation of the committed response.",
+		"attempt_id":            attemptID,
+		"evaluator_id":          "host-model-test-v1",
+		"evaluation_method":     "host_llm",
+		"evaluation_provenance": json.RawMessage(`{"trace_id":"trace-1"}`),
+		"rubric_score":          json.RawMessage(`{"criteria_scores":[{"id":"correctness","score":2,"evidence":"correct"},{"id":"reasoning","score":0.5,"evidence":"adequate"}]}`),
 	}
 }
 

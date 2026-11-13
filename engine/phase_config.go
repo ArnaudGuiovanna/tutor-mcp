@@ -11,7 +11,7 @@ import "tutor-mcp/algorithms"
 // constants to support
 //
 //  1. injection of alternative configs in integration tests (e.g. an
-//     E2E test using NDiagnosticMax=3 to validate transitions faster);
+//     E2E test using a small NDiagnosticMax to validate transitions faster);
 //  2. logging of the active config at server startup for ops audit;
 //  3. extensibility to per-domain configs in a future phase, without
 //     refactoring all call sites.
@@ -20,23 +20,10 @@ import "tutor-mcp/algorithms"
 // receive an immutable copy via OrchestratorInput.Config. Tests
 // construct ad-hoc PhaseConfig values to drive specific scenarios.
 type PhaseConfig struct {
-	// DeltaHThreshold is the minimum reduction in mean binary entropy
-	// of P(L) (relative to the entropy snapshotted at DIAGNOSTIC
-	// entry) required to exit DIAGNOSTIC. OQ-2.2 = relative criterion
-	// — an absolute threshold is sensitive to BKT defaults
-	// (H(P(L)=0.1) ≈ 0.469) and would short-circuit the phase.
-	DeltaHThreshold float64
-
-	// NDiagnosticMax bounds required diagnostic concept coverage. Domains with
-	// at most this many concepts cover every concept; larger domains cover this
-	// many distinct concepts. Repeated items never consume the bound.
+	// NDiagnosticMax is the qualified-item budget of one DIAGNOSTIC phase.
+	// The adaptive placement stops earlier when every concept is classified.
+	// Zero or negative disables the budget.
 	NDiagnosticMax int
-
-	// RetentionRecallThreshold is the FSRS Retrievability below which
-	// a goal-relevant concept receives recall priority in either learning phase.
-	// It follows the recall-routing threshold,
-	// which is intentionally earlier than user-facing FORGETTING alerts.
-	RetentionRecallThreshold float64
 
 	// GoalRelevantCutoff defines which concepts count as
 	// "goal-relevant" for the INSTRUCTION → MAINTENANCE transition
@@ -82,17 +69,13 @@ func (cfg PhaseConfig) EffectiveMasteryExitThreshold() float64 {
 // These are the values that go to production.
 //
 // Calibration history:
-//   - DeltaHThreshold=0.2 : initial guess; revisit with E2E artifact data
-//   - NDiagnosticMax=8    : cadrage utilisateur
-//   - RetentionRecallThreshold=RetentionRecallRoutingThreshold : early recall routing
+//   - NDiagnosticMax=DefaultDiagnosticItemBudget : placement item budget
 //   - GoalRelevantCutoff=0.0 : strict positive (OQ-2.7 = A)
 func NewDefaultPhaseConfig() PhaseConfig {
 	return PhaseConfig{
-		DeltaHThreshold:          0.2,
-		NDiagnosticMax:           8,
-		RetentionRecallThreshold: algorithms.RetentionRecallRoutingThreshold,
-		GoalRelevantCutoff:       0.0,
-		AntiRepeatWindow:         DefaultAntiRepeatWindow,
-		MasteryExitThreshold:     DefaultMasteryExitThreshold,
+		NDiagnosticMax:       DefaultDiagnosticItemBudget,
+		GoalRelevantCutoff:   0.0,
+		AntiRepeatWindow:     DefaultAntiRepeatWindow,
+		MasteryExitThreshold: DefaultMasteryExitThreshold,
 	}
 }

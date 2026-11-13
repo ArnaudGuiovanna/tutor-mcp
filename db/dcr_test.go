@@ -160,12 +160,9 @@ func TestDCRConfidentialRegistrationNeverReplaysStoredSecret(t *testing.T) {
 	if err != nil || first.Replayed || first.ClientSecret != registration.CandidateClientSecret {
 		t.Fatalf("first registration=%+v err=%v", first, err)
 	}
-	var envelope string
-	if err := store.root.QueryRow(`SELECT registration_secret_ciphertext FROM oauth_clients WHERE client_id = 'confidential-client'`).Scan(&envelope); err != nil {
-		t.Fatal(err)
-	}
-	if envelope != "" {
-		t.Fatal("confidential registration persisted a recoverable secret")
+	// The schema has no column able to hold a recoverable client secret.
+	if _, err := store.root.Exec(`SELECT registration_secret_ciphertext FROM oauth_clients`); err == nil {
+		t.Fatal("oauth_clients still exposes a recoverable secret column")
 	}
 	retry := registration
 	retry.CandidateClientID = "second-confidential-client"
@@ -281,59 +278,6 @@ func TestDCRCapEvictsOldestProvisionalClient(t *testing.T) {
 	// Only activated and in-grace clients remain: the cap now holds.
 	if err := register("overflow", now.Add(time.Second)); !errors.Is(err, storeport.ErrOAuthClientLimitReached) {
 		t.Fatalf("registration without evictable client err=%v", err)
-	}
-}
-
-func TestDCRLegacyReplayEnvelopeRotatesAndAuthenticates(t *testing.T) {
-	store := setupTestDB(t)
-	ctx := context.Background()
-	now := time.Now().UTC()
-	store.SetIntegrationSecretKeyring(testSecretKeyring(t, "old:"+encodedSecretKey(30), "old"))
-	fingerprint := dcrTestHash("confidential-profile")
-	if err := store.CreateOAuthClientWithSecretCappedTTL(
-		ctx, "confidential-client", "Confidential", `["https://client.example/cb"]`, "$2a$04$placeholder", 10, now.Add(time.Hour),
-	); err != nil {
-		t.Fatal(err)
-	}
-	legacy, err := store.secretKeyring.encryptWithAAD("private-client-secret", dcrRegistrationSecretAAD("confidential-client", fingerprint))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.root.Exec(rb(store,
-		`UPDATE oauth_clients SET registration_fingerprint = ?, registration_secret_ciphertext = ? WHERE client_id = 'confidential-client'`),
-		fingerprint, legacy,
-	); err != nil {
-		t.Fatal(err)
-	}
-	store.SetIntegrationSecretKeyring(testSecretKeyring(t,
-		"old:"+encodedSecretKey(30)+",new:"+encodedSecretKey(31), "new",
-	))
-	rotated, err := store.RotateIntegrationSecrets(ctx)
-	if err != nil || rotated != 1 {
-		t.Fatalf("rotated=%d err=%v", rotated, err)
-	}
-	var envelope string
-	if err := store.root.QueryRow(`SELECT registration_secret_ciphertext FROM oauth_clients WHERE client_id = 'confidential-client'`).Scan(&envelope); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.HasPrefix(envelope, integrationSecretPrefix+"new:") {
-		t.Fatalf("DCR envelope did not rotate: %q", envelope)
-	}
-	store.SetIntegrationSecretKeyring(testSecretKeyring(t, "new:"+encodedSecretKey(31), "new"))
-
-	alterAt := len(integrationSecretPrefix) + len("new:") + 5
-	replacement := byte('A')
-	if envelope[alterAt] == replacement {
-		replacement = 'B'
-	}
-	tampered := envelope[:alterAt] + string(replacement) + envelope[alterAt+1:]
-	if _, err := store.root.Exec(rb(store,
-		`UPDATE oauth_clients SET registration_secret_ciphertext = ? WHERE client_id = 'confidential-client'`), tampered,
-	); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.RotateIntegrationSecrets(ctx); err == nil {
-		t.Fatal("rotation accepted a tampered current-key DCR envelope")
 	}
 }
 
@@ -510,16 +454,28 @@ func TestDCRCapEvictionPostgresForcedRLS(t *testing.T) {
 		})
 	}
 
-	err := asLimitedRole(func(scoped *Store) error {
+	// The consent is invisible to this tenant-less transaction, yet the
+	// cascading foreign key removes it with the evicted client.
+	if err := asLimitedRole(func(scoped *Store) error {
 		return registerDCRTestClient(scoped, "incoming", now, 2)
-	})
-	if !errors.Is(err, storeport.ErrOAuthClientLimitReached) {
-		t.Fatalf("eviction blocked by a hidden approval err=%v, want client limit reached", err)
+	}); err != nil {
+		t.Fatalf("eviction of a client with a hidden approval: %v", err)
 	}
-	if got := dcrClientIDs(t, store); got != "approved-old,recent" {
-		t.Fatalf("clients after blocked eviction=%s", got)
+	if got := dcrClientIDs(t, store); got != "incoming,recent" {
+		t.Fatalf("clients after eviction=%s", got)
+	}
+	var approvals int
+	if err := store.root.QueryRowContext(ctx, `SELECT COUNT(*) FROM learner_approved_clients WHERE client_id = 'approved-old'`).Scan(&approvals); err != nil {
+		t.Fatal(err)
+	}
+	if approvals != 0 {
+		t.Fatalf("evicted client left %d approvals behind", approvals)
 	}
 
+	// Expiry purge has the same reach, from any tenant binding.
+	if err := store.ApproveClient(ctx, "L-evict", "recent", "https://recent.example/cb"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := store.root.ExecContext(ctx, `UPDATE oauth_clients SET expires_at = $1`, now.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
@@ -528,10 +484,20 @@ func TestDCRCapEvictionPostgresForcedRLS(t *testing.T) {
 		var err error
 		removed, err = scoped.CleanupExpiredOAuthClients(ctx)
 		return err
-	}); err != nil || removed != 1 {
+	}); err != nil || removed != 2 {
 		t.Fatalf("cleanup under forced RLS removed=%d err=%v", removed, err)
 	}
-	if got := dcrClientIDs(t, store); got != "approved-old" {
+	if got := dcrClientIDs(t, store); got != "" {
 		t.Fatalf("clients after cleanup=%s", got)
+	}
+	count, err := store.CountOAuthClients(ctx)
+	if err != nil || count != 0 {
+		t.Fatalf("purged clients still count against the cap: %d err=%v", count, err)
+	}
+	if err := store.root.QueryRowContext(ctx, `SELECT COUNT(*) FROM learner_approved_clients`).Scan(&approvals); err != nil {
+		t.Fatal(err)
+	}
+	if approvals != 0 {
+		t.Fatalf("purged clients left %d approvals behind", approvals)
 	}
 }

@@ -29,11 +29,11 @@ it('distingue le temps total de celui d’un nouvel outil et du suivant', () => 
   vi.useFakeTimers();
   const view=render(<TutorActivity tools={[]} streaming={false} permission={false} preparing="Préparation"/>);
   act(()=>vi.advanceTimersByTime(20000));
-  view.rerender(<TutorActivity tools={[{id:'one',title:'get_next_activity',status:'in_progress'}]} streaming={false} permission={false} preparing=""/>);
+  view.rerender(<TutorActivity tools={[{id:'one',title:'prepare_pedagogical_turn',status:'in_progress'}]} streaming={false} permission={false} preparing=""/>);
   expect(screen.getByText('Total : 20 s · Outil : 0 s')).toBeTruthy();
   act(()=>vi.advanceTimersByTime(3000));
   expect(screen.getByText('Total : 23 s · Outil : 3 s')).toBeTruthy();
-  view.rerender(<TutorActivity tools={[{id:'one',title:'get_next_activity',status:'completed'},{id:'two',title:'get_learner_context',status:'in_progress'}]} streaming={false} permission={false} preparing=""/>);
+  view.rerender(<TutorActivity tools={[{id:'one',title:'prepare_pedagogical_turn',status:'completed'},{id:'two',title:'get_learner_state',status:'in_progress'}]} streaming={false} permission={false} preparing=""/>);
   expect(screen.getByText('Total : 23 s · Outil : 0 s')).toBeTruthy();
 });
 
@@ -49,7 +49,7 @@ it('garde des durées continues quand l’horloge système avance puis recule',(
   act(()=>vi.advanceTimersByTime(2000));
   act(()=>{vi.setSystemTime(Date.now()+3600000);vi.advanceTimersByTime(1000);});
   expect(screen.getByText('Total : 3 s · Étape : 3 s')).toBeTruthy();
-  const tools=mergeToolActivity([],{id:'one',title:'get_learner_context',status:'in_progress'});
+  const tools=mergeToolActivity([],{id:'one',title:'get_learner_state',status:'in_progress'});
   view.rerender(<TutorActivity tools={tools} streaming={false} permission={false} preparing=""/>);
   act(()=>{vi.setSystemTime(Date.now()-7200000);vi.advanceTimersByTime(2000);});
   expect(screen.getByText('Total : 5 s · Outil : 2 s')).toBeTruthy();

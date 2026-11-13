@@ -1,5 +1,16 @@
 # Institution service: phase 7 — collective weights
 
+> **Current state.** This phase plan predates the removal of the browser
+> surfaces: the institution console (`/console`, `/console/admin/`,
+> `/console/progress`), the learner portal (`/learn`), self-service signup and
+> email invitations no longer exist. Institutions are provisioned by the
+> operator with native key identities; members are managed through
+> `POST /api/client/v1/institution/actions`, formations, cohorts and admissions
+> through the `/admin/catalog` HTTP API, and staff read progress through the
+> MCP tools (`list_trainer_cohorts`, `get_learner_progress`,
+> `get_cohort_insights`, `get_cohort_statistics`). Passages below that named the
+> removed surfaces have been updated accordingly.
+
 Baseline: `2950c0e0c2c3f268fb0ac5b1da61909740199d2e` on main and staging.
 
 ## Contract
@@ -45,7 +56,7 @@ Baseline: `2950c0e0c2c3f268fb0ac5b1da61909740199d2e` on main and staging.
   status are affected. Local, hobby, legacy and quarantined domains are not.
   Weights never cross tenants or formation versions.
 - Staff read the current weight of each concept, with version, contributors and
-  computation time, in `get_cohort_statistics` and the console. They see no
+  computation time, in `get_cohort_statistics`. They see no
   individual contribution. A concept without a weight shows none.
 - No server inference and no stored generated text.
 

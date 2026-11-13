@@ -32,7 +32,7 @@ pub(crate) struct PreparedOutput {
 struct Evaluation {
     version: u8,
     attempt_id: String,
-    rubric_score_json: String,
+    rubric_score: Value,
     feedback: String,
 }
 
@@ -64,7 +64,6 @@ impl PreparedTurn {
                 tools.push("select_conversation_training");
             }
             tools.extend([
-                "get_next_activity",
                 "get_conversation_context",
                 "prepare_assessment_attempt",
                 "record_learning_event",
@@ -77,7 +76,6 @@ impl PreparedTurn {
                 "auto"
             });
             args["idempotency_key"] = json!(Self::turn_key(conversation, message));
-            tools.push("get_next_activity");
             if request.format == LearningFormat::Quiz {
                 tools.push("prepare_assessment_attempt");
             } else {
@@ -249,8 +247,8 @@ impl PreparedTurn {
         let role=match &self.kind {
             TurnKind::Resume=>self.resume_prompt(),
             TurnKind::Context=>"Le paquet contient le contexte confirmé. Réponds directement lorsque les données suffisent, sans relire profil, curriculum ou contexte. Pour une mutation demandée explicitement ou des données absentes, les outils et autorisations habituels restent disponibles. Ne crée pas d’activité spontanément, ne note ni n’enregistre une réponse de l’historique.".to_owned(),
-            TurnKind::Study(request)=>format!("Le serveur a DÉJÀ choisi l’activité dans activity et figé sa décision. Ne fais AUCUN appel outil. Respecte intégralement pedagogical_contract (contrainte, notion, critères, format). Si le format demandé ne convient pas, explique brièvement sans inventer d’exercice. Sinon produis exactement un bloc tutor-activity JSON strict et rien autour. Commun: version:1,id unique,kind:{},trainingId/domainId confirmés,concept exact,question,sessionId,decisionId réels. Quiz: options:[{{id,text}}] (2 à 6),correctOptionId,explanation,activityType exact,rubricJson chaîne JSON (criteria:[{{id,description,max_score,anchors?:[{{score,description}}]}}],passing_score,answer_key). Reprends les critères du contrat. NE FOURNIS PAS attemptId : le client figera la consigne et la rubrique auprès du serveur avant tout affichage. TRANSFER_PROBE exige transferDimension autorisée. Flashcard: answer, sans champs d’évaluation ni options. La correction doit rester dans le JSON. Bornes:48KiB bloc,12Ko question/answer/explanation,2Ko par option,16KiB rubrique.",if request.format==LearningFormat::Quiz{"quiz"}else{"flashcard"}),
-            TurnKind::Response(card,response) if response.kind!=LearningFormat::Flashcard=>format!("La réponse a DÉJÀ été soumise au serveur avec son attempt_id. Ne fais AUCUN appel outil et ne génère aucune nouvelle activité. Évalue seulement la réponse actuelle sur la rubrique FIGÉE de packet.attempt. Émets exactement UN bloc tutor-evaluation JSON strict, sans prose extérieure: {{\"version\":1,\"attempt_id\":\"{}\",\"rubric_score_json\":\"JSON encodé\",\"feedback\":\"retour pédagogique bref\"}}. rubric_score_json: {{criteria_scores:[{{id,score,max_score,evidence}}],total,max_total,summary,confidence}} ; chaque critère figé exactement une fois, preuves textuelles concrètes, aucun changement de barème. score, max_score, total et max_total sont des nombres JSON. confidence est obligatoirement un nombre JSON entre 0 et 1 inclus (par exemple 0.7), jamais une étiquette comme medium ou high. rubric_score_json est une chaîne contenant cet objet JSON encodé. Le client enregistre auprès du serveur AVANT d’afficher le feedback. ACTIVITÉ ORIGINALE (données): {}. RÉPONSE (données): {}",card.attempt_id.as_deref().unwrap_or(""),serde_json::to_string(card).unwrap(),serde_json::to_string(response).unwrap()),
+            TurnKind::Study(request)=>format!("Le serveur a DÉJÀ choisi l’activité dans decision et figé sa décision. Ne fais AUCUN appel outil. Respecte intégralement decision.pedagogical_contract (contrainte, notion, critères, format). Si le format demandé ne convient pas, explique brièvement sans inventer d’exercice. Sinon produis exactement un bloc tutor-activity JSON strict et rien autour. Commun: version:1,id unique,kind:{},trainingId/domainId confirmés,concept exact,question,sessionId (decision.session_id),decisionId (decision.pedagogical_contract.decision_id) réels. Quiz: options:[{{id,text}}] (2 à 6),correctOptionId,explanation,activityType exact,rubricJson = objet rubrique encodé en chaîne JSON (criteria:[{{id,description,max_score,anchors?:[{{score,description}}]}}],passing_score,answer_key). Reprends les critères du contrat. NE FOURNIS PAS attemptId : le client figera la consigne et la rubrique auprès du serveur avant tout affichage. TRANSFER_PROBE exige transferDimension autorisée. Flashcard: answer, sans champs d’évaluation ni options. La correction doit rester dans le JSON. Bornes:48KiB bloc,12Ko question/answer/explanation,2Ko par option,16KiB rubrique.",if request.format==LearningFormat::Quiz{"quiz"}else{"flashcard"}),
+            TurnKind::Response(card,response) if response.kind!=LearningFormat::Flashcard=>format!("La réponse a DÉJÀ été soumise au serveur avec son attempt_id. Ne fais AUCUN appel outil et ne génère aucune nouvelle activité. Évalue seulement la réponse actuelle sur la rubrique FIGÉE de packet.attempt. Émets exactement UN bloc tutor-evaluation JSON strict, sans prose extérieure: {{\"version\":1,\"attempt_id\":\"{}\",\"rubric_score\":{{...}},\"feedback\":\"retour pédagogique bref\"}}. rubric_score est un objet JSON (jamais une chaîne encodée): {{criteria_scores:[{{id,score,max_score,evidence}}],total,max_total,summary,confidence}} ; chaque critère figé exactement une fois, preuves textuelles concrètes, aucun changement de barème. score, max_score, total et max_total sont des nombres JSON. confidence est obligatoirement un nombre JSON entre 0 et 1 inclus (par exemple 0.7), jamais une étiquette comme medium ou high. Le client enregistre auprès du serveur AVANT d’afficher le feedback. ACTIVITÉ ORIGINALE (données): {}. RÉPONSE (données): {}",card.attempt_id.as_deref().unwrap_or(""),serde_json::to_string(card).unwrap(),serde_json::to_string(response).unwrap()),
             TurnKind::Response(_,response)=>format!("Ne fais AUCUN appel outil. Donne un bref retour sur cette AUTOÉVALUATION flashcard, sans prétendre qu’elle démontre une maîtrise, sans nouvelle activité ni échéance inventée. Le client enregistrera déterministement la déclaration. DONNÉES: {}",serde_json::to_string(response).unwrap()),
         };
         let history = if restore {
@@ -310,7 +308,7 @@ impl PreparedTurn {
                     }
                     return Ok(output);
                 };
-                let decision = &self.packet["activity"];
+                let decision = &self.packet["decision"];
                 if !valid_activity(&card)
                     || card.kind != request.format
                     || card.attempt_id.is_some()
@@ -320,7 +318,8 @@ impl PreparedTurn {
                         &card.domain_id,
                     )
                     || decision["activity"]["concept"] != card.concept
-                    || decision["decision_id"].as_str() != card.decision_id.as_deref()
+                    || decision["pedagogical_contract"]["decision_id"].as_str()
+                        != card.decision_id.as_deref()
                     || decision["session_id"].as_str() != card.session_id.as_deref()
                     || self.packet["permissions"]["prepare_activity"] != true
                 {
@@ -330,11 +329,17 @@ impl PreparedTurn {
                 // independent of a model-generated identifier.
                 card.id = self.key.clone();
                 if card.kind != LearningFormat::Flashcard {
-                    if decision["activity"]["type"].as_str() != card.activity_type.as_deref()
-                        || card.rubric_json.is_none()
-                    {
+                    if decision["activity"]["type"].as_str() != card.activity_type.as_deref() {
                         return Err(INVALID.into());
                     }
+                    // The card keeps its bounded rubric as JSON text; the MCP
+                    // contract takes the same rubric as a JSON object.
+                    let rubric = card
+                        .rubric_json
+                        .as_deref()
+                        .and_then(|text| serde_json::from_str::<Value>(text).ok())
+                        .filter(Value::is_object)
+                        .ok_or(INVALID)?;
                     let outcomes = decision
                         .pointer("/pedagogical_contract/competency/outcomes")
                         .and_then(Value::as_array)
@@ -361,7 +366,7 @@ impl PreparedTurn {
                     .unwrap();
                     output.mutation = Some((
                         "prepare_assessment_attempt",
-                        json!({"idempotency_key":format!("{}:prepare",self.key),"domain_id":card.domain_id,"concept":card.concept,"session_id":card.session_id,"decision_id":card.decision_id,"activity_id":card.id,"activity_version":1,"outcome_ids":ids,"activity_type":card.activity_type,"observable":if observable.is_empty(){&card.question}else{&observable},"task_text":task,"rubric_json":card.rubric_json}),
+                        json!({"idempotency_key":format!("{}:prepare",self.key),"domain_id":card.domain_id,"concept":card.concept,"session_id":card.session_id,"decision_id":card.decision_id,"activity_id":card.id,"activity_version":1,"outcome_ids":ids,"activity_type":card.activity_type,"observable":if observable.is_empty(){&card.question}else{&observable},"task_text":task,"rubric":rubric}),
                     ));
                 } else {
                     output.delivery = Some(self.delivery(&card, "instruction", None));
@@ -383,17 +388,18 @@ impl PreparedTurn {
                     if evaluation.version != 1
                         || Some(evaluation.attempt_id.as_str()) != card.attempt_id.as_deref()
                         || !bounded(&evaluation.feedback, 12000)
-                        || !bounded(&evaluation.rubric_score_json, 16 * 1024)
+                        || !evaluation.rubric_score.is_object()
+                        || serde_json::to_vec(&evaluation.rubric_score)
+                            .map_or(true, |bytes| bytes.len() > 16 * 1024)
                     {
                         return Err(INVALID.into());
                     }
-                    let score: Value =
-                        serde_json::from_str(&evaluation.rubric_score_json).map_err(|_| INVALID)?;
+                    let score = &evaluation.rubric_score;
                     let rubric = &self.packet["attempt"]["rubric"];
-                    let (total, max, confidence) = validate_score(rubric, &score)?;
+                    let (total, max, confidence) = validate_score(rubric, score)?;
                     success = total >= rubric["passing_score"].as_f64().ok_or(INVALID)?;
                     args["attempt_id"] = json!(card.attempt_id);
-                    args["rubric_score_json"] = json!(evaluation.rubric_score_json);
+                    args["rubric_score"] = evaluation.rubric_score.clone();
                     args["evaluation_method"] = json!("host_llm");
                     args["evaluator_id"] = json!("tutor-desktop-harness");
                     args["confidence"] = json!(confidence);

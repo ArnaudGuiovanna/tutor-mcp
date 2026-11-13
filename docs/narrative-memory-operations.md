@@ -66,7 +66,7 @@ transactions. Each successful metadata-only CAS is a durable checkpoint.
 Shutdown cancels and joins maintenance before closing the database. The restricted
 institutional worker does not receive narrative UPDATE privileges or run repairs.
 
-Until repair completes, `get_next_activity` reports
+Until repair completes, an activity turn (`prepare_pedagogical_turn`) reports
 `session_narrative_index` in `degraded_components`; `get_memory_state` reports
 `narrative_context`. An incomplete index never silently means an empty history.
 Teaching can continue with the explicit degradation. Old application writers

@@ -31,7 +31,7 @@ func TestSessionIndexDegradationIsVisibleThroughMCPAndRecovers(t *testing.T) {
 		t.Fatal(err)
 	}
 	// RegisterTools installs the real tenant transaction around both tools.
-	result := callTool(t, deps, RegisterTools, "L_owner", "get_next_activity", map[string]any{"domain_id": domain.ID})
+	result := nextActivityFromTurn(t, callTool(t, deps, RegisterTools, "L_owner", "prepare_pedagogical_turn", activityTurnArgs(map[string]any{"domain_id": domain.ID})))
 	if result.IsError {
 		t.Fatalf("activity failed instead of degrading: %s", resultText(result))
 	}
@@ -45,7 +45,7 @@ func TestSessionIndexDegradationIsVisibleThroughMCPAndRecovers(t *testing.T) {
 	if page, _, err := persistence.BackfillSessionNarrativeIndex(t.Context(), scope, "", 100); err != nil || page.Indexed != 1 {
 		t.Fatalf("repair=%+v,%v", page, err)
 	}
-	result = callTool(t, deps, RegisterTools, "L_owner", "get_next_activity", map[string]any{"domain_id": domain.ID})
+	result = nextActivityFromTurn(t, callTool(t, deps, RegisterTools, "L_owner", "prepare_pedagogical_turn", activityTurnArgs(map[string]any{"domain_id": domain.ID})))
 	if result.IsError {
 		t.Fatal(resultText(result))
 	}

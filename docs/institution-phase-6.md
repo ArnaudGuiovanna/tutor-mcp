@@ -1,5 +1,16 @@
 # Institution service: phase 6 — collective statistics
 
+> **Current state.** This phase plan predates the removal of the browser
+> surfaces: the institution console (`/console`, `/console/admin/`,
+> `/console/progress`), the learner portal (`/learn`), self-service signup and
+> email invitations no longer exist. Institutions are provisioned by the
+> operator with native key identities; members are managed through
+> `POST /api/client/v1/institution/actions`, formations, cohorts and admissions
+> through the `/admin/catalog` HTTP API, and staff read progress through the
+> MCP tools (`list_trainer_cohorts`, `get_learner_progress`,
+> `get_cohort_insights`, `get_cohort_statistics`). Passages below that named the
+> removed surfaces have been updated accordingly.
+
 Baseline: `f926a9499850430195985e4fd387634367379f91` on main and staging.
 
 ## Contract
@@ -62,8 +73,7 @@ Baseline: `f926a9499850430195985e4fd387634367379f91` on main and staging.
    hourly by the scheduler for every tenant through the existing tenant-root
    loop.
 4. **Staff read.** `GetCohortStatistics` through the shared progress
-   authorization, MCP tool `get_cohort_statistics` and a statistics section in
-   `/console/progress`.
+   authorization and the MCP tool `get_cohort_statistics`.
 5. **Smoke, documentation and publication.** Extend the institution smoke,
    document in `docs/installation.md` and `CHANGELOG.md`.
 
@@ -75,8 +85,7 @@ isolation, cancelled and left learners, idempotent and concurrent recomputation,
 overwrite to `NULL` when a cohort falls under the threshold, tenant isolation
 with the real runtime role, revoked assignments and memberships, scope
 boundaries, stale and never-computed states, concept pagination,
-generic errors and HTML escaping. Exercise the MCP tool, the console section and
-the institution smoke. Finish with the repository verification and the normal
+generic errors. Exercise the MCP tool and the institution smoke. Finish with the repository verification and the normal
 staging-to-main publication workflow.
 
 Learner-facing comparison, institution-wide figures, statistics history, collective

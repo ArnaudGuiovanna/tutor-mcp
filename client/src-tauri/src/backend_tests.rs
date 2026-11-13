@@ -187,6 +187,19 @@ async fn intent(backend: &Backend, validated: bool) -> String {
     backend.store.lock().await.data.intents[0].id.clone()
 }
 
+async fn private_session_of(backend: &Backend, conversation_id: &str) -> String {
+    backend
+        .agent
+        .lock()
+        .await
+        .as_ref()
+        .unwrap()
+        .private_sessions
+        .get(conversation_id)
+        .cloned()
+        .expect("private-output session")
+}
+
 fn latency_requests(directory: &Path) -> Vec<Value> {
     std::fs::read_to_string(directory.join("fixture-rpc.jsonl"))
         .unwrap_or_default()
@@ -277,7 +290,7 @@ async fn warm_turn_preparation_stays_under_500ms_p95_with_100ms_tools() {
         .iter()
         .any(|r| r["method"] == "session/load" || r["method"] == "session/new"));
     assert!(!records.iter().any(|r| [
-        "get_learner_context",
+        "get_learner_state",
         "get_my_formations",
         "list_available_formations"
     ]
@@ -330,7 +343,7 @@ async fn warm_turns_reuse_the_session_without_catalog_or_history_replay() {
             .iter()
             .any(|r| r["method"] == "session/load" || r["method"] == "session/new"));
         assert!(!records.iter().any(|r| [
-            "get_learner_context",
+            "get_learner_state",
             "get_my_formations",
             "list_available_formations"
         ]
@@ -1167,13 +1180,9 @@ async fn explicit_disconnect_cancels_a_queued_automatic_launch() {
     let worker = backend.clone();
     let cwd = directory.path().to_string_lossy().into_owned();
     let launch = tokio::spawn(async move { worker.connect_agent(fixture_target(), cwd).await });
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while !backend.agent_requested.load(Ordering::Acquire) {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    // The request passed its early check and now waits for the lock.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!launch.is_finished());
     backend.disconnect_agent().await.unwrap();
     drop(operation);
     assert!(launch.await.unwrap().unwrap_err().contains("annulée"));
@@ -2094,9 +2103,108 @@ fn staff_authoring_prompt_never_invents_a_learner() {
     assert!(prompt.contains("PERSONNELLE PRIVÉE"));
     assert!(prompt.contains("Aucun formulaire d’intention"));
     assert!(prompt.contains("select_conversation_training"));
-    assert!(prompt.contains("propose_training_edit"));
+    assert!(prompt.contains("edit_training(action=propose)"));
     assert!(prompt.contains("création institutionnelle doit être demandée explicitement"));
     assert!(prompt.contains("staff-session"));
+}
+
+#[test]
+fn local_training_actions_use_the_merged_mcp_tools_and_argument_names() {
+    let (tool, args) = pedagogy::local_training_call(
+        "manage_training_lifecycle",
+        json!({"action":"archive","id":"personal:go","key":"k1","expected_revision":"3","confirm":true}),
+    )
+    .unwrap();
+    assert_eq!(tool, "manage_training_lifecycle");
+    assert_eq!(
+        args,
+        json!({"action":"archive","training_id":"personal:go","idempotency_key":"k1","expected_revision":"3","confirm":true})
+    );
+    let (tool, args) = pedagogy::local_training_call(
+        "edit_training",
+        json!({"action":"propose","id":"personal:go","key":"k2","document":{"curriculum":{}}}),
+    )
+    .unwrap();
+    assert_eq!(tool, "edit_training");
+    assert_eq!(args["action"], "propose");
+    assert_eq!(args["training_id"], "personal:go");
+    assert!(args.get("id").is_none() && args.get("key").is_none());
+    let (tool, args) =
+        pedagogy::local_training_call("get_training", json!({"id":"personal:go"})).unwrap();
+    assert_eq!(
+        (tool, args),
+        ("get_training", json!({"training_id":"personal:go"}))
+    );
+    let (tool, args) = pedagogy::local_training_call(
+        "manage_training_lifecycle",
+        json!({"action":"withdraw","preview":true,"id":"personal:go"}),
+    )
+    .unwrap();
+    assert_eq!(tool, "manage_training_lifecycle");
+    assert_eq!(
+        args,
+        json!({"action":"withdraw","preview":true,"training_id":"personal:go"})
+    );
+    for (tool, input) in [
+        ("get_next_activity", json!({})),
+        ("archive_training", json!({"id":"personal:go"})),
+        ("preview_training_lifecycle", json!({"id":"personal:go"})),
+        ("manage_training_lifecycle", json!({"id":"personal:go"})),
+        ("manage_training_lifecycle", json!({"action":"publish"})),
+        ("edit_training", json!({"action":"archive"})),
+    ] {
+        assert!(pedagogy::local_training_call(tool, input.clone()).is_err());
+        assert!(pedagogy::native_training_call(tool, input).is_err());
+    }
+}
+
+#[test]
+fn remote_training_calls_keep_the_native_action_vocabulary() {
+    let cases = [
+        (
+            "manage_training_lifecycle",
+            json!({"action":"delete","preview":true,"id":"personal:go"}),
+            "preview_training_lifecycle",
+            json!({"decision":"delete_training","id":"personal:go"}),
+        ),
+        (
+            "manage_training_lifecycle",
+            json!({"action":"restore","id":"personal:go","key":"k","expected_revision":"2","confirm":true}),
+            "restore_training",
+            json!({"id":"personal:go","key":"k","expected_revision":"2","confirm":true}),
+        ),
+        (
+            "edit_training",
+            json!({"action":"preview","id":"personal:go","document":{}}),
+            "preview_training_edit",
+            json!({"id":"personal:go","document":{}}),
+        ),
+        (
+            "edit_training",
+            json!({"action":"save","id":"personal:go","key":"k"}),
+            "save_training_edit",
+            json!({"id":"personal:go","key":"k"}),
+        ),
+        (
+            "get_training",
+            json!({"id":"personal:go"}),
+            "get_training",
+            json!({"id":"personal:go"}),
+        ),
+    ];
+    for (tool, input, action, body) in cases {
+        assert_eq!(
+            pedagogy::native_training_call(tool, input).unwrap(),
+            (action.to_owned(), body)
+        );
+    }
+    // A preview never carries a confirmation, and only lifecycle has one.
+    assert!(pedagogy::native_training_call(
+        "manage_training_lifecycle",
+        json!({"action":"delete","preview":true,"confirm":true}),
+    )
+    .is_err());
+    assert!(pedagogy::native_training_call("get_training", json!({"preview":true})).is_err());
 }
 
 #[tokio::test]
@@ -2216,6 +2324,7 @@ async fn expiring_native_session_signs_again_and_installs_new_mcp_headers_before
         session.identity.recovery_public_key = pair.recovery.public_key().to_hex();
         backend.tutor.lock().await.credentials = Some(session);
         let conversation = backend.start_conversation(None, None).await.unwrap();
+        std::fs::write(directory.path().join("fixture-rpc.jsonl"), "").unwrap();
         backend
             .tutor
             .lock()
@@ -2254,14 +2363,14 @@ async fn expiring_native_session_signs_again_and_installs_new_mcp_headers_before
             .await
             .unwrap();
             tokio::time::timeout(
-                std::time::Duration::from_millis(500),
+                std::time::Duration::from_secs(10),
                 backend.cancel_prompt(conversation.id.clone()),
             )
             .await
             .unwrap()
             .unwrap();
             assert_eq!(
-                tokio::time::timeout(std::time::Duration::from_millis(500), turn)
+                tokio::time::timeout(std::time::Duration::from_secs(10), turn)
                     .await
                     .unwrap()
                     .unwrap()
@@ -2269,7 +2378,7 @@ async fn expiring_native_session_signs_again_and_installs_new_mcp_headers_before
                 "cancelled"
             );
             let snapshot =
-                tokio::time::timeout(std::time::Duration::from_millis(500), backend.snapshot())
+                tokio::time::timeout(std::time::Duration::from_secs(10), backend.snapshot())
                     .await
                     .unwrap();
             assert_eq!(snapshot["pendingMessage"]["paused"], true);
@@ -2308,15 +2417,27 @@ async fn expiring_native_session_signs_again_and_installs_new_mcp_headers_before
             &std::fs::read(directory.path().join("fixture-agent-sessions.json")).unwrap(),
         )
         .unwrap();
+        // The renewed institution bearer stays in the native relay: the
+        // session keeps its loopback URL and local bearer, and is not reloaded.
+        let server_config = &captured[conversation.agent_session_id.unwrap()]["mcpServers"][0];
+        let relay = backend.mcp_proxy.get().unwrap();
+        assert!(server_config["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("http://127.0.0.1:"));
         assert_eq!(
-            captured[conversation.agent_session_id.unwrap()]["mcpServers"][0]["headers"]
+            server_config["headers"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .find(|header| header["name"] == "Authorization")
                 .unwrap()["value"],
-            "Bearer new-native-session-token"
+            relay.authorization()
         );
+        assert!(!captured.to_string().contains("native-session-token"));
+        assert!(!latency_requests(directory.path())
+            .iter()
+            .any(|row| row["method"] == "session/load" || row["method"] == "session/new"));
         let state = backend.snapshot().await;
         assert_eq!(
             state["conversations"][0]["messages"]
@@ -2351,7 +2472,7 @@ async fn native_pedagogical_turn_keeps_generation_private_until_server_commit() 
     let directory = tempfile::tempdir().unwrap();
     let rubric = json!({"criteria":[{"id":"correct","description":"The value is correct","max_score":1}],"passing_score":1,"answer_key":"5"});
     let card = json!({"version":1,"id":"generated","kind":"quiz","trainingId":"personal:go","domainId":"go","concept":"variables","question":"What is 3 + 2?","sessionId":"session-go","decisionId":"decision-1","activityType":"RECALL_EXERCISE","rubricJson":rubric.to_string(),"options":[{"id":"a","text":"3"},{"id":"b","text":"5"}],"correctOptionId":"b","explanation":"PRIVATE_ANSWER"});
-    let packet = json!({"schema_version":"pedagogical-turn/v1","mode":"activity","permissions":{"read":true,"prepare_activity":true},"conversation":{"conversation_id":"unused","training_id":"personal:go","domain_id":"go","revision":"1","selection_version":1},"activity":{"activity":{"type":"RECALL_EXERCISE","concept":"variables"},"session_id":"session-go","decision_id":"decision-1","pedagogical_contract":{"competency":{"outcomes":[]}}},"attempt":{"id":"attempt-1","domain_id":"go","concept":"variables","status":"prepared","rubric":rubric}});
+    let packet = json!({"schema_version":"pedagogical-turn/v1","mode":"activity","permissions":{"read":true,"prepare_activity":true},"conversation":{"conversation_id":"unused","training_id":"personal:go","domain_id":"go","revision":"1","selection_version":1},"decision":{"activity":{"type":"RECALL_EXERCISE","concept":"variables"},"session_id":"session-go","pedagogical_contract":{"decision_id":"decision-1","competency":{"outcomes":[]}}},"attempt":{"id":"attempt-1","domain_id":"go","concept":"variables","status":"prepared","rubric":rubric}});
     let fixture = directory.path().join("fixture-pedagogy.json");
     std::fs::write(
         &fixture,
@@ -2404,12 +2525,21 @@ async fn native_pedagogical_turn_keeps_generation_private_until_server_commit() 
         &std::fs::read(directory.path().join("fixture-agent-sessions.json")).unwrap(),
     )
     .unwrap();
-    let session = state["conversations"][0]["agentSessionId"]
+    // Structured generation ran in the conversation's private session; its
+    // MCP session kept its server and neither session was reloaded.
+    let mcp_session = state["conversations"][0]["agentSessionId"]
         .as_str()
         .unwrap();
-    assert_eq!(sessions[session]["mcpServers"], json!([]));
+    assert_eq!(sessions[mcp_session]["mcpServers"][0]["name"], "tutor");
+    let private_session = private_session_of(&backend, &conversation.id).await;
+    assert_ne!(private_session, mcp_session);
+    assert_eq!(sessions[&private_session]["mcpServers"], json!([]));
+    assert!(sessions[&private_session]["lastPrompt"].is_string());
+    assert!(!latency_requests(directory.path())
+        .iter()
+        .any(|row| row["method"] == "session/load"));
     let response = json!({"version":1,"activityId":activity["id"],"kind":"quiz","trainingId":"personal:go","domainId":"go","concept":"variables","attemptId":"attempt-1","selectedOptionId":"b","responseTimeSeconds":2});
-    let evaluation = json!({"version":1,"attempt_id":"attempt-1","rubric_score_json":json!({"criteria_scores":[{"id":"correct","score":1,"max_score":1,"evidence":"Selected 5"}],"total":1,"max_total":1,"confidence":0.9}).to_string(),"feedback":"SERVER_CONFIRMED_FEEDBACK"});
+    let evaluation = json!({"version":1,"attempt_id":"attempt-1","rubric_score":{"criteria_scores":[{"id":"correct","score":1,"max_score":1,"evidence":"Selected 5"}],"total":1,"max_total":1,"confidence":0.9},"feedback":"SERVER_CONFIRMED_FEEDBACK"});
     std::fs::write(directory.path().join("fixture-fail-commit"), b"fail").unwrap();
     std::fs::write(
         &fixture,
@@ -2526,6 +2656,7 @@ async fn late_stop_keeps_a_durably_finalized_pedagogical_response_complete() {
         context_changed: false,
         catalog_changed: false,
         private_output: true,
+        budget: TurnBudget::default(),
     };
     backend
         .store
@@ -3227,5 +3358,435 @@ async fn a_refused_model_choice_keeps_the_running_harness() {
         generation_of(&backend).await.as_deref(),
         Some(generation.as_str())
     );
+    backend.shutdown().await;
+}
+
+/// Start a turn the fixture keeps open until session/cancel.
+async fn waiting_turn(
+    backend: &Arc<Backend>,
+    directory: &Path,
+) -> (String, tokio::task::JoinHandle<Result<Value, String>>) {
+    let conversation = backend.start_conversation(None, None).await.unwrap();
+    std::fs::write(directory.join("fixture-rpc.jsonl"), "").unwrap();
+    let worker = backend.clone();
+    let id = conversation.id.clone();
+    let mut turn = tokio::spawn(async move { worker.send_prompt(id, "WAIT".into()).await });
+    tokio::select! {
+        () = wait_for_latency_request(directory, "session/prompt") => {}
+        ended = &mut turn => panic!("the waiting turn ended before its prompt: {ended:?}"),
+    }
+    (conversation.id, turn)
+}
+
+#[tokio::test]
+async fn a_running_turn_refuses_incompatible_operations_at_once_and_never_blocks_reads() {
+    use std::time::Duration;
+    let directory = tempfile::tempdir().unwrap();
+    let (backend, _events) = connected(directory.path()).await;
+    let (conversation, turn) = waiting_turn(&backend, directory.path()).await;
+    // The turn never ends on its own: any bound proves these operations do
+    // not wait for it, and a generous one survives a loaded machine.
+    let quick = Duration::from_secs(10);
+    let refused = tokio::time::timeout(
+        quick,
+        backend.connect_agent(
+            fixture_target(),
+            directory.path().to_string_lossy().into_owned(),
+        ),
+    )
+    .await
+    .expect("connect_agent must not wait for the turn")
+    .unwrap_err();
+    assert_eq!(refused, TurnBlocked::Connection.message());
+    let settings = backend.settings().await;
+    assert_eq!(
+        tokio::time::timeout(quick, backend.save_settings(settings))
+            .await
+            .expect("save_settings must not wait for the turn")
+            .unwrap_err(),
+        TurnBlocked::Settings.message()
+    );
+    assert_eq!(
+        tokio::time::timeout(
+            quick,
+            backend.set_agent_configuration(crate::workspace::AgentSettings::default())
+        )
+        .await
+        .expect("set_agent_configuration must not wait for the turn")
+        .unwrap_err(),
+        TurnBlocked::AgentSettings.message()
+    );
+    // A voluntary disconnection is refused like any connection change; it
+    // never ends the running turn behind the learner's back.
+    for refused in [
+        tokio::time::timeout(quick, backend.disconnect_agent())
+            .await
+            .expect("disconnect_agent must not wait for the turn")
+            .unwrap_err(),
+        tokio::time::timeout(quick, backend.disconnect_tutor())
+            .await
+            .expect("disconnect_tutor must not wait for the turn")
+            .unwrap_err(),
+    ] {
+        assert_eq!(refused, TurnBlocked::Connection.message());
+    }
+    assert!(backend.agent.lock().await.is_some());
+    assert!(backend.prompt.lock().await.is_some());
+    assert!(!turn.is_finished());
+    // Reads and display selection never wait either.
+    let configuration = tokio::time::timeout(quick, backend.agent_configuration())
+        .await
+        .expect("agent_configuration must not wait for the turn")
+        .unwrap();
+    assert_eq!(configuration["connected"], true);
+    tokio::time::timeout(quick, backend.select_conversation(None))
+        .await
+        .expect("select_conversation must not wait for the turn")
+        .unwrap();
+    // Another turn is refused while this one runs.
+    assert_eq!(
+        backend
+            .send_prompt(conversation.clone(), "Autre".into())
+            .await
+            .unwrap_err(),
+        "Une demande est déjà en cours."
+    );
+    // The harness was neither replaced nor reconfigured.
+    assert!(!latency_requests(directory.path()).iter().any(|row| {
+        [
+            "initialize",
+            "session/new",
+            "session/load",
+            "session/set_config_option",
+        ]
+        .contains(&row["method"].as_str().unwrap_or_default())
+    }));
+    backend.cancel_prompt(conversation).await.unwrap();
+    assert_eq!(turn.await.unwrap().unwrap()["stopReason"], "cancelled");
+    // After the turn, the same operations run normally.
+    backend
+        .connect_agent(
+            fixture_target(),
+            directory.path().to_string_lossy().into_owned(),
+        )
+        .await
+        .unwrap();
+    backend.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_codex_turn_beyond_its_tool_budget_is_cancelled_with_an_explicit_stop_reason() {
+    let directory = tempfile::tempdir().unwrap();
+    let (backend, mut events) = connected(directory.path()).await;
+    // The fixture is not Codex: give its process the Codex budget, smaller.
+    backend.agent.lock().await.as_mut().unwrap().tool_budget = Some(2);
+    let (conversation, turn) = waiting_turn(&backend, directory.path()).await;
+    let (generation, session, assistant) = {
+        let prompt = backend.prompt.lock().await;
+        let prompt = prompt.as_ref().unwrap();
+        (
+            prompt.generation.clone(),
+            prompt.session_id.clone(),
+            prompt.assistant_message_id.clone(),
+        )
+    };
+    let tool_call = |id: &str| {
+        json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session,
+            "update":{"sessionUpdate":"tool_call","toolCallId":id,"status":"pending",
+            "rawInput":{"server":"tutor","tool":"prepare_pedagogical_turn","arguments":{}}}}})
+    };
+    let cancels = |directory: &Path| {
+        latency_requests(directory)
+            .iter()
+            .filter(|row| row["method"] == "session/cancel")
+            .count()
+    };
+    // Two distinct calls (one repeated update) stay within the budget.
+    for id in ["call-1", "call-2", "call-2"] {
+        backend.on_agent_event(&generation, tool_call(id)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(cancels(directory.path()), 0);
+    assert!(!turn.is_finished());
+    backend
+        .on_agent_event(&generation, tool_call("call-3"))
+        .await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), turn)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(result["stopReason"], "max_turn_requests");
+    assert_eq!(result["turnLimit"], LEARNING_TURN_BUDGET);
+    assert_eq!(cancels(directory.path()), 1);
+    let mut limit = None;
+    let mut session_updates = 0;
+    while let Ok(event) = events.try_recv() {
+        if event["value"]["type"] == "turn_limit" {
+            limit = Some(event["value"].clone());
+        }
+        // Every forwarded event of this turn names its conversation and turn.
+        if event["value"]["method"] == "session/update"
+            && event["value"]["params"]["sessionId"] == session.as_str()
+        {
+            session_updates += 1;
+            assert_eq!(event["value"]["conversationId"], conversation.as_str());
+            assert_eq!(event["value"]["turnId"], assistant.as_str());
+        }
+    }
+    assert!(
+        session_updates >= 3,
+        "tool calls are forwarded with their turn"
+    );
+    let limit = limit.expect("turn_limit event");
+    assert_eq!(limit["enforcedBy"], "client");
+    assert_eq!(limit["conversationId"], conversation.as_str());
+    assert_eq!(limit["turnId"], assistant.as_str());
+    assert_eq!(limit["stopReason"], "max_turn_requests");
+    assert_eq!(
+        limit["message"],
+        format!("Le tuteur a atteint la limite de {LEARNING_TURN_BUDGET} actions pour cette réponse. Vous pouvez lui demander de poursuivre.")
+    );
+    let state = backend.snapshot().await;
+    assert_eq!(
+        state["conversations"][0]["messages"][1]["status"],
+        "interrupted"
+    );
+    // The harness stays connected for the next turn.
+    assert!(backend.agent.lock().await.is_some());
+    backend.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_connected_tutor_origin_is_native_state_kept_until_the_url_changes_origin() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Backend::new(directory.path(), Arc::new(|_, _| {})).unwrap();
+    let mut settings = backend.settings().await;
+    settings.tutor.mode = "remote".into();
+    settings.tutor.url = "https://school.example/".into();
+    // The interface cannot write it.
+    settings.tutor_connected_origin = "https://forged.example".into();
+    backend.save_settings(settings).await.unwrap();
+    assert!(backend.settings().await.tutor_connected_origin.is_empty());
+    backend
+        .remember_connected_origin("https://school.example/")
+        .await;
+    let origin = native_auth::validate_origin("https://school.example/").unwrap();
+    assert_eq!(backend.settings().await.tutor_connected_origin, origin);
+    assert_eq!(
+        backend.snapshot().await["settings"]["tutorConnectedOrigin"],
+        origin.as_str()
+    );
+    // A full Settings object sent back by the interface keeps it, as does a
+    // disconnection.
+    let mut settings = backend.settings().await;
+    settings.tutor_connected_origin.clear();
+    settings.language = "en".into();
+    backend.save_settings(settings).await.unwrap();
+    backend.disconnect_tutor().await.unwrap();
+    assert_eq!(backend.settings().await.tutor_connected_origin, origin);
+    let restored = Backend::new(directory.path(), Arc::new(|_, _| {})).unwrap();
+    assert_eq!(restored.settings().await.tutor_connected_origin, origin);
+    // Another origin clears it.
+    let mut settings = restored.settings().await;
+    settings.tutor.url = "https://other.example".into();
+    restored.save_settings(settings).await.unwrap();
+    assert!(restored.settings().await.tutor_connected_origin.is_empty());
+    assert!(restored.snapshot().await["settings"]
+        .get("tutorConnectedOrigin")
+        .is_none());
+}
+
+#[test]
+fn turn_tags_name_the_conversation_and_turn_of_an_event() {
+    let tag = TurnTag {
+        conversation_id: "chat".into(),
+        turn_id: Some("assistant-1".into()),
+    };
+    assert_eq!(
+        tag.tag(json!({"type":"turn_error","message":"x"})),
+        json!({"type":"turn_error","message":"x","conversationId":"chat","turnId":"assistant-1"})
+    );
+    let untracked = TurnTag {
+        conversation_id: "chat".into(),
+        turn_id: None,
+    };
+    assert_eq!(
+        untracked.tag(json!({"type":"turn_limit"})),
+        json!({"type":"turn_limit","conversationId":"chat"})
+    );
+    // Events outside a turn are forwarded unchanged.
+    assert_eq!(
+        TurnTag::tag_with(None, json!({"method":"session/update"})),
+        json!({"method":"session/update"})
+    );
+    assert_eq!(
+        turn_limit_message("en"),
+        format!("The tutor reached the limit of {LEARNING_TURN_BUDGET} actions for this response. You can ask it to continue.")
+    );
+}
+
+#[test]
+fn each_operation_refused_during_a_turn_explains_itself() {
+    let all = [
+        TurnBlocked::Connection,
+        TurnBlocked::Settings,
+        TurnBlocked::AgentSettings,
+        TurnBlocked::Intent,
+        TurnBlocked::Identity,
+        TurnBlocked::Institution,
+        TurnBlocked::Conversation,
+        TurnBlocked::Message,
+    ];
+    let messages = all
+        .iter()
+        .map(|item| item.message())
+        .collect::<HashSet<_>>();
+    assert_eq!(messages.len(), all.len());
+    // Only the connection refusal speaks of the connection.
+    for item in all {
+        assert_eq!(
+            item.message().contains("connexion"),
+            item == TurnBlocked::Connection,
+            "{item:?}"
+        );
+    }
+}
+
+fn registered_prompt(session: &str, turn: &str, generation: &str) -> Prompt {
+    Prompt {
+        conversation_id: "conversation".into(),
+        session_id: session.into(),
+        assistant_message_id: turn.into(),
+        generation: generation.into(),
+        cancelled: false,
+        failure: None,
+        provider_failure: false,
+        truncated: false,
+        context_changed: false,
+        catalog_changed: false,
+        private_output: false,
+        budget: TurnBudget::default(),
+    }
+}
+
+#[test]
+fn the_budget_watchdog_of_a_turn_never_restarts_a_later_turn_of_the_same_session() {
+    let mut first = registered_prompt("stable", "answer-a", "g");
+    first.budget.exceeded = true;
+    assert!(over_budget_unconfirmed(Some(&first), "stable", "answer-a"));
+    // Turn B on the same stable session, itself over budget: A's timer is stale.
+    let mut second = registered_prompt("stable", "answer-b", "g");
+    second.budget.exceeded = true;
+    assert!(!over_budget_unconfirmed(
+        Some(&second),
+        "stable",
+        "answer-a"
+    ));
+    first.budget.exceeded = false;
+    assert!(!over_budget_unconfirmed(Some(&first), "stable", "answer-a"));
+    assert!(!over_budget_unconfirmed(None, "stable", "answer-a"));
+}
+
+#[test]
+fn claude_sessions_always_bypass_proxies_for_the_loopback_relay() {
+    let options = |settings: Value| json!({"_meta":{"claudeCode":{"options":{"settingSources":["user"],"settings":settings}}}});
+    // A user NO_PROXY without loopback, inherited from the Claude settings.
+    let inherited = json!({"apiKeyHelper":"helper","env":{
+        "HTTPS_PROXY":"http://proxy:3128","NO_PROXY":"corp.example","no_proxy":"intra.example"}});
+    let params = claude_session_settings(
+        options(json!({"disableAllHooks":true})),
+        Some(inherited),
+        Some("build.example,127.0.0.1,localhost,::1"),
+    );
+    let settings = &params["_meta"]["claudeCode"]["options"]["settings"];
+    let merged = "build.example,127.0.0.1,localhost,::1,corp.example,intra.example";
+    assert_eq!(settings["env"]["NO_PROXY"], merged);
+    assert_eq!(settings["env"]["no_proxy"], merged);
+    assert_eq!(settings["env"]["HTTPS_PROXY"], "http://proxy:3128");
+    assert_eq!(settings["apiKeyHelper"], "helper");
+    assert_eq!(settings["disableAllHooks"], true);
+    assert_eq!(
+        params["_meta"]["claudeCode"]["options"]["settingSources"],
+        json!([])
+    );
+    // The user settings file tier (unreadable here) is outranked by the flag tier.
+    let params = claude_session_settings(
+        options(json!({"disableAllHooks":true})),
+        None,
+        Some("127.0.0.1,localhost,::1"),
+    );
+    let options = &params["_meta"]["claudeCode"]["options"];
+    assert_eq!(options["settingSources"], json!(["user"]));
+    assert_eq!(
+        options["settings"]["env"]["NO_PROXY"],
+        "127.0.0.1,localhost,::1"
+    );
+    assert_eq!(
+        options["settings"]["env"]["no_proxy"],
+        "127.0.0.1,localhost,::1"
+    );
+    // Without the relay nothing is imposed; other harnesses have no Claude options.
+    let params = claude_session_settings(
+        json!({"_meta":{"claudeCode":{"options":{"settings":{}}}}}),
+        Some(json!({"env":{"NO_PROXY":"corp.example"}})),
+        None,
+    );
+    assert_eq!(
+        params["_meta"]["claudeCode"]["options"]["settings"]["env"],
+        json!({"NO_PROXY":"corp.example"})
+    );
+    assert_eq!(
+        claude_session_settings(json!({"cwd":"/w"}), None, Some("127.0.0.1")),
+        json!({"cwd":"/w"})
+    );
+}
+
+#[tokio::test]
+async fn a_disconnection_and_a_turn_registration_are_mutually_exclusive() {
+    let directory = tempfile::tempdir().unwrap();
+    let (backend, _events) = connected(directory.path()).await;
+    let generation = generation_of(&backend).await.unwrap();
+    // A registered turn: the harness is neither detached nor un-requested.
+    *backend.prompt.lock().await = Some(registered_prompt("s", "t", &generation));
+    assert_eq!(
+        backend.detach_agent_if_idle().await.err().as_deref(),
+        Some(TurnBlocked::Connection.message())
+    );
+    assert!(backend.agent.lock().await.is_some());
+    assert!(backend.agent_requested.load(Ordering::Acquire));
+    *backend.prompt.lock().await = None;
+    // Without a turn, the harness is detached in the same critical section,
+    // so a prepared turn can no longer register on it.
+    let detached = backend.detach_agent_if_idle().await.unwrap().unwrap();
+    assert_eq!(detached.generation, generation);
+    assert!(backend.agent.lock().await.is_none());
+    assert!(!backend.agent_requested.load(Ordering::Acquire));
+    detached.rpc.stop().await.unwrap();
+    backend.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_connection_refused_after_waiting_for_the_lock_has_no_side_effect() {
+    let directory = tempfile::tempdir().unwrap();
+    let (backend, _events) = connected(directory.path()).await;
+    let generation = generation_of(&backend).await.unwrap();
+    backend.agent_requested.store(false, Ordering::Release);
+    let operation = backend.operation.lock().await;
+    let worker = backend.clone();
+    let cwd = directory.path().to_string_lossy().into_owned();
+    let connect = tokio::spawn(async move { worker.connect_agent(fixture_target(), cwd).await });
+    // The early check passes; the request now waits for the operation lock.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!connect.is_finished());
+    *backend.prompt.lock().await = Some(registered_prompt("s", "t", &generation));
+    drop(operation);
+    assert_eq!(
+        connect.await.unwrap().unwrap_err(),
+        TurnBlocked::Connection.message()
+    );
+    assert!(!backend.agent_requested.load(Ordering::Acquire));
+    assert_eq!(generation_of(&backend).await, Some(generation));
+    *backend.prompt.lock().await = None;
     backend.shutdown().await;
 }

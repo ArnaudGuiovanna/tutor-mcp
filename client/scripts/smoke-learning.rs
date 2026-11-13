@@ -304,10 +304,10 @@ async fn smoke() -> Result<(), String> {
         .map_err(|_| "L’inventaire des appels réels est absent.")?;
     if !tools
         .iter()
-        .any(|title| title.contains("get_next_activity"))
+        .any(|title| title.contains("prepare_pedagogical_turn"))
     {
         return Err(format!(
-            "L’appel réel à get_next_activity n’est pas prouvé. Outils observés : {}",
+            "L’appel réel à prepare_pedagogical_turn n’est pas prouvé. Outils observés : {}",
             tools.join(", ")
         ));
     }

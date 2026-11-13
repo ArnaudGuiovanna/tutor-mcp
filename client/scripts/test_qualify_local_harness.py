@@ -39,8 +39,8 @@ fixed = mode.startswith("fixed")
 data = pathlib.Path(sys.argv[sys.argv.index("--data-dir") + 1])
 secret = "PRIVATE_FIXTURE_DATA_NEVER_REPORT"
 session, turn, operation = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
-tool, tool_id = "get_pending_alerts", "tutor/get_pending_alerts"
-arguments = {"domain_id":"qualification-domain"}
+tool, tool_id = "get_learner_state", "tutor/get_learner_state"
+arguments = {"view":"progress"}
 url = None
 pending = None
 db = None
@@ -217,7 +217,7 @@ for line in sys.stdin:
         db.commit()
         tool_update("pending", True)
         raw_input = {"server":"tutor","tool":tool,"arguments":arguments}
-        if mode == "wrong-permission-tool": raw_input["tool"] = "delete_domain"
+        if mode == "wrong-permission-tool": raw_input["tool"] = "manage_domain"
         if mode == "wrong-permission-args": raw_input["arguments"] = {"domain_id":secret}
         emit({"jsonrpc":"2.0","method":"session/request_permission","id":"permission:"+operation,
               "params":{"sessionId":session,"_meta":{"is_mcp_tool_approval":True},
@@ -499,7 +499,7 @@ class HarnessQualificationTests(unittest.IsolatedAsyncioTestCase):
         fixture.lists = 1
         with self.assertRaisesRegex(runner.QualificationError, "fixture_unexpected_call"):
             fixture.dispatch({"jsonrpc":"2.0","id":1,"method":"tools/call",
-                              "params":{"name":"delete_domain","arguments":runner.ARGUMENTS}})
+                              "params":{"name":"manage_domain","arguments":runner.ARGUMENTS}})
 
 
 if __name__ == "__main__":

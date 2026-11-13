@@ -6,6 +6,7 @@ package tools
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"tutor-mcp/algorithms"
 	"tutor-mcp/db"
 	"tutor-mcp/models"
 
@@ -60,7 +60,7 @@ func setupFileBackedToolsTest(t *testing.T) (*db.Store, *Deps) {
 	return store, deps
 }
 
-// TestRecordInteraction_NoLostUpdateUnderConcurrency reproduces R008.
+// TestRecordInteraction_NoLostUpdateUnderConcurrency reproduces a lost update.
 // N concurrent applyInteraction calls on the same (learner, concept) must
 // all be reflected in the final concept_states row. Without a transaction
 // guarding the read-modify-write cycle on PMastery / reps, concurrent
@@ -133,11 +133,6 @@ func TestRecordInteraction_NoLostUpdateUnderConcurrency(t *testing.T) {
 		t.Fatalf("lost update: expected reps=%d, got reps=%d (concept_states overwritten by concurrent record_interaction)", N, cs.Reps)
 	}
 }
-
-// Compile-time guard: make sure the BKT heuristic is exposed under its new
-// renamed name. If a future refactor reverts the rename this file refuses
-// to build (issue #51).
-var _ = algorithms.BKTUpdateHeuristicSlipByErrorType
 
 func TestRecordInteraction_NoAuth(t *testing.T) {
 	_, deps := setupToolsTest(t)
@@ -384,8 +379,8 @@ func TestRecordInteraction_ReturnsRubricObservation(t *testing.T) {
 		"response_time_seconds": 12.0,
 		"confidence":            0.9,
 		"notes":                 "rubric scored",
-		"rubric_json":           `{"scale":"0-1","criteria":[{"id":"correctness","weight":0.7}]}`,
-		"rubric_score_json":     `{"overall":0.8,"criteria_scores":{"correctness":0.8}}`,
+		"rubric":                json.RawMessage(`{"criteria":[{"id":"correctness","max_score":0.7}]}`),
+		"rubric_score":          json.RawMessage(`{"criteria_scores":[{"id":"correctness","score":0.8}]}`),
 	})
 	if res.IsError {
 		t.Fatalf("got %q", resultText(res))
@@ -413,8 +408,13 @@ func TestRecordInteraction_ReturnsRubricObservation(t *testing.T) {
 	if _, ok := score["criteria_scores"].([]any); !ok {
 		t.Fatalf("expected canonical criteria_scores, got %v", score)
 	}
-	if _, ok := obs["rubric_schema_warnings"].([]any); !ok {
-		t.Fatalf("expected rubric schema warnings, got %v", obs)
+	// A canonical rubric needs no normalization; the score exceeding its
+	// max_score is still reported.
+	if _, ok := obs["rubric_schema_warnings"]; ok {
+		t.Fatalf("canonical rubric produced warnings: %v", obs["rubric_schema_warnings"])
+	}
+	if _, ok := obs["rubric_score_schema_warnings"].([]any); !ok {
+		t.Fatalf("expected rubric_score schema warnings, got %v", obs)
 	}
 	recents, err := store.GetRecentInteractionsByLearner(context.Background(), "L_owner", 1)
 	if err != nil {
@@ -470,13 +470,13 @@ func TestRecordInteraction_ReturnsSemanticObservation(t *testing.T) {
 	makeOwnerDomain(t, store, "L_owner", "math")
 
 	res := callTool(t, deps, registerRecordInteraction, "L_owner", "record_interaction", map[string]any{
-		"concept":                   "a",
-		"activity_type":             "RECALL_EXERCISE",
-		"success":                   true,
-		"response_time_seconds":     12.0,
-		"confidence":                0.9,
-		"notes":                     "semantic audit",
-		"semantic_observation_json": `{"reasoning_quality":"brittle","success_mode":"procedural_without_explanation","confidence_alignment":"overconfident"}`,
+		"concept":               "a",
+		"activity_type":         "RECALL_EXERCISE",
+		"success":               true,
+		"response_time_seconds": 12.0,
+		"confidence":            0.9,
+		"notes":                 "semantic audit",
+		"semantic_observation":  json.RawMessage(`{"reasoning_quality":"brittle","success_mode":"procedural_without_explanation","confidence_alignment":"overconfident"}`),
 	})
 	if res.IsError {
 		t.Fatalf("got %q", resultText(res))
@@ -584,14 +584,15 @@ func TestRecordInteraction_RejectsInvalidRubricJSON(t *testing.T) {
 		"response_time_seconds": 5.0,
 		"confidence":            0.8,
 		"notes":                 "",
-		"rubric_json":           `{"criteria":`,
+		"rubric":                `{"criteria":`,
 	})
 	if !res.IsError {
-		t.Fatalf("expected rubric_json validation error, got %q", resultText(res))
+		t.Fatalf("expected rubric validation error, got %q", resultText(res))
 	}
 	msg := resultText(res)
-	if !strings.Contains(msg, "rubric_json") || !strings.Contains(msg, "valid JSON") {
-		t.Fatalf("expected rubric_json JSON error, got %q", msg)
+	// A JSON-encoded string is no longer accepted: rubric is an object.
+	if !strings.Contains(msg, "rubric") || !strings.Contains(msg, "type") {
+		t.Fatalf("expected rubric type error, got %q", msg)
 	}
 
 	recents, _ := store.GetRecentInteractionsByLearner(context.Background(), "L_owner", 5)
@@ -611,14 +612,14 @@ func TestRecordInteraction_RejectsNegativeScalarRubricScoreJSON(t *testing.T) {
 		"response_time_seconds": 5.0,
 		"confidence":            0.8,
 		"notes":                 "",
-		"rubric_score_json":     `-0.8`,
+		"rubric_score":          json.RawMessage(`{"criteria_scores":[{"id":"correctness","score":-0.8}]}`),
 	})
 	if !res.IsError {
-		t.Fatalf("expected rubric_score_json validation error, got %q", resultText(res))
+		t.Fatalf("expected rubric_score validation error, got %q", resultText(res))
 	}
 	msg := resultText(res)
-	if !strings.Contains(msg, "rubric_score_json") || !strings.Contains(msg, "non-negative") {
-		t.Fatalf("expected structured rubric_score_json error, got %q", msg)
+	if !strings.Contains(msg, "rubric_score") || !strings.Contains(msg, "minimum") {
+		t.Fatalf("expected structured rubric_score error, got %q", msg)
 	}
 }
 
@@ -628,28 +629,28 @@ func TestRecordInteraction_RejectsInvalidSemanticObservationJSON(t *testing.T) {
 		raw  string
 		want string
 	}{
-		{name: "malformed", raw: `{"reasoning_quality":`, want: "valid JSON"},
-		{name: "non_object", raw: `["brittle"]`, want: "JSON object"},
+		{name: "encoded_string", raw: `"{\"reasoning_quality\":\"brittle\"}"`, want: "type"},
+		{name: "non_object", raw: `["brittle"]`, want: "type"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store, deps := setupToolsTest(t)
 			makeOwnerDomain(t, store, "L_owner", "math")
 
 			res := callTool(t, deps, registerRecordInteraction, "L_owner", "record_interaction", map[string]any{
-				"concept":                   "a",
-				"activity_type":             "RECALL_EXERCISE",
-				"success":                   true,
-				"response_time_seconds":     5.0,
-				"confidence":                0.8,
-				"notes":                     "",
-				"semantic_observation_json": tc.raw,
+				"concept":               "a",
+				"activity_type":         "RECALL_EXERCISE",
+				"success":               true,
+				"response_time_seconds": 5.0,
+				"confidence":            0.8,
+				"notes":                 "",
+				"semantic_observation":  json.RawMessage(tc.raw),
 			})
 			if !res.IsError {
-				t.Fatalf("expected semantic_observation_json validation error, got %q", resultText(res))
+				t.Fatalf("expected semantic_observation validation error, got %q", resultText(res))
 			}
 			msg := resultText(res)
-			if !strings.Contains(msg, "semantic_observation_json") || !strings.Contains(msg, tc.want) {
-				t.Fatalf("expected semantic_observation_json %q error, got %q", tc.want, msg)
+			if !strings.Contains(msg, "semantic_observation") || !strings.Contains(msg, tc.want) {
+				t.Fatalf("expected semantic_observation %q error, got %q", tc.want, msg)
 			}
 
 			recents, _ := store.GetRecentInteractionsByLearner(context.Background(), "L_owner", 5)
@@ -1026,8 +1027,9 @@ func TestRecordInteraction_RejectsUnknownActivityType(t *testing.T) {
 	if !strings.Contains(msg, "activity_type") {
 		t.Fatalf("expected error to mention 'activity_type', got %q", msg)
 	}
-	if !strings.Contains(msg, "must be one of") {
-		t.Fatalf("expected error to list accepted values via 'must be one of', got %q", msg)
+	// The schema enum rejects the value before the handler runs.
+	if !strings.Contains(msg, "does not equal any of") {
+		t.Fatalf("expected the schema enum to list accepted values, got %q", msg)
 	}
 	// Spot-check a few canonical values are mentioned.
 	if !strings.Contains(msg, "RECALL_EXERCISE") || !strings.Contains(msg, "NEW_CONCEPT") {
@@ -1064,8 +1066,9 @@ func TestRecordInteraction_RejectsUnknownErrorType(t *testing.T) {
 	if !strings.Contains(msg, "error_type") {
 		t.Fatalf("expected error to mention 'error_type', got %q", msg)
 	}
-	if !strings.Contains(msg, "must be one of") {
-		t.Fatalf("expected error to list accepted values via 'must be one of', got %q", msg)
+	// The schema enum rejects the value before the handler runs.
+	if !strings.Contains(msg, "does not equal any of") {
+		t.Fatalf("expected the schema enum to list accepted values, got %q", msg)
 	}
 	if !strings.Contains(msg, "SYNTAX_ERROR") || !strings.Contains(msg, "KNOWLEDGE_GAP") {
 		t.Fatalf("expected error to list canonical error types, got %q", msg)

@@ -1,5 +1,3 @@
-import type { CSSProperties } from 'react';
-
 type IconName = 'panel' | 'calendar' | 'edit' | 'stop' | 'share' | 'copy' | 'sun' | 'gear' | 'users' | 'search' | 'command' | 'book' | 'chat' | 'plug' | 'arrow' | 'check' | 'close' | 'refresh' | 'pause' | 'spark' | 'shield' | 'external' | 'clock' | 'plus' | 'chevron' | 'cards';
 
 const paths: Record<IconName, React.ReactNode> = {
@@ -31,6 +29,6 @@ const paths: Record<IconName, React.ReactNode> = {
   cards: <><rect x="3" y="7" width="13" height="14" rx="2" /><path d="M7.5 3.6 18.4 2a2 2 0 0 1 2.3 1.7l1.6 10.9a2 2 0 0 1-1.7 2.3l-1.6.2" /><path d="m6.5 14 2 2 3.5-4" /></>,
 };
 
-export function Icon({ name, size = 20, style }: { name: IconName; size?: number; style?: CSSProperties }) {
-  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={style}>{paths[name]}</svg>;
+export function Icon({ name, size = 20 }: { name: IconName; size?: number }) {
+  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }

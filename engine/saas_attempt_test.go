@@ -110,9 +110,6 @@ func TestSaaSDSARHealthyContinuationExceedsTechnicalRetryBudget(t *testing.T) {
 	if _, err := store.SetMembershipAuthorization(t.Context(), p.TenantScope(), models.MembershipStatusActive, []string{models.RoleOwner}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.RecordMembershipMFAVerification(t.Context(), p.TenantScope(), time.Now()); err != nil {
-		t.Fatal(err)
-	}
 	p, err = store.GetPrincipalForLearner(t.Context(), "L1", []string{models.OAuthScopeLearner})
 	if err != nil {
 		t.Fatal(err)

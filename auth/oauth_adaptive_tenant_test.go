@@ -90,7 +90,7 @@ func TestAuthorizePost_LoginFailureThresholdLetsMultiOrganizationOwnerChooseTena
 	s.HandleLoginChallengeGet(getRec, httptest.NewRequest(http.MethodGet, challengeURL.String(), nil))
 	var accountCookie *http.Cookie
 	for _, cookie := range getRec.Result().Cookies() {
-		if cookie.Name == accountCSRFCookieName {
+		if cookie.Name == accountCSRFCookieName("/login-challenge") {
 			accountCookie = cookie
 		}
 	}
@@ -135,8 +135,8 @@ func seedOrganizationProfile(t *testing.T, store interface{ RawDB() *sql.DB }, u
 	}{
 		{`INSERT INTO tenants (id, slug, name, status, region, policy_json, created_at, updated_at)
 			VALUES ('tenant-b', 'tenant-b', 'Tenant B', 'active', 'default', '{}', ?, ?)`, []any{now, now}},
-		{`INSERT INTO tenant_memberships (id, tenant_id, user_id, learner_id, roles_json, status, version, created_at, updated_at, mfa_required)
-			VALUES ('membership-b', 'tenant-b', ?, NULL, '["learner"]', 'active', 1, ?, ?, 0)`, []any{userID, now, now}},
+		{`INSERT INTO tenant_memberships (id, tenant_id, user_id, learner_id, roles_json, status, version, created_at, updated_at)
+			VALUES ('membership-b', 'tenant-b', ?, NULL, '["learner"]', 'active', 1, ?, ?)`, []any{userID, now, now}},
 		{`INSERT INTO learners (id, email, password_hash, objective, webhook_url, profile_json, created_at, email_verified_at, tenant_id, user_id, membership_id, identity_mode)
 			VALUES ('learner-b', 'tenant-b+learner-b@profile.invalid', '', '', '', '{}', ?, ?, 'tenant-b', ?, 'membership-b', 'email')`, []any{now, now, userID}},
 		{`UPDATE tenant_memberships SET learner_id = 'learner-b' WHERE id = 'membership-b'`, nil},
@@ -171,7 +171,7 @@ func adaptiveLoginPoster(t *testing.T, s *OAuthServer) func(password, tenantID s
 		}
 		req := httptest.NewRequest(http.MethodPost, "/authorize", strings.NewReader(form.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		req.AddCookie(&http.Cookie{Name: "csrf_token", Value: csrf})
+		req.AddCookie(&http.Cookie{Name: authorizeCSRFCookieName, Value: csrf})
 		for _, cookie := range cookies {
 			req.AddCookie(cookie)
 		}

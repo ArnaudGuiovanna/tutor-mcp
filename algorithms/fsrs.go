@@ -67,10 +67,6 @@ type FSRSCard struct {
 	LastReview    time.Time
 }
 
-func NewFSRSCard() FSRSCard {
-	return FSRSCard{State: New}
-}
-
 func clamp(v, min, max float64) float64 {
 	if v < min {
 		return min

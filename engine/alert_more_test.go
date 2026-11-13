@@ -37,7 +37,7 @@ func TestEstimateReviewMinutesBranches(t *testing.T) {
 		{Concept: "X", Stability: 0.1, ElapsedDays: 30, PMastery: 0.3, Lapses: 5, CardState: "review",
 			LastReview: ptrTime(time.Now().AddDate(0, 0, -30))},
 	}
-	alerts := ComputeAlerts(states, nil, time.Time{})
+	alerts := ComputeAlertsWithEvidenceAt(states, nil, nil, time.Time{}, time.Now())
 	for _, a := range alerts {
 		if a.Type == models.AlertForgetting && !strings.Contains(a.RecommendedAction, "12") {
 			t.Errorf("expected '12 minutes' in recommended action for high-lapse concept, got %q", a.RecommendedAction)
@@ -65,7 +65,7 @@ func TestComputeAlerts_ErrorTypeRecommendations(t *testing.T) {
 				{Concept: "X", Success: false, ErrorType: tc.errorType},
 			}
 			states := []*models.ConceptState{alertNonForgettingState("X", 0.3)}
-			alerts := ComputeAlerts(states, interactions, time.Time{})
+			alerts := ComputeAlertsWithEvidenceAt(states, interactions, nil, time.Time{}, time.Now())
 
 			found := false
 			for _, a := range alerts {
@@ -86,7 +86,7 @@ func TestComputeAlerts_ErrorTypeRecommendations(t *testing.T) {
 // TestComputeAlerts_OverloadOnLongSession covers the sessionStart > 45m branch.
 func TestComputeAlerts_OverloadOnLongSession(t *testing.T) {
 	start := time.Now().Add(-50 * time.Minute)
-	alerts := ComputeAlerts(nil, nil, start)
+	alerts := ComputeAlertsWithEvidenceAt(nil, nil, nil, start, time.Now())
 	found := false
 	for _, a := range alerts {
 		if a.Type == models.AlertOverload {
@@ -102,7 +102,7 @@ func TestComputeAlerts_OverloadOnLongSession(t *testing.T) {
 // recent sessionStart does NOT produce an OVERLOAD alert.
 func TestComputeAlerts_NoOverloadOnShortSession(t *testing.T) {
 	start := time.Now().Add(-5 * time.Minute)
-	alerts := ComputeAlerts(nil, nil, start)
+	alerts := ComputeAlertsWithEvidenceAt(nil, nil, nil, start, time.Now())
 	for _, a := range alerts {
 		if a.Type == models.AlertOverload {
 			t.Errorf("did not expect OVERLOAD with 5-minute session, got %+v", a)
@@ -116,7 +116,7 @@ func TestComputeAlerts_SustainedSuccessDoesNotCreatePlateau(t *testing.T) {
 	for i := 0; i < 30; i++ {
 		interactions = append(interactions, &models.Interaction{Concept: "P", Success: true})
 	}
-	alerts := ComputeAlerts(nil, interactions, time.Time{})
+	alerts := ComputeAlertsWithEvidenceAt(nil, interactions, nil, time.Time{}, time.Now())
 
 	found := false
 	for _, a := range alerts {
@@ -152,7 +152,7 @@ func TestComputeAlertsForgettingDoesNotCreateSyntheticPlateau(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			states := []*models.ConceptState{alertStateAtRetention(t, "P", tc.retention)}
-			alerts := ComputeAlerts(states, interactions, time.Time{})
+			alerts := ComputeAlertsWithEvidenceAt(states, interactions, nil, time.Time{}, time.Now())
 
 			if _, found := findAlert(alerts, models.AlertForgetting, "P"); !found {
 				t.Fatal("expected FORGETTING alert in plateau collision scenario")
@@ -177,7 +177,7 @@ func TestComputeAlertsAt_DeterministicForgetting(t *testing.T) {
 			LastReview: &lastReview},
 	}
 
-	alerts := ComputeAlertsAt(states, nil, time.Time{}, now)
+	alerts := ComputeAlertsWithEvidenceAt(states, nil, nil, time.Time{}, now)
 
 	a, found := findAlert(alerts, models.AlertForgetting, "X")
 	if !found {
@@ -193,7 +193,7 @@ func TestComputeAlertsAt_DeterministicForgetting(t *testing.T) {
 		{Concept: "X", Stability: 0.1, ElapsedDays: 0, PMastery: 0.3, CardState: "review",
 			LastReview: &recent},
 	}
-	if _, found := findAlert(ComputeAlertsAt(statesRecent, nil, time.Time{}, now), models.AlertForgetting, "X"); found {
+	if _, found := findAlert(ComputeAlertsWithEvidenceAt(statesRecent, nil, nil, time.Time{}, now), models.AlertForgetting, "X"); found {
 		t.Error("did not expect FORGETTING alert for a 1-hour-old review")
 	}
 }
@@ -205,18 +205,18 @@ func TestComputeAlertsAt_DeterministicOverload(t *testing.T) {
 
 	// 46 minutes elapsed → just past the 45-minute threshold → OVERLOAD.
 	start := now.Add(-46 * time.Minute)
-	if _, found := findAlert(ComputeAlertsAt(nil, nil, start, now), models.AlertOverload, ""); !found {
+	if _, found := findAlert(ComputeAlertsWithEvidenceAt(nil, nil, nil, start, now), models.AlertOverload, ""); !found {
 		t.Error("expected OVERLOAD at 46 minutes elapsed")
 	}
 
 	// 44 minutes elapsed → below threshold → no OVERLOAD.
 	startShort := now.Add(-44 * time.Minute)
-	if _, found := findAlert(ComputeAlertsAt(nil, nil, startShort, now), models.AlertOverload, ""); found {
+	if _, found := findAlert(ComputeAlertsWithEvidenceAt(nil, nil, nil, startShort, now), models.AlertOverload, ""); found {
 		t.Error("did not expect OVERLOAD at 44 minutes elapsed")
 	}
 
 	// Zero sessionStart → never OVERLOAD.
-	if _, found := findAlert(ComputeAlertsAt(nil, nil, time.Time{}, now), models.AlertOverload, ""); found {
+	if _, found := findAlert(ComputeAlertsWithEvidenceAt(nil, nil, nil, time.Time{}, now), models.AlertOverload, ""); found {
 		t.Error("did not expect OVERLOAD with a zero sessionStart")
 	}
 }

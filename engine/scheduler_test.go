@@ -200,3 +200,18 @@ func TestSendOLM_SkipsWhenNothingActionable(t *testing.T) {
 		t.Errorf("nothing actionable should NOT mark OLM as sent")
 	}
 }
+
+func TestSchedulerConsolidationDeliveryTimeoutOption(t *testing.T) {
+	s := &Scheduler{}
+	if got := s.consolidationDeliveryTimeout(); got != DefaultConsolidationDeliveryTimeout {
+		t.Fatalf("default timeout = %v, want %v", got, DefaultConsolidationDeliveryTimeout)
+	}
+	s.Configure(SchedulerOptions{ConsolidationDeliveryTimeout: 5 * time.Minute})
+	if got := s.consolidationDeliveryTimeout(); got != 5*time.Minute {
+		t.Fatalf("configured timeout = %v, want 5m", got)
+	}
+	s.Configure(SchedulerOptions{ConsolidationDeliveryTimeout: -time.Minute})
+	if got := s.consolidationDeliveryTimeout(); got != DefaultConsolidationDeliveryTimeout {
+		t.Fatalf("invalid timeout must fall back to the default, got %v", got)
+	}
+}

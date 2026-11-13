@@ -5,8 +5,7 @@
 package algorithms
 
 // Mastery thresholds are exposed via accessors in thresholds.go.
-// MasteryKST() returns the prerequisite-unlock threshold (0.70 legacy,
-// 0.85 unified under REGULATION_THRESHOLD=on).
+// MasteryKST() returns the prerequisite-unlock threshold (0.85).
 
 type KSTGraph struct {
 	Concepts      []string            `json:"concepts"`

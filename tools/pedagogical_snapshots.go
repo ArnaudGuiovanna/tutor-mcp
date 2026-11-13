@@ -24,7 +24,7 @@ type GetPedagogicalSnapshotsParams struct {
 }
 
 func registerGetPedagogicalSnapshots(server *mcp.Server, deps *Deps) {
-	addTool(server, &mcp.Tool{
+	addTool(server, deps, &mcp.Tool{
 		Name:        "get_pedagogical_snapshots",
 		Description: "Read stored pedagogical decision snapshots for the authenticated learner, optionally filtered by domain and concept.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, params GetPedagogicalSnapshotsParams) (*mcp.CallToolResult, any, error) {
@@ -48,7 +48,7 @@ func registerGetPedagogicalSnapshots(server *mcp.Server, deps *Deps) {
 		if domainID != "" {
 			domain, err := resolveDomain(ctx, deps.Store, learnerID, domainID)
 			if err != nil || domain == nil {
-				deps.Logger.Error("get_pedagogical_snapshots: domain not found", "err", err, "learner", learnerID, "domain_id", params.DomainID)
+				deps.Logger.Error("get_pedagogical_snapshots: domain not found", append(diagnosticErrorAttrs(err), "learner", learnerID, "domain_id", params.DomainID)...)
 				r, _ := errorResult("domain not found")
 				return r, nil, nil
 			}

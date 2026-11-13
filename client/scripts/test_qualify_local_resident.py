@@ -279,7 +279,7 @@ class AcpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(acp.process.stdin.written), 1)  # Prompt only, no permission response.
 
     def permission_frame(self, arguments):
-        return {'jsonrpc': '2.0', 'id': 'permission:fixture-profile', 'method': 'session/request_permission', 'params': {'sessionId': 'session-A', 'toolCall': {'toolCallId': 'fixture-profile', 'rawInput': {'server': 'tutor', 'tool': 'get_learner_context', 'arguments': arguments}}, 'options': [{'kind': 'allow_once', 'optionId': 'allow'}, {'kind': 'reject_once', 'optionId': 'deny'}]}}
+        return {'jsonrpc': '2.0', 'id': 'permission:fixture-profile', 'method': 'session/request_permission', 'params': {'sessionId': 'session-A', 'toolCall': {'toolCallId': 'fixture-profile', 'rawInput': {'server': 'tutor', 'tool': 'get_learner_state', 'arguments': arguments}}, 'options': [{'kind': 'allow_once', 'optionId': 'allow'}, {'kind': 'reject_once', 'optionId': 'deny'}]}}
 
     async def profile_permission(self, training, arguments, allowed=True):
         acp = self.acp([self.permission_frame(arguments), answer_frame()])

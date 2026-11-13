@@ -202,7 +202,7 @@ describe('Apprendre depuis la conversation', () => {
     await waitFor(()=>expect(vi.mocked(api.trainingAction).mock.calls.filter(([action])=>action==='list_training_library')).toHaveLength(2));
   });
 
-  it('accepte immédiatement les événements de la session recréée et ignore ceux de l’ancienne', async () => {
+  it('accepte immédiatement les événements étiquetés de la session recréée et ignore les autres', async () => {
     const state=initialState(true);state.conversations=[conversation];state.activeConversationId=conversation.id;
     const fixture=client(state);let finish!:(value:{stopReason:string})=>void;
     vi.mocked(fixture.api.sendPrompt).mockImplementation(()=>new Promise(resolve=>{finish=resolve;}));
@@ -216,7 +216,8 @@ describe('Apprendre depuis la conversation', () => {
     );
     act(()=>{
       fixture.broadcast(rebound);
-      fixture.emit({method:'session/update',params:{sessionId:'agent-new',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'Nouvelle session conservée.'}}}});
+      fixture.emit({method:'session/update',conversationId:conversation.id,turnId:'message-answer',params:{sessionId:'agent-new',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'Nouvelle session conservée.'}}}});
+      // The old session's late output is no longer tagged with the turn.
       fixture.emit({method:'session/update',params:{sessionId:'agent-1',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'Ancienne session ignorée.'}}}});
     });
     expect(screen.getByText('Nouvelle session conservée.')).toBeTruthy();
@@ -246,7 +247,7 @@ describe('Apprendre depuis la conversation', () => {
     expect(waiting).toBeTruthy();
     expect(screen.getByRole('region',{name:'Messages de la conversation'}).contains(waiting)).toBe(true);
     expect(screen.getByText('Total : 0 s · Étape : 0 s')).toBeTruthy();
-    act(()=>fixture.emit({method:'session/update',params:{sessionId:'agent-1',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'Une explication progressive.'}}}}));
+    act(()=>fixture.emit({method:'session/update',conversationId:'conversation-1',params:{sessionId:'agent-1',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'Une explication progressive.'}}}}));
     expect(await screen.findByText('Une explication progressive.')).toBeTruthy();
     act(()=>fixture.emit({id:7,method:'session/request_permission',params:{sessionId:'agent-1',toolCall:{title:'Enregistrer une observation'},options:[{optionId:'reject',name:'Refuser',kind:'reject_once'}]}}));
     await userEvent.click(await screen.findByRole('button',{name:'Refuser'}));expect(fixture.api.answerPermission).toHaveBeenCalledWith(7,'reject');
@@ -264,12 +265,12 @@ describe('Apprendre depuis la conversation', () => {
     act(()=>fixture.emit(retry));
     expect((await screen.findByText(retry.message)).closest('[role="status"]')?.getAttribute('aria-live')).toBe('polite');
     expect(screen.queryByRole('alert')).toBeNull();expect(fixture.api.cancelPrompt).not.toHaveBeenCalled();expect(fixture.getState().agentConnected).toBe(true);
-    act(()=>fixture.emit({method:'session/update',params:{sessionId:'agent-1',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'La réponse reprend.'}}}}));
+    act(()=>fixture.emit({method:'session/update',conversationId:'conversation-1',params:{sessionId:'agent-1',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'La réponse reprend.'}}}}));
     expect(await screen.findByText('La réponse reprend.')).toBeTruthy();expect(screen.queryByText(retry.message)).toBeNull();expect(screen.getByText('Je rédige la réponse…')).toBeTruthy();
     act(()=>fixture.emit(retry));expect(screen.getByText(retry.message)).toBeTruthy();
-    act(()=>fixture.emit({method:'session/update',params:{sessionId:'agent-1',update:{sessionUpdate:'tool_call',toolCallId:'tool-1',title:'get_learner_context',status:'in_progress'}}}));
+    act(()=>fixture.emit({method:'session/update',conversationId:'conversation-1',params:{sessionId:'agent-1',update:{sessionUpdate:'tool_call',toolCallId:'tool-1',title:'get_learner_state',status:'in_progress'}}}));
     expect(screen.queryByText(retry.message)).toBeNull();expect(screen.getByText('Je consulte votre progression…')).toBeTruthy();
-    act(()=>fixture.emit({method:'session/update',params:{sessionId:'agent-1',update:{sessionUpdate:'tool_call_update',toolCallId:'tool-1',status:'completed'}}}));
+    act(()=>fixture.emit({method:'session/update',conversationId:'conversation-1',params:{sessionId:'agent-1',update:{sessionUpdate:'tool_call_update',toolCallId:'tool-1',status:'completed'}}}));
     expect(screen.getByText('J’attends la réponse de l’agent…')).toBeTruthy();
     expect(screen.getByText('La réponse reprend.')).toBeTruthy();
     act(()=>fixture.emit(retry));

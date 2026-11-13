@@ -188,7 +188,10 @@ impl Backend {
                 return Ok(false);
             }
             let created = rpc
-                .request("session/new", background_session_params(cwd))
+                .request(
+                    "session/new",
+                    self.session_params(background_session_params(cwd)).await,
+                )
                 .await?;
             let session = session_id(&created)?;
             *task.session.lock().unwrap() = Some(session.clone());

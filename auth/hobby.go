@@ -59,7 +59,7 @@ func (s *OAuthServer) HandleHobbyAccountGet(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	setAccountCSRFCookie(w, csrf, r.URL.Path, 1800)
+	s.setAccountCSRFCookie(w, csrf, r.URL.Path, 1800)
 	renderAccountPage(w, http.StatusOK, accountPageData{Title: "Choose your credentials", Token: raw, CSRFToken: csrf, HobbyPurpose: purpose})
 }
 
@@ -115,6 +115,6 @@ func (s *OAuthServer) HandleHobbyAccountPost(w http.ResponseWriter, r *http.Requ
 		invalid()
 		return
 	}
-	setAccountCSRFCookie(w, "", r.URL.Path, -1)
+	s.setAccountCSRFCookie(w, "", r.URL.Path, -1)
 	renderAccountPage(w, http.StatusOK, accountPageData{Title: "Credentials saved", Message: "Return to your MCP client to sign in and authorize it. Account creation does not grant access to any client."})
 }

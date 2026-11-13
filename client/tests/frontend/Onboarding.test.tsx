@@ -186,11 +186,20 @@ describe('configuration guidée au premier lancement', () => {
     expect(await screen.findByLabelText('Message au tuteur')).toBeTruthy();
     cleanup();
 
-    // A remote profile with an agent and a saved address, never used and without confirmed backup.
+    // A remote profile already connected to its saved server, without conversation nor confirmed backup.
     const configured = freshState(); configured.settings.targetId = claude.id; configured.settings.tutor.url = 'https://tutor.example.org';
+    configured.settings.tutorConnectedOrigin = 'https://tutor.example.org';
     configured.identity = { exists: true, npub: 'npub1lea', backupConfirmed: false, needsBackup: true };
     setup(configured);
     expect(await screen.findByLabelText('Message au tuteur')).toBeTruthy();
+    cleanup();
+
+    // A new setup interrupted after saving the remote address (key awaiting authorisation) resumes at the server step.
+    const interrupted = freshState(); interrupted.settings.targetId = claude.id; interrupted.settings.tutor.url = 'https://tutor.example.org';
+    interrupted.identity = { exists: true, npub: 'npub1lea', backupConfirmed: true, needsBackup: false };
+    setup(interrupted);
+    expect(await heading('Connectez votre serveur Tutor')).toBeTruthy();
+    expect(screen.queryByLabelText('Message au tuteur')).toBeNull();
     cleanup();
 
     const unfinished = freshState(); unfinished.settings.targetId = claude.id;

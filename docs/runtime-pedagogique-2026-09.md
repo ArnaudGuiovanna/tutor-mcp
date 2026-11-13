@@ -151,7 +151,7 @@ Réparation explicite d'un prérequis devenu inutile :
 ```json
 {
   "domain_id": "domaine",
-  "expected_version": 4,
+  "expected_revision": 4,
   "operation": "repair_prerequisites",
   "source_concept_ids": ["competence_dependante"],
   "prerequisites": {"competence_dependante": []},

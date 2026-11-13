@@ -113,7 +113,7 @@ async fn main() {
 }
 
 const MAX_EVENTS: usize = 10000;
-const EXPECTED_TOOL: &str = "get_learner_context";
+const EXPECTED_TOOL: &str = "get_learner_state";
 
 // These bytes are embedded by the compiler, so later edits to the checkout do
 // not change the provenance of an already-built native or Windows executable.
@@ -630,7 +630,6 @@ fn native_operations_allowed(operations: &Value) -> bool {
                     Some(
                         "prepare_pedagogical_turn"
                             | "select_conversation_training"
-                            | "get_next_activity"
                             | "get_conversation_context"
                             | "prepare_assessment_attempt"
                             | "submit_assessment_attempt"
@@ -920,7 +919,7 @@ async fn qualify(options: Options) -> Result<(), String> {
                 // This benchmark authorizes one read-only tool on its disposable
                 // server. Every unrecognized operation is explicitly denied.
                 let allowed =
-                    context_read && registry.request_tool(&event) == Some("get_learner_context");
+                    context_read && registry.request_tool(&event) == Some("get_learner_state");
                 let choice = allowed
                     .then(|| {
                         event["params"]["options"]
@@ -974,7 +973,7 @@ async fn qualify(options: Options) -> Result<(), String> {
                 if options.scenario == "correction" { &fixture["variants"][index] } else { fixture }
             });
             let text = match options.scenario.as_str() {
-                "context-read" => "Consulte uniquement mon profil avec get_learner_context, puis confirme en une phrase que tu l’as consulté. Ne crée aucune formation et ne modifie rien.".to_string(),
+                "context-read" => "Consulte uniquement mon profil avec get_learner_state, puis confirme en une phrase que tu l’as consulté. Ne crée aucune formation et ne modifie rien.".to_string(),
                 "explanation" => "Explique en deux phrases pourquoi soustraire le même nombre aux deux membres d’une équation préserve l’égalité. Utilise le contexte préparé, sans appel d’outil.".to_string(),
                 "resume" => resume_text(current_fixture.unwrap(), index % 2 == 1),
                 "correction" => {
@@ -1092,7 +1091,6 @@ mod tests {
         assert!(native_operations_allowed(&json!([
             "prepare_pedagogical_turn",
             "select_conversation_training",
-            "get_next_activity",
             "get_conversation_context",
             "prepare_assessment_attempt",
             "record_learning_event"

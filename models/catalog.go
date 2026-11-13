@@ -19,22 +19,24 @@ type Formation struct {
 }
 
 type FormationVersion struct {
-	ID           string     `json:"id"`
-	TenantID     string     `json:"tenant_id"`
-	FormationID  string     `json:"formation_id"`
-	Version      int64      `json:"version"`
-	Status       string     `json:"status"`
-	MetadataJSON string     `json:"metadata_json,omitempty"`
-	CreatedBy    string     `json:"created_by"`
-	CreatedAt    time.Time  `json:"created_at"`
-	PublishedAt  *time.Time `json:"published_at"`
+	ID          string `json:"id"`
+	TenantID    string `json:"tenant_id"`
+	FormationID string `json:"formation_id"`
+	Version     int64  `json:"version"`
+	Status      string `json:"status"`
+	// Metadata is the free-form JSON object attached to the version.
+	Metadata    map[string]any `json:"metadata,omitempty"`
+	CreatedBy   string         `json:"created_by"`
+	CreatedAt   time.Time      `json:"created_at"`
+	PublishedAt *time.Time     `json:"published_at"`
 }
 
 type FormationModuleInput struct {
-	StableKey    string `json:"stable_key"`
-	Title        string `json:"title"`
-	Position     int    `json:"position"`
-	MetadataJSON string `json:"metadata_json,omitempty"`
+	StableKey string `json:"stable_key"`
+	Title     string `json:"title"`
+	Position  int    `json:"position"`
+	// Metadata is an optional free-form JSON object.
+	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 type FormationConceptInput struct {
@@ -46,8 +48,11 @@ type FormationConceptInput struct {
 	StableKey       string                `json:"stable_key"`
 	Label           string                `json:"label"`
 	Position        int                   `json:"position"`
-	MetadataJSON    string                `json:"metadata_json,omitempty"`
-	Prerequisites   []string              `json:"prerequisites,omitempty"`
+	// Metadata is an optional free-form JSON object. The pedagogy keys
+	// (description, level, outcomes, criteria) are reserved for the typed
+	// fields above.
+	Metadata      map[string]any `json:"metadata,omitempty"`
+	Prerequisites []string       `json:"prerequisites,omitempty"`
 }
 
 type Cohort struct {
