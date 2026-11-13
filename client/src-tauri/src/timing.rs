@@ -285,7 +285,6 @@ pub(crate) fn rpc_method(method: &str) -> &'static str {
         "session/set_model" => "session/set_model",
         "tools/list" => "tools/list",
         "tools/call" => "tools/call",
-        "_tutor/rebind" => "_tutor/rebind",
         _ => "other",
     }
 }

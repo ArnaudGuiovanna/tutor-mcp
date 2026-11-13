@@ -584,7 +584,6 @@ details > p { overflow-wrap: anywhere; }
 .meter-graphic .fill { y: var(--meter-h); height: var(--meter-h); rx: calc(var(--meter-h) / 2); fill: var(--blue); filter: drop-shadow(var(--glow-sm)); }
 .meter-graphic .fill.ok { fill: var(--mastery); filter: none; }
 .meter-graphic .threshold { width: var(--stroke-accent); height: 100%; rx: var(--stroke); fill: var(--fg); transform: translateX(calc(var(--stroke-accent) / -2)); }
-.progress-list progress { grid-column: 1 / -1; width: 100%; height: var(--meter-h); accent-color: var(--blue); }
 
 /* Édition de formation */
 .access-form, .member-access, .publication-actions, .submission-state { display: grid; gap: var(--space-4); padding: var(--space-5) 0; border-bottom: var(--stroke) solid var(--line); }
@@ -721,7 +720,7 @@ details > p { overflow-wrap: anywhere; }
 .connection-step:focus-visible { border-radius: var(--r-lg); }
 .connection-step .connection-card { margin: 0; }
 .connection-step > .settings-section { border-bottom: 0; }
-/* Colonne de l’agent : carte de connexion, Qwen local et réglages du modèle forment des cartes sœurs. */
+/* Colonnes de connexion : la carte, les sections et les réglages du modèle forment des cartes sœurs. */
 .connection-step > .settings-section { margin-top: var(--space-3); padding: var(--space-5) var(--card-pad); border: var(--stroke) solid var(--line-strong); border-radius: var(--r-lg); background: var(--surface); }
 .connection-step > .settings-section > h2 { font-size: var(--text-md); font-weight: var(--weight-semibold); }
 .connection-step > .settings-section > :last-child { margin-bottom: 0; }

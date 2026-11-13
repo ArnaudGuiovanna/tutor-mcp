@@ -56,7 +56,7 @@ class PlatformPolicyTests(unittest.TestCase):
         invariant = {'Format, modules, vet, staticcheck', 'Test (race detector)',
                      'Test (PostgreSQL 17)', 'Govulncheck', 'Secret scan (full history)',
                      'CodeQL', 'Deployment (hobby)', 'Deployment (institution)',
-                     'Client (Windows)', 'Local agent (Windows)'}
+                     'Client (Windows)'}
         self.assertTrue(invariant.issubset(required['contexts']))
         workflow = (ROOT / '.github/workflows/ci.yml').read_text()
         self.assertIn('test_platform_policy.py', workflow)

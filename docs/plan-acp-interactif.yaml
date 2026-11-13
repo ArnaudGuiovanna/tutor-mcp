@@ -181,7 +181,6 @@ implementation_notes:
     - Le nouveau parcours est activé quand tools/list annonce prepare_pedagogical_turn.
     - Un ancien serveur conserve le parcours historique ; le nouvel outil doit être déployé côté serveur pour bénéficier du contexte regroupé.
     - Les changements de schéma SQLite et PostgreSQL sont additifs.
-    - L’agent local reste présent et conserve son parcours antérieur ; ce chantier ne le retire pas.
     - Le nouveau worker de consolidation exige le stockage narratif partagé et une autorisation persistante des deux outils de maintenance.
     - Les serveurs utilisant uniquement les anciens fichiers mémoire ne sont pas consolidés par ce worker.
   generation_and_recovery:

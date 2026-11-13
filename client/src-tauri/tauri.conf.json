@@ -28,7 +28,7 @@
   "bundle": {
     "active": true,
     "icon": ["icons/icon.png", "icons/icon.ico"],
-    "resources": { "../THIRD_PARTY_NOTICES/": "THIRD_PARTY_NOTICES/", "../bundled-agents/": "agents/", "../bundled-local-agent/": "local-agent/" },
+    "resources": { "../THIRD_PARTY_NOTICES/": "THIRD_PARTY_NOTICES/", "../bundled-agents/": "agents/" },
     "targets": ["nsis"],
     "publisher": "Arnaud Guiovanna",
     "shortDescription": "Votre apprentissage, avec votre agent IA",

@@ -437,13 +437,12 @@ impl AcpClient {
             .await
     }
 
-    /// Override the session/prompt inactivity limit (None: only the absolute
-    /// ceiling applies, e.g. for a local model with a long silent prefill).
-    pub fn set_prompt_idle_timeout(&self, idle: Option<Duration>) {
-        self.inner.prompt_idle_ms.store(
-            idle.map_or(0, |idle| idle.as_millis().max(1) as u64),
-            Ordering::Relaxed,
-        );
+    /// Override the session/prompt inactivity limit.
+    #[cfg(test)]
+    fn set_prompt_idle_timeout(&self, idle: Duration) {
+        self.inner
+            .prompt_idle_ms
+            .store(idle.as_millis().max(1) as u64, Ordering::Relaxed);
     }
 
     /// Malformed inbound frames skipped since the process started.
@@ -1240,10 +1239,7 @@ async fn wait_for_prompt(
     ceiling: Duration,
 ) -> Result<Result<TypedResponse, oneshot::error::RecvError>, ()> {
     let started = Instant::now();
-    let idle = match inner.prompt_idle_ms.load(Ordering::Relaxed) {
-        0 => ceiling,
-        millis => Duration::from_millis(millis),
-    };
+    let idle = Duration::from_millis(inner.prompt_idle_ms.load(Ordering::Relaxed));
     tokio::pin!(receiver);
     loop {
         let last = inner
@@ -2157,7 +2153,7 @@ mod tests {
     #[tokio::test]
     async fn a_silent_prompt_times_out_but_a_pending_human_permission_does_not() {
         let (client, mut events) = client().await;
-        client.set_prompt_idle_timeout(Some(Duration::from_millis(300)));
+        client.set_prompt_idle_timeout(Duration::from_millis(300));
         let worker = client.clone();
         let prompt = tokio::spawn(async move {
             worker
@@ -2237,7 +2233,7 @@ for line in sys.stdin:
         let client = AcpClient::spawn(silent_tool_spec(250), events)
             .await
             .unwrap();
-        client.set_prompt_idle_timeout(Some(Duration::from_millis(1500)));
+        client.set_prompt_idle_timeout(Duration::from_millis(1500));
         let worker = client.clone();
         let prompt = tokio::spawn(async move {
             worker

@@ -1,6 +1,6 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { AgentConfiguration, McpTool, AgentConnection, AgentTarget, Conversation, FormationReview, FormationVersion, Intent, Institution, PublicIdentity, JsonRecord, LocalModelStatus, PromptResult, Settings, Snapshot, TutorOverview, TutorStatus } from './types';
+import type { AgentConfiguration, McpTool, AgentConnection, AgentTarget, Conversation, FormationReview, FormationVersion, Intent, Institution, PublicIdentity, JsonRecord, PromptResult, Settings, Snapshot, TutorOverview, TutorStatus } from './types';
 
 function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (!isTauri()) {
@@ -10,10 +10,6 @@ function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
 }
 
 export const bridge = {
-  localModelStatus: () => call<LocalModelStatus>('local_model_status'),
-  downloadLocalModel: () => call<LocalModelStatus>('download_local_model'),
-  importLocalModel: () => call<LocalModelStatus>('import_local_model'),
-  cancelLocalModel: () => call<LocalModelStatus>('cancel_local_model'),
   deleteProfile: (id: string, confirmation: string) => call<Snapshot>('delete_profile', {id, confirmation}),
   institutionAction: (action: string, input: Record<string, unknown> = {}) => call<unknown>('institution_action', {action,input}),
   listMcpTools: () => call<{tools: McpTool[]}>('list_mcp_tools'),

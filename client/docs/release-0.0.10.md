@@ -2,7 +2,7 @@
 
 Cette préversion Windows réunit la refonte du workspace et les corrections de
 connexion ACP. Elle conserve le moteur local, son routage des demandes et les
-limites de la [préversion locale 0.0.9](local-semantic-preview.md).
+limites de la préversion locale 0.0.9.
 
 ## Interface
 

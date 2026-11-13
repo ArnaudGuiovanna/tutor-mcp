@@ -195,7 +195,7 @@ function StepHarness({ api, snapshot, known, refresh, onTargets, onBack, onDone 
       if (!found.length || (configuredId && !configured && !found.some(target => target.id === configuredId))) {
         try {
           const discovered = await api.discoverAgents();
-          if (!found.length) found = discovered.filter(target => target.id !== 'local:qwen');
+          if (!found.length) found = discovered;
           configured ||= discovered.find(target => target.id === configuredId);
         } catch { /* reported below */ }
       }

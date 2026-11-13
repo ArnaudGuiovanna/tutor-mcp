@@ -15,7 +15,6 @@
     "Local (windows-latest)",
     "Deployment (hobby)",
     "Deployment (institution)",
-    "Client (Windows)",
-    "Local agent (Windows)"
+    "Client (Windows)"
   ]
 }

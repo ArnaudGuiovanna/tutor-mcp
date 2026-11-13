@@ -17,12 +17,6 @@ impl Backend {
         operation: &Preparation,
     ) -> Result<Option<PreparedTurn>, String> {
         let resume = PreparedTurn::is_resume(text)?;
-        if self.settings().await.target_id == crate::local_agent::TARGET_ID {
-            if resume {
-                return Err("La reprise préparée nécessite un harness Codex ou Claude. Votre demande reste dans la file.".into());
-            }
-            return Ok(None);
-        }
         let refresh = {
             let tutor = self.tutor.lock().await;
             let expected = tutor

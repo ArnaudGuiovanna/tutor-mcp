@@ -14,15 +14,11 @@ let sessions = fs.existsSync(sessionFile) ? JSON.parse(fs.readFileSync(sessionFi
 let waiting;
 let typedFailures = false;
 const configs = {};
-const fixedLocalModel = fs.existsSync(path.join(process.cwd(), 'fixture-local-model'));
-const localModel = fixedLocalModel ? require('../../local-agent/model-profile.json').id : null;
-const configOptions = (id) => configs[id] ||= sessions[id]?.fixtureConfig || (fixedLocalModel ? [
-  {id:'model',category:'model',name:'Model',type:'select',currentValue:localModel,options:[{value:localModel,name:'Qwen local'}]},
-] : [
+const configOptions = (id) => configs[id] ||= sessions[id]?.fixtureConfig || [
   {id:'model',category:'model',name:'Model',type:'select',currentValue:'fixture-standard',options:[{value:'fixture-standard',name:'Standard'},{value:'fixture-fast',name:'Fast'}]},
   {id:'effort',category:'thought_level',name:'Reasoning',type:'select',currentValue:'medium',options:[{value:'low',name:'Low'},{value:'medium',name:'Medium'},{value:'high',name:'High'}]},
   {id:'fast-mode',category:'model_config',name:'Fast mode',type:'select',currentValue:'off',options:[{value:'off',name:'Off'},{value:'on',name:'On'}]},
-]);
+];
 const send = (value) => process.stdout.write(`${JSON.stringify(value)}\n`);
 const result = (request, value) => send({jsonrpc:'2.0', id:request.id, result:value});
 const chunk = (sessionId, text) => send({jsonrpc:'2.0',method:'session/update',params:{sessionId,update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text}}}});
@@ -100,14 +96,12 @@ readline.createInterface({input:process.stdin}).on('line', async (line) => {
     sessions[sessionId] = params;
     fs.writeFileSync(sessionFile, JSON.stringify(sessions));
     result(request,{sessionId,configOptions:configOptions(sessionId)});
-  } else if (request.method === 'session/load' || (fixedLocalModel && request.method === '_tutor/rebind')) {
+  } else if (request.method === 'session/load') {
     if (!sessions[params.sessionId]) return send({jsonrpc:'2.0',id:request.id,error:{code:-32602,message:'Unknown session'}});
     sessions[params.sessionId] = {...sessions[params.sessionId],...params};
     fs.writeFileSync(sessionFile, JSON.stringify(sessions));
-    if (request.method === 'session/load') {
-      const count=Number.isInteger(delays.replayChunks)?Math.max(0,Math.min(delays.replayChunks,10000)):1;
-      for(let i=0;i<count;i++) chunk(params.sessionId,'ANCIEN TEXTE À NE PAS RÉAJOUTER');
-    }
+    const count=Number.isInteger(delays.replayChunks)?Math.max(0,Math.min(delays.replayChunks,10000)):1;
+    for(let i=0;i<count;i++) chunk(params.sessionId,'ANCIEN TEXTE À NE PAS RÉAJOUTER');
     result(request,{configOptions:configOptions(params.sessionId)});
   } else if (request.method === 'session/set_config_option') {
     const options=configOptions(params.sessionId);

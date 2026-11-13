@@ -2,12 +2,10 @@ node_modules/
 **/node_modules/
 dist/
 src-tauri/target/
-local-agent/target/
 src-tauri/gen/
 test-results/
 playwright-report/
 THIRD_PARTY_NOTICES/
 bundled-agents/
-bundled-local-agent/
 .agents-*/
 *.local

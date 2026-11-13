@@ -33,178 +33,10 @@ les pièces jointes y figurent par leur nom. Les titres sont reformulés au prem
 échange, sans requête de génération supplémentaire. Voir les
 [notes de version](docs/release-0.0.10.md).
 
-## Agent Qwen local en développement
-
-La distribution Windows regroupe **Tutor 0.0.13 et l’agent local dans un seul
-installateur**. Dans **Paramètres → Connexion et outils**, installer le modèle
-Qwen avec le bouton de téléchargement, ou sélectionner le GGUF déjà disponible
-sur l’ordinateur. L’application conserve le modèle dans son dossier de données
-et vérifie sa taille et son SHA-256 avant activation. Il n’y a aucun script ni
-variable d’environnement à configurer pour ce parcours.
-
-Le modèle pèse environ **1,1 Go** : il est téléchargé depuis une révision
-Hugging Face épinglée. Une connexion Internet est nécessaire pour cette
-installation initiale, sauf si le GGUF exact est déjà disponible. L’inférence
-est ensuite locale ; la connexion au serveur Tutor garde son fonctionnement
-habituel. Le serveur MCP n’est pas embarqué ni modifié. La préversion permet
-de tester la conversation, la reprise et les lectures MCP prises en charge ; elle n’active
-pas encore l’accélération P2000. Les mesures Linux et leurs limites sont
-publiées dans [le bilan de cette préversion](docs/local-cpu-preview.md).
-Elles ne prédisent pas la latence sur la machine Windows cible.
-
-Le composant `local-agent/` charge directement **Qwen3-1.7B Q4_K_M**, avec le
-raisonnement interne désactivé, et sert ACP sur son entrée/sortie standard.
-Il prend en charge la conversation texte, le streaming, l’arrêt et la reprise
-depuis un journal local. La préparation, la soumission et l’évaluation pédagogiques
-doivent encore être intégrées. Certaines consultations de bibliothèque peuvent
-initialiser une formation côté serveur ; elles gardent une permission explicite
-et ne sont jamais rejouées automatiquement.
-Le tuteur complet reste donc en développement ; voir
-[le backlog H00–H12](../docs/backlog-local-harness.yaml).
-
-Une question pédagogique clairement identifiée utilise une seule génération. Le modèle reçoit le nom de
-la formation active confirmé par le client et au plus les deux derniers tours ;
-le journal reste complet et toutes les omissions de contexte sont enregistrées.
-Le rôle est celui d’un coach d’apprentissage, pour tous les sujets.
-
-Les demandes entières « donne-moi mon profil » et « recherche mon profil ou ma
-formation » (ou `/profil`) déclenchent une lecture autorisée de
-`get_learner_state`. Rust affiche l’objectif, les préférences retournées et
-la formation active confirmée, sans génération ni supposition du modèle. Cette
-lecture reste possible sans domaine configuré. « Affiche ma formation » (ou
-`/formation`) affiche directement la formation de la conversation, synchronisée
-par le client. Une formation absente ou non vérifiée est indiquée explicitement.
-
-`/alertes` et `/contexte` conservent leur parcours : alertes d’abord, puis contexte
-seulement si `has_critical` et `needs_domain_setup` valent tous deux `false`.
-Ces deux commandes utilisent une génération finale. `/aide`, « Que peux-tu faire ? »
-et les salutations simples reçoivent une réponse déterministe, sans charger le
-modèle. Depuis 0.0.9, les autres formulations peuvent passer par une classification
-JSON bornée : profil, liste/recherche de formations, formation active, discussion
-ou clarification. Le modèle propose une catégorie ; Rust conserve le choix
-d’outil, les arguments protégés, les permissions et le rendu des données.
-Ce premier routage ne couvre pas encore toutes les intentions pédagogiques.
-Voir [le périmètre de test 0.0.9](docs/local-semantic-preview.md).
-
-Rust choisit les outils, valide leurs contrats, injecte les identités vérifiées
-et conserve les permissions ACP. Le catalogue et les schémas restent hors du
-prompt. Les reçus complets restent dans le journal. Une donnée indispensable
-qui ne tient pas dans le budget est refusée entière. Dans l’interface, un
-indicateur et le temps écoulé apparaissent dès l’attente, avant le premier token ;
-le compteur reste visible lorsque les animations sont désactivées.
-L’ancien harness de découverte reste disponible dans la bibliothèque pour les
-expérimentations ; il n’est plus utilisé par le parcours ACP livré.
-
-Le moteur utilise le couple `llama-cpp-2`/`llama-cpp-sys-2` **0.1.146** épinglé
-par Goose. L’accès direct permet de compter le prompt avec le tokenizer exact
-du modèle. Les poids restent chargés entre les générations ; chaque génération
-dispose d’un KV cache limité par défaut à **2 048 tokens**. Le gestionnaire
-de contexte réserve **192 tokens de sortie** et **256 de marge**, puis sélectionne
-des tours entiers. Les omissions sont journalisées ; aucune donnée indispensable
-n’est tronquée silencieusement. Le client active la réutilisation du préfixe exact,
-la connexion MCP persistante et le cache de catalogue vérifié. Une modification
-de préfixe, d’identité ou de catalogue invalide la réutilisation concernée.
-
-Le client fournit un dossier privé `local-agent` dans les données du profil.
-Chaque session possède un journal SQLite lié au profil, au compte, à
-l’institution, au serveur et à l’empreinte du modèle. Les échanges originaux
-restent distincts des projections : `session/load` restitue l’historique
-conservé à l’interface, tandis que Qwen reçoit uniquement le contexte du travail
-en cours. Le renouvellement de connexion utilise `_tutor/rebind` pour une
-session déjà chargée, sans relecture de l’historique. Les jetons MCP restent
-dans la configuration en mémoire, hors du journal et des prompts.
-
-Pour l’agent local, le client transmet le message de l’apprenant sans lui
-préfixer l’historique déjà journalisé. Il fournit séparément le contexte de
-formation obtenu du serveur dans `_meta.tutorLocal.task` : `conversationId`,
-`language`, `trainingContext`. Le harness vérifie sa correspondance avec la
-conversation de la connexion MCP ; le modèle ne choisit pas ces identifiants.
-Les agents externes conservent leur construction de prompt habituelle.
-
-Pour un usage ACP direct, fournir `--data-dir CHEMIN_PRIVE_ABSOLU` et
-`_meta.tutorLocal.owner` avec les identifiants stables vérifiés
-`profileId`, `accountId`, `tenantId`, `serverId` lors de la création/reprise.
-Sans propriétaire, une session de configuration reste temporaire. Le journal
-n’est pas chiffré ; il utilise les protections du dossier applicatif. Les API
-de rétention refusent de supprimer une mutation dont le résultat reste inconnu.
-Le pilote MCP nécessite une session durable et exactement un serveur nommé
-`tutor`. Les lectures passent par une liste de contrats examinés ; une
-annotation `readOnlyHint` ne suffit pas à autoriser un outil. Un échec de
-transport n’entraîne aucun nouvel envoi automatique.
-
-La compilation de cet agent séparé demande **Rust 1.95.0**, CMake ≥3.25,
-libclang et un compilateur C++. Le client de bureau conserve Rust 1.93.
-
-```sh
-cargo +1.95.0 build --manifest-path client/local-agent/Cargo.toml --locked --release
-```
-
-Le fichier GGUF accepté par défaut est identifié dans
-[`model-profile.json`](local-agent/model-profile.json), avec sa révision et son
-SHA-256. Il n’est pas inclus dans le dépôt. Son téléchargement dans l’application
-est déclenché explicitement par le bouton des paramètres. Pour le récupérer
-avec la CLI Hugging Face :
-
-```sh
-hf download unsloth/Qwen3-1.7B-GGUF Qwen3-1.7B-Q4_K_M.gguf --revision d7f544eead698dbd1f15126ef60b45a1e1933222 --local-dir CHEMIN_MODELES
-```
-
-Pour un lancement de développement, définir `TUTOR_LOCAL_AGENT_PATH` avec le chemin absolu
-du binaire natif et `TUTOR_LOCAL_MODEL_PATH` avec celui du GGUF. La cible
-**Qwen — local (expérimental)** apparaît dans les agents. Le mode initial est
-CPU ; `TUTOR_LOCAL_THREADS` (1–32) et `TUTOR_LOCAL_BATCH` (1–512) permettent de
-borner le travail. L’agent reçoit uniquement des arguments natifs, sans shell.
-
-Les options de compilation `--features cuda` ou `--features vulkan` ajoutent
-un backend GPU. `TUTOR_LOCAL_GPU_LAYERS` sélectionne ensuite 0–36 couches.
-La P2000 nécessite une chaîne CUDA compatible Pascal, par exemple CUDA 12.9,
-et une compilation ciblant `sm_61`. **Windows/P2000 n’est pas encore qualifié** ;
-le profil CPU et les tests de protocole ne démontrent pas cette compatibilité.
-
-Vérification sans téléchargement de modèle :
-
-```sh
-bash scripts/verify-local-agent.sh
-```
-
-Qualification explicite du modèle réel (les chemins doivent être absolus) :
-
-```sh
-python client/scripts/qualify-local-agent.py --agent CHEMIN_AGENT --model CHEMIN_GGUF --output CHEMIN_RAPPORT_JSON
-```
-
-Essai distinct de la chaîne Qwen → harness → permission ACP → lecture MCP :
-
-```sh
-python client/scripts/qualify-local-harness.py --agent CHEMIN_AGENT --model CHEMIN_GGUF --output CHEMIN_RAPPORT_HARNESS_JSON --timeout 1800
-```
-
-Cet essai utilise un serveur HTTP local de test avec trois outils. Il vérifie
-dans le journal la sélection du contrat, l’appel autorisé, la lecture ciblée
-du résultat et son inclusion dans le contexte de réponse. Il exige aussi une
-réponse contenant le fait retourné par le serveur. Il ne qualifie pas les
-parcours du vrai Tutor, le catalogue complet ni la qualité pédagogique.
-
-Ce rapport sépare l’hôte réellement testé de la cible Windows/P2000. Le test
-natif historique `exact_qwen_text_grammar_budget_and_cancellation`, ignoré par
-défaut, vérifie aussi la grammaire avec `TUTOR_LOCAL_MODEL_PATH`. **Son calcul
-sous grammaire JSON échoue avec ce profil** ; le bilan documente cet échec.
-Les parcours MCP livrés ne délèguent aucune décision JSON au modèle. Pour
-reproduire séparément ce test expérimental :
-
-```sh
-cargo +1.95.0 test --manifest-path client/local-agent/Cargo.toml --locked --release exact_qwen_text_grammar_budget_and_cancellation -- --ignored --nocapture
-```
-
-Les contrôles GitHub construisent l’exécutable CPU Windows, puis l’installateur
-intégré et ses reçus liés au commit. Ils vérifient aussi l’interface installée.
-Ils n’exécutent pas le GGUF réel et ne constituent pas une qualification GPU.
-
 ## Parcours disponibles
 
-Les parcours pédagogiques ci-dessous utilisent les agents externes connectés
-aux outils Tutor. Le pilote Qwen local reste limité aux capacités décrites plus
-haut ; ses commandes ne préparent ni quiz ni évaluation.
+Les parcours pédagogiques ci-dessous utilisent les harness Codex ou Claude
+connectés aux outils Tutor. Le client n’exécute aucun modèle localement.
 
 - Connexions indépendantes du harness et de Tutor, avec état du processus,
   état d’authentification annoncé par le harness et incidents de requête distincts.
@@ -312,16 +144,11 @@ Pour reconstruire les ressources depuis le dépôt :
 
 ```powershell
 python client/scripts/prepare-agents.py
-rustup toolchain install 1.95.0 --profile minimal --component rust-docs
-./client/scripts/prepare-local-agent.ps1
 ```
 
 Le script utilise les archives npm verrouillées et le ZIP officiel Node vérifié
 par SHA256. Les ressources générées sont ignorées par Git. Le workflow teste
-les deux agents installés sans Node externe dans PATH. Le second script construit
-l’agent Qwen CPU avec son runtime C++ lié statiquement, vérifie son lancement et
-collecte ses notices. Il requiert les outils Visual Studio C++, CMake et LLVM
-sur la machine de compilation. L’utilisateur de l’installateur n’en a pas besoin.
+les deux agents installés sans Node externe dans PATH.
 
 Pour WSL2, installer l’adaptateur **dans la distribution Linux concernée**, puis
 relancer la détection. Le lancement conserve le même utilisateur Linux, retrouve

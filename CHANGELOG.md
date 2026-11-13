@@ -267,6 +267,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Removed
 
+- Local CPU inference in the Tutor desktop client: the bundled Qwen GGUF agent
+  (`client/local-agent/`), its model download/import settings, packaging, CI
+  workflow and qualification scripts. The client now drives only the Claude
+  and Codex ACP harnesses; the local Tutor MCP server mode is unchanged.
 - MCP tools `get_pending_alerts` (use `get_learner_state(view="progress")`),
   `get_metacognitive_mirror` (in every activity decision) and the legacy,
   unverified `record_transfer_result` (record transfer through an assessment

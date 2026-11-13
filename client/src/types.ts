@@ -12,14 +12,6 @@ export interface AgentTarget {
   detail: string;
 }
 
-export interface LocalModelStatus {
-  phase: 'missing' | 'checking' | 'downloading' | 'importing' | 'ready' | 'error' | 'cancelled';
-  downloaded: number;
-  total: number;
-  error: string | null;
-  agentAvailable: boolean;
-}
-
 export interface Settings {
   reviewPlans?: Record<string, { enabled: boolean; format: 'quiz' | 'flashcard' }>;
   language?: 'fr' | 'en';
@@ -107,7 +99,7 @@ export interface TutorStatus {
 
 export interface Snapshot {
   agentStatus?: {
-    phase: 'running' | 'stopped'; authentication: 'checking' | 'unknown' | 'none' | 'authenticated' | 'not_required'; targetId?: string; environment?: string; distribution?: string; wslUser?: string; lastFailure?: { source: 'adapter' | 'acp'; category: string; message: string } | null;
+    phase: 'running' | 'stopped'; authentication: 'checking' | 'unknown' | 'none' | 'authenticated'; targetId?: string; environment?: string; distribution?: string; wslUser?: string; lastFailure?: { source: 'adapter' | 'acp'; category: string; message: string } | null;
     /** Supervised reconnection of an unexpectedly stopped harness (absent from older backends). */
     reconnect?: AgentReconnect;
     /** RFC 3339 end of a provider limit; new turns are refused until then. */

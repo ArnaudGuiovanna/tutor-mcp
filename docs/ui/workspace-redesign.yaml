@@ -119,14 +119,10 @@ validation:
   live_harness_accounts: not_exercised
   frontend_tests: 133_passed
   client_native_tests: 163_passed_2_ignored
-  local_agent_tests_before_base_refresh: 190_passed
   default_font_test: passed
   frontend_build: passed_existing_chunk_size_warning
   client_clippy: passed
-  local_agent_clippy_before_base_refresh: passed
   text_contrast_minimum_dark: 5.80
   text_contrast_minimum_light: 4.62
   windows_cross_check: blocked_missing_x86_64_w64_mingw32_gcc
-  local_agent_tests_after_base_refresh: 228_passed
-  local_agent_clippy_after_base_refresh: passed
   remote_own_commits: none

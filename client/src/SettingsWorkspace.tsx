@@ -5,7 +5,6 @@ import type { AgentConfiguration, AgentConfigOption, InstitutionMember, Institut
 import { errorMessage, record, statusLabel } from './model';
 import { t } from './i18n';
 import { Icon } from './icons';
-import { LocalModelSetup } from './LocalModelSetup';
 import { LoadError, LoadingState } from './LoadState';
 
 export type SettingsTab = 'agents' | 'institution' | 'members' | 'ergonomics';
@@ -21,7 +20,7 @@ function useInstitutionOverview(api:ClientBridge,connected:boolean){
  return {overview,setOverview,error,loading:connected&&!overview&&!error,retry:()=>{setError('');setAttempt(value=>value+1);}};
 }
 
-export function SettingsWorkspace({api,snapshot,overview,busy,turnLockReason='',tab:selected,onTabChange,initialTab='agents',renderConnection,onSaved,onLocalModelReady,onRestartSetup}:{api:ClientBridge;snapshot:Snapshot;overview:TutorOverview|null;busy:boolean;/** Set while a model turn runs: agent settings are refused natively until it ends. */turnLockReason?:string;/** Controlled tab; `initialTab` only seeds an uncontrolled workspace. */tab?:SettingsTab;onTabChange?:(tab:SettingsTab)=>void;initialTab?:SettingsTab;renderConnection:(section:'agents'|'institution',disabled:boolean)=>ReactNode;onSaved:(next:Snapshot)=>void;onLocalModelReady?:()=>Promise<void>;onRestartSetup?:()=>void}) {
+export function SettingsWorkspace({api,snapshot,overview,busy,turnLockReason='',tab:selected,onTabChange,initialTab='agents',renderConnection,onSaved,onRestartSetup}:{api:ClientBridge;snapshot:Snapshot;overview:TutorOverview|null;busy:boolean;/** Set while a model turn runs: agent settings are refused natively until it ends. */turnLockReason?:string;/** Controlled tab; `initialTab` only seeds an uncontrolled workspace. */tab?:SettingsTab;onTabChange?:(tab:SettingsTab)=>void;initialTab?:SettingsTab;renderConnection:(section:'agents'|'institution',disabled:boolean)=>ReactNode;onSaved:(next:Snapshot)=>void;onRestartSetup?:()=>void}) {
  const [ownTab,setOwnTab]=useState<SettingsTab>(initialTab);const tab=selected??ownTab;
  // Visited panels stay mounted (hidden): switching tabs keeps their input and their reads.
  const [visited,setVisited]=useState<SettingsTab[]>([tab]);
@@ -48,7 +47,7 @@ export function SettingsWorkspace({api,snapshot,overview,busy,turnLockReason='',
     </ol>
     <div className={`connection-cards ${snapshot.tutorStatus.connected&&snapshot.agentConnected?'connections-ready':''}`}>
     <div id="tutor-connection" className="connection-step" tabIndex={-1}>{renderConnection('institution',locked)}</div>
-    <div id="agent-connection" className="connection-step" tabIndex={-1}>{renderConnection('agents',locked)}<LocalModelSetup api={api} busy={locked} onReady={onLocalModelReady}/>{snapshot.agentConnected&&<details className="settings-disclosure"><summary>{t('Modèle et rapidité')}</summary><AgentOptions api={api} snapshot={snapshot} busy={locked} turnLockReason={turnLockReason} onSaved={onSaved}/></details>}</div>
+    <div id="agent-connection" className="connection-step" tabIndex={-1}>{renderConnection('agents',locked)}{snapshot.agentConnected&&<details className="settings-disclosure"><summary>{t('Modèle et rapidité')}</summary><AgentOptions api={api} snapshot={snapshot} busy={locked} turnLockReason={turnLockReason} onSaved={onSaved}/></details>}</div>
     </div>
     <div id="tool-permissions" className="connection-step" tabIndex={-1}><McpPermissions api={api} settings={snapshot.settings} overview={overview} connected={snapshot.tutorStatus.connected} busy={locked} onSave={save}/></div>
     <section className="settings-section guided-setup" aria-label={t('Configuration guidée')}><h2>{t('Configuration guidée')}</h2><p>{t('Reprenez pas à pas votre compte, votre assistant IA et votre serveur Tutor.')}</p><button type="button" className="button secondary" disabled={locked||!onRestartSetup} onClick={onRestartSetup}>{t('Relancer la configuration guidée')}</button></section>

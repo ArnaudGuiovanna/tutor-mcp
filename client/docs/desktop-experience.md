@@ -192,7 +192,7 @@ ouverte par processus ; les sessions remplacées sont fermées par
 `session/close` lorsque l’adaptateur l’annonce. Les événements d’un tour privé
 portent l’identifiant de la session privée, différent de `agentSessionId`.
 
-**Relais MCP local.** Pour un harness natif (hors agent local et WSL), l’adaptateur
+**Relais MCP local.** Pour un harness natif (hors WSL), l’adaptateur
 reçoit `http://127.0.0.1:<port>/mcp/<route>` et un bearer local aléatoire,
 stables pour le processus Tutor ; le relais n’écoute que sur la boucle locale,
 refuse un `Origin` de navigateur, un `Host` non local ou un bearer inconnu, et
@@ -205,9 +205,7 @@ jeton ne change donc plus l’empreinte de la session. `NO_PROXY` inclut
 annonce `mcpCapabilities.http` et transmet `headers`
 (`claude-agent-acp/dist/acp-agent.js` l. 1401-1404 et 8505-8516), Codex
 aussi (`codex-acp/dist/index.js` l. 35527-35530 et 42462-42465). Un harness WSL
-garde la configuration directe (sa boucle locale n’est pas celle de Windows) ;
-l’agent local aussi : il rafraîchit par `_tutor/rebind` sans recréer de
-processus (`client/local-agent/src/mcp.rs`, `mcp_session.rs`).
+garde la configuration directe (sa boucle locale n’est pas celle de Windows).
 
 **Réglages Claude hérités.** `settingSources: ["user"]` appliquait aussi les
 plugins (`enabledPlugins`) et les règles `permissions.allow` de l’utilisateur.

@@ -333,7 +333,6 @@ fn metric_record(event: &Value) -> Option<Value> {
                     | "session/set_model"
                     | "tools/list"
                     | "tools/call"
-                    | "_tutor/rebind"
                     | "other"
             ) {
                 return None;
