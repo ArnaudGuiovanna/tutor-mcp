@@ -5,6 +5,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"testing"
@@ -184,6 +185,17 @@ func TestFormationMigrationPreservesHistoryAndReconcilesDefinitions(t *testing.T
 	if out.Enrollment.ID == source.ID || out.Enrollment.DomainID != source.DomainID || len(out.InvalidatedConceptKeys) != 1 || out.InvalidatedConceptKeys[0] != "equations" {
 		t.Fatalf("migration = %+v", out)
 	}
+	page, err := s.ListAuditEvents(ctx, owner, models.AuditEventFilter{ActionPrefix: "enrollment.migrate", Limit: 10})
+	if err != nil || len(page.Items) != 1 {
+		t.Fatalf("migration audit = %+v %v", page, err)
+	}
+	var auditDetails map[string]string
+	if err := json.Unmarshal([]byte(page.Items[0].DetailsJSON), &auditDetails); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(auditDetails, map[string]string{"target_enrollment_id": out.Enrollment.ID, "target_version_id": clone.Version.ID}) {
+		t.Fatalf("migration audit details = %+v", auditDetails)
+	}
 	for _, key := range []string{"numbers", "equations"} {
 		state, err := s.GetConceptStateInDomain(ctx, student.LearnerID, source.DomainID, key)
 		if err != nil {
@@ -219,6 +231,32 @@ func TestFormationMigrationPreservesHistoryAndReconcilesDefinitions(t *testing.T
 	var seats int
 	if err := s.queryRow(ctx, `SELECT SUM(reserved_seats) FROM cohorts WHERE tenant_id = ? AND id IN (?, ?)`, owner.TenantID, cohort.ID, targetCohort.ID).Scan(&seats); err != nil || seats != 1 {
 		t.Fatalf("seat movement = %d %v", seats, err)
+	}
+}
+
+func TestFormationAssignmentAuditEscapesMemberID(t *testing.T) {
+	s := setupTestDB(t)
+	owner := ownerPrincipal(t, s)
+	f, _, err := s.CreateFormationDraft(t.Context(), owner, "Audit escaping", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Unassigning a nonexistent ID is idempotent and still records an audit.
+	// Quotes, backslashes and control characters must remain one string field.
+	const memberID = "member\",\"assigned\":true,\"extra\":\"\\\r\n"
+	if err := s.AssignFormationTrainer(t.Context(), owner, f.ID, memberID, false); err != nil {
+		t.Fatal(err)
+	}
+	page, err := s.ListAuditEvents(t.Context(), owner, models.AuditEventFilter{ActionPrefix: "formation.assignment", Limit: 10})
+	if err != nil || len(page.Items) != 1 {
+		t.Fatalf("assignment audit = %+v %v", page, err)
+	}
+	var details map[string]any
+	if err := json.Unmarshal([]byte(page.Items[0].DetailsJSON), &details); err != nil {
+		t.Fatal(err)
+	}
+	if len(details) != 2 || details["membership_id"] != memberID || details["assigned"] != false {
+		t.Fatalf("assignment audit changed by member ID: %+v", details)
 	}
 }
 

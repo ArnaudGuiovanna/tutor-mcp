@@ -456,7 +456,14 @@ func (s *Store) AssignFormationTrainer(ctx context.Context, actor models.Princip
 		} else if _, err := txs.exec(txCtx, `DELETE FROM formation_trainers WHERE tenant_id = ? AND formation_id = ? AND membership_id = ?`, actor.TenantID, formationID, membershipID); err != nil {
 			return err
 		}
-		return txs.AppendAuditEvent(txCtx, actor, models.AuditEvent{Action: "formation.assignment", TargetType: "formation", TargetID: formationID, DetailsJSON: fmt.Sprintf(`{"membership_id":%s,"assigned":%t}`, strconvQuote(membershipID), assigned)})
+		details, err := json.Marshal(struct {
+			MembershipID string `json:"membership_id"`
+			Assigned     bool   `json:"assigned"`
+		}{membershipID, assigned})
+		if err != nil {
+			return err
+		}
+		return txs.AppendAuditEvent(txCtx, actor, models.AuditEvent{Action: "formation.assignment", TargetType: "formation", TargetID: formationID, DetailsJSON: string(details)})
 	})
 }
 

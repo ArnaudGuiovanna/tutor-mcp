@@ -60,7 +60,7 @@ func (api *API) training(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "training_unavailable")
 		return
 	case err != nil:
-		api.logger.Warn("training action rejected", "action", action)
+		api.logger.Warn("training action rejected")
 		writeError(w, 422, "training_action_rejected")
 		return
 	}

@@ -87,7 +87,7 @@ func (api *API) institutionAction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "not_found")
 		return
 	case err != nil:
-		api.logger.Warn("institution action rejected", "action", body.Action)
+		api.logger.Warn("institution action rejected")
 		writeError(w, 422, "institution_action_rejected")
 		return
 	}

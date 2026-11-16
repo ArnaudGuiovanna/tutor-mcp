@@ -82,6 +82,30 @@ version. Tutor MCP uses `x/crypto/bcrypt`; its dependency graph does not import
 OpenPGP. Keep these OpenPGP packages out of the application. This advisory is
 left visible in scan results; it is not suppressed.
 
+The Rust lockfile also contains `glib` 0.18.5 through Tauri's Linux GTK3
+dependencies. [GHSA-wrw7-89jp-8q8g](https://github.com/advisories/GHSA-wrw7-89jp-8q8g)
+affects its string-variant iterator. As checked on November 16, 2026, the
+upstream 0.18 branch still lacks the fix; the advisory's patched version,
+0.20.0, is incompatible with this GTK3 dependency graph. The distributed
+Windows desktop client and the Linux qualification builds with
+`--no-default-features --features qualification` do not compile `glib`.
+This does not make the locked Linux desktop dependency safe: keep the alert
+open until a compatible upstream fix is available, and resolve it before
+adding Linux desktop distribution. The Go server does not use this Rust graph.
+
+Check the current target graphs with:
+
+```bash
+cargo tree --manifest-path client/src-tauri/Cargo.toml --locked \
+  --target x86_64-pc-windows-msvc -i glib
+cargo tree --manifest-path client/src-tauri/Cargo.toml --locked \
+  --target x86_64-unknown-linux-gnu --no-default-features \
+  --features qualification -i glib
+```
+
+Both commands should report that there is nothing to print. Recheck this
+assessment whenever the supported platforms or Tauri features change.
+
 ## Verifying release artifacts
 
 Each release archive (`tutor-mcp_<os>_<arch>.tar.gz` or `.zip`, notices included) carries a signed

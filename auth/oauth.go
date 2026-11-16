@@ -1067,7 +1067,8 @@ func (s *OAuthServer) handleAuthorizationCodeGrant(w http.ResponseWriter, r *htt
 	// consume a valid one-time code.
 	accessToken, err := GenerateJWTForPrincipalAndScope(s.baseURL, resource, clientID, principal, authCode.Scope)
 	if err != nil {
-		s.logger.Error("generate jwt failed", "err", err)
+		// Signing errors may contain claim values; keep them out of logs.
+		s.logger.Error("generate jwt failed")
 		writeTokenError(w, "server_error", http.StatusInternalServerError)
 		return
 	}
@@ -1192,7 +1193,8 @@ func (s *OAuthServer) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Req
 	principal.Scopes = strings.Fields(newRT.Scope)
 	accessToken, err := GenerateJWTForPrincipalAndScope(s.baseURL, newRT.Resource, clientID, principal, newRT.Scope)
 	if err != nil {
-		s.logger.Error("generate jwt failed after refresh rotation", "err", err)
+		// Signing errors may contain claim values; keep them out of logs.
+		s.logger.Error("generate jwt failed after refresh rotation")
 		writeTokenError(w, "server_error", http.StatusInternalServerError)
 		return
 	}

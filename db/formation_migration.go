@@ -186,7 +186,14 @@ func (s *Store) MigrateFormationEnrollment(ctx context.Context, actor models.Pri
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`, actor.TenantID, sourceID, targetID, domainID, actor.MembershipID, now, string(raw)); err != nil {
 			return err
 		}
-		return txs.AppendAuditEvent(txCtx, actor, models.AuditEvent{Action: "enrollment.migrate", TargetType: "enrollment", TargetID: sourceID, DetailsJSON: `{"target_enrollment_id":` + strconvQuote(targetID) + `,"target_version_id":` + strconvQuote(targetVersionID) + `}`})
+		details, err := json.Marshal(struct {
+			TargetEnrollmentID string `json:"target_enrollment_id"`
+			TargetVersionID    string `json:"target_version_id"`
+		}{targetID, targetVersionID})
+		if err != nil {
+			return err
+		}
+		return txs.AppendAuditEvent(txCtx, actor, models.AuditEvent{Action: "enrollment.migrate", TargetType: "enrollment", TargetID: sourceID, DetailsJSON: string(details)})
 	})
 	return out, err
 }
